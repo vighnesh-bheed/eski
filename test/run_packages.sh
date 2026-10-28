@@ -40,9 +40,12 @@ fail() {
 }
 
 test_dirs() {
-	if [ -d src ]; then
-		find src -name '.*' -prune -o -type f -name '*_test.odin' -print | sed 's|/[^/]*$||' | LC_ALL=C sort -u
-	fi
+	local root
+	for root in src test; do
+		if [ -d "$root" ]; then
+			find "$root" -name '.*' -prune -o -type f -name '*_test.odin' -print | sed 's|/[^/]*$||'
+		fi
+	done | LC_ALL=C sort -u | grep -v -x -e test/storage -e test/slab || true
 }
 
 run_odin_test() {
