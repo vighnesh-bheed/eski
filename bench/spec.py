@@ -1510,8 +1510,19 @@ def cmd_inventory(a):
     return 0
 
 
+TARGET_FALLBACK = {"eski-docker": "eski"}
+
+
+def for_target(mapping, target):
+    mapping = mapping or {}
+    if target in mapping:
+        return mapping[target]
+    fallback = TARGET_FALLBACK.get(target)
+    return mapping.get(fallback) if fallback else None
+
+
 def target_skip(item, target, target_probe):
-    explicit = (item.get("skip_targets") or {}).get(target)
+    explicit = for_target(item.get("skip_targets"), target)
     if explicit:
         return explicit
     if not target_probe.get("method"):
@@ -1576,7 +1587,7 @@ def cmd_shell(a):
     scalar("IT_SKIP", target_skip(item, a.target, load_json(a.target_probe, {}) if a.target_probe else {}))
     has_setup = item.get("config") or item.get("init_commands") or item.get("init_lua") or item.get("check")
     scalar("IT_SETUP", 1 if has_setup else 0)
-    array("IT_SERVER_ARGS", (item.get("server_args") or {}).get(a.target, []))
+    array("IT_SERVER_ARGS", for_target(item.get("server_args"), a.target) or [])
     pre = item.get("preload") or {}
     scalar("IT_PRELOAD_TOOL", pre.get("tool", ""))
     scalar("IT_PRELOAD_IMAGE", pre.get("image", ""))

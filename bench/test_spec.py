@@ -265,6 +265,29 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(spec.target_skip(item, "redis", {"method": "command_list", "missing": []}), "")
         self.assertEqual(spec.target_skip(item, "redis", {}), "")
 
+    def test_container_target_inherits_eski_entries(self):
+        item = {"suite": "pts", "name": "case", "key": "case", "clients": [{"tool": "redis-benchmark", "argv": []}],
+                "skip_targets": {"eski": "eski lacks lpush"}, "server_args": {"eski": ["--hz", "50"], "redis": ["--io-threads", "4"]}}
+        self.assertEqual(spec.target_skip(item, "eski-docker", {}), "eski lacks lpush")
+        self.assertEqual(spec.target_skip(item, "dragonfly", {}), "")
+        item["skip_targets"]["eski-docker"] = "container only"
+        self.assertEqual(spec.target_skip(item, "eski-docker", {}), "container only")
+        plan = Path(tempfile.mkdtemp()) / "plan.json"
+        plan.write_text(json.dumps({"items": [dict(item, skip_targets={})]}))
+        import io
+        real = sys.stdout
+        try:
+            sys.stdout = io.StringIO()
+            spec.main(["shell", "--plan", str(plan), "--index", "0", "--target", "eski-docker"])
+            out = sys.stdout.getvalue()
+            sys.stdout = io.StringIO()
+            spec.main(["shell", "--plan", str(plan), "--index", "0", "--target", "valkey"])
+            other = sys.stdout.getvalue()
+        finally:
+            sys.stdout = real
+        self.assertIn("local -a IT_SERVER_ARGS=(--hz 50)", out)
+        self.assertIn("local -a IT_SERVER_ARGS=()", other)
+
     def test_shell_output_round_trips(self):
         tree = write_tree({"a.yml": CASE})
         items, meta = spec.spec_plan(tree, {"method": "probe", "implemented": ["hgetall", "hset"]}, {"client_cpus": "0-3"})
