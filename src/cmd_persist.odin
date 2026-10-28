@@ -1,0 +1,1748 @@
+package main
+
+import "base:intrinsics"
+import "base:runtime"
+import "core:crypto/legacy/sha1"
+import "core:sys/linux"
+import ht "hashtype"
+import lt "listtype"
+import "rdb"
+import st "settype"
+import sm "streamtype"
+import zt "zsettype"
+
+PERSIST_BGSAVE_RETRY_DELAY :: 5
+
+PERSIST_CMD_SET :: 1024
+
+ERR_BGSAVE_IN_PROGRESS :: "ERR Background save already in progress"
+
+ERR_MISCONF :: "MISCONF Redis is configured to save RDB snapshots, but it's currently unable to persist to disk. Commands that may modify the data set are disabled, because this instance is configured to report errors during writes if RDB snapshotting fails (stop-writes-on-bgsave-error option). Please check the Redis logs for details about the RDB error."
+
+ERR_LOADING :: "LOADING Redis is loading the dataset in memory"
+
+Persist_Sanitize :: enum u8 {
+	No,
+	Yes,
+	Clients,
+}
+
+Persist_Protected :: enum u8 {
+	No,
+	Yes,
+	Local,
+}
+
+Persist_Cmd_Flag :: enum u8 {
+	Write,
+	Loading_Ok,
+}
+
+Persist_Cmd_Flags :: bit_set[Persist_Cmd_Flag;u8]
+
+Save_Param :: struct {
+	seconds: i64,
+	changes: i64,
+}
+
+Persist_Progress :: struct {
+	processed:   i64,
+	total:       i64,
+	cow:         i64,
+	cow_peak:    i64,
+	cow_sum:     i64,
+	cow_samples: i64,
+	cow_ms:      i64,
+}
+
+Load_Result :: enum u8 {
+	Ok,
+	Not_Exist,
+	Failed,
+}
+
+Persist :: struct {
+	dirty:               i64,
+	dirty_before_bgsave: i64,
+	lastsave:            i64,
+	lastbgsave_try:      i64,
+	lastbgsave_err:      bool,
+	child_pid:           linux.Pid,
+	save_time_start:     i64,
+	save_time_last:      i64,
+	bgsave_scheduled:    bool,
+	bgsave_aborted:      bool,
+	stat_rdb_saves:      i64,
+	stat_rdb_cow:        i64,
+	progress:            ^Persist_Progress,
+	loading:             bool,
+	loading_start:       i64,
+	loading_total:       i64,
+	loading_loaded:      i64,
+	loading_used_mem:    i64,
+	last_load_expired:   i64,
+	last_load_loaded:    i64,
+	serve_while_loading: bool,
+	in_child:            bool,
+	gate_active:         bool,
+	save_params:         [dynamic]Save_Param,
+	compression:         bool,
+	checksum:            bool,
+	stop_writes:         bool,
+	del_sync_files:      bool,
+	key_save_delay:      i64,
+	sanitize:            Persist_Sanitize,
+	protected:           Persist_Protected,
+	skip_checksum:       bool,
+	cmds_ready:          bool,
+	zset_seeded:         bool,
+	dirty_explicit:      bool,
+	child_aof:           bool,
+	latest_fork_usec:    i64,
+	total_forks:         i64,
+}
+
+pst := Persist {
+	save_time_last  = -1,
+	save_time_start = -1,
+	compression     = true,
+	checksum        = true,
+	stop_writes     = true,
+}
+
+@(private = "file")
+persist_cmd_keys: [PERSIST_CMD_SET]^Command
+
+@(private = "file")
+persist_ping_cmd: ^Command
+
+@(private = "file")
+persist_cmd_bits: [PERSIST_CMD_SET]Persist_Cmd_Flags
+
+@(private = "file")
+persist_write_names := [?]string {
+	"append", "bitfield", "bitop", "blmove", "blmpop", "blpop", "brpop", "brpoplpush", "bzmpop", "bzpopmax", "bzpopmin",
+	"copy", "decr", "decrby", "del", "expire", "expireat", "flushall", "flushdb", "geoadd", "georadius",
+	"georadiusbymember", "geosearchstore", "getdel", "getex", "getset", "hdel", "hexpire", "hexpireat", "hincrby",
+	"hincrbyfloat", "hmset", "hpersist", "hpexpire", "hpexpireat", "hset", "hsetnx", "incr", "incrby", "incrbyfloat",
+	"linsert", "lmove", "lmpop", "lpop", "lpush", "lpushx", "lrem", "lset", "ltrim", "migrate", "move", "mset",
+	"msetnx", "persist", "pexpire", "pexpireat", "pfadd", "pfdebug", "pfmerge", "psetex", "rename", "renamenx",
+	"restore", "restore-asking", "rpop", "rpoplpush", "rpush", "rpushx", "sadd", "sdiffstore", "set", "setbit",
+	"setex", "setnx", "setrange", "sinterstore", "smove", "sort", "spop", "srem", "sunionstore", "swapdb", "unlink",
+	"xack", "xadd", "xautoclaim", "xclaim", "xdel", "xgroup", "xreadgroup", "xsetid", "xtrim", "zadd", "zdiffstore",
+	"zincrby", "zinterstore", "zmpop", "zpopmax", "zpopmin", "zrangestore", "zrem", "zremrangebylex",
+	"zremrangebyrank", "zremrangebyscore", "zunionstore",
+}
+
+@(private = "file")
+persist_loading_names := [?]string {
+	"acl", "auth", "client", "command", "config", "debug", "discard", "echo", "exec", "hello", "info", "lastsave",
+	"latency", "monitor", "multi", "psubscribe", "publish", "punsubscribe", "quit", "readonly", "readwrite",
+	"replconf", "reset", "role", "select", "shutdown", "slowlog", "spublish", "ssubscribe", "subscribe",
+	"sunsubscribe", "time", "unsubscribe", "unwatch", "watch",
+}
+
+@(private = "file")
+persist_cmd_slot :: #force_inline proc "contextless" (cmd: ^Command) -> int {
+	h := u64(uintptr(cmd)) >> 3
+	h *= 0x9E3779B97F4A7C15
+	i := int(h >> 54) & (PERSIST_CMD_SET - 1)
+	for persist_cmd_keys[i] != nil && persist_cmd_keys[i] != cmd {
+		i = (i + 1) & (PERSIST_CMD_SET - 1)
+	}
+	return i
+}
+
+@(private = "file")
+persist_cmd_mark :: proc(name: string, flag: Persist_Cmd_Flag) {
+	for &slot in cmd_table {
+		cmd := slot.cmd
+		if cmd == nil || cmd.name != name {
+			continue
+		}
+		i := persist_cmd_slot(cmd)
+		persist_cmd_keys[i] = cmd
+		persist_cmd_bits[i] += {flag}
+	}
+}
+
+@(private = "file")
+persist_cmds_lazy :: proc "contextless" () {
+	context = runtime.default_context()
+	persist_init_commands()
+}
+
+persist_cmd_flags :: #force_inline proc "contextless" (cmd: ^Command) -> Persist_Cmd_Flags {
+	if cmd == nil {
+		return {}
+	}
+	if !pst.cmds_ready {
+		persist_cmds_lazy()
+	}
+	i := persist_cmd_slot(cmd)
+	if persist_cmd_keys[i] != cmd {
+		return {}
+	}
+	return persist_cmd_bits[i]
+}
+
+persist_init_commands :: proc() {
+	persist_cmd_keys = {}
+	persist_cmd_bits = {}
+	persist_ping_cmd = nil
+	for &slot in cmd_table {
+		if slot.cmd != nil && slot.cmd.name == "ping" {
+			persist_ping_cmd = slot.cmd
+		}
+	}
+	for name in persist_write_names {
+		persist_cmd_mark(name, .Write)
+	}
+	for name in persist_loading_names {
+		persist_cmd_mark(name, .Loading_Ok)
+	}
+	marked := false
+	for k in persist_cmd_keys {
+		if k != nil {
+			marked = true
+			break
+		}
+	}
+	pst.cmds_ready = marked
+}
+
+@(private = "file")
+persist_aof_denied :: #force_inline proc "contextless" () -> bool {
+	return aof.state != .Off && aof.write_err
+}
+
+persist_update_gate :: proc "contextless" () {
+	pst.gate_active = pst.loading || persist_writes_denied() || persist_aof_denied()
+}
+
+persist_writes_denied :: #force_inline proc "contextless" () -> bool {
+	return pst.stop_writes && pst.lastbgsave_err && len(pst.save_params) > 0
+}
+
+persist_gate :: proc(c: ^Conn, cmd: ^Command) -> bool {
+	flags := persist_cmd_flags(cmd)
+	if pst.loading && .Loading_Ok not_in flags {
+		reply_error(c, ERR_LOADING)
+		return true
+	}
+	if .Write in flags || (cmd != nil && cmd == persist_ping_cmd) {
+		if persist_writes_denied() {
+			reply_error(c, ERR_MISCONF)
+			return true
+		}
+		if persist_aof_denied() {
+			reply_error_parts(c, "MISCONF Errors writing to the AOF file: ", errno_text(aof.write_errno))
+			return true
+		}
+	}
+	return false
+}
+
+persist_note :: #force_inline proc(c: ^Conn, cmd: ^Command, argv: [][]u8, pending: int, dirty_before: i64) {
+	flags := persist_cmd_flags(cmd)
+	if pst.dirty_explicit {
+		pst.dirty_explicit = false
+	} else if pst.dirty == dirty_before && .Write in flags && !persist_failed_reply(c, pending) {
+		pst.dirty += 1
+	}
+	aof_after_command(c, cmd, flags, argv, pending)
+}
+
+@(private = "file")
+persist_failed_reply :: #force_inline proc "contextless" (c: ^Conn, pending: int) -> bool {
+	return c != nil && pending >= 0 && c.wlen > pending && c.wbuf[pending] == '-'
+}
+
+log_fd: linux.Fd = 1
+
+@(private)
+MONTHS := [12]string{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}
+
+persist_filename :: proc "contextless" () -> string {
+	if len(cfg.dbfilename) == 0 {
+		return "dump.rdb"
+	}
+	return cfg.dbfilename
+}
+
+Slot_Value :: struct {
+	str:  []u8,
+	obj:  rawptr,
+	type: Obj_Type,
+}
+
+@(private = "file")
+persist_type_byte :: proc "contextless" (v: Slot_Value) -> u8 {
+	if v.obj == nil {
+		return rdb.TYPE_STRING
+	}
+	switch v.type {
+	case .String:
+		return rdb.TYPE_STRING
+	case .List:
+		return lt.rdb_type(cast(lt.List)v.obj)
+	case .Set:
+		return st.rdb_type(cast(st.Set)v.obj)
+	case .Zset:
+		return zt.rdb_type(cast(zt.Zset)v.obj)
+	case .Hash:
+		return ht.rdb_type(cast(ht.Hash)v.obj)
+	case .Stream:
+		return sm.rdb_type(cast(sm.Stream)v.obj)
+	}
+	return rdb.TYPE_STRING
+}
+
+persist_write_value :: proc(w: ^rdb.Writer, key: []u8, v: Slot_Value, with_key: bool = true) -> bool {
+	rdb.put_type(w, persist_type_byte(v))
+	if with_key {
+		rdb.put_string(w, key)
+	}
+	if v.obj == nil || v.type == .String {
+		rdb.put_string(w, v.str)
+		return !w.failed
+	}
+	switch v.type {
+	case .String:
+	case .List:
+		lt.rdb_save(w, cast(lt.List)v.obj)
+	case .Set:
+		st.rdb_save(w, cast(st.Set)v.obj)
+	case .Zset:
+		zt.rdb_save(w, cast(zt.Zset)v.obj)
+	case .Hash:
+		ht.rdb_save(w, cast(ht.Hash)v.obj)
+	case .Stream:
+		sm.rdb_save(w, cast(sm.Stream)v.obj)
+	}
+	return !w.failed
+}
+
+@(private = "file")
+persist_slot_entry :: #force_inline proc "contextless" (db: ^Db, t: ^Table, i: int) -> Entry {
+	return Entry {
+		db = db,
+		mp = &t.slots[i].meta,
+		kp = &t.slots[i].key,
+		vp = &t.slots[i].val,
+		expire_at = i64(t.slots[i].meta.expire_at),
+	}
+}
+
+@(private = "file")
+persist_table_count :: #force_inline proc "contextless" (db: ^Db) -> int {
+	return 2 if db.rehash_idx >= 0 else 1
+}
+
+@(private = "file")
+persist_table_ok :: #force_inline proc "contextless" (t: ^Table) -> bool {
+	return t.ctrl != nil && t.cap > 0 && t.live > 0
+}
+
+persist_write_rdb :: proc(w: ^rdb.Writer, aof_base: bool = false) -> bool {
+	rdb.put_header(w, persist_unix_now(), i64(mem_used()), aof_base)
+	processed: i64 = 0
+	lru := persist_policy_lru()
+	lfu := persist_policy_lfu()
+	for &db, id in dbs {
+		size := db_size_of(&db)
+		if size == 0 {
+			continue
+		}
+		rdb.put_u8(w, rdb.OPCODE_SELECTDB)
+		rdb.put_len(w, u64(id))
+		rdb.put_u8(w, rdb.OPCODE_RESIZEDB)
+		rdb.put_len(w, u64(size))
+		rdb.put_len(w, u64(max(db.expires, 0)))
+		for bank in 0 ..< persist_table_count(&db) {
+			t := &db.t[bank]
+			if !persist_table_ok(t) {
+				continue
+			}
+			for g: u64 = 0; g <= t.gmask; g += 1 {
+				bits := group_full(group_load(t.ctrl, g))
+				for bits != 0 {
+					i := int(g) * GROUP_SLOTS + int(intrinsics.count_trailing_zeros(bits))
+					bits &= bits - 1
+					kp := &t.slots[i].key
+					expire := i64(t.slots[i].meta.expire_at)
+					if expire != 0 {
+						rdb.put_u8(w, rdb.OPCODE_EXPIRETIME_MS)
+						rdb.put_ms(w, expire)
+					}
+					if lru || lfu {
+						e := persist_slot_entry(&db, t, i)
+						if lru {
+							rdb.put_u8(w, rdb.OPCODE_IDLE)
+							rdb.put_len(w, u64(max(entry_idle_seconds(&e), 0)))
+						} else {
+							rdb.put_u8(w, rdb.OPCODE_FREQ)
+							rdb.put_u8(w, u8(clamp(entry_lfu_value(&e), 0, 255)))
+						}
+					}
+					v := persist_slot_value(&db, kp, &t.slots[i].val)
+					if !persist_write_value(w, key_bytes(kp, &db.slab), v, true) {
+						return false
+					}
+					processed += 1
+					if pst.in_child {
+						persist_child_tick(processed)
+					}
+				}
+			}
+		}
+	}
+	rdb.put_trailer(w)
+	return rdb.writer_flush(w)
+}
+
+@(private = "file")
+persist_child_tick :: proc(processed: i64) {
+	p := pst.progress
+	if p != nil {
+		intrinsics.volatile_store(&p.processed, processed)
+		if processed & 1023 == 0 {
+			persist_sample_cow()
+		}
+	}
+	if pst.key_save_delay != 0 {
+		persist_debug_delay(pst.key_save_delay)
+	}
+}
+
+@(private = "file")
+persist_save_internal :: proc(filename: string) -> bool {
+	tbuf: [64]u8
+	temp := persist_temp_name(linux.getpid(), tbuf[:])
+	tcbuf: [80]u8
+	ctemp := persist_cstr(temp, tcbuf[:])
+	fd, err := linux.open(ctemp, {.WRONLY, .CREAT, .TRUNC, .CLOEXEC}, {.IRUSR, .IWUSR, .IRGRP, .IROTH})
+	if err != .NONE {
+		cwd: [PERSIST_PATH_MAX]u8
+		plog(LOG_WARNING, "Failed opening the temp RDB file ", temp, " (in server root dir ", persist_cwd(cwd[:]), ") for saving: ", errno_text(err))
+		return false
+	}
+	w: rdb.Writer
+	rdb.writer_init_file(&w, fd, pst.compression, pst.checksum)
+	if cfg.rdb_save_incremental_fsync {
+		w.sync_every = 4 << 20
+	}
+	good := persist_write_rdb(&w, false)
+	good = rdb.writer_flush(&w) && good
+	write_errno := w.errno
+	rdb.writer_destroy(&w)
+	if good {
+		if serr := linux.fsync(fd); serr != .NONE {
+			good = false
+			write_errno = serr
+		}
+	}
+	linux.close(fd)
+	if !good {
+		plog(LOG_WARNING, "Write error saving DB on disk: ", errno_text(write_errno))
+		linux.unlink(ctemp)
+		return false
+	}
+	fbuf: [PERSIST_PATH_MAX]u8
+	cfinal := persist_cstr(filename, fbuf[:])
+	if rerr := linux.rename(ctemp, cfinal); rerr != .NONE {
+		cwd: [PERSIST_PATH_MAX]u8
+		plog(LOG_WARNING, "Error moving temp DB file ", temp, " on the final destination ", filename, " (in server root dir ", persist_cwd(cwd[:]), "): ", errno_text(rerr))
+		linux.unlink(ctemp)
+		return false
+	}
+	if dfd, derr := linux.open(".", {.DIRECTORY, .CLOEXEC}); derr == .NONE {
+		linux.fsync(dfd)
+		linux.close(dfd)
+	}
+	plog(LOG_NOTICE, "DB saved on disk")
+	return true
+}
+
+persist_rdb_save :: proc() -> bool {
+	if pst.child_pid > 0 && !pst.child_aof {
+		plog(LOG_WARNING, "Background save already in progress")
+		return false
+	}
+	good := persist_save_internal(persist_filename())
+	pst.stat_rdb_saves += 1
+	if good {
+		pst.dirty = 0
+		pst.lastsave = persist_unix_now()
+		pst.lastbgsave_err = false
+	}
+	persist_update_gate()
+	return good
+}
+
+persist_bgsave :: proc() -> bool {
+	if pst.child_pid > 0 {
+		return false
+	}
+	pst.dirty_before_bgsave = pst.dirty
+	pst.lastbgsave_try = persist_unix_now()
+	persist_progress_prepare()
+	start := now_ns()
+	pid, err := linux.fork()
+	if err != .NONE {
+		pst.lastbgsave_err = true
+		plog(LOG_WARNING, "Can't save in background: fork: ", errno_text(err))
+		persist_update_gate()
+		return false
+	}
+	if pid == 0 {
+		persist_child_setup()
+		good := persist_save_internal(persist_filename())
+		if good {
+			persist_sample_cow()
+			persist_log_cow("Fork CoW for RDB: current ")
+		}
+		linux.exit_group(0 if good else 1)
+	}
+	pst.latest_fork_usec = (now_ns() - start) / 1000
+	pst.total_forks += 1
+	pst.stat_rdb_saves += 1
+	pst.child_pid = pid
+	pst.child_aof = false
+	pst.save_time_start = persist_unix_now()
+	pst.bgsave_scheduled = false
+	pst.bgsave_aborted = false
+	tmp: [24]u8
+	n := format_i64(&tmp[0], i64(pid))
+	plog(LOG_NOTICE, "Background saving started by pid ", string(tmp[:n]))
+	return true
+}
+
+persist_remove_temp :: proc(pid: linux.Pid) {
+	tbuf: [64]u8
+	name := persist_temp_name(pid, tbuf[:])
+	cbuf: [80]u8
+	linux.unlink(persist_cstr(name, cbuf[:]))
+}
+
+persist_kill_child :: proc() {
+	if pst.child_pid <= 0 || pst.child_aof {
+		return
+	}
+	pid := pst.child_pid
+	linux.kill(pid, .SIGUSR1)
+	status: u32
+	for {
+		_, werr := linux.wait4(pid, &status, {}, nil)
+		if werr != .EINTR {
+			break
+		}
+	}
+	persist_remove_temp(pid)
+	pst.bgsave_aborted = true
+	persist_bgsave_done(0, int(linux.Signal.SIGUSR1))
+}
+
+@(private = "file")
+persist_bgsave_done :: proc(exitcode: int, bysignal: int) {
+	now := persist_unix_now()
+	pid := pst.child_pid
+	if bysignal == 0 && exitcode == 0 {
+		plog(LOG_NOTICE, "Background saving terminated with success")
+		pst.dirty = max(pst.dirty - pst.dirty_before_bgsave, 0)
+		pst.lastsave = now
+		pst.lastbgsave_err = false
+	} else if bysignal == 0 {
+		plog(LOG_WARNING, "Background saving error")
+		pst.lastbgsave_err = true
+	} else {
+		tmp: [24]u8
+		n := format_i64(&tmp[0], i64(bysignal))
+		plog(LOG_WARNING, "Background saving terminated by signal ", string(tmp[:n]))
+		if pid > 0 {
+			persist_remove_temp(pid)
+		}
+		if bysignal != int(linux.Signal.SIGUSR1) {
+			pst.lastbgsave_err = true
+		}
+	}
+	if pst.progress != nil {
+		pst.stat_rdb_cow = intrinsics.volatile_load(&pst.progress.cow)
+	}
+	if pst.save_time_start >= 0 {
+		pst.save_time_last = now - pst.save_time_start
+	}
+	pst.save_time_start = -1
+	pst.child_pid = 0
+	pst.child_aof = false
+	persist_update_gate()
+}
+
+persist_check_child :: proc() {
+	pid := pst.child_pid
+	if pid <= 0 {
+		return
+	}
+	status: u32
+	got, err := linux.wait4(pid, &status, {.WNOHANG}, nil)
+	if err == .EINTR || (err == .NONE && got == 0) {
+		return
+	}
+	exitcode, bysignal := 1, 0
+	if err == .NONE && got == pid {
+		if status & 0x7f == 0 {
+			exitcode = int((status >> 8) & 0xff)
+		} else {
+			bysignal = int(status & 0x7f)
+			exitcode = 0
+		}
+	} else if pst.child_aof {
+		pst.child_pid = 0
+		pst.child_aof = false
+		return
+	}
+	if pst.child_aof {
+		aof_rewrite_done(exitcode, bysignal)
+		if pst.child_pid == pid {
+			pst.child_pid = 0
+			pst.child_aof = false
+		}
+		return
+	}
+	persist_bgsave_done(exitcode, bysignal)
+}
+
+Loaded_Value :: struct {
+	type: Obj_Type,
+	str:  []u8,
+	obj:  rawptr,
+}
+
+@(private = "file")
+persist_seed_zsets :: proc() {
+	if !pst.zset_seeded {
+		zset_seed()
+		pst.zset_seeded = true
+	}
+}
+
+persist_deep_sanitize :: proc "contextless" (restore: bool) -> bool {
+	switch pst.sanitize {
+	case .Yes:
+		return true
+	case .Clients:
+		return restore && !aof.loading
+	case .No:
+	}
+	return false
+}
+
+@(private = "file")
+STRING_SLOT :: 2
+
+@(private = "file")
+KEY_SLOT :: 3
+
+persist_load_object :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> (v: Loaded_Value) {
+	switch rdbtype {
+	case rdb.TYPE_STRING:
+		s, good := rdb.get_string(r, STRING_SLOT)
+		if good {
+			v.type = .String
+			v.str = s
+		}
+	case rdb.TYPE_LIST, rdb.TYPE_LIST_ZIPLIST, rdb.TYPE_LIST_QUICKLIST, rdb.TYPE_LIST_QUICKLIST_2:
+		l := lt.rdb_load(r, rdbtype, deep)
+		if l != nil {
+			v.type = .List
+			v.obj = l
+		}
+	case rdb.TYPE_SET, rdb.TYPE_SET_INTSET, rdb.TYPE_SET_LISTPACK:
+		s := st.rdb_load(r, rdbtype, deep)
+		if s != nil {
+			v.type = .Set
+			v.obj = s
+		}
+	case rdb.TYPE_ZSET, rdb.TYPE_ZSET_2, rdb.TYPE_ZSET_ZIPLIST, rdb.TYPE_ZSET_LISTPACK:
+		persist_seed_zsets()
+		z := zt.rdb_load(r, rdbtype, deep)
+		if z != nil {
+			v.type = .Zset
+			v.obj = z
+		}
+	case rdb.TYPE_HASH, rdb.TYPE_HASH_ZIPMAP, rdb.TYPE_HASH_ZIPLIST, rdb.TYPE_HASH_LISTPACK, rdb.TYPE_HASH_METADATA_PRE_GA, rdb.TYPE_HASH_LISTPACK_EX_PRE_GA, rdb.TYPE_HASH_METADATA, rdb.TYPE_HASH_LISTPACK_EX:
+		h := ht.rdb_load(r, rdbtype, deep)
+		if h != nil {
+			v.type = .Hash
+			v.obj = h
+		}
+	case rdb.TYPE_STREAM_LISTPACKS, rdb.TYPE_STREAM_LISTPACKS_2, rdb.TYPE_STREAM_LISTPACKS_3:
+		s := sm.rdb_load(r, rdbtype, deep)
+		if s != nil {
+			v.type = .Stream
+			v.obj = s
+		}
+	case rdb.TYPE_MODULE_PRE_GA:
+		rdb.corrupt(r, "Pre-release module format not supported")
+	case rdb.TYPE_MODULE_2:
+		id := rdb.get_len(r)
+		if !rdb.ok(r) {
+			rdb.corrupt(r, "Short read module id")
+			return
+		}
+		name: [9]u8
+		rdb.corrupt(r, "The RDB file contains module data I can't load: no matching module '", 0, false, rdb.module_name_by_id(id, &name))
+		rdb.corrupt_append(r, "'")
+	case:
+		rdb.corrupt(r, "Unknown RDB encoding type ", u64(max(rdbtype, 0)), true)
+	}
+	if !rdb.ok(r) && v.obj != nil {
+		persist_free_loaded(v)
+		v = {}
+	}
+	return
+}
+
+persist_free_loaded :: proc(v: Loaded_Value) {
+	if v.obj != nil && v.type != .String {
+		object_release_any(v.type, v.obj)
+	}
+}
+
+persist_attach :: proc(e: ^Entry, key: []u8, v: Loaded_Value) {
+	switch v.type {
+	case .String:
+		entry_assign(e, v.str)
+	case .List:
+		list_copy_attach(e, v.obj)
+	case .Set:
+		set_copy_attach(e, v.obj)
+	case .Zset:
+		zset_copy_attach(e, key, v.obj, 0)
+	case .Hash:
+		h := cast(ht.Hash)v.obj
+		h.acct = ht.memory_usage(h)
+		hash_copy_attach(e, key, v.obj, ht.min_expire(h, true))
+		hash_sync(e.db, h)
+	case .Stream:
+		s := cast(sm.Stream)v.obj
+		s.acct = sm.memory_usage(s)
+		stream_copy_attach(e, v.obj)
+	}
+}
+
+@(private = "file")
+Report_Site :: struct {
+	prefix: string,
+	line:   int,
+}
+
+@(private = "file")
+persist_report_sites := [?]Report_Site {
+	{"Unknown length encoding", 224},
+	{"Invalid LZF compressed string", 413},
+	{"Unknown RDB string encoding type", 534},
+	{"OOM in dictTryExpand", 2081},
+	{"Duplicate set members detected", 2010},
+	{"Zset with NAN score detected", 2112},
+	{"Duplicate zset fields detected", 2124},
+	{"Hash with dup elements", 2182},
+	{"Duplicate hash fields detected", 2202},
+	{"Hash failed loading minExpire", 2280},
+	{"Hash read invalid minExpire value", 2284},
+	{"invalid expireAt time", 2332},
+	{"Quicklist integrity check failed.", 2448},
+	{"Listpack integrity check failed.", 2471},
+	{"Ziplist integrity check failed.", 2481},
+	{"Hash listpackex integrity check failed.", 2526},
+	{"Zipmap integrity check failed.", 2548},
+	{"Hash zipmap with dup elements", 2572},
+	{"List ziplist integrity check failed.", 2607},
+	{"Intset integrity check failed.", 2632},
+	{"Set listpack integrity check failed.", 2646},
+	{"Zset ziplist integrity check failed.", 2668},
+	{"Zset listpack integrity check failed.", 2694},
+	{"Hash ziplist integrity check failed.", 2714},
+	{"Hash listpack integrity check failed.", 2760},
+	{"Stream listpacks len loading failed.", 2790},
+	{"Stream master ID loading failed", 2801},
+	{"Stream node key entry is not the size of a stream ID", 2806},
+	{"Stream listpacks loading failed.", 2818},
+	{"Stream listpack integrity check failed.", 2825},
+	{"Empty listpack inside stream", 2837},
+	{"Listpack re-added with existing key", 2849},
+	{"Stream object metadata loading failed.", 2887},
+	{"Stream length inconsistent with rax entries", 2893},
+	{"Stream cgroup count loading failed.", 2901},
+	{"Error reading the consumer group name from Stream", 2912},
+	{"Stream cgroup ID loading failed.", 2921},
+	{"Stream cgroup offset loading failed.", 2932},
+	{"Duplicated consumer group name", 2943},
+	{"Stream PEL size loading failed.", 2958},
+	{"Stream PEL ID loading failed.", 2965},
+	{"Stream PEL NACK loading failed.", 2973},
+	{"Duplicated global PEL entry loading stream consumer group", 2979},
+	{"Stream consumers num loading failed.", 2991},
+	{"Error reading the consumer name from Stream group.", 2998},
+	{"Duplicate stream consumer detected.", 3007},
+	{"Stream short read reading seen time.", 3014},
+	{"Stream short read reading active time.", 3022},
+	{"Stream consumer PEL num loading failed.", 3035},
+	{"Stream short read reading PEL streamID.", 3043},
+	{"Consumer entry not found in group global PEL", 3050},
+	{"Stream consumer PEL entry already has a consumer assigned", 3061},
+	{"Stream CG PEL entry without consumer", 3088},
+	{"Pre-release module format not supported", 3097},
+	{"Short read module id", 3102},
+	{"The RDB file contains module data", 3116},
+	{"Unknown RDB encoding type", 3158},
+	{"bad when_opcode", 3519},
+	{"Pre-release function format not supported.", 3564},
+	{"RDB CRC error", 3696},
+}
+
+@(private = "file")
+persist_report_line :: proc(reason: string) -> int {
+	for site in persist_report_sites {
+		if len(reason) >= len(site.prefix) && reason[:len(site.prefix)] == site.prefix {
+			return site.line
+		}
+	}
+	return 0
+}
+
+@(private = "file")
+persist_report :: proc(r: ^rdb.Reader) -> ! {
+	reason := rdb.reader_reason(r)
+	l: Log_Line
+	ll_begin(&l, LOG_WARNING)
+	ll_str(&l, "Internal error in RDB reading offset ")
+	ll_int(&l, rdb.reader_offset(r))
+	ll_str(&l, ", function at rdb.c:")
+	ll_int(&l, i64(persist_report_line(reason)))
+	ll_str(&l, " -> ")
+	ll_str(&l, reason)
+	ll_end(&l)
+	plog(LOG_WARNING, "Terminating server after rdb file reading failure.")
+	linux.exit_group(1)
+}
+
+@(private = "file")
+persist_load_failed :: proc(r: ^rdb.Reader) -> ! {
+	if r.status == .Corrupt {
+		persist_report(r)
+	}
+	plog(LOG_WARNING, "Short read or OOM loading DB. Unrecoverable error, aborting now.")
+	l: Log_Line
+	ll_begin(&l, LOG_WARNING)
+	ll_str(&l, "Internal error in RDB reading offset ")
+	ll_int(&l, rdb.reader_offset(r))
+	ll_str(&l, ", function at rdb.c:0 -> Unexpected EOF reading RDB file")
+	ll_end(&l)
+	plog(LOG_WARNING, "Terminating server after rdb file reading failure.")
+	linux.exit_group(1)
+}
+
+@(private = "file")
+persist_aux_int :: proc(val: []u8) -> (i64, bool) {
+	return rdb.string2ll(val)
+}
+
+@(private = "file")
+persist_handle_aux :: proc(key: []u8, val: []u8) {
+	name := string(key)
+	switch name {
+	case "redis-ver":
+		plog(LOG_NOTICE, "Loading RDB produced by version ", string(val))
+	case "ctime":
+		if t, good := persist_aux_int(val); good {
+			age := persist_unix_now() - t
+			l: Log_Line
+			ll_begin(&l, LOG_NOTICE)
+			ll_str(&l, "RDB age ")
+			ll_int(&l, max(age, 0))
+			ll_str(&l, " seconds")
+			ll_end(&l)
+		}
+	case "used-mem":
+		if m, good := persist_aux_int(val); good {
+			pst.loading_used_mem = m
+			l: Log_Line
+			ll_begin(&l, LOG_NOTICE)
+			ll_str(&l, "RDB memory usage when created ")
+			ll_fixed(&l, f64(m) / (1024 * 1024), 2)
+			ll_str(&l, " Mb")
+			ll_end(&l)
+		}
+	case "aof-base":
+		if v, good := persist_aux_int(val); good && v != 0 {
+			plog(LOG_NOTICE, "RDB is base AOF")
+		}
+	case "redis-bits", "aof-preamble", "repl-stream-db", "repl-id", "repl-offset", "lua":
+	case:
+		plog(LOG_DEBUG, "Unrecognized RDB AUX field: '", name, "'")
+	}
+}
+
+persist_set_lru :: proc(e: ^Entry, lru_idle: i64, lfu_freq: i64) {
+	if lfu_freq >= 0 {
+		if persist_policy_lfu() {
+			entry_set_lru(e, u32(lfu_minutes()) << 8 | u32(min(lfu_freq, 255)))
+		}
+		return
+	}
+	if lru_idle >= 0 && !persist_policy_lfu() {
+		entry_restore_idle(e, lru_idle)
+	}
+}
+
+@(private = "file")
+persist_skip_expired: bool
+
+@(private = "file")
+persist_load_version :: proc(magic: []u8) -> int {
+	if len(magic) != 9 || string(magic[:5]) != "REDIS" {
+		return -1
+	}
+	v := 0
+	for c in magic[5:] {
+		if c < '0' || c > '9' {
+			return -1
+		}
+		v = v * 10 + int(c - '0')
+	}
+	return v
+}
+
+persist_load_stream :: proc(r: ^rdb.Reader, merge: bool) -> Load_Result {
+	magic, got := rdb.take(r, 9)
+	if !got {
+		persist_load_failed(r)
+	}
+	version := persist_load_version(magic)
+	if version < 0 {
+		plog(LOG_WARNING, "Wrong signature trying to load DB from file")
+		return .Failed
+	}
+	if version < 1 || version > rdb.RDB_VERSION {
+		tmp: [24]u8
+		n := format_i64(&tmp[0], i64(version))
+		plog(LOG_WARNING, "Can't handle RDB format version ", string(tmp[:n]))
+		return .Failed
+	}
+	deep := persist_deep_sanitize(false)
+	pst.last_load_loaded = 0
+	pst.last_load_expired = 0
+	db := &dbs[0]
+	expire: i64 = -1
+	lru_idle: i64 = -1
+	lfu_freq: i64 = -1
+	now_ms := persist_unix_ms()
+	keys_seen: i64 = 0
+	for {
+		t := rdb.get_type(r)
+		if t < 0 {
+			persist_load_failed(r)
+		}
+		switch t {
+		case rdb.OPCODE_EXPIRETIME:
+			secs, good := rdb.get_u32_le(r)
+			if !good {
+				persist_load_failed(r)
+			}
+			expire = i64(i32(secs)) * 1000
+			continue
+		case rdb.OPCODE_EXPIRETIME_MS:
+			ms, good := rdb.get_ms(r)
+			if !good {
+				persist_load_failed(r)
+			}
+			expire = ms
+			continue
+		case rdb.OPCODE_FREQ:
+			f, good := rdb.get_u8(r)
+			if !good {
+				persist_load_failed(r)
+			}
+			lfu_freq = i64(f)
+			continue
+		case rdb.OPCODE_IDLE:
+			idle := rdb.get_len(r)
+			if !rdb.ok(r) {
+				persist_load_failed(r)
+			}
+			lru_idle = i64(min(idle, u64(max(i64))))
+			continue
+		case rdb.OPCODE_EOF:
+		case rdb.OPCODE_SELECTDB:
+			id := rdb.get_len(r)
+			if !rdb.ok(r) {
+				persist_load_failed(r)
+			}
+			if id >= u64(len(dbs)) {
+				tmp: [24]u8
+				n := format_i64(&tmp[0], i64(len(dbs)))
+				plog(LOG_WARNING, "FATAL: Data file was created with a Redis server configured to handle more than ", string(tmp[:n]), " databases. Exiting")
+				linux.exit_group(1)
+			}
+			db = &dbs[id]
+			continue
+		case rdb.OPCODE_RESIZEDB:
+			rdb.get_len(r)
+			rdb.get_len(r)
+			if !rdb.ok(r) {
+				persist_load_failed(r)
+			}
+			continue
+		case rdb.OPCODE_SLOT_INFO:
+			rdb.get_len(r)
+			rdb.get_len(r)
+			rdb.get_len(r)
+			if !rdb.ok(r) {
+				persist_load_failed(r)
+			}
+			continue
+		case rdb.OPCODE_AUX:
+			k, kgood := rdb.get_string(r, 0)
+			if !kgood {
+				persist_load_failed(r)
+			}
+			v, vgood := rdb.get_string(r, 1)
+			if !vgood {
+				persist_load_failed(r)
+			}
+			persist_handle_aux(k, v)
+			continue
+		case rdb.OPCODE_MODULE_AUX:
+			id := rdb.get_len(r)
+			if !rdb.ok(r) {
+				persist_load_failed(r)
+			}
+			name: [9]u8
+			rdb.corrupt(r, "The RDB file contains AUX module data I can't load: no matching module '", 0, false, rdb.module_name_by_id(id, &name))
+			rdb.corrupt_append(r, "'")
+			persist_report(r)
+		case rdb.OPCODE_FUNCTION_PRE_GA:
+			rdb.corrupt(r, "Pre-release function format not supported.")
+			persist_report(r)
+		case rdb.OPCODE_FUNCTION2:
+			_, fgood := rdb.get_string(r, 0)
+			if !fgood {
+				persist_load_failed(r)
+			}
+			plog(LOG_WARNING, "Skipping a function library stored in the RDB file: scripting is not supported")
+			continue
+		case:
+			key, kgood := rdb.get_string(r, KEY_SLOT)
+			if !kgood {
+				persist_load_failed(r)
+			}
+			v := persist_load_object(r, t, deep)
+			if r.status == .Empty_Key {
+				r.status = .Ok
+				plog(LOG_VERBOSE, "rdbLoadObject skipping empty key: ", string(key))
+				expire, lru_idle, lfu_freq = -1, -1, -1
+				continue
+			}
+			if !rdb.ok(r) {
+				persist_load_failed(r)
+			}
+			keys_seen += 1
+			if persist_skip_expired && expire != -1 && expire < now_ms {
+				persist_free_loaded(v)
+				pst.last_load_expired += 1
+				expire, lru_idle, lfu_freq = -1, -1, -1
+				continue
+			}
+			e, created := db_upsert_in(db, key)
+			if !created {
+				if !merge {
+					tmp: [24]u8
+					n := format_i64(&tmp[0], i64(db.id))
+					plog(LOG_WARNING, "RDB has duplicated key '", string(key), "' in DB ", string(tmp[:n]))
+					rdb.corrupt(r, "Duplicated key found in RDB file")
+					persist_report(r)
+				}
+				db_remove_in(db, key)
+				e, _ = db_upsert_in(db, key)
+			}
+			persist_attach(e, key, v)
+			if expire != -1 {
+				entry_set_expire(e, expire)
+			}
+			persist_set_lru(e, lru_idle, lfu_freq)
+			pst.last_load_loaded += 1
+			expire, lru_idle, lfu_freq = -1, -1, -1
+			if cfg.key_load_delay != 0 {
+				persist_debug_delay(cfg.key_load_delay)
+			}
+			if keys_seen & 1023 == 0 && intrinsics.volatile_load(&persist_sig_pending) != 0 && pst.loading {
+				plog(LOG_WARNING, "Eski is now ready to exit, bye bye...")
+				linux.exit_group(0)
+			}
+			continue
+		}
+		break
+	}
+	if version >= 5 {
+		expected := rdb.reader_checksum(r)
+		trailer, tgood := rdb.take(r, 8)
+		if !tgood {
+			persist_load_failed(r)
+		}
+		stored: u64 = 0
+		for i in 0 ..< 8 {
+			stored |= u64(trailer[i]) << (8 * uint(i))
+		}
+		if r.checksum && !pst.skip_checksum {
+			if stored == 0 {
+				plog(LOG_WARNING, "RDB file was saved with checksum disabled: no check performed.")
+			} else if stored != expected {
+				l: Log_Line
+				ll_begin(&l, LOG_WARNING)
+				ll_str(&l, "Wrong RDB checksum expected: (")
+				persist_ll_hex16(&l, stored)
+				ll_str(&l, ") got (")
+				persist_ll_hex16(&l, expected)
+				ll_str(&l, "). Aborting now.")
+				ll_end(&l)
+				rdb.corrupt(r, "RDB CRC error")
+				persist_report(r)
+			}
+		}
+	}
+	return .Ok
+}
+
+@(private = "file")
+persist_unix_ms :: proc "contextless" () -> i64 {
+	ts, _ := linux.clock_gettime(.REALTIME)
+	return i64(ts.time_sec) * 1000 + i64(ts.time_nsec) / 1_000_000
+}
+
+@(private = "file")
+persist_ll_hex16 :: proc "contextless" (l: ^Log_Line, v: u64) {
+	digits := "0123456789abcdef"
+	tmp: [16]u8
+	for i in 0 ..< 16 {
+		tmp[i] = digits[(v >> (4 * uint(15 - i))) & 15]
+	}
+	ll_str(l, string(tmp[:]))
+}
+
+persist_rdb_load :: proc(merge: bool, at_startup: bool) -> Load_Result {
+	name := persist_filename()
+	pbuf: [PERSIST_PATH_MAX]u8
+	fd, err := linux.open(persist_cstr(name, pbuf[:]), {.CLOEXEC})
+	if err == .ENOENT {
+		return .Not_Exist
+	}
+	if err != .NONE {
+		plog(LOG_WARNING, "Fatal error loading the DB, check server logs. Exiting.")
+		plog(LOG_WARNING, "Error opening ", name, ": ", errno_text(err))
+		return .Failed
+	}
+	defer linux.close(fd)
+	stat: linux.Stat
+	pst.loading_total = 0
+	if linux.fstat(fd, &stat) == .NONE {
+		pst.loading_total = i64(stat.size)
+	}
+	pst.loading = true
+	pst.loading_start = persist_unix_now()
+	pst.loading_loaded = 0
+	pst.loading_used_mem = 0
+	pst.serve_while_loading = at_startup
+	persist_update_gate()
+	r: rdb.Reader
+	rdb.reader_init_file(&r, fd, pst.checksum)
+	r.progress = persist_loading_progress
+	r.tick_every = cfg.loading_events_interval_bytes if cfg.loading_events_interval_bytes > 0 else PERSIST_LOADING_EVENTS_BYTES
+	r.next_tick = r.tick_every
+	start := now_ns()
+	persist_skip_expired = true
+	result := persist_load_stream(&r, merge)
+	persist_skip_expired = false
+	pst.loading_loaded = rdb.reader_offset(&r)
+	rdb.reader_destroy(&r)
+	pst.loading = false
+	pst.serve_while_loading = false
+	persist_update_gate()
+	if result != .Ok {
+		return result
+	}
+	l: Log_Line
+	ll_begin(&l, LOG_NOTICE)
+	ll_str(&l, "Done loading RDB, keys loaded: ")
+	ll_int(&l, pst.last_load_loaded)
+	ll_str(&l, ", keys expired: ")
+	ll_int(&l, pst.last_load_expired)
+	ll_str(&l, ".")
+	ll_end(&l)
+	if at_startup {
+		m: Log_Line
+		ll_begin(&m, LOG_NOTICE)
+		ll_str(&m, "DB loaded from disk: ")
+		ll_fixed(&m, f64(now_ns() - start) / 1e9, 3)
+		ll_str(&m, " seconds")
+		ll_end(&m)
+	}
+	return .Ok
+}
+
+Shutdown_Flag :: enum u8 {
+	Nosave,
+	Save,
+	Now,
+	Force,
+}
+
+Shutdown_Flags :: bit_set[Shutdown_Flag;u8]
+
+persist_finish_shutdown :: proc(flags: Shutdown_Flags) -> bool {
+	server_close_listeners()
+	remove_pid_file()
+	plog(LOG_WARNING, "Eski is now ready to exit, bye bye...")
+	linux.exit_group(0)
+}
+
+persist_prepare_shutdown :: proc(flags_in: Shutdown_Flags) -> bool {
+	flags := flags_in
+	if pst.loading {
+		flags += {.Nosave}
+		flags -= {.Save}
+	}
+	plog(LOG_WARNING, "User requested shutdown...")
+	if pst.child_pid > 0 && !pst.child_aof {
+		plog(LOG_WARNING, "There is a child saving an .rdb. Killing it!")
+		persist_kill_child()
+	}
+	aof_shutdown()
+	if .Nosave not_in flags && (.Save in flags || len(pst.save_params) > 0) {
+		plog(LOG_NOTICE, "Saving the final RDB snapshot before exiting.")
+		if !persist_rdb_save() {
+			if .Force in flags {
+				plog(LOG_WARNING, "Error trying to save the DB. Exit anyway.")
+			} else {
+				plog(LOG_WARNING, "Error trying to save the DB, can't exit.")
+				return false
+			}
+		}
+	}
+	return true
+}
+
+@(private = "file")
+persist_signal_flags :: proc(sig: i32) -> Shutdown_Flags {
+	bits := cfg.shutdown_on_sigint if sig == i32(linux.Signal.SIGINT) else cfg.shutdown_on_sigterm
+	flags: Shutdown_Flags
+	if bits & SHUTDOWN_SAVE != 0 {
+		flags += {.Save}
+	}
+	if bits & SHUTDOWN_NOSAVE != 0 {
+		flags += {.Nosave}
+	}
+	if bits & SHUTDOWN_NOW != 0 {
+		flags += {.Now}
+	}
+	if bits & SHUTDOWN_FORCE != 0 {
+		flags += {.Force}
+	}
+	return flags
+}
+
+persist_cron :: proc() {
+	if intrinsics.volatile_load(&persist_sig_pending) != 0 {
+		sig := intrinsics.volatile_load(&persist_sig_last)
+		flags := persist_signal_flags(sig)
+		if persist_prepare_shutdown(flags) {
+			persist_finish_shutdown(flags)
+		}
+		name := "SIGINT" if sig == i32(linux.Signal.SIGINT) else "SIGTERM"
+		plog(LOG_WARNING, name, " received but errors trying to shut down the server, check the logs for more information")
+		intrinsics.volatile_store(&persist_sig_pending, 0)
+	}
+	persist_check_child()
+	aof_cron()
+	migrate_cron()
+	set_scratch_trim()
+	zset_reset_scratch()
+	if pst.child_pid > 0 || pst.loading {
+		return
+	}
+	if pst.bgsave_scheduled {
+		persist_bgsave()
+		return
+	}
+	now := persist_unix_now()
+	for sp in pst.save_params {
+		if pst.dirty < sp.changes || now - pst.lastsave <= sp.seconds {
+			continue
+		}
+		if pst.lastbgsave_err && now - pst.lastbgsave_try <= PERSIST_BGSAVE_RETRY_DELAY {
+			continue
+		}
+		l: Log_Line
+		ll_begin(&l, LOG_NOTICE)
+		ll_int(&l, sp.changes)
+		ll_str(&l, " changes in ")
+		ll_int(&l, sp.seconds)
+		ll_str(&l, " seconds. Saving...")
+		ll_end(&l)
+		persist_bgsave()
+		break
+	}
+}
+
+persist_startup :: proc() {
+	persist_init_commands()
+	persist_install_signals()
+	pst.lastsave = persist_unix_now()
+	persist_update_gate()
+	if !aof.started && !aof_startup() {
+		plog(LOG_WARNING, "Fatal error loading the DB, check server logs. Exiting.")
+		linux.exit_group(1)
+	}
+	if aof.wanted || aof.state != .Off {
+		return
+	}
+	switch persist_rdb_load(false, true) {
+	case .Ok, .Not_Exist:
+	case .Failed:
+		plog(LOG_WARNING, "Fatal error loading the DB, check server logs. Exiting.")
+		linux.exit_group(1)
+	}
+}
+
+persist_flushed :: proc(all: bool, removed: i64) {
+	pst.dirty += removed
+	pst.dirty_explicit = true
+	if !all {
+		return
+	}
+	if pst.child_pid > 0 && !pst.child_aof {
+		persist_kill_child()
+	}
+	if len(pst.save_params) > 0 {
+		persist_rdb_save()
+	}
+}
+
+cmd_save :: proc(c: ^Conn, argv: [][]u8) {
+	if pst.child_pid > 0 && !pst.child_aof {
+		reply_error(c, ERR_BGSAVE_IN_PROGRESS)
+		return
+	}
+	if persist_rdb_save() {
+		reply_ok(c)
+	} else {
+		reply_error(c, "ERR")
+	}
+}
+
+cmd_bgsave :: proc(c: ^Conn, argv: [][]u8) {
+	schedule := false
+	if len(argv) > 1 {
+		if len(argv) == 2 && eq_nocase(argv[1], "schedule") {
+			schedule = true
+		} else {
+			reply_error(c, ERR_SYNTAX)
+			return
+		}
+	}
+	if pst.child_pid > 0 && !pst.child_aof {
+		reply_error(c, ERR_BGSAVE_IN_PROGRESS)
+		return
+	}
+	if pst.child_pid > 0 {
+		if schedule {
+			pst.bgsave_scheduled = true
+			reply_simple(c, "Background saving scheduled")
+		} else {
+			reply_error(c, ERR_AOF_CHILD_BGSAVE)
+		}
+		return
+	}
+	if persist_bgsave() {
+		reply_simple(c, "Background saving started")
+	} else {
+		reply_error(c, "ERR")
+	}
+}
+
+cmd_lastsave :: proc(c: ^Conn, argv: [][]u8) {
+	reply_int(c, pst.lastsave)
+}
+
+cmd_shutdown :: proc(c: ^Conn, argv: [][]u8) {
+	flags: Shutdown_Flags
+	abort := false
+	for arg in argv[1:] {
+		switch {
+		case eq_nocase(arg, "nosave"):
+			flags += {.Nosave}
+		case eq_nocase(arg, "save"):
+			flags += {.Save}
+		case eq_nocase(arg, "now"):
+			flags += {.Now}
+		case eq_nocase(arg, "force"):
+			flags += {.Force}
+		case eq_nocase(arg, "abort"):
+			abort = true
+		case:
+			reply_error(c, ERR_SYNTAX)
+			return
+		}
+	}
+	if (abort && len(argv) != 2) || (.Nosave in flags && .Save in flags) {
+		reply_error(c, ERR_SYNTAX)
+		return
+	}
+	if abort {
+		reply_error(c, "ERR No shutdown in progress.")
+		return
+	}
+	if persist_prepare_shutdown(flags) {
+		persist_finish_shutdown(flags)
+	}
+	reply_error(c, "ERR Errors trying to SHUTDOWN. Check logs.")
+}
+
+persist_info :: proc(b: ^[dynamic]u8) {
+	child := pst.child_pid > 0 && !pst.child_aof
+	any_child := pst.child_pid > 0
+	p := pst.progress
+	cow_peak, cow, cow_age, processed, total: i64
+	if any_child && p != nil {
+		cow_peak = intrinsics.volatile_load(&p.cow_peak)
+		cow = intrinsics.volatile_load(&p.cow)
+		stamp := intrinsics.volatile_load(&p.cow_ms)
+		if cow > 0 && stamp > 0 {
+			cow_age = max(now_ns() / 1_000_000 - stamp, 0) / 1000
+		}
+		processed = intrinsics.volatile_load(&p.processed)
+		total = intrinsics.volatile_load(&p.total)
+	}
+	perc: f64 = 0
+	if total > 0 {
+		perc = f64(processed) * 100 / f64(total)
+	}
+	info_section_header(b, "Persistence")
+	info_line_int(b, "loading", 1 if pst.loading else 0)
+	info_line_int(b, "async_loading", 0)
+	info_line_int(b, "current_cow_peak", cow_peak)
+	info_line_int(b, "current_cow_size", cow)
+	info_line_int(b, "current_cow_size_age", cow_age)
+	info_line_fixed(b, "current_fork_perc", perc)
+	info_line_int(b, "current_save_keys_processed", processed)
+	info_line_int(b, "current_save_keys_total", total)
+	info_line_int(b, "rdb_changes_since_last_save", pst.dirty)
+	info_line_int(b, "rdb_bgsave_in_progress", 1 if child else 0)
+	info_line_int(b, "rdb_last_save_time", pst.lastsave)
+	info_line_str(b, "rdb_last_bgsave_status", "err" if pst.lastbgsave_err else "ok")
+	info_line_int(b, "rdb_last_bgsave_time_sec", pst.save_time_last)
+	current: i64 = -1
+	if child && pst.save_time_start >= 0 {
+		current = persist_unix_now() - pst.save_time_start
+	}
+	info_line_int(b, "rdb_current_bgsave_time_sec", current)
+	info_line_int(b, "rdb_saves", pst.stat_rdb_saves)
+	info_line_int(b, "rdb_last_cow_size", pst.stat_rdb_cow)
+	info_line_int(b, "rdb_last_load_keys_expired", pst.last_load_expired)
+	info_line_int(b, "rdb_last_load_keys_loaded", pst.last_load_loaded)
+	aof_info(b)
+	if pst.loading {
+		persist_info_loading(b)
+	}
+}
+
+@(private = "file")
+persist_info_loading :: proc(b: ^[dynamic]u8) {
+	now := persist_unix_now()
+	elapsed := max(now - pst.loading_start, 0)
+	loaded := pst.loading_loaded
+	total := pst.loading_total
+	perc: f64 = 0
+	if total > 0 {
+		perc = f64(loaded) * 100 / f64(total)
+	}
+	eta: i64 = 1
+	if elapsed > 0 && loaded > 0 {
+		eta = i64(f64(total - loaded) / (f64(loaded) / f64(elapsed)))
+	}
+	info_line_int(b, "loading_start_time", pst.loading_start)
+	info_line_int(b, "loading_total_bytes", total)
+	info_line_int(b, "loading_rdb_used_mem", pst.loading_used_mem)
+	info_line_int(b, "loading_loaded_bytes", loaded)
+	info_line_fixed(b, "loading_loaded_perc", perc)
+	info_line_int(b, "loading_eta_seconds", max(eta, 0))
+}
+
+@(private = "file")
+digest_xor :: proc(d: ^[20]u8, data: []u8) {
+	ctx: sha1.Context
+	sha1.init(&ctx)
+	sha1.update(&ctx, data)
+	h: [20]u8
+	sha1.final(&ctx, h[:])
+	for i in 0 ..< 20 {
+		d[i] ~= h[i]
+	}
+}
+
+@(private = "file")
+digest_mix :: proc(d: ^[20]u8, data: []u8) {
+	digest_xor(d, data)
+	ctx: sha1.Context
+	sha1.init(&ctx)
+	sha1.update(&ctx, d[:])
+	sha1.final(&ctx, d[:])
+}
+
+@(private = "file")
+digest_u32 :: proc(d: ^[20]u8, v: u32) {
+	b := [4]u8{u8(v), u8(v >> 8), u8(v >> 16), u8(v >> 24)}
+	digest_mix(d, b[:])
+}
+
+@(private = "file")
+digest_score :: proc(d: ^[20]u8, score: f64) {
+	b: [8]u8
+	bits := transmute(u64)score
+	if score == 0 {
+		bits = 0
+	}
+	for i in 0 ..< 8 {
+		b[i] = u8(bits >> (8 * uint(i)))
+	}
+	digest_mix(d, b[:])
+}
+
+@(private = "file")
+digest_value :: proc(v: Slot_Value, d: ^[20]u8) {
+	if v.obj == nil || v.type == .String {
+		digest_u32(d, 0)
+		digest_mix(d, v.str)
+		return
+	}
+	switch v.type {
+	case .String:
+	case .List:
+		digest_u32(d, 1)
+		l := cast(lt.List)v.obj
+		it := lt.iterator(l, 0, .Tail)
+		entry: lt.List_Entry
+		for lt.iter_next(&it, &entry) {
+			buf: [24]u8
+			ev := lt.entry_value(&it, &entry)
+			digest_mix(d, lt.value_bytes(ev, cast(^[21]u8)&buf))
+		}
+	case .Set:
+		digest_u32(d, 2)
+		acc: [20]u8
+		it := st.iterator(cast(st.Set)v.obj)
+		for {
+			member, more := st.next(&it)
+			if !more {
+				break
+			}
+			buf: [24]u8
+			digest_xor(&acc, st.value_bytes(member, cast(^[21]u8)&buf))
+		}
+		digest_mix(d, acc[:])
+	case .Zset:
+		digest_u32(d, 3)
+		acc: [20]u8
+		it := zt.iter_make(cast(zt.Zset)v.obj, false)
+		item: zt.Item
+		for zt.iter_next(&it, &item) {
+			elem: [20]u8
+			buf: [24]u8
+			digest_mix(&elem, zt.item_bytes(&item, cast(^[21]u8)&buf))
+			digest_score(&elem, item.score)
+			digest_xor(&acc, elem[:])
+		}
+		digest_mix(d, acc[:])
+	case .Hash:
+		digest_u32(d, 4)
+		acc: [20]u8
+		it := ht.iterator(cast(ht.Hash)v.obj)
+		for ht.next(&it) {
+			elem: [20]u8
+			fbuf, vbuf: [24]u8
+			digest_mix(&elem, ht.value_bytes(ht.current_field(&it), cast(^[21]u8)&fbuf))
+			digest_mix(&elem, ht.value_bytes(ht.current_value(&it), cast(^[21]u8)&vbuf))
+			if ht.current_expire(&it) != rdb.EB_EXPIRE_TIME_INVALID && ht.current_expire(&it) != 0 {
+				ttl := ht.current_expire(&it)
+				tb: [8]u8
+				for i in 0 ..< 8 {
+					tb[i] = u8(ttl >> (8 * uint(i)))
+				}
+				digest_mix(&elem, tb[:])
+			}
+			digest_xor(&acc, elem[:])
+		}
+		digest_mix(d, acc[:])
+	case .Stream:
+		digest_u32(d, 6)
+		s := cast(sm.Stream)v.obj
+		si: sm.Iterator
+		sm.iterator_start(&si, s, nil, nil, false)
+		id: sm.ID
+		numfields: i64
+		for sm.iterator_get_id(&si, &id, &numfields) {
+			ib: [16]u8
+			for i in 0 ..< 8 {
+				ib[i] = u8(id.ms >> (8 * uint(7 - i)))
+				ib[8 + i] = u8(id.seq >> (8 * uint(7 - i)))
+			}
+			digest_mix(d, ib[:])
+			for _ in 0 ..< numfields {
+				field, value := sm.iterator_get_field(&si)
+				digest_mix(d, field)
+				digest_mix(d, value)
+			}
+		}
+		sm.iterator_stop(&si)
+	}
+}
+
+@(private = "file")
+digest_object :: proc(db: ^Db, t: ^Table, i: int, d: ^[20]u8) {
+	kp := &t.slots[i].key
+	v := persist_slot_value(db, kp, &t.slots[i].val)
+	digest_value(v, d)
+	if t.slots[i].meta.expire_at != 0 {
+		digest_mix(d, transmute([]u8)string("!!expire!!"))
+	}
+}
+
+@(private = "file")
+reply_digest :: proc(c: ^Conn, d: ^[20]u8) {
+	digits := "0123456789abcdef"
+	hex: [40]u8
+	for i in 0 ..< 20 {
+		hex[2 * i] = digits[d[i] >> 4]
+		hex[2 * i + 1] = digits[d[i] & 15]
+	}
+	reply_simple(c, string(hex[:]))
+}
+
+persist_dataset_digest :: proc(final: ^[20]u8) {
+	final^ = {}
+	for &db, id in dbs {
+		if db_size_of(&db) == 0 {
+			continue
+		}
+		digest_u32(final, u32(id))
+		for bank in 0 ..< persist_table_count(&db) {
+			t := &db.t[bank]
+			if !persist_table_ok(t) {
+				continue
+			}
+			for g: u64 = 0; g <= t.gmask; g += 1 {
+				bits := group_full(group_load(t.ctrl, g))
+				for bits != 0 {
+					i := int(g) * GROUP_SLOTS + int(intrinsics.count_trailing_zeros(bits))
+					bits &= bits - 1
+					aux: [20]u8
+					digest_mix(&aux, key_bytes(&t.slots[i].key, &db.slab))
+					digest_object(&db, t, i, &aux)
+					digest_xor(final, aux[:])
+				}
+			}
+		}
+	}
+}
+
+@(private = "file")
+persist_debug_reload :: proc(c: ^Conn, argv: [][]u8) {
+	merge, noflush, nosave := false, false, false
+	for arg in argv[2:] {
+		switch {
+		case eq_nocase(arg, "merge"):
+			merge = true
+		case eq_nocase(arg, "noflush"):
+			noflush = true
+		case eq_nocase(arg, "nosave"):
+			nosave = true
+		case:
+			reply_error(c, "ERR DEBUG RELOAD only supports the MERGE, NOFLUSH and NOSAVE options.")
+			return
+		}
+	}
+	if !nosave {
+		if pst.child_pid > 0 && !pst.child_aof {
+			persist_kill_child()
+		}
+		if !persist_rdb_save() {
+			reply_error(c, "ERR")
+			return
+		}
+	}
+	if !noflush {
+		db_flush_all()
+	}
+	if persist_rdb_load(merge, false) != .Ok {
+		reply_error(c, "ERR Error trying to load the RDB dump, check server logs.")
+		return
+	}
+	plog(LOG_NOTICE, "DB reloaded by DEBUG RELOAD")
+	reply_ok(c)
+}
+
+persist_raw_digest_value :: proc(c: ^Conn, keys: [][]u8) {
+	reply_array(c, len(keys))
+	for key in keys {
+		d: [20]u8
+		db := c.db if c.db != nil else cur_db()
+		t, i := persist_raw_locate(db, key)
+		if i >= 0 {
+			digest_value(persist_slot_value(db, &t.slots[i].key, &t.slots[i].val), &d)
+		}
+		reply_digest(c, &d)
+	}
+}
+
+persist_debug :: proc(c: ^Conn, argv: [][]u8) -> bool {
+	if len(argv) < 2 {
+		return false
+	}
+	sub := argv[1]
+	switch {
+	case eq_nocase(sub, "reload"):
+		persist_debug_reload(c, argv)
+	case eq_nocase(sub, "digest") && len(argv) == 2:
+		d: [20]u8
+		persist_dataset_digest(&d)
+		reply_digest(c, &d)
+	case eq_nocase(sub, "digest-value") && len(argv) >= 2:
+		persist_raw_digest_value(c, argv[2:])
+	case eq_nocase(sub, "loadaof") && len(argv) == 2:
+		aof_debug_loadaof(c)
+	case eq_nocase(sub, "set-skip-checksum-validation") && len(argv) == 3:
+		v, good := parse_i64(argv[2])
+		if !good {
+			reply_error(c, ERR_NOT_INT)
+			return true
+		}
+		pst.skip_checksum = v != 0
+		reply_ok(c)
+	case:
+		return false
+	}
+	return true
+}
+
+@(private = "file")
+persist_commands := [?]Command {
+	{"save", cmd_save, 1},
+	{"bgsave", cmd_bgsave, -1},
+	{"lastsave", cmd_lastsave, 1},
+	{"shutdown", cmd_shutdown, -1},
+}
+
+@(init)
+register_persist_commands :: proc "contextless" () {
+	register_commands(persist_commands[:])
+}
