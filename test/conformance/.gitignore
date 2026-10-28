@@ -1,0 +1,5 @@
+.valkey/
+.redis/
+results/
+.redis
+.valkey
