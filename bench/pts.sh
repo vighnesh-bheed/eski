@@ -33,7 +33,7 @@ REDIS_IO_THREADS=8
 usage() {
   cat <<EOF
 usage: bench/pts.sh [--quick] [--profiles memtier,redis] [--select GLOB,...] [--server-config harness|profile]
-                    [--targets redis,valkey,dragonfly,eski] [--label name]
+                    [--targets redis,valkey,dragonfly,eski,eski-docker] [--label name]
 
 Runs the fixed parameter invocations of the OpenBenchmarking.org test profiles
 $MEMTIER_PROFILE (updated $MEMTIER_PROFILE_UPDATED) and $REDIS_PROFILE (updated $REDIS_PROFILE_UPDATED)

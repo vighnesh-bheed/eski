@@ -6,7 +6,7 @@ from pathlib import Path
 
 BENCH_DIR = Path(__file__).resolve().parent
 RESULTS_DIR = BENCH_DIR / "results"
-TARGET_ORDER = ["redis", "valkey", "dragonfly", "eski"]
+TARGET_ORDER = ["redis", "valkey", "dragonfly", "eski", "eski-docker"]
 SCENARIO_ORDER = [
     "mixed_p1",
     "mixed_p16",
@@ -23,6 +23,8 @@ RB_SCENARIOS = ["rb_p1", "rb_p16"]
 RB_COMMAND_ORDER = ["PING_INLINE", "PING_MBULK", "SET", "GET", "INCR", "MSET (10 keys)"]
 BASE = "redis"
 CHALLENGER = "eski"
+CONTAINER = "eski-docker"
+RATIOS = [(CHALLENGER, BASE), (CONTAINER, BASE), (CONTAINER, CHALLENGER)]
 
 
 def die(msg):
@@ -125,6 +127,10 @@ def f_ratio(a, b):
     return f"{a / b:.2f}x"
 
 
+def ratio_pairs(targets):
+    return [(a, b) for a, b in RATIOS if a in targets and b in targets]
+
+
 def f_mib(v):
     return "-" if v is None else f"{v / 1048576:,.1f}"
 
@@ -204,6 +210,13 @@ def describe(run, name):
         if pv:
             versions.append(f"{image.rsplit('/', 1)[-1]} {pv.group(1)}")
     print(f"{'versions':<9}{', '.join(versions)}")
+    container = targets.get(CONTAINER) or {}
+    if container.get("image_id"):
+        print(f"{'image':<9}{CONTAINER} {container.get('image')} {container['image_id'][:19]}, binary sha256 {(container.get('binary_sha256') or '?')[:16]}")
+        native = (targets.get(CHALLENGER) or {}).get("binary_sha256")
+        if native and container.get("binary_sha256") and native != container["binary_sha256"]:
+            notes.append(f"{CHALLENGER} and {CONTAINER} run different binaries, so {CONTAINER}/{CHALLENGER} mixes build differences into the "
+                         "container overhead; point ESKI_BIN at the binary bench/image.sh --extract copies out of the image")
     for n in notes:
         print(f"{'note':<9}{n}")
     spec = (m.get("suites") or {}).get("spec")
@@ -245,14 +258,14 @@ def comparable_warnings(cur, other):
 def main_table(run, other):
     targets = run.targets
     scenarios = run.scenarios
-    show_ratio = CHALLENGER in targets and BASE in targets
+    ratios = ratio_pairs(targets)
     header = ["scenario"]
     for t in targets:
         header.append(f"{t} ops/s  p50/p99/p99.9 ms")
         if other:
             header.append(f"vs {t}")
-    if show_ratio:
-        header.append(f"{CHALLENGER}/{BASE}")
+    for a, b in ratios:
+        header.append(f"{a}/{b}")
     rows = []
     for s in scenarios:
         row = [s]
@@ -268,8 +281,8 @@ def main_table(run, other):
             row.append(cell)
             if other:
                 row.append(f_delta(run.value(t, s, "ops_per_sec"), other.value(t, s, "ops_per_sec")))
-        if show_ratio:
-            row.append(f_ratio(run.value(CHALLENGER, s, "ops_per_sec"), run.value(BASE, s, "ops_per_sec")))
+        for a, b in ratios:
+            row.append(f_ratio(run.value(a, s, "ops_per_sec"), run.value(b, s, "ops_per_sec")))
         rows.append(row)
     note_parts = ["memtier latencies are per request; fill10m latencies are SET latencies"]
     if any(s in RB_SCENARIOS for s in scenarios):
@@ -284,7 +297,7 @@ def fill_table(run, other):
     targets = [t for t in run.targets if run.get(t, s) is not None]
     if not targets:
         return
-    show_ratio = CHALLENGER in targets and BASE in targets
+    ratios = ratio_pairs(targets)
     metrics = [
         ("ops/sec", "ops_per_sec", f_ops),
         ("SET p99 ms", "p99_ms", f_ms),
@@ -300,8 +313,8 @@ def fill_table(run, other):
         header.append(t)
         if other:
             header.append(f"vs {t}")
-    if show_ratio:
-        header.append(f"{CHALLENGER}/{BASE}")
+    for a, b in ratios:
+        header.append(f"{a}/{b}")
     rows = []
     for label, field, fmt in metrics:
         row = [label]
@@ -310,8 +323,8 @@ def fill_table(run, other):
             row.append("ERROR" if r.get("error") else fmt(r.get(field)))
             if other:
                 row.append(f_delta(run.value(t, s, field), other.value(t, s, field)))
-        if show_ratio:
-            row.append(f_ratio(run.value(CHALLENGER, s, field), run.value(BASE, s, field)))
+        for a, b in ratios:
+            row.append(f_ratio(run.value(a, s, field), run.value(b, s, field)))
         rows.append(row)
     keys = run.meta.get("fill_keys")
     print_table(f"Bulk load of {f_int(keys)} keys (64-byte values), then INFO memory / DBSIZE", header, rows)
@@ -322,14 +335,14 @@ def rb_table(run, other):
     if not scenarios:
         return
     targets = [t for t in run.targets if any(run.get(t, s) is not None for s in scenarios)]
-    show_ratio = CHALLENGER in targets and BASE in targets
+    ratios = ratio_pairs(targets)
     header = ["redis-benchmark"]
     for t in targets:
         header.append(f"{t} ops/s  p50/p99 ms")
         if other:
             header.append(f"vs {t}")
-    if show_ratio:
-        header.append(f"{CHALLENGER}/{BASE}")
+    for a, b in ratios:
+        header.append(f"{a}/{b}")
     rows = []
     for s in scenarios:
         commands = []
@@ -353,10 +366,10 @@ def rb_table(run, other):
                 if other:
                     oc = other.rb_command(t, s, cmd)
                     row.append(f_delta(c.get("ops_per_sec") if c else None, oc.get("ops_per_sec") if oc else None))
-            if show_ratio:
-                a = run.rb_command(CHALLENGER, s, cmd)
-                b = run.rb_command(BASE, s, cmd)
-                row.append(f_ratio(a.get("ops_per_sec") if a else None, b.get("ops_per_sec") if b else None))
+            for a, b in ratios:
+                ca = run.rb_command(a, s, cmd)
+                cb = run.rb_command(b, s, cmd)
+                row.append(f_ratio(ca.get("ops_per_sec") if ca else None, cb.get("ops_per_sec") if cb else None))
             rows.append(row)
     print_table("redis-benchmark per command (50 connections, ops/sec, p50/p99 in ms)", header, rows)
 
@@ -384,7 +397,7 @@ def suite_table(run, other, suite, title, label_header, notes):
     if not names:
         return
     targets = [t for t in run.targets if any(run.get(t, n) is not None for n in names)]
-    show_ratio = CHALLENGER in targets and BASE in targets
+    ratios = ratio_pairs(targets)
     with_p999 = any(run.value(t, n, "p999_ms") is not None for t in targets for n in names)
     lat = "p50/p99/p99.9 ms" if with_p999 else "p50/p99 ms"
     header = [label_header]
@@ -392,8 +405,8 @@ def suite_table(run, other, suite, title, label_header, notes):
         header.append(f"{t} ops/s  {lat}")
         if other:
             header.append(f"vs {t}")
-    if show_ratio:
-        header.append(f"{CHALLENGER}/{BASE}")
+    for a, b in ratios:
+        header.append(f"{a}/{b}")
     rows = []
     rejected = []
     for n in names:
@@ -407,8 +420,8 @@ def suite_table(run, other, suite, title, label_header, notes):
             bad = ((r or {}).get("setup") or {}).get("config_rejected")
             if bad:
                 rejected.append(f"{t} {n}: " + ", ".join(sorted(bad)))
-        if show_ratio:
-            row.append(f_ratio(run.value(CHALLENGER, n, "ops_per_sec"), run.value(BASE, n, "ops_per_sec")))
+        for a, b in ratios:
+            row.append(f_ratio(run.value(a, n, "ops_per_sec"), run.value(b, n, "ops_per_sec")))
         rows.append(row)
     notes = list(notes)
     skips = sorted({(t, n, run.get(t, n).get("skipped")) for t in targets for n in names if (run.get(t, n) or {}).get("skipped")})
