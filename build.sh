@@ -53,7 +53,7 @@ package_dirs() {
 		fi
 	done | while IFS= read -r dir; do
 		case "$dir" in
-			test/storage|test/slab|bench/slab_reuse)
+			test/storage|test/slab)
 				continue
 				;;
 		esac
