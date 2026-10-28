@@ -10,6 +10,7 @@ VALKEY_IMAGE="${BENCH_VALKEY_IMAGE:-docker.io/valkey/valkey:8}"
 DRAGONFLY_IMAGE="${BENCH_DRAGONFLY_IMAGE:-docker.dragonflydb.io/dragonflydb/dragonfly}"
 MEMTIER_IMAGE="${BENCH_MEMTIER_IMAGE:-docker.io/redislabs/memtier_benchmark:latest}"
 ESKI_BIN="${ESKI_BIN:-$ROOT_DIR/bin/eski}"
+ESKI_IMAGE="${BENCH_ESKI_IMAGE:-eski:local}"
 SERVER_CPUS="${BENCH_SERVER_CPUS:-0-3}"
 CLIENT_CPUS="${BENCH_CLIENT_CPUS:-4-9}"
 DRAGONFLY_THREADS="${BENCH_DRAGONFLY_THREADS:-4}"
@@ -33,14 +34,17 @@ declare -A PORT=(
   [valkey]="${BENCH_PORT_VALKEY:-6380}"
   [dragonfly]="${BENCH_PORT_DRAGONFLY:-6381}"
   [eski]="${BENCH_PORT_ESKI:-6399}"
+  [eski-docker]="${BENCH_PORT_ESKI_DOCKER:-6400}"
 )
 declare -A IMAGE=(
   [redis]="$REDIS_IMAGE"
   [valkey]="$VALKEY_IMAGE"
   [dragonfly]="$DRAGONFLY_IMAGE"
   [eski]=""
+  [eski-docker]="$ESKI_IMAGE"
 )
-ALL_TARGETS=(redis valkey dragonfly eski)
+ALL_TARGETS=(redis valkey dragonfly eski eski-docker)
+DEFAULT_TARGETS=(redis valkey dragonfly eski)
 ALL_SCENARIOS=(mixed_p1 mixed_p16 mixed_p64 get_p1 set_p1 conn1_p1 conn500_p1 fill10m rb_p1 rb_p16)
 
 RUN_TAG="eski-bench=$$"
@@ -60,6 +64,9 @@ BOOTED_EXTRA=""
 BOOT_ERROR=""
 BOOT_TAIL=""
 ITEM_BOOT_FAILED=0
+ESKI_IMAGE_ID=""
+ESKI_IMAGE_INFO=""
+SERVER_ARGV=()
 
 IFS= read -r -d '' PY_HELPER <<'PY' || true
 import csv
@@ -478,12 +485,15 @@ PY
 
 usage() {
   cat <<EOF
-usage: bench/run.sh [--quick] [--targets redis,valkey,dragonfly,eski] [--scenarios a,b,c|none] [--label name]
+usage: bench/run.sh [--quick] [--targets redis,valkey,dragonfly,eski,eski-docker] [--scenarios a,b,c|none] [--label name]
                     [--spec] [--spec-cases a,b,c] [--spec-test-time N] [--spec-list] [--plan FILE]
 
   --quick           5 s timed scenarios, fill10m uses 1M keys, smaller redis-benchmark runs,
                     specification cases capped at ${SPEC_QUICK_TEST_TIME} s of test time
   --targets         comma separated subset of: ${ALL_TARGETS[*]}
+                    (default: ${DEFAULT_TARGETS[*]}); eski runs the native binary at ESKI_BIN,
+                    eski-docker runs the container image BENCH_ESKI_IMAGE built by bench/image.sh
+                    with the same arguments and CPU pinning, so the two measure container overhead
   --scenarios       comma separated subset of: ${ALL_SCENARIOS[*]}, or none
   --label           suffix for the results directory name
   --spec            also run every applicable test case of the Redis benchmarks specification
@@ -498,7 +508,7 @@ usage: bench/run.sh [--quick] [--targets redis,valkey,dragonfly,eski] [--scenari
 environment overrides (defaults in brackets):
   BENCH_SERVER_CPUS [0-3]  BENCH_CLIENT_CPUS [4-9]  BENCH_DRAGONFLY_THREADS [4]
   BENCH_PORT_REDIS [6379]  BENCH_PORT_VALKEY [6380]  BENCH_PORT_DRAGONFLY [6381]  BENCH_PORT_ESKI [6399]
-  ESKI_BIN [$ROOT_DIR/bin/eski]
+  ESKI_BIN [$ROOT_DIR/bin/eski]  BENCH_ESKI_IMAGE [eski:local]  BENCH_PORT_ESKI_DOCKER [6400]
   BENCH_SPEC_MEMTIER_IMAGE [the run_image each case declares]
   BENCH_SPEC_PRELOAD_TIMEOUT [3600]  BENCH_SPEC_CLIENT_TIMEOUT [1800, for cases without a test time]
   BENCH_SPEC_CHECK_TIMEOUT [60, how long the keyspace check waits]  BENCH_SPEC_SUITES [the pinned release]
@@ -574,7 +584,7 @@ if [ -n "$TARGETS_ARG" ]; then
   mapfile -t TARGETS < <(select_from target "$TARGETS_ARG" "${ALL_TARGETS[@]}") || exit 1
   [ "${#TARGETS[@]}" -gt 0 ] || exit 1
 else
-  TARGETS=("${ALL_TARGETS[@]}")
+  TARGETS=("${DEFAULT_TARGETS[@]}")
 fi
 if [ "$SCENARIOS_ARG" = none ]; then
   SCENARIOS=()
@@ -746,6 +756,12 @@ preflight() {
   for img in "${imgs[@]}"; do
     docker image inspect "$img" >/dev/null 2>&1 || die "docker image $img is not present locally; run: docker pull $img"
   done
+  if contains eski-docker "${TARGETS[@]}"; then
+    ESKI_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$ESKI_IMAGE" 2>/dev/null) ||
+      die "docker image $ESKI_IMAGE for target eski-docker is not present locally; build it with bench/image.sh or set BENCH_ESKI_IMAGE"
+    ESKI_IMAGE_INFO=$(docker run --rm --label "$RUN_TAG" --entrypoint /bin/cat "$ESKI_IMAGE_ID" /usr/share/doc/eski/build-info.txt 2>/dev/null) ||
+      die "docker image $ESKI_IMAGE has no /usr/share/doc/eski/build-info.txt; build it with bench/image.sh"
+  fi
   if docker info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q selinux; then
     MOUNT_OPT=":z"
   fi
@@ -755,6 +771,7 @@ preflight() {
     [ "$t" = eski ] && [ ! -x "$ESKI_BIN" ] && continue
     if port_busy "${PORT[$t]}"; then
       local var="BENCH_PORT_${t^^}"
+      var=${var//-/_}
       die "port ${PORT[$t]} for target '$t' is already in use ($(port_owner "${PORT[$t]}")); stop it or set $var to a free port"
     fi
   done
@@ -842,16 +859,31 @@ write_meta() {
 
 target_status() {
   local t=$1 status=$2 reason=$3 started=$4
-  local tdir="$RUN_DIR/$t" image="" iid="" bin="" sha="" mtime=""
+  local tdir="$RUN_DIR/$t" image="" iid="" bin="" sha="" mtime="" info="" argv_json=null limits_json=null
   if [ "$t" = eski ]; then
     bin=$ESKI_BIN
     if [ -f "$ESKI_BIN" ]; then
       sha=$(sha256sum "$ESKI_BIN" | cut -d' ' -f1)
       mtime=$(date -Iseconds -r "$ESKI_BIN")
     fi
+    limits_json=$(jq -n --arg cpus "$SERVER_CPUS" '{pinning: "taskset", cpuset_cpus: $cpus, memory_bytes: 0}')
   else
     image=${IMAGE[$t]}
     iid=$(image_id "$image")
+  fi
+  if [ "$t" = eski-docker ] && [ -n "$ESKI_IMAGE_INFO" ]; then
+    iid=$ESKI_IMAGE_ID
+    info=$ESKI_IMAGE_INFO
+    sha=$(sed -n 's/^binary_sha256=//p' <<<"$info" | head -n 1)
+    printf '%s\n' "$info" >"$tdir/image-build-info.txt"
+  fi
+  if [ "${#SERVER_ARGV[@]}" -gt 0 ]; then
+    argv_json=$(printf '%s\n' "${SERVER_ARGV[@]}" | jq -R . | jq -s .)
+  fi
+  if [ -s "$tdir/container-hostconfig.json" ]; then
+    limits_json=$(jq '{pinning: "docker", cpuset_cpus: .CpusetCpus, memory_bytes: .Memory, memory_swap_bytes: .MemorySwap,
+      nano_cpus: .NanoCpus, cpu_quota: .CpuQuota, pids_limit: .PidsLimit, network_mode: .NetworkMode}' \
+      "$tdir/container-hostconfig.json" 2>/dev/null) || limits_json=null
   fi
   jq -n \
     --arg status "$status" --arg reason "$reason" \
@@ -860,16 +892,21 @@ target_status() {
     --arg binary "$bin" --arg sha "$sha" --arg mtime "$mtime" \
     --arg started "$started" --arg finished "$(date -Iseconds)" \
     --arg iso "$(isolated_cpus)" \
+    --arg info "$info" --argjson argv "$argv_json" --argjson limits "$limits_json" \
     '{status: $status, reason: $reason, port: $port, cpus: $cpus, started_at: $started, finished_at: $finished, isolated_cpus_at_end: $iso}
      + (if $image != "" then {image: $image, image_id: $image_id} else {} end)
-     + (if $binary != "" then {binary: $binary, binary_sha256: $sha, binary_mtime: $mtime} else {} end)' \
+     + (if $binary != "" then {binary: $binary, binary_sha256: $sha, binary_mtime: $mtime} else {} end)
+     + (if $info != "" then {binary_sha256: $sha, image_build_info: $info} else {} end)
+     + (if $argv != null then {server_argv: $argv} else {} end)
+     + (if $limits != null then {limits: $limits} else {} end)' \
     >"$tdir/target.json"
 }
 
 start_server() {
   local t=$1 port=$2 tdir=$3
   if [ "$t" = eski ]; then
-    taskset -c "$SERVER_CPUS" "$ESKI_BIN" --port "$port" >"$tdir/server.log" 2>&1 &
+    SERVER_ARGV=(taskset -c "$SERVER_CPUS" "$ESKI_BIN" --port "$port" "${SERVER_EXTRA[@]}")
+    "${SERVER_ARGV[@]}" >"$tdir/server.log" 2>&1 &
     ESKI_PID=$!
     return 0
   fi
@@ -878,13 +915,17 @@ start_server() {
   local -a base=(docker run --rm -d --name "bench-$t" --label "$RUN_TAG" --network=host --cpuset-cpus="$SERVER_CPUS")
   case "$t" in
     redis)
-      "${base[@]}" "$REDIS_IMAGE" redis-server --port "$port" --save "" --appendonly no --protected-mode no "${SERVER_EXTRA[@]}" ;;
+      SERVER_ARGV=("${base[@]}" "$REDIS_IMAGE" redis-server --port "$port" --save "" --appendonly no --protected-mode no "${SERVER_EXTRA[@]}") ;;
     valkey)
-      "${base[@]}" "$VALKEY_IMAGE" valkey-server --port "$port" --save "" --appendonly no --protected-mode no "${SERVER_EXTRA[@]}" ;;
+      SERVER_ARGV=("${base[@]}" "$VALKEY_IMAGE" valkey-server --port "$port" --save "" --appendonly no --protected-mode no "${SERVER_EXTRA[@]}") ;;
     dragonfly)
-      "${base[@]}" --ulimit memlock=-1 "$DRAGONFLY_IMAGE" dragonfly --port="$port" \
-        --proactor_threads="$DRAGONFLY_THREADS" --dbfilename= --logtostderr --version_check=false ;;
-  esac >"$tdir/start.log" 2>&1 || return 1
+      SERVER_ARGV=("${base[@]}" --ulimit memlock=-1 "$DRAGONFLY_IMAGE" dragonfly --port="$port" \
+        --proactor_threads="$DRAGONFLY_THREADS" --dbfilename= --logtostderr --version_check=false) ;;
+    eski-docker)
+      SERVER_ARGV=("${base[@]}" "$ESKI_IMAGE_ID" --port "$port" "${SERVER_EXTRA[@]}") ;;
+  esac
+  "${SERVER_ARGV[@]}" >"$tdir/start.log" 2>&1 || return 1
+  docker inspect --format '{{json .HostConfig}}' "bench-$t" >"$tdir/container-hostconfig.json" 2>/dev/null
   docker logs -f "bench-$t" >"$tdir/server.log" 2>&1 &
   LOGS_PID=$!
   return 0
@@ -1121,7 +1162,11 @@ fetch_spec() {
 probe_eski() {
   local out=$1; shift
   local port=${PORT[eski]} rc
-  [ -x "$ESKI_BIN" ] || die "specification cases are chosen by the commands eski implements, so an eski binary is needed at $ESKI_BIN (build it or set ESKI_BIN)"
+  if [ ! -x "$ESKI_BIN" ] && contains eski-docker "${TARGETS[@]}"; then
+    probe_eski_image "$out" "$@"
+    return
+  fi
+  [ -x "$ESKI_BIN" ] || die "specification cases are chosen by the commands eski implements, so an eski binary is needed at $ESKI_BIN (build it, set ESKI_BIN or select the eski-docker target)"
   port_busy "$port" && die "port $port for the eski command probe is in use ($(port_owner "$port")); set BENCH_PORT_ESKI to a free port"
   mkdir -p "$SPEC_CACHE" || die "cannot create $SPEC_CACHE"
   (cd "$SPEC_CACHE" && exec "$ESKI_BIN" --port "$port") >"$SPEC_CACHE/eski-probe.log" 2>&1 &
@@ -1129,6 +1174,24 @@ probe_eski() {
   python3 -I "$SPEC_TOOL" probe --port "$port" --out "$out" "$@"
   rc=$?
   stop_eski
+  return "$rc"
+}
+
+probe_eski_image() {
+  local out=$1; shift
+  local port=${PORT[eski-docker]} name="bench-probe-eski-$$" iid rc
+  iid=${ESKI_IMAGE_ID:-$(docker image inspect --format '{{.Id}}' "$ESKI_IMAGE" 2>/dev/null)}
+  [ -n "$iid" ] || die "docker image $ESKI_IMAGE is not present locally; build it with bench/image.sh or set BENCH_ESKI_IMAGE"
+  port_busy "$port" && die "port $port for the eski-docker command probe is in use ($(port_owner "$port")); set BENCH_PORT_ESKI_DOCKER to a free port"
+  CURRENT_CONTAINER=$name
+  if ! docker run --rm -d --name "$name" --label "$RUN_TAG" --network=host "$iid" --port "$port" >/dev/null 2>&1; then
+    CURRENT_CONTAINER=""
+    die "cannot start $ESKI_IMAGE for the eski command probe"
+  fi
+  python3 -I "$SPEC_TOOL" probe --port "$port" --out "$out" "$@"
+  rc=$?
+  docker kill "$name" >/dev/null 2>&1
+  CURRENT_CONTAINER=""
   return "$rc"
 }
 
@@ -1171,7 +1234,7 @@ build_plan() {
     probe_args+=(--extra "$PLAN_ARG")
     plan_args+=(--extra "$PLAN_ARG")
   fi
-  if [ "$SPEC" = 1 ] || { contains eski "${TARGETS[@]}" && [ -x "$ESKI_BIN" ]; }; then
+  if [ "$SPEC" = 1 ] || { contains eski "${TARGETS[@]}" && [ -x "$ESKI_BIN" ]; } || contains eski-docker "${TARGETS[@]}"; then
     probe_eski "$work/eski_commands.json" "${probe_args[@]}" || die "probing the commands of eski failed"
     plan_args+=(--probe "$work/eski_commands.json")
   fi
@@ -1329,6 +1392,7 @@ run_items() {
 run_target() {
   local t=$1 port=${PORT[$1]} tdir="$RUN_DIR/$1" started
   started=$(date -Iseconds)
+  SERVER_ARGV=()
   mkdir -p "$tdir"
   if [ "$t" = eski ] && [ ! -x "$ESKI_BIN" ]; then
     say "[eski] SKIPPED: no executable eski binary at $ESKI_BIN (build it first); the other targets are unaffected"
