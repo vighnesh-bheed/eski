@@ -266,6 +266,45 @@ expiry_large_borrowed_pack_values_and_reordering :: proc(t: ^testing.T) {
 	}
 }
 
+expiry_pack_order :: proc(t: ^testing.T, h: Hash, want: []string, deadlines: []u64) {
+	it := iterator(h)
+	for name, i in want {
+		testing.expect(t, next(&it))
+		testing.expect(t, value_eq(current_field(&it), ordinary_bytes(name)))
+		testing.expect_value(t, current_expire(&it), deadlines[i])
+	}
+	testing.expect(t, !next(&it))
+}
+
+@(test)
+expiry_pack_value_updates_keep_position :: proc(t: ^testing.T) {
+	h := expiry_make(false)
+	defer destroy(h)
+	for name in ([4]string{"a", "b", "c", "d"}) {
+		set(h, ordinary_bytes(name), ordinary_bytes("1"))
+	}
+	expiry_set(t, h, ordinary_bytes("b"), 300)
+	expiry_set(t, h, ordinary_bytes("d"), 300)
+	none := EB_EXPIRE_TIME_INVALID
+	expiry_pack_order(t, h, {"d", "b", "a", "c"}, {300, 300, none, none})
+	testing.expect(t, set(h, ordinary_bytes("a"), ordinary_bytes("plain")))
+	expiry_pack_order(t, h, {"d", "b", "a", "c"}, {300, 300, none, none})
+	result, err := incrby(h, ordinary_bytes("b"), 4, 0)
+	testing.expect(t, err == .None && result == 5)
+	expiry_pack_order(t, h, {"d", "b", "a", "c"}, {300, 300, none, none})
+	result, err = incrby(h, ordinary_bytes("c"), 2, 0)
+	testing.expect(t, err == .None && result == 3)
+	expiry_pack_order(t, h, {"d", "b", "a", "c"}, {300, 300, none, none})
+	testing.expect(t, set(h, ordinary_bytes("d"), ordinary_bytes("cleared")))
+	expiry_pack_order(t, h, {"b", "a", "c", "d"}, {300, none, none, none})
+	expiry_set(t, h, ordinary_bytes("c"), 300)
+	expiry_pack_order(t, h, {"c", "b", "a", "d"}, {300, 300, none, none})
+	value, _, found := get_raw(h, ordinary_bytes("b"))
+	testing.expect(t, found && value_eq(value, ordinary_bytes("5")))
+	value, _, found = get_raw(h, ordinary_bytes("a"))
+	testing.expect(t, found && value_eq(value, ordinary_bytes("plain")))
+}
+
 @(test)
 expiry_active_quota_and_stale_registry_roots :: proc(t: ^testing.T) {
 	reg: Registry

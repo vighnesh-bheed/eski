@@ -901,7 +901,7 @@ ordinary_saved_minimum :: proc(h: Hash) -> (i64, bool) {
 }
 
 @(test)
-ordinary_persistence_uses_registered_minimum :: proc(t: ^testing.T) {
+ordinary_persistence_minimum_header_by_encoding :: proc(t: ^testing.T) {
 	for table in ([2]bool{false, true}) {
 		reg: Registry
 		defer registry_destroy(&reg)
@@ -909,6 +909,7 @@ ordinary_persistence_uses_registered_minimum :: proc(t: ^testing.T) {
 		h := create()
 		defer destroy(h)
 		set(h, ordinary_bytes("f"), ordinary_bytes("v"))
+		set(h, ordinary_bytes("g"), ordinary_bytes("w"))
 		if table {
 			convert(h)
 			ensure_meta(h)
@@ -920,9 +921,27 @@ ordinary_persistence_uses_registered_minimum :: proc(t: ^testing.T) {
 		minf := EB_EXPIRE_TIME_INVALID
 		deleted, updated: int
 		set_ex_field(h, ordinary_bytes("f"), 200, .None, 0, &minf, &deleted, &updated)
-		registry_add(&reg, h, 100)
-		minimum, ok := ordinary_saved_minimum(h)
-		testing.expect(t, ok && minimum == 100)
+		set_ex_field(h, ordinary_bytes("g"), 900, .None, 0, &minf, &deleted, &updated)
+		for registered in ([2]u64{100, 300}) {
+			registry_add(&reg, h, registered)
+			minimum, ok := ordinary_saved_minimum(h)
+			testing.expect(t, ok && minimum == (200 if table else i64(registered)))
+			w: rdb.Writer
+			rdb.writer_init_mem(&w, false, false)
+			rdb_save(&w, h)
+			r: rdb.Reader
+			rdb.reader_init_mem(&r, rdb.writer_bytes(&w), false)
+			d := rdb_load(&r, int(rdb_type(h)), true)
+			testing.expect(t, d != nil && r.status == .Ok)
+			if d != nil {
+				_, fexp, ffound := get_raw(d, ordinary_bytes("f"))
+				_, gexp, gfound := get_raw(d, ordinary_bytes("g"))
+				testing.expect(t, ffound && fexp == 200 && gfound && gexp == 900)
+			}
+			destroy(d)
+			rdb.reader_destroy(&r)
+			rdb.writer_destroy(&w)
+		}
 	}
 }
 
@@ -1077,15 +1096,79 @@ ordinary_registry_transitions_preserve_stale_headers :: proc(t: ^testing.T) {
 			testing.expect(t, ok && minimum == 100)
 		}
 		deleted_count, empty := hdel(h, [][]u8{ordinary_bytes("b")})
+		testing.expect(t, deleted_count == 1 && !empty && is_registered(h) && registered_expire(h) == 100)
+		set(h, ordinary_bytes("b"), ordinary_bytes("2"))
+		minf = EB_EXPIRE_TIME_INVALID
+		set_ex_field(h, ordinary_bytes("a"), 200, .None, 0, &minf, &deleted, &updated)
+		deleted_count, empty = hdel(h, [][]u8{ordinary_bytes("zz"), ordinary_bytes("a")})
 		testing.expect(t, deleted_count == 1 && !empty && !is_registered(h))
+		set(h, ordinary_bytes("a"), ordinary_bytes("1"))
 		minf = EB_EXPIRE_TIME_INVALID
 		set_ex_field(h, ordinary_bytes("a"), 200, .None, 0, &minf, &deleted, &updated)
 		registry_add(&reg, h, 100)
-		set(h, ordinary_bytes("b"), ordinary_bytes("2"))
 		testing.expect(t, delete_field(h, ordinary_bytes("a")))
 		testing.expect(t, is_registered(h) && registered_expire(h) == 100)
 		deleted_count, empty = hdel(h, [][]u8{ordinary_bytes("b")})
 		testing.expect(t, deleted_count == 1 && empty && !is_registered(h))
+	}
+}
+
+@(test)
+ordinary_packed_unique_sample_keeps_pack_order :: proc(t: ^testing.T) {
+	for extended in ([2]bool{false, true}) {
+		h := create()
+		defer destroy(h)
+		defer ordinary_cleanup()
+		for i in 0 ..< 12 {
+			buf: [21]u8
+			f := ordinary_key(i, &buf)
+			set(h, f, f)
+		}
+		if extended {
+			convert_to_ex(h)
+			minf := EB_EXPIRE_TIME_INVALID
+			deleted, updated: int
+			set_ex_field(h, ordinary_bytes("9"), 500, .None, 0, &minf, &deleted, &updated)
+			set_ex_field(h, ordinary_bytes("4"), 300, .None, 0, &minf, &deleted, &updated)
+		}
+		position: [12]int
+		it := iterator(h)
+		row := 0
+		for next(&it) {
+			fb: [21]u8
+			idx, _ := parse_incrby_increment(value_bytes(current_field(&it), &fb))
+			position[idx] = row
+			row += 1
+		}
+		fields, values := make([dynamic]Value), make([dynamic]Value)
+		defer delete(fields)
+		defer delete(values)
+		hits: [12]int
+		for count in 2 ..< 12 {
+			for _ in 0 ..< 40 {
+				clear(&fields)
+				clear(&values)
+				random_unique(h, count, true, &fields, &values)
+				testing.expect_value(t, len(fields), count)
+				testing.expect_value(t, len(values), count)
+				last := -1
+				for f, i in fields {
+					fb: [21]u8
+					idx, err := parse_incrby_increment(value_bytes(f, &fb))
+					testing.expect(t, err == .None && idx >= 0 && idx < 12)
+					if err != .None || idx < 0 || idx >= 12 {
+						continue
+					}
+					testing.expect(t, position[idx] > last)
+					last = position[idx]
+					testing.expect(t, value_eq(values[i], value_bytes(f, &fb)))
+					hits[idx] += 1
+				}
+			}
+		}
+		for n in hits {
+			testing.expect(t, n > 0)
+		}
 	}
 }
 
