@@ -5088,7 +5088,7 @@ aof_debug_loadaof :: proc(c: ^Conn) {
 		aof.fsynced_size = aof.current_size
 	}
 	#partial switch res {
-	case .Ok, .Empty, .Not_Exist, .Truncated:
+	case .Ok, .Empty, .Truncated:
 		plog(LOG_NOTICE, "Append Only File loaded by DEBUG LOADAOF")
 		reply_ok(c)
 	case:
