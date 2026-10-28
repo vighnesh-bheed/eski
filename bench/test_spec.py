@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 import sys
@@ -264,6 +266,60 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(spec.target_skip(item, "valkey", {"method": "command_list", "missing": ["hexpire"]}), "valkey lacks hexpire")
         self.assertEqual(spec.target_skip(item, "redis", {"method": "command_list", "missing": []}), "")
         self.assertEqual(spec.target_skip(item, "redis", {}), "")
+
+    def test_warmup_survives_plan_and_shell_exports(self):
+        warmup = {"tool": "memtier_benchmark", "image": "warmup:pinned", "cpus": "4-5", "timeout": 15,
+                  "argv": ["--command", "GET __key__", "--distinct-client-seed", "--test-time=3"]}
+        item = {"suite": "custom", "name": "custom", "key": "custom", "warmup": warmup,
+                "clients": [{"tool": "memtier_benchmark", "image": "timed:pinned", "argv": ["--test-time=15"]}]}
+        with tempfile.TemporaryDirectory() as temporary:
+            source, output = Path(temporary) / "source.json", Path(temporary) / "plan.json"
+            source.write_text(json.dumps({"items": [item]}))
+            self.assertEqual(spec.main(["plan", "--extra", str(source), "--out", str(output)]), 0)
+            self.assertEqual(json.loads(output.read_text())["items"], [item])
+            with contextlib.redirect_stdout(io.StringIO()) as shell:
+                spec.main(["shell", "--plan", str(output), "--target", "redis", "--index", "0"])
+            self.assertIn("local IT_WARMUP_TOOL=memtier_benchmark", shell.getvalue())
+            self.assertIn("local -a IT_WARMUP_ARGV=(--command 'GET __key__' --distinct-client-seed --test-time=3)", shell.getvalue())
+            with contextlib.redirect_stdout(io.StringIO()) as summary:
+                spec.main(["shell", "--plan", str(output), "--summary"])
+            self.assertIn("warmup:pinned", summary.getvalue())
+        for invalid in ({"tool": "unsupported", "argv": []}, {"tool": "memtier_benchmark", "argv": "--test-time=3"}, {}, []):
+            with self.subTest(invalid=invalid), self.assertRaises(SystemExit):
+                spec.validate_item(dict(item, warmup=invalid), "fixture")
+        with self.assertRaisesRegex(SystemExit, "cannot flush the warmed dataset"):
+            spec.validate_item(dict(item, flush_each_run=True), "fixture")
+
+    def test_reply_assertions_validate_and_survive_planning(self):
+        item = {"suite": "custom", "name": "custom", "key": "custom",
+                "check": {"keyspacelen": 3, "replies": [{"argv": ["MGET", "present", "missing"], "equals": ["value", None]}]},
+                "clients": [{"tool": "memtier_benchmark", "argv": ["--requests=1"]}]}
+        with tempfile.TemporaryDirectory() as temporary:
+            source, output = Path(temporary) / "source.json", Path(temporary) / "plan.json"
+            source.write_text(json.dumps({"items": [item]}))
+            self.assertEqual(spec.main(["plan", "--extra", str(source), "--out", str(output)]), 0)
+            self.assertEqual(json.loads(output.read_text())["items"], [item])
+        for expected in (None, "", 0, True, 1.5, [], ["value", [1, None, False]]):
+            with self.subTest(expected=expected):
+                spec.validate_item(dict(item, check={"replies": [{"argv": ["GET", ""], "equals": expected}]}), "fixture")
+        invalid = [None, {}, "reply", [None], [[]], [{}], [{"argv": ["GET", "k"]}], [{"equals": None}],
+                   [{"argv": ["GET", "k"], "equals": None, "extra": 1}]]
+        invalid.extend([{"argv": argv, "equals": None}] for argv in ("GET k", [], [""], ["GET", 1]))
+        invalid.extend([{"argv": ["GET", "k"], "equals": expected}] for expected in ({"value": 1}, float("nan"), (1,)))
+        for replies in invalid:
+            with self.subTest(replies=replies), self.assertRaises(SystemExit):
+                spec.validate_item(dict(item, check={"replies": replies}), "fixture")
+        with self.assertRaisesRegex(SystemExit, "check declaration must be an object"):
+            spec.validate_item(dict(item, check=[]), "fixture")
+
+    def test_reply_comparison_is_type_exact(self):
+        self.assertEqual(spec.decoded_reply([b"8", None, 1]), ["8", None, 1])
+        self.assertTrue(spec.same_reply(["8", 1], ["8", 1]))
+        self.assertFalse(spec.same_reply(1, True))
+        self.assertFalse(spec.same_reply("8", 8))
+        self.assertFalse(spec.same_reply(["8"], ["8", 1]))
+        with self.assertRaises(ValueError):
+            spec.decoded_reply(spec.RespError("ERR wrong type"))
 
     def test_container_target_inherits_eski_entries(self):
         item = {"suite": "pts", "name": "case", "key": "case", "clients": [{"tool": "redis-benchmark", "argv": []}],

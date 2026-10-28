@@ -14,12 +14,15 @@ ESKI_IMAGE="${BENCH_ESKI_IMAGE:-eski:local}"
 SERVER_CPUS="${BENCH_SERVER_CPUS:-0-3}"
 CLIENT_CPUS="${BENCH_CLIENT_CPUS:-4-9}"
 DRAGONFLY_THREADS="${BENCH_DRAGONFLY_THREADS:-4}"
+SERVER_MEMORY="${BENCH_SERVER_MEMORY:-}"
+CLIENT_MEMORY="${BENCH_CLIENT_MEMORY:-}"
+SERVER_MAXMEMORY="${BENCH_SERVER_MAXMEMORY:-}"
 READY_TIMEOUT=30
 SPEC_VERSION="0.3.46"
 SPEC_SHA256="763f7dd9d453050c0cebe174437e244eeaf9a185e64de18f70bad20ed07e0ca0"
 SPEC_URL="https://github.com/redis/redis-benchmarks-specification/archive/refs/tags/v${SPEC_VERSION}.tar.gz"
 SPEC_TREE_NAME="redis-benchmarks-specification-$SPEC_VERSION"
-SPEC_CACHE="$BENCH_DIR/.spec"
+SPEC_CACHE="${BENCH_SPEC_CACHE:-$BENCH_DIR/.spec}"
 SPEC_TOOL="$BENCH_DIR/spec.py"
 SPEC_SUITES="${BENCH_SPEC_SUITES:-}"
 SPEC_MEMTIER_IMAGE="${BENCH_SPEC_MEMTIER_IMAGE:-}"
@@ -47,7 +50,10 @@ ALL_TARGETS=(redis valkey dragonfly eski eski-docker)
 DEFAULT_TARGETS=(redis valkey dragonfly eski)
 ALL_SCENARIOS=(mixed_p1 mixed_p16 mixed_p64 get_p1 set_p1 conn1_p1 conn500_p1 fill10m rb_p1 rb_p16)
 
-RUN_TAG="eski-bench=$$"
+RUN_ID="${BENCH_RUN_ID:-$$-$RANDOM}"
+[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "run.sh: error: BENCH_RUN_ID may only contain letters, digits, '.', '_' and '-'" >&2; exit 1; }
+RUN_TAG="eski-bench=$RUN_ID"
+declare -A LOCKED_IMAGE=()
 ESKI_PID=""
 LOGS_PID=""
 CURRENT_CONTAINER=""
@@ -67,10 +73,12 @@ ITEM_BOOT_FAILED=0
 ESKI_IMAGE_ID=""
 ESKI_IMAGE_INFO=""
 SERVER_ARGV=()
+SERVER_ARTIFACT=""
 
 IFS= read -r -d '' PY_HELPER <<'PY' || true
 import csv
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -139,6 +147,15 @@ def memtier_base(run_dir, target, scenario):
             raise KeyError("ALL STATS")
         stats = data[merged[0]]
     tot = stats["Totals"]
+    for label, block in stats.items():
+        if isinstance(block, dict):
+            for field in ("Errors", "Errors/sec", "Command Errors", "Connection Errors", "Connection Errors/sec"):
+                value = num(block.get(field))
+                if field in block and (value is None or not math.isfinite(value) or value != 0):
+                    raise ValueError(f"{label} reports {field}={block[field]}")
+    throughput = num(tot.get("Ops/sec"))
+    if throughput is None or not math.isfinite(throughput) or throughput <= 0:
+        raise ValueError("memtier reports no completed operations")
     cfg = data.get("configuration") or {}
     cpu = stats.get("CPU") or {}
     runtime = stats.get("Runtime") or {}
@@ -398,6 +415,9 @@ def mode_item(run_dir, target, plan, index):
         rec["other_clients"] = [{k: c.get(k) for k in ("tool", "image", "argv", "cpus")} for c in item["clients"][:-1]]
     if item.get("preload"):
         rec["preload"] = {k: item["preload"].get(k) for k in ("tool", "image", "argv", "cpus")}
+    if item.get("warmup"):
+        rec["warmup"] = {k: item["warmup"].get(k) for k in ("tool", "image", "argv", "cpus")}
+        rec["warmup"]["measurement_scope"] = "raw client output kept; excluded from the timed throughput and latency; included in the case telemetry and the lifetime memory peak"
     rec["case"] = item.get("info") or {}
     setup = item_setup(run_dir, target, item)
     if setup is not None:
@@ -456,6 +476,12 @@ def item_mode(mode, args):
 def main():
     mode = sys.argv[1]
     args = sys.argv[2:]
+    if mode == "validate_memtier":
+        try:
+            memtier_base(*args)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            raise SystemExit(f"invalid memtier result: {e}")
+        return
     if mode == "summary":
         mode_summary(*args)
         return
@@ -507,6 +533,11 @@ usage: bench/run.sh [--quick] [--targets redis,valkey,dragonfly,eski,eski-docker
 
 environment overrides (defaults in brackets):
   BENCH_SERVER_CPUS [0-3]  BENCH_CLIENT_CPUS [4-9]  BENCH_DRAGONFLY_THREADS [4]
+  BENCH_SERVER_MEMORY, BENCH_CLIENT_MEMORY [no cap]  memory and swap cap of every server and client container
+  BENCH_SERVER_MAXMEMORY [unset]  maxmemory in bytes given to every server
+  BENCH_OUTPUT_DIR [bench/results/<stamp>]  absolute fresh results directory
+  BENCH_RUN_ID [pid-random]  label value of every container this run owns
+  BENCH_SPEC_CACHE [bench/.spec]  BENCH_OWNER_EVENTS [unset]  ownership events file read by bench/exam.sh
   BENCH_PORT_REDIS [6379]  BENCH_PORT_VALKEY [6380]  BENCH_PORT_DRAGONFLY [6381]  BENCH_PORT_ESKI [6399]
   ESKI_BIN [$ROOT_DIR/bin/eski]  BENCH_ESKI_IMAGE [eski:local]  BENCH_PORT_ESKI_DOCKER [6400]
   BENCH_SPEC_MEMTIER_IMAGE [the run_image each case declares]
@@ -579,6 +610,9 @@ if [ -n "$PLAN_ARG" ]; then
   [ -f "$PLAN_ARG" ] || die "plan file not found: $PLAN_ARG"
   PLAN_ARG=$(cd "$(dirname "$PLAN_ARG")" && pwd)/$(basename "$PLAN_ARG")
 fi
+[[ -z "$SERVER_MAXMEMORY" || "$SERVER_MAXMEMORY" =~ ^[1-9][0-9]*$ ]] || die "BENCH_SERVER_MAXMEMORY must be a positive byte count"
+[[ -z "$SERVER_MEMORY" || "$SERVER_MEMORY" =~ ^[1-9][0-9]*[bkmgBKMG]?$ ]] || die "BENCH_SERVER_MEMORY must be a docker memory size such as 8g"
+[[ -z "$CLIENT_MEMORY" || "$CLIENT_MEMORY" =~ ^[1-9][0-9]*[bkmgBKMG]?$ ]] || die "BENCH_CLIENT_MEMORY must be a docker memory size such as 2g"
 
 if [ -n "$TARGETS_ARG" ]; then
   mapfile -t TARGETS < <(select_from target "$TARGETS_ARG" "${ALL_TARGETS[@]}") || exit 1
@@ -630,7 +664,7 @@ py() { python3 -c "$PY_HELPER" "$@"; }
 
 rcli() {
   local port=$1; shift
-  timeout 30 docker run --rm --label "$RUN_TAG" --network=host "$REDIS_IMAGE" \
+  timeout 30 docker run --pull=never --rm --label "$RUN_TAG" --network=host "$(image_id "$REDIS_IMAGE")" \
     redis-cli -h 127.0.0.1 -p "$port" "$@" 2>/dev/null | tr -d '\r'
 }
 
@@ -671,7 +705,30 @@ ac_online() {
   echo unknown
 }
 
-image_id() { docker image inspect --format '{{.Id}}' "$1" 2>/dev/null || echo unknown; }
+image_id() {
+  if [ -n "${LOCKED_IMAGE[$1]:-}" ]; then
+    printf '%s\n' "${LOCKED_IMAGE[$1]}"
+  else
+    docker image inspect --format '{{.Id}}' "$1" 2>/dev/null || echo unknown
+  fi
+}
+
+lock_image() {
+  local id
+  [ -n "${LOCKED_IMAGE[$1]:-}" ] && return 0
+  id=$(docker image inspect --format '{{.Id}}' "$1" 2>/dev/null) || die "docker image $1 is not present locally; run: docker pull $1"
+  LOCKED_IMAGE[$1]=$id
+}
+
+observe() {
+  [ -n "${BENCH_OWNER_EVENTS:-}" ] || return 0
+  local command=$1 kind=$2 role=$3
+  shift 3
+  if [ "$command" = watch ]; then
+    exec python3 -I "$BENCH_DIR/exam_metrics.py" "$command" --events "$BENCH_OWNER_EVENTS" --kind "$kind" --role "$role" "$@" >>"${BENCH_OWNER_EVENTS}.log" 2>&1
+  fi
+  python3 -I "$BENCH_DIR/exam_metrics.py" "$command" --events "$BENCH_OWNER_EVENTS" --kind "$kind" --role "$role" "$@" >>"${BENCH_OWNER_EVENTS}.log" 2>&1
+}
 
 need_prefill() {
   local s
@@ -683,6 +740,7 @@ need_prefill() {
 
 stop_eski() {
   [ -n "$ESKI_PID" ] || return 0
+  observe hook before-stop server --pid "$ESKI_PID" --artifact-dir "$SERVER_ARTIFACT"
   if kill -0 "$ESKI_PID" 2>/dev/null; then
     kill -TERM "$ESKI_PID" 2>/dev/null
     local i
@@ -694,6 +752,16 @@ stop_eski() {
   fi
   wait "$ESKI_PID" 2>/dev/null
   ESKI_PID=""
+}
+
+forget_container() {
+  local name=$1 i
+  for i in $(seq 1 100); do
+    docker container inspect "$name" >/dev/null 2>&1 || return 0
+    docker rm -f "$name" >/dev/null 2>&1
+    sleep 0.2
+  done
+  return 1
 }
 
 stop_logs() {
@@ -718,6 +786,7 @@ cleanup() {
   trap - EXIT INT TERM
   stop_eski
   if [ -n "$CURRENT_CONTAINER" ]; then
+    observe hook before-stop server --container "$CURRENT_CONTAINER" --artifact-dir "$SERVER_ARTIFACT"
     docker rm -f "$CURRENT_CONTAINER" >/dev/null 2>&1
   fi
   local leftovers
@@ -735,7 +804,7 @@ trap 'printf "\ninterrupted, cleaning up\n" >&2; exit 130' INT TERM
 
 check_cpuset() {
   local cpus=$1 role=$2 err
-  if ! err=$(docker run --rm --label "$RUN_TAG" --cpuset-cpus="$cpus" "$REDIS_IMAGE" true 2>&1); then
+  if ! err=$(docker run --pull=never --rm --label "$RUN_TAG" --cpuset-cpus="$cpus" "$(image_id "$REDIS_IMAGE")" true 2>&1); then
     printf 'run.sh: error: docker cannot pin the %s to CPUs %s\n  docker said: %s\n' "$role" "$cpus" "$(printf '%s' "$err" | head -n1)" >&2
     printf '  CPUs docker may use right now: %s; CPUs isolated by a cpuset partition: %s\n' "$(docker_cpus)" "$(isolated_cpus)" >&2
     printf '  power profile: %s, AC online: %s\n' "$(power_profile)" "$(ac_online)" >&2
@@ -754,12 +823,14 @@ preflight() {
   contains valkey "${TARGETS[@]}" && imgs+=("$VALKEY_IMAGE")
   contains dragonfly "${TARGETS[@]}" && imgs+=("$DRAGONFLY_IMAGE")
   for img in "${imgs[@]}"; do
-    docker image inspect "$img" >/dev/null 2>&1 || die "docker image $img is not present locally; run: docker pull $img"
+    lock_image "$img"
   done
   if contains eski-docker "${TARGETS[@]}"; then
-    ESKI_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$ESKI_IMAGE" 2>/dev/null) ||
+    docker image inspect "$ESKI_IMAGE" >/dev/null 2>&1 ||
       die "docker image $ESKI_IMAGE for target eski-docker is not present locally; build it with bench/image.sh or set BENCH_ESKI_IMAGE"
-    ESKI_IMAGE_INFO=$(docker run --rm --label "$RUN_TAG" --entrypoint /bin/cat "$ESKI_IMAGE_ID" /usr/share/doc/eski/build-info.txt 2>/dev/null) ||
+    lock_image "$ESKI_IMAGE"
+    ESKI_IMAGE_ID=$(image_id "$ESKI_IMAGE")
+    ESKI_IMAGE_INFO=$(docker run --pull=never --rm --label "$RUN_TAG" --entrypoint /bin/cat "$ESKI_IMAGE_ID" /usr/share/doc/eski/build-info.txt 2>/dev/null) ||
       die "docker image $ESKI_IMAGE has no /usr/share/doc/eski/build-info.txt; build it with bench/image.sh"
   fi
   if docker info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q selinux; then
@@ -778,12 +849,18 @@ preflight() {
 }
 
 plan_images_json() {
-  local img ver
+  local img ver tools
   local -a triples=()
   for img in "${PLAN_IMAGES[@]}"; do
     ver=""
-    case "$img" in
-      *memtier*) ver=$(docker run --rm --label "$RUN_TAG" "$img" --version 2>&1 | head -n1) ;;
+    tools=$(jq -r --arg image "$img" '[.items[] | (.clients[]?, .preload?, .warmup?) | select(. != null and .image == $image) | .tool] | unique | join(",")' "$PLAN")
+    case "$tools" in
+      *memtier_benchmark*) ver=$(docker run --pull=never --rm --label "$RUN_TAG" "$(image_id "$img")" --version 2>&1 | head -n1) ;;
+      *redis-benchmark*) ver=$(docker run --pull=never --rm --label "$RUN_TAG" "$(image_id "$img")" redis-benchmark --version 2>&1 | head -n1) ;;
+      *)
+        case "$img" in
+          *memtier*) ver=$(docker run --pull=never --rm --label "$RUN_TAG" "$(image_id "$img")" --version 2>&1 | head -n1) ;;
+        esac ;;
     esac
     triples+=("$img" "$(image_id "$img")" "$ver")
   done
@@ -796,7 +873,7 @@ plan_images_json() {
 
 write_meta() {
   local memtier_version eski_sha="" eski_mtime=""
-  memtier_version=$(docker run --rm --label "$RUN_TAG" "$MEMTIER_IMAGE" --version 2>&1 | head -n1)
+  memtier_version=$(docker run --pull=never --rm --label "$RUN_TAG" "$(image_id "$MEMTIER_IMAGE")" --version 2>&1 | head -n1)
   local -a flag_pairs=()
   local s
   for s in "${SCENARIOS[@]}"; do
@@ -826,6 +903,7 @@ write_meta() {
     --arg memtier_image "$MEMTIER_IMAGE" \
     --arg memtier_image_id "$(image_id "$MEMTIER_IMAGE")" \
     --arg cli_image "$REDIS_IMAGE" \
+    --arg server_memory "$SERVER_MEMORY" --arg client_memory "$CLIENT_MEMORY" --arg server_maxmemory "$SERVER_MAXMEMORY" \
     --arg docker_version "$(docker version --format '{{.Server.Version}}' 2>/dev/null)" \
     --arg isolated "$(isolated_cpus)" \
     --arg docker_cpus "$(docker_cpus)" \
@@ -846,6 +924,9 @@ write_meta() {
       cpu_model: $cpu_model, cpu_count: ($cpu_count | tonumber), kernel: $kernel, os: $os,
       quick: $quick, test_time_s: $test_time, fill_keys: $fill_keys,
       server_cpus: $server_cpus, client_cpus: $client_cpus,
+      server_container_memory: (if $server_memory != "" then $server_memory else null end),
+      client_container_memory: (if $client_memory != "" then $client_memory else null end),
+      server_maxmemory_bytes: (if $server_maxmemory != "" then ($server_maxmemory | tonumber) else null end),
       memtier_version: $memtier_version, memtier_image: $memtier_image, memtier_image_id: $memtier_image_id,
       cli_image: $cli_image, docker_version: $docker_version,
       isolated_cpus_at_start: $isolated, docker_cpus_at_start: $docker_cpus,
@@ -893,7 +974,9 @@ target_status() {
     --arg started "$started" --arg finished "$(date -Iseconds)" \
     --arg iso "$(isolated_cpus)" \
     --arg info "$info" --argjson argv "$argv_json" --argjson limits "$limits_json" \
-    '{status: $status, reason: $reason, port: $port, cpus: $cpus, started_at: $started, finished_at: $finished, isolated_cpus_at_end: $iso}
+    --arg maxmemory "$SERVER_MAXMEMORY" \
+    '{status: $status, reason: $reason, port: $port, cpus: $cpus, started_at: $started, finished_at: $finished, isolated_cpus_at_end: $iso,
+      maxmemory_bytes: (if $maxmemory != "" then ($maxmemory | tonumber) else null end)}
      + (if $image != "" then {image: $image, image_id: $image_id} else {} end)
      + (if $binary != "" then {binary: $binary, binary_sha256: $sha, binary_mtime: $mtime} else {} end)
      + (if $info != "" then {binary_sha256: $sha, image_build_info: $info} else {} end)
@@ -904,29 +987,37 @@ target_status() {
 
 start_server() {
   local t=$1 port=$2 tdir=$3
+  local -a persist=(--save "" --appendonly no) limit=() memory=()
+  [ -n "$SERVER_MAXMEMORY" ] && limit=(--maxmemory "$SERVER_MAXMEMORY")
+  SERVER_ARTIFACT=$tdir
   if [ "$t" = eski ]; then
-    SERVER_ARGV=(taskset -c "$SERVER_CPUS" "$ESKI_BIN" --port "$port" "${SERVER_EXTRA[@]}")
+    SERVER_ARGV=(taskset -c "$SERVER_CPUS" "$ESKI_BIN" --port "$port" "${persist[@]}" "${limit[@]}" "${SERVER_EXTRA[@]}")
     "${SERVER_ARGV[@]}" >"$tdir/server.log" 2>&1 &
     ESKI_PID=$!
+    observe hook start server --pid "$ESKI_PID" --artifact-dir "$tdir"
     return 0
   fi
-  docker rm -f "bench-$t" >/dev/null 2>&1
-  CURRENT_CONTAINER="bench-$t"
-  local -a base=(docker run --rm -d --name "bench-$t" --label "$RUN_TAG" --network=host --cpuset-cpus="$SERVER_CPUS")
+  CURRENT_CONTAINER="bench-$t-$RUN_ID"
+  forget_container "$CURRENT_CONTAINER" || return 1
+  [ -n "$SERVER_MEMORY" ] && memory=(--memory="$SERVER_MEMORY" --memory-swap="$SERVER_MEMORY")
+  local -a base=(docker run --pull=never --rm -d --name "$CURRENT_CONTAINER" --label "$RUN_TAG" --network=host --cpuset-cpus="$SERVER_CPUS"
+    "${memory[@]}" --workdir=/data --tmpfs /data:rw,mode=1777)
   case "$t" in
     redis)
-      SERVER_ARGV=("${base[@]}" "$REDIS_IMAGE" redis-server --port "$port" --save "" --appendonly no --protected-mode no "${SERVER_EXTRA[@]}") ;;
+      SERVER_ARGV=("${base[@]}" "$(image_id "$REDIS_IMAGE")" redis-server --port "$port" "${persist[@]}" --protected-mode no "${limit[@]}" "${SERVER_EXTRA[@]}") ;;
     valkey)
-      SERVER_ARGV=("${base[@]}" "$VALKEY_IMAGE" valkey-server --port "$port" --save "" --appendonly no --protected-mode no "${SERVER_EXTRA[@]}") ;;
+      SERVER_ARGV=("${base[@]}" "$(image_id "$VALKEY_IMAGE")" valkey-server --port "$port" "${persist[@]}" --protected-mode no "${limit[@]}" "${SERVER_EXTRA[@]}") ;;
     dragonfly)
-      SERVER_ARGV=("${base[@]}" --ulimit memlock=-1 "$DRAGONFLY_IMAGE" dragonfly --port="$port" \
-        --proactor_threads="$DRAGONFLY_THREADS" --dbfilename= --logtostderr --version_check=false) ;;
+      [ -n "$SERVER_MAXMEMORY" ] && limit=(--maxmemory="$SERVER_MAXMEMORY")
+      SERVER_ARGV=("${base[@]}" --ulimit memlock=-1 "$(image_id "$DRAGONFLY_IMAGE")" dragonfly --port="$port" \
+        "${limit[@]}" --proactor_threads="$DRAGONFLY_THREADS" --dbfilename= --logtostderr --version_check=false) ;;
     eski-docker)
-      SERVER_ARGV=("${base[@]}" "$ESKI_IMAGE_ID" --port "$port" "${SERVER_EXTRA[@]}") ;;
+      SERVER_ARGV=("${base[@]}" "$ESKI_IMAGE_ID" --port "$port" "${persist[@]}" "${limit[@]}" "${SERVER_EXTRA[@]}") ;;
   esac
   "${SERVER_ARGV[@]}" >"$tdir/start.log" 2>&1 || return 1
-  docker inspect --format '{{json .HostConfig}}' "bench-$t" >"$tdir/container-hostconfig.json" 2>/dev/null
-  docker logs -f "bench-$t" >"$tdir/server.log" 2>&1 &
+  docker inspect --format '{{json .HostConfig}}' "$CURRENT_CONTAINER" >"$tdir/container-hostconfig.json" 2>/dev/null
+  observe hook start server --container "$CURRENT_CONTAINER" --artifact-dir "$tdir"
+  docker logs -f "$CURRENT_CONTAINER" >"$tdir/server.log" 2>&1 &
   LOGS_PID=$!
   return 0
 }
@@ -935,7 +1026,7 @@ server_alive() {
   if [ "$1" = eski ]; then
     [ -n "$ESKI_PID" ] && kill -0 "$ESKI_PID" 2>/dev/null
   else
-    [ "$(docker inspect -f '{{.State.Running}}' "bench-$1" 2>/dev/null)" = true ]
+    [ -n "$CURRENT_CONTAINER" ] && [ "$(docker inspect -f '{{.State.Running}}' "$CURRENT_CONTAINER" 2>/dev/null)" = true ]
   fi
 }
 
@@ -953,9 +1044,10 @@ stop_server() {
   local t=$1
   if [ "$t" = eski ]; then
     stop_eski
-  else
-    docker stop -t 10 "bench-$t" >/dev/null 2>&1
-    docker rm -f "bench-$t" >/dev/null 2>&1
+  elif [ -n "$CURRENT_CONTAINER" ]; then
+    observe hook before-stop server --container "$CURRENT_CONTAINER" --artifact-dir "$SERVER_ARTIFACT"
+    docker stop -t 10 "$CURRENT_CONTAINER" >/dev/null 2>&1
+    forget_container "$CURRENT_CONTAINER"
     CURRENT_CONTAINER=""
   fi
   stop_logs
@@ -983,29 +1075,41 @@ client_guard() {
 
 run_memtier() {
   local tdir=$1 port=$2 name=$3; shift 3
-  local cname="bench-client-$$-$BASHPID-$RANDOM" rc
-  local -a fixed=(--protocol=redis --hide-histogram --print-percentiles 50,99,99.9) guard=()
+  local cname="bench-client-$$-$BASHPID-$RANDOM" rc observer=""
+  local -a fixed=(--protocol=redis --hide-histogram --print-percentiles 50,99,99.9) guard=() memory=()
   [ "${MT_EXACT:-0}" = 1 ] && fixed=()
   [ -n "${MT_LIMIT:-}" ] && guard=(timeout --kill-after=30 "$MT_LIMIT")
+  [ -n "$CLIENT_MEMORY" ] && memory=(--memory="$CLIENT_MEMORY" --memory-swap="$CLIENT_MEMORY")
   rm -f "$tdir/$name.json"
-  "${guard[@]}" docker run --rm --name "$cname" --label "$RUN_TAG" --network=host --cpuset-cpus="${MT_CPUS:-$CLIENT_CPUS}" \
-    --user "$(id -u):$(id -g)" -v "$tdir:/out$MOUNT_OPT" "${MT_IMAGE:-$MEMTIER_IMAGE}" \
+  if [ -n "${BENCH_OWNER_EVENTS:-}" ]; then
+    observe watch start client --container "$cname" --artifact-dir "$tdir/$name" &
+    observer=$!
+  fi
+  "${guard[@]}" docker run --pull=never --rm --name "$cname" --label "$RUN_TAG" --network=host --cpuset-cpus="${MT_CPUS:-$CLIENT_CPUS}" \
+    "${memory[@]}" --user "$(id -u):$(id -g)" -v "$tdir:/out$MOUNT_OPT" "$(image_id "${MT_IMAGE:-$MEMTIER_IMAGE}")" \
     --server=127.0.0.1 --port="$port" "${fixed[@]}" --json-out-file="/out/$name.json" "$@" \
     >"$tdir/$name.log" 2>&1
   rc=$?
+  if [ -n "$observer" ]; then kill "$observer" 2>/dev/null || true; wait "$observer" 2>/dev/null || true; fi
   client_guard "$rc" "$cname" "$tdir/$name.log" || return 1
-  [ -s "$tdir/$name.json" ]
+  [ -s "$tdir/$name.json" ] && py validate_memtier "$(dirname "$tdir")" "$(basename "$tdir")" "$name" >>"$tdir/$name.log" 2>&1
 }
 
 run_rb_argv() {
   local tdir=$1 port=$2 name=$3; shift 3
-  local cname="bench-client-$$-$BASHPID-$RANDOM" rc
-  local -a guard=()
+  local cname="bench-client-$$-$BASHPID-$RANDOM" rc observer=""
+  local -a guard=() memory=()
   [ -n "${MT_LIMIT:-}" ] && guard=(timeout --kill-after=30 "$MT_LIMIT")
-  "${guard[@]}" docker run --rm --name "$cname" --label "$RUN_TAG" --network=host --cpuset-cpus="${MT_CPUS:-$CLIENT_CPUS}" \
-    "${MT_IMAGE:-$REDIS_IMAGE}" redis-benchmark -h 127.0.0.1 -p "$port" "$@" \
+  [ -n "$CLIENT_MEMORY" ] && memory=(--memory="$CLIENT_MEMORY" --memory-swap="$CLIENT_MEMORY")
+  if [ -n "${BENCH_OWNER_EVENTS:-}" ]; then
+    observe watch start client --container "$cname" --artifact-dir "$tdir/$name" &
+    observer=$!
+  fi
+  "${guard[@]}" docker run --pull=never --rm --name "$cname" --label "$RUN_TAG" --network=host --cpuset-cpus="${MT_CPUS:-$CLIENT_CPUS}" \
+    "${memory[@]}" "$(image_id "${MT_IMAGE:-$REDIS_IMAGE}")" redis-benchmark -h 127.0.0.1 -p "$port" "$@" \
     >"$tdir/$name.csv" 2>"$tdir/$name.log"
   rc=$?
+  if [ -n "$observer" ]; then kill "$observer" 2>/dev/null || true; wait "$observer" 2>/dev/null || true; fi
   client_guard "$rc" "$cname" "$tdir/$name.log"
 }
 
@@ -1179,15 +1283,16 @@ probe_eski() {
 
 probe_eski_image() {
   local out=$1; shift
-  local port=${PORT[eski-docker]} name="bench-probe-eski-$$" iid rc
+  local port=${PORT[eski-docker]} name="bench-probe-eski-$RUN_ID" iid rc
   iid=${ESKI_IMAGE_ID:-$(docker image inspect --format '{{.Id}}' "$ESKI_IMAGE" 2>/dev/null)}
   [ -n "$iid" ] || die "docker image $ESKI_IMAGE is not present locally; build it with bench/image.sh or set BENCH_ESKI_IMAGE"
   port_busy "$port" && die "port $port for the eski-docker command probe is in use ($(port_owner "$port")); set BENCH_PORT_ESKI_DOCKER to a free port"
   CURRENT_CONTAINER=$name
-  if ! docker run --rm -d --name "$name" --label "$RUN_TAG" --network=host "$iid" --port "$port" >/dev/null 2>&1; then
+  if ! docker run --pull=never --rm -d --name "$name" --label "$RUN_TAG" --network=host "$iid" --port "$port" --save "" --appendonly no >/dev/null 2>&1; then
     CURRENT_CONTAINER=""
     die "cannot start $ESKI_IMAGE for the eski command probe"
   fi
+  observe hook start server --container "$name" --artifact-dir "$SPEC_CACHE/probe-eski-docker"
   python3 -I "$SPEC_TOOL" probe --port "$port" --out "$out" "$@"
   rc=$?
   docker kill "$name" >/dev/null 2>&1
@@ -1197,15 +1302,16 @@ probe_eski_image() {
 
 probe_reference() {
   local out=$1; shift
-  local port=${PORT[redis]} name="bench-probe-$$" rc
+  local port=${PORT[redis]} name="bench-probe-$RUN_ID" rc
   port_busy "$port" && die "port $port for the reference command probe is in use ($(port_owner "$port")); set BENCH_PORT_REDIS to a free port"
-  docker image inspect "$REDIS_IMAGE" >/dev/null 2>&1 || die "docker image $REDIS_IMAGE is not present locally; run: docker pull $REDIS_IMAGE"
+  lock_image "$REDIS_IMAGE"
   CURRENT_CONTAINER=$name
-  if ! docker run --rm -d --name "$name" --label "$RUN_TAG" --network=host "$REDIS_IMAGE" \
+  if ! docker run --pull=never --rm -d --name "$name" --label "$RUN_TAG" --network=host "$(image_id "$REDIS_IMAGE")" \
       redis-server --port "$port" --save "" --appendonly no >/dev/null 2>&1; then
     CURRENT_CONTAINER=""
     die "cannot start $REDIS_IMAGE for the reference command probe"
   fi
+  observe hook start server --container "$name" --artifact-dir "$SPEC_CACHE/probe-redis"
   python3 -I "$SPEC_TOOL" probe --port "$port" --out "$out" "$@"
   rc=$?
   docker kill "$name" >/dev/null 2>&1
@@ -1273,7 +1379,7 @@ prepare_plan() {
     die "the plan has no items and no scenarios are selected"
   fi
   for img in "${PLAN_IMAGES[@]}"; do
-    docker image inspect "$img" >/dev/null 2>&1 || die "docker image $img is not present locally; run: docker pull $img"
+    lock_image "$img"
   done
 }
 
@@ -1327,6 +1433,11 @@ run_item() {
       --port "$port" --out "$tdir/$IT_KEY.setup.json" --check-timeout "$SPEC_CHECK_TIMEOUT" 2>>"$tdir/$IT_KEY.setup.log"); then
     fail=${msg:-init commands or keyspace check failed}
     log="$t/$IT_KEY.setup.log"
+  fi
+  if [ -z "$fail" ] && [ -n "$IT_WARMUP_TOOL" ] && ! run_tool "$tdir" "$port" "$IT_KEY.warmup" "$IT_WARMUP_TOOL" \
+      "$IT_WARMUP_IMAGE" "$IT_WARMUP_CPUS" "$IT_WARMUP_TIMEOUT" "${IT_WARMUP_ARGV[@]}"; then
+    fail="warmup failed"
+    log="$t/$IT_KEY.warmup.log"
   fi
   r=1
   while [ -z "$fail" ] && [ "$r" -le "$IT_RUNS" ]; do
@@ -1459,7 +1570,13 @@ fi
 preflight
 
 STAMP=$(date +%Y%m%d-%H%M%S)
-RUN_DIR="$RESULTS_ROOT/$STAMP${LABEL:+-$LABEL}"
+if [ -n "${BENCH_OUTPUT_DIR:-}" ]; then
+  [[ "$BENCH_OUTPUT_DIR" = /* ]] || die "BENCH_OUTPUT_DIR must be an absolute path"
+  [ ! -e "$BENCH_OUTPUT_DIR" ] || die "BENCH_OUTPUT_DIR must name a directory that does not exist yet"
+  RUN_DIR="$BENCH_OUTPUT_DIR"
+else
+  RUN_DIR="$RESULTS_ROOT/$STAMP${LABEL:+-$LABEL}"
+fi
 mkdir -p "$RUN_DIR" || die "cannot create $RUN_DIR"
 : >"$RUN_DIR/records.jsonl"
 if [ "$SPEC" = 1 ] || [ -n "$PLAN_ARG" ]; then
