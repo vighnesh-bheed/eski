@@ -552,7 +552,8 @@ sort_large_inputs :: proc(t: ^testing.T) {
 	expect_reply(t, &s, `["99999.5", "99998.5"]`, "SORT", "nums", "DESC", "LIMIT", "0", "2")
 	expect_reply(t, &s, `["50000.5", "50001.5"]`, "SORT", "nums", "LIMIT", "50000", "2")
 	elapsed := time.since(start)
-	testing.expectf(t, elapsed < 20 * time.Second, "large sorts took %v", elapsed)
+	bound := 20 * time.Second when !ODIN_DEBUG else 90 * time.Second
+	testing.expectf(t, elapsed < bound, "large sorts took %v", elapsed)
 }
 
 @(private)
