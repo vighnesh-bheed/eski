@@ -1,0 +1,106 @@
+int_value_0|128|64|set f 0
+int_field_0|128|64|set 0 v
+int_value_1|128|64|set f 1
+int_field_1|128|64|set 1 v
+int_value_2|128|64|set f 127
+int_field_2|128|64|set 127 v
+int_value_3|128|64|set f 128
+int_field_3|128|64|set 128 v
+int_value_4|128|64|set f -1
+int_field_4|128|64|set -1 v
+int_value_5|128|64|set f -4096
+int_field_5|128|64|set -4096 v
+int_value_6|128|64|set f 4095
+int_field_6|128|64|set 4095 v
+int_value_7|128|64|set f 4096
+int_field_7|128|64|set 4096 v
+int_value_8|128|64|set f -4097
+int_field_8|128|64|set -4097 v
+int_value_9|128|64|set f 32767
+int_field_9|128|64|set 32767 v
+int_value_10|128|64|set f -32768
+int_field_10|128|64|set -32768 v
+int_value_11|128|64|set f 32768
+int_field_11|128|64|set 32768 v
+int_value_12|128|64|set f -32769
+int_field_12|128|64|set -32769 v
+int_value_13|128|64|set f 8388607
+int_field_13|128|64|set 8388607 v
+int_value_14|128|64|set f -8388608
+int_field_14|128|64|set -8388608 v
+int_value_15|128|64|set f 8388608
+int_field_15|128|64|set 8388608 v
+int_value_16|128|64|set f -8388609
+int_field_16|128|64|set -8388609 v
+int_value_17|128|64|set f 2147483647
+int_field_17|128|64|set 2147483647 v
+int_value_18|128|64|set f -2147483648
+int_field_18|128|64|set -2147483648 v
+int_value_19|128|64|set f 2147483648
+int_field_19|128|64|set 2147483648 v
+int_value_20|128|64|set f -2147483649
+int_field_20|128|64|set -2147483649 v
+int_value_21|128|64|set f 9223372036854775807
+int_field_21|128|64|set 9223372036854775807 v
+int_value_22|128|64|set f -9223372036854775808
+int_field_22|128|64|set -9223372036854775808 v
+ints_all|128|64|set k0 0;set k1 1;set k2 127;set k3 128;set k4 -1;set k5 -4096;set k6 4095;set k7 4096;set k8 -4097;set k9 32767;set k10 -32768;set k11 32768;set k12 -32769;set k13 8388607;set k14 -8388608;set k15 8388608;set k16 -8388609;set k17 2147483647;set k18 -2147483648;set k19 2147483648;set k20 -2147483649;set k21 9223372036854775807;set k22 -9223372036854775808
+noncanon_0|128|64|set f 007;set 007 g
+noncanon_1|128|64|set f +1;set +1 g
+noncanon_2|128|64|set f -0;set -0 g
+noncanon_3|128|64|set f 1.0;set 1.0 g
+noncanon_4|128|64|set f 9223372036854775808;set 9223372036854775808 g
+noncanon_5|128|64|set f -9223372036854775809;set -9223372036854775809 g
+noncanon_6|128|64|set f 18446744073709551616;set 18446744073709551616 g
+noncanon_7|128|64|set f 00;set 00 g
+noncanon_8|128|64|set f -;set - g
+noncanon_9|128|64|set f 12345678901234567890;set 12345678901234567890 g
+noncanon_10|128|64|set f 123456789012345678901;set 123456789012345678901 g
+noncanon_11|128|64|set f 0x10;set 0x10 g
+noncanon_12|128|64|set f 1e3;set 1e3 g
+noncanon_13|128|64|set f @h:2031;set @h:2031 g
+noncanon_14|128|64|set f @h:3120;set @h:3120 g
+noncanon_15|128|64|set f @h:310032;set @h:310032 g
+noncanon_16|128|64|set f --1;set --1 g
+empty_value|128|64|set f @e
+empty_field|128|64|set @e v
+empty_both|128|64|set @e @e
+str_1|128|64|set f @r:a:1
+str_62|128|64|set f @r:a:62
+str_63|128|64|set f @r:a:63
+str_64|128|64|set f @r:a:64
+str_65|128|100000000|set f @r:x:65;set g @r:y:33
+str_125|128|100000000|set f @r:x:125;set g @r:y:63
+str_126|128|100000000|set f @r:x:126;set g @r:y:64
+str_127|128|100000000|set f @r:x:127;set g @r:y:64
+str_200|128|100000000|set f @r:x:200;set g @r:y:101
+str_4093|128|100000000|set f @r:x:4093;set g @r:y:2047
+str_4094|128|100000000|set f @r:x:4094;set g @r:y:2048
+str_4095|128|100000000|set f @r:x:4095;set g @r:y:2048
+str_4096|128|100000000|set f @r:x:4096;set g @r:y:2049
+str_4097|128|100000000|set f @r:x:4097;set g @r:y:2049
+str_16376|128|100000000|set f @r:x:16376;set g @r:y:8189
+str_16377|128|100000000|set f @r:x:16377;set g @r:y:8189
+str_16378|128|100000000|set f @r:x:16378;set g @r:y:8190
+str_16379|128|100000000|set f @r:x:16379;set g @r:y:8190
+str_65535|128|100000000|set f @r:x:65535;set g @r:y:32768
+binary|128|64|set @h:00ff80c0e0f0 @h:ff00fe;set @h:7f @h:80
+update_same_size|128|64|set a hello;set b foo;set c quux;set b bar;set a world
+update_grow|128|64|set a 1;set b 2;set a @r:z:40;set b @r:w:63
+update_shrink|128|64|set a @r:z:40;set b @r:w:63;set a 1;set b @e
+update_int_to_str|128|64|set a 100;set b 200;set a abc;set b 99999999999
+update_str_to_int|128|64|set a abc;set b def;set a -5;set b 4096
+update_backlen_grow|128|1000|set a x;set b y;set a @r:q:126;set b @r:r:125
+update_backlen_shrink|128|1000|set a @r:q:126;set b @r:r:200;set a x;set b y
+del_first|128|64|set a 1;set b 2;set c 3;del a
+del_middle|128|64|set a 1;set b 2;set c 3;del b
+del_last|128|64|set a 1;set b 2;set c 3;del c
+del_readd|128|100|set a 1;set b 2;set c 3;del a;set a 9;del c;set d @r:k:70
+del_missing|128|64|set a 1;del zz;del 1
+int_field_lookup|128|64|set 1 a;set 01 b;set 1 c;set -0 d;set 0 e;set -0 f
+many_128|128|64|set field:0 value:0;set field:1 value:7;set field:2 value:14;set field:3 value:21;set field:4 value:28;set field:5 value:35;set field:6 value:42;set field:7 value:49;set field:8 value:56;set field:9 value:63;set field:10 value:70;set field:11 value:77;set field:12 value:84;set field:13 value:91;set field:14 value:98;set field:15 value:105;set field:16 value:112;set field:17 value:119;set field:18 value:126;set field:19 value:133;set field:20 value:140;set field:21 value:147;set field:22 value:154;set field:23 value:161;set field:24 value:168;set field:25 value:175;set field:26 value:182;set field:27 value:189;set field:28 value:196;set field:29 value:203;set field:30 value:210;set field:31 value:217;set field:32 value:224;set field:33 value:231;set field:34 value:238;set field:35 value:245;set field:36 value:252;set field:37 value:259;set field:38 value:266;set field:39 value:273;set field:40 value:280;set field:41 value:287;set field:42 value:294;set field:43 value:301;set field:44 value:308;set field:45 value:315;set field:46 value:322;set field:47 value:329;set field:48 value:336;set field:49 value:343;set field:50 value:350;set field:51 value:357;set field:52 value:364;set field:53 value:371;set field:54 value:378;set field:55 value:385;set field:56 value:392;set field:57 value:399;set field:58 value:406;set field:59 value:413;set field:60 value:420;set field:61 value:427;set field:62 value:434;set field:63 value:441;set field:64 value:448;set field:65 value:455;set field:66 value:462;set field:67 value:469;set field:68 value:476;set field:69 value:483;set field:70 value:490;set field:71 value:497;set field:72 value:504;set field:73 value:511;set field:74 value:518;set field:75 value:525;set field:76 value:532;set field:77 value:539;set field:78 value:546;set field:79 value:553;set field:80 value:560;set field:81 value:567;set field:82 value:574;set field:83 value:581;set field:84 value:588;set field:85 value:595;set field:86 value:602;set field:87 value:609;set field:88 value:616;set field:89 value:623;set field:90 value:630;set field:91 value:637;set field:92 value:644;set field:93 value:651;set field:94 value:658;set field:95 value:665;set field:96 value:672;set field:97 value:679;set field:98 value:686;set field:99 value:693;set field:100 value:700;set field:101 value:707;set field:102 value:714;set field:103 value:721;set field:104 value:728;set field:105 value:735;set field:106 value:742;set field:107 value:749;set field:108 value:756;set field:109 value:763;set field:110 value:770;set field:111 value:777;set field:112 value:784;set field:113 value:791;set field:114 value:798;set field:115 value:805;set field:116 value:812;set field:117 value:819;set field:118 value:826;set field:119 value:833;set field:120 value:840;set field:121 value:847;set field:122 value:854;set field:123 value:861;set field:124 value:868;set field:125 value:875;set field:126 value:882;set field:127 value:889
+many_mixed|128|64|set -500 0;set f1 v1;set f2 2002;set -389 v9;set f4 4004;set f5 v25;set -278 6006;set f7 v49;set f8 8008;set -167 v81;set f10 10010;set f11 v121;set -56 12012;set f13 v169;set f14 14014;set 55 v225;set f16 16016;set f17 v289;set 166 18018;set f19 v361;set f20 20020;set 277 v441;set f22 22022;set f23 v529;set 388 24024;set f25 v625;set f26 26026;set 499 v729;set f28 28028;set f29 v841;set 610 30030;set f31 v961;set f32 32032;set 721 v1089;set f34 34034;set f35 v1225;set 832 36036;set f37 v1369;set f38 38038;set 943 v1521;set f40 40040;set f41 v1681;set 1054 42042;set f43 v1849;set f44 44044;set 1165 v2025;set f46 46046;set f47 v2209;set 1276 48048;set f49 v2401;set f50 50050;set 1387 v2601;set f52 52052;set f53 v2809;set 1498 54054;set f55 v3025;set f56 56056;set 1609 v3249;set f58 58058;set f59 v3481;set 1720 60060;set f61 v3721;set f62 62062;set 1831 v3969;set f64 64064;set f65 v4225;set 1942 66066;set f67 v4489;set f68 68068;set 2053 v4761;set f70 70070;set f71 v5041;set 2164 72072;set f73 v5329;set f74 74074;set 2275 v5625;set f76 76076;set f77 v5929;set 2386 78078;set f79 v6241;set f80 80080;set 2497 v6561;set f82 82082;set f83 v6889;set 2608 84084;set f85 v7225;set f86 86086;set 2719 v7569;set f88 88088;set f89 v7921;set 2830 90090;set f91 v8281;set f92 92092;set 2941 v8649;set f94 94094;set f95 v9025;set 3052 96096;set f97 v9409;set f98 98098;set 3163 v9801
+churn|128|64|del k0;set k1 1;set k2 2;set k3 3;del k4;set k5 5;set k6 6;set k7 7;del k1;set k9 9;set k10 10;set k11 11;del k5;set k0 13;set k1 14;set k2 15;del k2;set k4 17;set k5 18;set k6 19;del k6;set k8 21;set k9 22;set k10 23;del k3;set k12 25;set k0 26;set k1 27;del k0;set k3 29;set k4 30;set k5 31;del k4;set k7 33;set k8 34;set k9 35;del k1;set k11 37;set k12 38;set k0 39;del k5;set k2 41;set k3 42;set k4 43;del k2;set k6 45;set k7 46;set k8 47;del k6;set k10 49;set k11 50;set k12 51;del k3;set k1 53;set k2 54;set k3 55;del k0;set k5 57;set k6 58;set k7 59;del k4;set k9 61;set k10 62;set k11 63;del k1;set k0 65;set k1 66;set k2 67;del k5;set k4 69;set k5 70;set k6 71;del k2;set k8 73;set k9 74;set k10 75;del k6;set k12 77;set k0 78;set k1 79;del k3;set k3 81;set k4 82;set k5 83;del k0;set k7 85;set k8 86;set k9 87;del k4;set k11 89;set k12 90;set k0 91;del k1;set k2 93;set k3 94;set k4 95;del k5;set k6 97;set k7 98;set k8 99;del k2;set k10 101;set k11 102;set k12 103;del k6;set k1 105;set k2 106;set k3 107;del k3;set k5 109;set k6 110;set k7 111;del k0;set k9 113;set k10 114;set k11 115;del k4;set k0 117;set k1 118;set k2 119;del k1;set k4 121;set k5 122;set k6 123;del k5;set k8 125;set k9 126;set k10 127;del k2;set k12 129;set k0 130;set k1 131;del k6;set k3 133;set k4 134;set k5 135;del k3;set k7 137;set k8 138;set k9 139;del k0;set k11 141;set k12 142;set k0 143;del k4;set k2 145;set k3 146;set k4 147;del k1;set k6 149;set k7 150;set k8 151;del k5;set k10 153;set k11 154;set k12 155;del k2;set k1 157;set k2 158;set k3 159;del k6;set k5 161;set k6 162;set k7 163;del k3;set k9 165;set k10 166;set k11 167;del k0;set k0 169;set k1 170;set k2 171;del k4;set k4 173;set k5 174;set k6 175;del k1;set k8 177;set k9 178;set k10 179;del k5;set k12 181;set k0 182;set k1 183;del k2;set k3 185;set k4 186;set k5 187;del k6;set k7 189;set k8 190;set k9 191;del k3;set k11 193;set k12 194;set k0 195;del k0;set k2 197;set k3 198;set k4 199
+big_backlen_3|128|100000000|set f @r:b:2097145
+big_backlen_4|128|100000000|set f @r:b:2097146
+big_two|128|100000000|set f @r:c:100000;set g @r:d:300000
