@@ -24,10 +24,7 @@ rdb_save :: proc "contextless" (w: ^rdb.Writer, h: Hash) {
 	type := rdb_type(h)
 	minimum := EB_EXPIRE_TIME_INVALID
 	if type == rdb.TYPE_HASH_METADATA || type == rdb.TYPE_HASH_LISTPACK_EX {
-		minimum = registered_expire(h)
-		if minimum == EB_EXPIRE_TIME_INVALID {
-			minimum = 0
-		}
+		minimum = dump_min_expire(h)
 		rdb.put_ms(w, i64(minimum))
 	}
 	if h.encoding != .Hashtable {

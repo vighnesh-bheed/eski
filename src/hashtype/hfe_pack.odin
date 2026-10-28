@@ -83,7 +83,7 @@ min_expire :: proc(h: Hash, accurate: bool) -> u64 {
 	unreachable()
 }
 
-dump_min_expire :: proc(h: Hash) -> u64 {
+dump_min_expire :: proc "contextless" (h: Hash) -> u64 {
 	if h.encoding == .Hashtable {
 		return vol_min(h.table)
 	}

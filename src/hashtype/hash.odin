@@ -286,13 +286,12 @@ set :: proc(h: Hash, field, value: []u8, keep_ttl := false) -> (updated: bool) {
 	} else if h.encoding == .Listpack_Ex {
 		fp, vp, ttl, ok := lpex_locate(h, field)
 		if ok {
-			expiry := u64(0)
-			if keep_ttl {
-				expiry = u64(ttl)
+			if ttl != 0 && !keep_ttl {
+				lpex_replace_value(h, fp, field, value, 0)
+			} else {
+				h.lp = lp.lp_replace(h.lp, &vp, value)
 			}
-			lpex_replace_value(h, fp, field, value, expiry)
 			updated = true
-			_ = vp
 		} else {
 			lpex_add_new(h, field, value, 0)
 		}
@@ -350,13 +349,18 @@ delete_field :: proc(h: Hash, field: []u8) -> bool {
 }
 
 hdel :: proc(h: Hash, fields: [][]u8) -> (deleted: int, emptied: bool) {
+	volatile := false
 	for field in fields {
+		if !volatile && is_registered(h) {
+			_, expiry, found := get_raw(h, field)
+			volatile = found && expiry != EB_EXPIRE_TIME_INVALID
+		}
 		if delete_field(h, field) {
 			deleted += 1
 		}
 	}
 	emptied = length(h) == 0
-	if emptied || (deleted > 0 && !fields_with_expire(h)) {
+	if emptied || (volatile && !fields_with_expire(h)) {
 		registry_remove(h)
 	}
 	return
