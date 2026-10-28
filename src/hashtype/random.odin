@@ -211,6 +211,22 @@ random_unique :: proc(h: Hash, count: int, with_values: bool, fields: ^[dynamic]
 			return
 		}
 	}
+	if h.encoding != .Hashtable && k < n {
+		it := iterator(h)
+		row := 0
+		picked := 0
+		for picked < k && next(&it) {
+			if int(rand_below(u64(n - row))) < k - picked {
+				append(fields, current_field(&it))
+				if with_values {
+					append(values, current_value(&it))
+				}
+				picked += 1
+			}
+			row += 1
+		}
+		return
+	}
 	start := len(fields^)
 	vstart := len(values^)
 	it := iterator(h)
