@@ -164,78 +164,139 @@ stop_eski
 step "corrupt and edge case files, eski against the reference"
 mkdir -p "$WORK/cases"
 "${PY[@]}" "$HERE/craft.py" "$WORK/eski-own.rdb" "$WORK/cases" || { echo "FAIL could not craft the case files"; STATUS=1; }
-while IFS=$'\t' read -r name code msg withref refcode; do
+
+answers() {
+	"${PY[@]}" -c "import socket,sys; s=socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=1); s.sendall(b'PING\r\n'); sys.exit(0 if s.recv(64).startswith(b'+PONG') else 1)" "$1" 2>/dev/null
+}
+
+running() {
+	local state
+	state="$(sed -n 's/^.*) \([A-Za-z]\) .*$/\1/p' "/proc/$1/stat" 2>/dev/null)"
+	[ -n "$state" ] && [ "$state" != Z ] && [ "$state" != X ]
+}
+
+case_eski() {
+	"$SERVER" --port "$PORT" --enable-debug-command yes --bind 127.0.0.1 --dir "$1/j" >"$1/eski.log" 2>&1 &
+	SERVER_PID=$!
+	for _ in $(seq 1 200); do
+		if ! running "$SERVER_PID"; then
+			wait "$SERVER_PID"
+			OUTCOME=$?
+			SERVER_PID=""
+			return
+		fi
+		if answers "$PORT"; then
+			OUTCOME=started
+			return
+		fi
+		sleep 0.1
+	done
+	OUTCOME="neither started nor exited"
+	kill -9 "$SERVER_PID" 2>/dev/null
+	wait "$SERVER_PID" 2>/dev/null
+	SERVER_PID=""
+}
+
+case_ref() {
+	docker run -d --name "$NAME" --network=host --user "$(id -u):$(id -g)" -v "$1/r:/data:z" "$IMAGE" \
+		redis-server --port "$REF_PORT" --bind 127.0.0.1 --dir /data --save "" >/dev/null || exit 2
+	local state
+	for _ in $(seq 1 600); do
+		state="$(docker inspect -f '{{.State.Running}} {{.State.ExitCode}}' "$NAME" 2>/dev/null)"
+		if [ "${state%% *}" = false ]; then
+			OUTCOME="${state#* }"
+			return
+		fi
+		if answers "$REF_PORT"; then
+			OUTCOME=started
+			return
+		fi
+		sleep 0.1
+	done
+	OUTCOME="neither started nor exited"
+}
+
+describe() {
+	case "$1" in
+	started)
+		echo "started"
+		;;
+	"" | *[!0-9]*)
+		echo "$1"
+		;;
+	*)
+		echo "exited with status $1"
+		;;
+	esac
+}
+
+case_fail() {
+	echo "FAIL $CASE: $*"
+	STATUS=1
+	CASE_BAD=1
+}
+
+check_started() {
+	local who="$1" port="$2" n idle
+	if [ "$CASE" = idle ]; then
+		idle="$(call "$port" OBJECT IDLETIME idle)"
+		if [ "$idle" -ge 3599 ] 2>/dev/null && [ "$idle" -le 3700 ]; then echo "  idle: $who OBJECT IDLETIME after load is $idle"; else case_fail "$who OBJECT IDLETIME after load is $idle"; fi
+	fi
+	if [ "$CASE" = expired ]; then
+		n="$(call "$port" DBSIZE)"
+		if [ "$n" = "1" ]; then echo "  expired: $who loaded only the live key"; else case_fail "$who DBSIZE after load is $n"; fi
+	fi
+}
+
+logged() {
+	grep -m1 -E -- "$1" "$2" | sed -E 's/^[0-9]+:[A-Z] [^*#]*[*#] //'
+}
+
+while IFS=$'\t' read -r name category jexpect jpattern rexpect rpattern; do
+	CASE="$name"
+	CASE_BAD=0
 	dir="$WORK/case-$name"
 	mkdir -p "$dir/j" "$dir/r"
 	cp "$WORK/cases/$name.rdb" "$dir/j/dump.rdb"
 	cp "$WORK/cases/$name.rdb" "$dir/r/dump.rdb"
-	if [ "$code" = "1" ]; then
-		timeout 20 "$SERVER" --port "$PORT" --enable-debug-command yes --bind 127.0.0.1 --dir "$dir/j" >"$dir/eski.log" 2>&1
-		jcode=$?
-	else
-		"$SERVER" --port "$PORT" --enable-debug-command yes --bind 127.0.0.1 --dir "$dir/j" >"$dir/eski.log" 2>&1 &
-		SERVER_PID=$!
-		wait_port "$PORT" || exit 2
-		jcode=0
-		if [ "$name" = "idle" ]; then
-			idle="$(call "$PORT" OBJECT IDLETIME idle)"
-			if [ "$idle" -ge 3599 ] && [ "$idle" -le 3700 ]; then echo "  idle: OBJECT IDLETIME after load is $idle"; else echo "FAIL idle time after load is $idle"; STATUS=1; fi
-		fi
-		if [ "$name" = "expired" ]; then
-			n="$(call "$PORT" DBSIZE)"
-			if [ "$n" = "1" ]; then echo "  expired: only the live key was loaded"; else echo "FAIL expired: dbsize $n"; STATUS=1; fi
-		fi
+	case_eski "$dir"
+	jout="$OUTCOME"
+	if [ "$jout" = started ]; then
+		check_started eski "$PORT"
 		stop_eski
 	fi
-	if [ "$jcode" != "$code" ]; then
-		echo "FAIL $name: eski exit status $jcode, expected $code"
-		STATUS=1
+	case_ref "$dir"
+	rout="$OUTCOME"
+	if [ "$rout" = started ]; then
+		check_started "the reference" "$REF_PORT"
 	fi
-	if grep -qF -- "$msg" "$dir/eski.log"; then
-		echo "  $name: eski logged \"$msg\" and exited with $jcode"
-	else
-		echo "FAIL $name: eski did not log \"$msg\""
+	docker logs "$NAME" >"$dir/ref.log" 2>&1
+	stop_ref
+	if [ "$jout" != "$jexpect" ]; then
+		case_fail "eski $(describe "$jout"), expected it to have $(describe "$jexpect")"
+	fi
+	if [ "$rout" != "$rexpect" ]; then
+		case_fail "the reference $(describe "$rout"), expected it to have $(describe "$rexpect")"
+	fi
+	if { [ "$jout" = started ] && [ "$rout" != started ]; } || { [ "$jout" != started ] && [ "$rout" = started ]; }; then
+		case_fail "the outcomes differ: eski $(describe "$jout"), the reference $(describe "$rout")"
+	fi
+	if ! grep -qE -- "$jpattern" "$dir/eski.log"; then
+		case_fail "eski's log does not name $category, no line matches \"$jpattern\""
 		sed 's/^/    /' "$dir/eski.log" | tail -5
-		STATUS=1
 	fi
-	if [ "$withref" = "1" ]; then
-		if [ "$code" = "1" ]; then
-			timeout 60 docker run --rm --name "$NAME" --network=host --user "$(id -u):$(id -g)" -v "$dir/r:/data:z" "$IMAGE" \
-				redis-server --port "$REF_PORT" --bind 127.0.0.1 --dir /data --save "" >"$dir/ref.log" 2>&1
-			rcode=$?
+	if ! grep -qE -- "$rpattern" "$dir/ref.log"; then
+		case_fail "the reference's log does not name $category, no line matches \"$rpattern\""
+		sed 's/^/    /' "$dir/ref.log" | grep -v "^    $" | tail -6
+	fi
+	if [ "$CASE_BAD" = 0 ]; then
+		if [ "$jout" = started ]; then
+			echo "  $name: both started and both logged $category"
 		else
-			REF_DIR="$dir/r"
-			start_ref
-			REF_DIR=""
-			if [ "$name" = "expired" ]; then
-				echo "  expired: the reference loaded $(call "$REF_PORT" DBSIZE) key"
-			fi
-			if [ "$name" = "idle" ]; then
-				echo "  idle: reference OBJECT IDLETIME after load is $(call "$REF_PORT" OBJECT IDLETIME idle)"
-			fi
-			docker logs "$NAME" >"$dir/ref.log" 2>&1
-			stop_ref
-			rcode=0
+			echo "  $name: both refused to start, eski $(describe "$jout") and the reference $(describe "$rout"), and both logged $category"
 		fi
-		jline="$(grep -o 'Internal error in RDB reading.*' "$dir/eski.log" | head -1)"
-		rline="$(grep -o 'Internal error in RDB reading.*' "$dir/ref.log" | head -1)"
-		if [ "$jline" != "$rline" ]; then
-			echo "FAIL $name: eski logged \"$jline\", the reference logged \"$rline\""
-			STATUS=1
-		elif [ -n "$jline" ]; then
-			echo "  $name: both logged \"$jline\""
-		fi
-		if [ "$rcode" = "$refcode" ] && grep -qF -- "$msg" "$dir/ref.log"; then
-			if [ "$refcode" = "$code" ]; then
-				echo "  $name: the reference logged the same line and exited with $rcode"
-			else
-				echo "  $name: the reference logged the same line and exited with $rcode (eski exits with $code)"
-			fi
-		else
-			echo "FAIL $name: the reference exited with $rcode, log follows"
-			sed 's/^/    /' "$dir/ref.log" | grep -v "^    $" | tail -6
-			STATUS=1
-		fi
+		echo "    eski: $(logged "$jpattern" "$dir/eski.log")"
+		echo "    reference: $(logged "$rpattern" "$dir/ref.log")"
 	fi
 done <"$WORK/cases/cases.txt"
 
