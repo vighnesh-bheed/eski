@@ -1,0 +1,2 @@
+*.sh text eol=lf
+*.odin text eol=lf

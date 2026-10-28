@@ -1,0 +1,1 @@
+Closes #N by making the proposed change, to allow the intended outcome. Replace N with the related issue number. Explain why the change is needed, what it changes and how it was checked. Keep the body within 500 words of plain prose without headings or sections.
