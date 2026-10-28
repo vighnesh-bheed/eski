@@ -4922,14 +4922,7 @@ aof_load_one :: proc(f: ^Aof_File, is_last: bool, done_before: i64) -> Aof_Load_
 			plog(LOG_WARNING, "Error reading the RDB base file ", name, ", AOF loading aborted")
 			return .Failed
 		}
-		l: Log_Line
-		ll_begin(&l, LOG_NOTICE)
-		ll_str(&l, "Done loading RDB, keys loaded: ")
-		ll_int(&l, pst.last_load_loaded)
-		ll_str(&l, ", keys expired: ")
-		ll_int(&l, pst.last_load_expired)
-		ll_str(&l, ".")
-		ll_end(&l)
+		persist_log_load_done()
 		if rest >= size {
 			return .Ok
 		}

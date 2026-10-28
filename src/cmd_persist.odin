@@ -82,6 +82,7 @@ Persist :: struct {
 	loading_used_mem:    i64,
 	last_load_expired:   i64,
 	last_load_loaded:    i64,
+	last_load_empty:     i64,
 	serve_while_loading: bool,
 	in_child:            bool,
 	gate_active:         bool,
@@ -683,18 +684,18 @@ persist_load_object :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> (v: Loa
 			v.obj = s
 		}
 	case rdb.TYPE_MODULE_PRE_GA:
-		rdb.corrupt(r, "Pre-release module format not supported")
+		rdb.corrupt(r, "holds module data in a pre-release format")
 	case rdb.TYPE_MODULE_2:
 		id := rdb.get_len(r)
 		if !rdb.ok(r) {
-			rdb.corrupt(r, "Short read module id")
+			rdb.corrupt(r, "holds module data with an unreadable module id")
 			return
 		}
 		name: [9]u8
-		rdb.corrupt(r, "The RDB file contains module data I can't load: no matching module '", 0, false, rdb.module_name_by_id(id, &name))
+		rdb.corrupt(r, "holds data of unknown module type '", 0, false, rdb.module_name_by_id(id, &name))
 		rdb.corrupt_append(r, "'")
 	case:
-		rdb.corrupt(r, "Unknown RDB encoding type ", u64(max(rdbtype, 0)), true)
+		rdb.corrupt(r, "has unknown encoding type ", u64(max(rdbtype, 0)), true)
 	}
 	if !rdb.ok(r) && v.obj != nil {
 		persist_free_loaded(v)
@@ -732,115 +733,195 @@ persist_attach :: proc(e: ^Entry, key: []u8, v: Loaded_Value) {
 }
 
 @(private = "file")
-Report_Site :: struct {
+PERSIST_LOG_KEY_MAX :: 256
+
+@(private = "file")
+Corrupt_Phrase :: struct {
 	prefix: string,
-	line:   int,
+	phrase: string,
 }
 
 @(private = "file")
-persist_report_sites := [?]Report_Site {
-	{"Unknown length encoding", 224},
-	{"Invalid LZF compressed string", 413},
-	{"Unknown RDB string encoding type", 534},
-	{"OOM in dictTryExpand", 2081},
-	{"Duplicate set members detected", 2010},
-	{"Zset with NAN score detected", 2112},
-	{"Duplicate zset fields detected", 2124},
-	{"Hash with dup elements", 2182},
-	{"Duplicate hash fields detected", 2202},
-	{"Hash failed loading minExpire", 2280},
-	{"Hash read invalid minExpire value", 2284},
-	{"invalid expireAt time", 2332},
-	{"Quicklist integrity check failed.", 2448},
-	{"Listpack integrity check failed.", 2471},
-	{"Ziplist integrity check failed.", 2481},
-	{"Hash listpackex integrity check failed.", 2526},
-	{"Zipmap integrity check failed.", 2548},
-	{"Hash zipmap with dup elements", 2572},
-	{"List ziplist integrity check failed.", 2607},
-	{"Intset integrity check failed.", 2632},
-	{"Set listpack integrity check failed.", 2646},
-	{"Zset ziplist integrity check failed.", 2668},
-	{"Zset listpack integrity check failed.", 2694},
-	{"Hash ziplist integrity check failed.", 2714},
-	{"Hash listpack integrity check failed.", 2760},
-	{"Stream listpacks len loading failed.", 2790},
-	{"Stream master ID loading failed", 2801},
-	{"Stream node key entry is not the size of a stream ID", 2806},
-	{"Stream listpacks loading failed.", 2818},
-	{"Stream listpack integrity check failed.", 2825},
-	{"Empty listpack inside stream", 2837},
-	{"Listpack re-added with existing key", 2849},
-	{"Stream object metadata loading failed.", 2887},
-	{"Stream length inconsistent with rax entries", 2893},
-	{"Stream cgroup count loading failed.", 2901},
-	{"Error reading the consumer group name from Stream", 2912},
-	{"Stream cgroup ID loading failed.", 2921},
-	{"Stream cgroup offset loading failed.", 2932},
-	{"Duplicated consumer group name", 2943},
-	{"Stream PEL size loading failed.", 2958},
-	{"Stream PEL ID loading failed.", 2965},
-	{"Stream PEL NACK loading failed.", 2973},
-	{"Duplicated global PEL entry loading stream consumer group", 2979},
-	{"Stream consumers num loading failed.", 2991},
-	{"Error reading the consumer name from Stream group.", 2998},
-	{"Duplicate stream consumer detected.", 3007},
-	{"Stream short read reading seen time.", 3014},
-	{"Stream short read reading active time.", 3022},
-	{"Stream consumer PEL num loading failed.", 3035},
-	{"Stream short read reading PEL streamID.", 3043},
-	{"Consumer entry not found in group global PEL", 3050},
-	{"Stream consumer PEL entry already has a consumer assigned", 3061},
-	{"Stream CG PEL entry without consumer", 3088},
-	{"Pre-release module format not supported", 3097},
-	{"Short read module id", 3102},
-	{"The RDB file contains module data", 3116},
-	{"Unknown RDB encoding type", 3158},
-	{"bad when_opcode", 3519},
-	{"Pre-release function format not supported.", 3564},
-	{"RDB CRC error", 3696},
+persist_corrupt_phrases := [?]Corrupt_Phrase {
+	{"Unknown length encoding", "has a length field with an unknown encoding"},
+	{"Invalid length", "has an invalid length field"},
+	{"Invalid string length", "holds a string with an invalid length"},
+	{"Invalid LZF compressed string", "holds compressed data that does not decompress"},
+	{"Unknown RDB string encoding type", "holds a string with an unknown encoding"},
+	{"Invalid double value", "holds an invalid floating point value"},
+	{"Listpack re-added with existing key", "has a duplicate node"},
+	{"Empty listpack inside stream", "has an empty node"},
+	{"Stream node key entry", "has a node whose key is not an entry ID"},
+	{"Stream listpack", "has a node that fails its integrity check"},
+	{"Stream length inconsistent", "has a length that does not match its nodes"},
+	{"Duplicated consumer group name", "has a duplicate consumer group"},
+	{"Duplicate stream consumer", "has a duplicate consumer"},
+	{"Duplicated global PEL entry", "has a duplicate pending entry"},
+	{"Duplicated consumer PEL entry", "has a pending entry claimed by two consumers"},
+	{"Consumer entry not found", "has a consumer pending entry that its group lacks"},
+	{"Stream CG PEL entry without consumer", "has a pending entry without a consumer"},
+	{"Error reading the consumer", "has an unreadable consumer or group name"},
+	{"Stream", "has malformed metadata"},
+	{"Duplicate set members", "has duplicate members"},
+	{"Duplicate zset fields", "has duplicate members"},
+	{"Zset with NAN score", "has a score that is not a number"},
+	{"Duplicate hash fields", "has duplicate fields"},
+	{"Hash with dup elements", "has duplicate fields"},
+	{"Hash failed loading minExpire", "has an invalid field expiry"},
+	{"Hash read invalid minExpire", "has an invalid field expiry"},
+	{"invalid expireAt time", "has an invalid field expiry"},
+	{"Invalid set length", "has an invalid length"},
+	{"Invalid sorted set length", "has an invalid length"},
+	{"Invalid set type", "has an unknown encoding"},
+	{"Unknown sorted set encoding", "has an unknown encoding"},
+	{"Unsupported hash type", "has an unknown encoding"},
 }
 
 @(private = "file")
-persist_report_line :: proc(reason: string) -> int {
-	for site in persist_report_sites {
-		if len(reason) >= len(site.prefix) && reason[:len(site.prefix)] == site.prefix {
-			return site.line
+persist_has_prefix :: proc "contextless" (s: string, prefix: string) -> bool {
+	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
+}
+
+@(private = "file")
+persist_corrupt_phrase :: proc "contextless" (reason: string) -> string {
+	for p in persist_corrupt_phrases {
+		if persist_has_prefix(reason, p.prefix) {
+			return p.phrase
 		}
 	}
-	return 0
-}
-
-@(private = "file")
-persist_report :: proc(r: ^rdb.Reader) -> ! {
-	reason := rdb.reader_reason(r)
-	l: Log_Line
-	ll_begin(&l, LOG_WARNING)
-	ll_str(&l, "Internal error in RDB reading offset ")
-	ll_int(&l, rdb.reader_offset(r))
-	ll_str(&l, ", function at rdb.c:")
-	ll_int(&l, i64(persist_report_line(reason)))
-	ll_str(&l, " -> ")
-	ll_str(&l, reason)
-	ll_end(&l)
-	plog(LOG_WARNING, "Terminating server after rdb file reading failure.")
-	linux.exit_group(1)
-}
-
-@(private = "file")
-persist_load_failed :: proc(r: ^rdb.Reader) -> ! {
-	if r.status == .Corrupt {
-		persist_report(r)
+	marker := "integrity check failed"
+	for i := 0; i + len(marker) <= len(reason); i += 1 {
+		if reason[i:i + len(marker)] == marker {
+			return "fails its integrity check"
+		}
 	}
-	plog(LOG_WARNING, "Short read or OOM loading DB. Unrecoverable error, aborting now.")
-	l: Log_Line
-	ll_begin(&l, LOG_WARNING)
-	ll_str(&l, "Internal error in RDB reading offset ")
-	ll_int(&l, rdb.reader_offset(r))
-	ll_str(&l, ", function at rdb.c:0 -> Unexpected EOF reading RDB file")
-	ll_end(&l)
-	plog(LOG_WARNING, "Terminating server after rdb file reading failure.")
+	return "is malformed"
+}
+
+@(private = "file")
+persist_type_word :: proc "contextless" (rdbtype: int) -> string {
+	switch rdbtype {
+	case rdb.TYPE_STRING:
+		return "string"
+	case rdb.TYPE_LIST, rdb.TYPE_LIST_ZIPLIST, rdb.TYPE_LIST_QUICKLIST, rdb.TYPE_LIST_QUICKLIST_2:
+		return "list"
+	case rdb.TYPE_SET, rdb.TYPE_SET_INTSET, rdb.TYPE_SET_LISTPACK:
+		return "set"
+	case rdb.TYPE_ZSET, rdb.TYPE_ZSET_2, rdb.TYPE_ZSET_ZIPLIST, rdb.TYPE_ZSET_LISTPACK:
+		return "sorted set"
+	case rdb.TYPE_HASH, rdb.TYPE_HASH_ZIPMAP, rdb.TYPE_HASH_ZIPLIST, rdb.TYPE_HASH_LISTPACK, rdb.TYPE_HASH_METADATA_PRE_GA, rdb.TYPE_HASH_LISTPACK_EX_PRE_GA, rdb.TYPE_HASH_METADATA, rdb.TYPE_HASH_LISTPACK_EX:
+		return "hash"
+	case rdb.TYPE_STREAM_LISTPACKS, rdb.TYPE_STREAM_LISTPACKS_2, rdb.TYPE_STREAM_LISTPACKS_3:
+		return "stream"
+	}
+	return ""
+}
+
+@(private = "file")
+persist_ll_key :: proc "contextless" (l: ^Log_Line, key: []u8) {
+	hexd := "0123456789abcdef"
+	ll_str(l, "'")
+	for ch, i in key {
+		if i == PERSIST_LOG_KEY_MAX {
+			ll_str(l, "...")
+			break
+		}
+		if ch == '\\' || ch == '\'' {
+			esc := [2]u8{'\\', ch}
+			ll_bytes(l, esc[:])
+		} else if ch >= 0x20 && ch < 0x7f {
+			one := [1]u8{ch}
+			ll_bytes(l, one[:])
+		} else {
+			hex := [4]u8{'\\', 'x', hexd[ch >> 4], hexd[ch & 15]}
+			ll_bytes(l, hex[:])
+		}
+	}
+	ll_str(l, "'")
+}
+
+@(private = "file")
+persist_fail_begin :: proc "contextless" (l: ^Log_Line, r: ^rdb.Reader) {
+	ll_begin(l, LOG_WARNING)
+	ll_str(l, "Loading the RDB file failed at byte offset ")
+	ll_int(l, rdb.reader_offset(r))
+	ll_str(l, ": ")
+}
+
+@(private = "file")
+persist_fail_end :: proc "contextless" (l: ^Log_Line) -> ! {
+	ll_end(l)
 	linux.exit_group(1)
+}
+
+@(private = "file")
+persist_fail_with :: proc "contextless" (r: ^rdb.Reader, parts: ..string) -> ! {
+	l: Log_Line
+	persist_fail_begin(&l, r)
+	for p in parts {
+		ll_str(&l, p)
+	}
+	persist_fail_end(&l)
+}
+
+@(private = "file")
+persist_load_failed :: proc "contextless" (r: ^rdb.Reader) -> ! {
+	if r.status == .Corrupt {
+		persist_fail_with(r, "the file ", persist_corrupt_phrase(rdb.reader_reason(r)))
+	}
+	persist_fail_with(r, "unexpected end of file")
+}
+
+@(private = "file")
+persist_value_failed :: proc "contextless" (r: ^rdb.Reader, key: []u8, rdbtype: int) -> ! {
+	word := persist_type_word(rdbtype)
+	l: Log_Line
+	persist_fail_begin(&l, r)
+	if r.status != .Corrupt {
+		ll_str(&l, "unexpected end of file, the ")
+		ll_str(&l, word if word != "" else "value")
+		ll_str(&l, " at key ")
+		persist_ll_key(&l, key)
+		ll_str(&l, " is truncated")
+	} else if word == "" {
+		ll_str(&l, "key ")
+		persist_ll_key(&l, key)
+		ll_str(&l, " ")
+		ll_str(&l, rdb.reader_reason(r))
+	} else {
+		ll_str(&l, "the ")
+		ll_str(&l, word)
+		ll_str(&l, " at key ")
+		persist_ll_key(&l, key)
+		ll_str(&l, " ")
+		ll_str(&l, persist_corrupt_phrase(rdb.reader_reason(r)))
+	}
+	persist_fail_end(&l)
+}
+
+@(private = "file")
+persist_log_empty_key :: proc "contextless" (key: []u8) {
+	l: Log_Line
+	ll_begin(&l, LOG_VERBOSE)
+	ll_str(&l, "Skipping empty key ")
+	persist_ll_key(&l, key)
+	ll_str(&l, " while loading the RDB file")
+	ll_end(&l)
+}
+
+persist_log_load_done :: proc "contextless" () {
+	l: Log_Line
+	ll_begin(&l, LOG_NOTICE)
+	ll_str(&l, "Done loading RDB, keys loaded: ")
+	ll_int(&l, pst.last_load_loaded)
+	ll_str(&l, ", keys expired: ")
+	ll_int(&l, pst.last_load_expired)
+	if pst.last_load_empty > 0 {
+		ll_str(&l, ", empty keys skipped: ")
+		ll_int(&l, pst.last_load_empty)
+	}
+	ll_str(&l, ".")
+	ll_end(&l)
 }
 
 @(private = "file")
@@ -933,6 +1014,7 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool) -> Load_Result {
 	deep := persist_deep_sanitize(false)
 	pst.last_load_loaded = 0
 	pst.last_load_expired = 0
+	pst.last_load_empty = 0
 	db := &dbs[0]
 	expire: i64 = -1
 	lru_idle: i64 = -1
@@ -1019,19 +1101,9 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool) -> Load_Result {
 				persist_load_failed(r)
 			}
 			name: [9]u8
-			rdb.corrupt(r, "The RDB file contains AUX module data I can't load: no matching module '", 0, false, rdb.module_name_by_id(id, &name))
-			rdb.corrupt_append(r, "'")
-			persist_report(r)
-		case rdb.OPCODE_FUNCTION_PRE_GA:
-			rdb.corrupt(r, "Pre-release function format not supported.")
-			persist_report(r)
-		case rdb.OPCODE_FUNCTION2:
-			_, fgood := rdb.get_string(r, 0)
-			if !fgood {
-				persist_load_failed(r)
-			}
-			plog(LOG_WARNING, "Skipping a function library stored in the RDB file: scripting is not supported")
-			continue
+			persist_fail_with(r, "the file carries auxiliary data of unknown module type '", rdb.module_name_by_id(id, &name), "'")
+		case rdb.OPCODE_FUNCTION_PRE_GA, rdb.OPCODE_FUNCTION2:
+			persist_fail_with(r, "the file carries a function library, which cannot be loaded without a scripting engine")
 		case:
 			key, kgood := rdb.get_string(r, KEY_SLOT)
 			if !kgood {
@@ -1040,12 +1112,13 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool) -> Load_Result {
 			v := persist_load_object(r, t, deep)
 			if r.status == .Empty_Key {
 				r.status = .Ok
-				plog(LOG_VERBOSE, "rdbLoadObject skipping empty key: ", string(key))
+				persist_log_empty_key(key)
+				pst.last_load_empty += 1
 				expire, lru_idle, lfu_freq = -1, -1, -1
 				continue
 			}
 			if !rdb.ok(r) {
-				persist_load_failed(r)
+				persist_value_failed(r, key, t)
 			}
 			keys_seen += 1
 			if persist_skip_expired && expire != -1 && expire < now_ms {
@@ -1057,11 +1130,13 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool) -> Load_Result {
 			e, created := db_upsert_in(db, key)
 			if !created {
 				if !merge {
-					tmp: [24]u8
-					n := format_i64(&tmp[0], i64(db.id))
-					plog(LOG_WARNING, "RDB has duplicated key '", string(key), "' in DB ", string(tmp[:n]))
-					rdb.corrupt(r, "Duplicated key found in RDB file")
-					persist_report(r)
+					l: Log_Line
+					persist_fail_begin(&l, r)
+					ll_str(&l, "duplicated key ")
+					persist_ll_key(&l, key)
+					ll_str(&l, " in database ")
+					ll_int(&l, i64(db.id))
+					persist_fail_end(&l)
 				}
 				db_remove_in(db, key)
 				e, _ = db_upsert_in(db, key)
@@ -1099,15 +1174,12 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool) -> Load_Result {
 				plog(LOG_WARNING, "RDB file was saved with checksum disabled: no check performed.")
 			} else if stored != expected {
 				l: Log_Line
-				ll_begin(&l, LOG_WARNING)
-				ll_str(&l, "Wrong RDB checksum expected: (")
+				persist_fail_begin(&l, r)
+				ll_str(&l, "CRC mismatch, the file stores checksum ")
 				persist_ll_hex16(&l, stored)
-				ll_str(&l, ") got (")
+				ll_str(&l, " but its contents hash to ")
 				persist_ll_hex16(&l, expected)
-				ll_str(&l, "). Aborting now.")
-				ll_end(&l)
-				rdb.corrupt(r, "RDB CRC error")
-				persist_report(r)
+				persist_fail_end(&l)
 			}
 		}
 	}
@@ -1171,14 +1243,7 @@ persist_rdb_load :: proc(merge: bool, at_startup: bool) -> Load_Result {
 	if result != .Ok {
 		return result
 	}
-	l: Log_Line
-	ll_begin(&l, LOG_NOTICE)
-	ll_str(&l, "Done loading RDB, keys loaded: ")
-	ll_int(&l, pst.last_load_loaded)
-	ll_str(&l, ", keys expired: ")
-	ll_int(&l, pst.last_load_expired)
-	ll_str(&l, ".")
-	ll_end(&l)
+	persist_log_load_done()
 	if at_startup {
 		m: Log_Line
 		ll_begin(&m, LOG_NOTICE)

@@ -48,8 +48,6 @@ every_opcode_is_accepted :: proc(t: ^testing.T) {
 	rdb.put_aux(&img.w, "redis-ver", transmute([]u8)string("7.4.11"))
 	rdb.put_aux(&img.w, "made-up-field", transmute([]u8)string("ignored"))
 	rdb.put_aux_int(&img.w, "aof-base", 0)
-	rdb.put_u8(&img.w, rdb.OPCODE_FUNCTION2)
-	rdb.put_string(&img.w, transmute([]u8)string("#!lua name=lib\nredis.register_function('f', function() return 1 end)"))
 	image_db(&img, 0, 4, 2)
 	rdb.put_u8(&img.w, rdb.OPCODE_SLOT_INFO)
 	rdb.put_len(&img.w, 1)
@@ -238,6 +236,15 @@ fatal_load_failures :: proc(t: ^testing.T) {
 		image_begin(&img)
 		rdb.put_u8(&img.w, rdb.OPCODE_FUNCTION_PRE_GA)
 		expect_fatal(t, image_end(&img), "pre-release functions", 1)
+	}
+	{
+		img: Image
+		image_begin(&img)
+		rdb.put_u8(&img.w, rdb.OPCODE_FUNCTION2)
+		rdb.put_string(&img.w, transmute([]u8)string("#!lua name=lib\nredis.register_function('f', function() return 1 end)"))
+		image_db(&img, 0, 1, 0)
+		image_string(&img, "k", "v")
+		expect_fatal(t, image_end(&img), "function library", 1)
 	}
 	{
 		img: Image
