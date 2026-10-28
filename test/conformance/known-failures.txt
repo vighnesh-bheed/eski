@@ -1,0 +1,42 @@
+scripting
+functions
+cluster/*
+moduleapi/*
+aofrw
+wait
+integration/replication*
+integration/*
+info::errorstats: failed call within LUA
+info::errorstats: failed call NOSCRIPT error
+info::errorstats: limit errors will not increase indefinitely
+introspection::MONITOR can log commands issued by the scripting engine
+introspection::MONITOR can log commands issued by functions
+introspection-2::command stats for scripts
+introspection-2::COMMAND GETKEYS EVAL with keys
+introspection-2::COMMAND GETKEYS EVAL without keys
+introspection-2::EVAL command is marked with movablekeys
+introspection-2::TOUCH alters the last access time of a key
+latency-monitor::LATENCY of expire events are correctly collected
+multi::MULTI and script timeout
+multi::EXEC and script timeout
+multi::MULTI-EXEC body and script timeout
+multi::just EXEC and script timeout
+pubsub::publish to self inside script
+tracking::Invalid keys should not be tracked for scripts in NOLOOP mode
+tracking::Tracking only occurs for scripts when a command calls a read-only command
+redis:expire::Redis should not propagate the read command on lazy expire
+redis:type/set::SRANDMEMBER with a dict containing long chain
+valkey:expire::Server should not propagate the read command on lazy expire
+valkey:introspection-2::TOUCH alters the last access time of a key in no-touch mode
+valkey:slowlog::SLOWLOG - the commands in script are recorded normally - is_eval: 0
+valkey:slowlog::SLOWLOG - the commands in script are recorded normally - is_eval: 1
+valkey:hyperloglog::PFMERGE results with simd
+valkey:bitops::BITCOUNT with just start
+valkey:protocol::Check CRLF when parsing the querybuf
+valkey:expire::EXPIRE / EXPIREAT / PEXPIREAT Expiration time is already expired
+valkey:scan::{standalone} SCAN unknown type
+valkey:scan::{standalone} SCAN with expired keys with TYPE filter
+valkey:pubsub::Keyspace notification: expired event (Expiration time is already expired)
+redis:acl::ACL LOG shows failed subcommand executions at toplevel
+redis:acl::ACL can log errors in the context of Lua scripting
+redis:auth::Arbitrary command gives an error when AUTH is required
