@@ -4,6 +4,7 @@ import "core:os"
 import "core:sys/linux"
 
 VERSION :: "0.1.0"
+PROJECT_LICENSE :: "Apache-2.0"
 
 usage :: proc(fd: linux.Fd) {
 	write_fd(fd, "Usage: ./eski [/path/to/redis.conf] [options] [-]\n       ./eski - (read config from stdin)\n       ./eski -v or --version\n       ./eski -h or --help\n\nEvery parameter of the reference's configuration file can also be given on the\ncommand line as --name value, for example --port 6380 --maxmemory 100mb.\nThe Eski specific parameters are --memcached-port N (default 0, off) and\n--memcached-max-item-size N (1k to 512m, default 1m).\n\nExamples:\n       ./eski (run the server with default config, port 6399)\n       ./eski /etc/redis/6379.conf\n       ./eski --port 7777\n       ./eski /etc/myredis.conf --loglevel verbose -\n")
@@ -25,7 +26,7 @@ main :: proc() {
 	if len(args) >= 2 {
 		switch args[1] {
 		case "-v", "--version":
-			write_fd(1, "eski v=" + VERSION + "\n")
+			write_fd(1, "eski v=" + VERSION + " license=" + PROJECT_LICENSE + "\n")
 			linux.exit_group(0)
 		case "--help", "-h":
 			usage(1)

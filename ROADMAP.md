@@ -1,0 +1,36 @@
+# Roadmap
+
+Eski implements a single-node command surface and verifies it through package tests, differential harnesses, smoke comparisons and an upstream-suite baseline gate. The generated [conformance report](docs/conformance.md) records the current gaps. An implemented group remains subject to that evidence; it does not imply that every selected upstream test passes.
+
+## Command-group milestones
+
+| Group | Delivered scope and verification condition |
+| --- | --- |
+| Strings and keys | String writes, reads, ranges, numeric operations and lifecycle commands are implemented; completion requires the `type/string`, `type/incr` and `keyspace` units, the string tests and smoke comparisons to agree on the supported behaviour. See [strings](docs/strings-and-keys.md) and [keyspace](docs/keyspace.md). |
+| Hashes | Field operations, scans, sampling and field expiry are implemented; completion requires `type/hash` and `type/hash-field-expire`, package tests and the native hash comparison to preserve replies and stored data. See [hashes](docs/hashes.md). |
+| Lists | Mutation, movement and blocking pops are implemented; completion requires `type/list`, `type/list-2`, `type/list-3`, blocking tests and native comparison, including the outstanding counter differences. See [lists](docs/lists.md). |
+| Sets | Membership, sampling, algebra and codecs are implemented; completion requires `type/set`, package/storage tests and native comparisons over each representation. See [sets](docs/sets.md). |
+| Sorted sets | Ranked/score/lexical ranges, algebra, sampling and blocking pops are implemented; completion requires `type/zset`, numerical/storage tests and native comparisons. See [sorted sets](docs/sorted-sets-and-geo.md). |
+| Bitmaps and HyperLogLog | Bit operations, fields and probabilistic cardinality are implemented; completion requires `bitops`, `bitfield`, `hyperloglog` and the corresponding native/model checks. See [bitmaps and HLL](docs/bitmaps-and-hyperloglog.md). |
+| Geospatial operations | Coordinate storage, distance and radius/shape searches are implemented; completion requires `geo` and the native coordinate/search comparison. See [geo](docs/sorted-sets-and-geo.md#geospatial-operations). |
+| Streams | Record storage, trimming, reads and consumer groups are implemented; completion requires `type/stream`, `type/stream-cgroups`, storage/group tests and the stream comparison. See [streams](docs/streams.md). |
+| Pub/sub, notifications and tracking | Subscription delivery and local invalidations are implemented; completion requires `pubsub`, `pubsubshard`, `tracking` and channel/output-buffer comparisons for the supported single-node behaviour. See [delivery and tracking](docs/pubsub-notifications-tracking.md). |
+| Transactions and blocking | Queuing, watches and wait registries are implemented; completion requires `multi`, the blocking package tests and the supported blocking cases in list, sorted-set and stream checks. See [transactions](docs/transactions.md). |
+| Persistence | RDB, append-only files and payload transfer are implemented; completion requires `dump`, persistence/codec tests, restart/corruption checks and the smoke persistence round trips. See [persistence](docs/persistence.md). |
+| Server and client management | Configuration, protocol negotiation, introspection and ACL are implemented; completion requires the protocol/auth/ACL/info/introspection units and documented accounting differences to be resolved or scoped explicitly. See [server](docs/server.md), [connections](docs/connections-and-protocol.md) and [ACL](docs/acl.md). |
+| Memory limits and eviction | Server/client limits, eviction policies and lazy release are implemented; completion requires `maxmemory`, `memefficiency`, `lazyfree`, ownership tests and bounded-maintenance checks. See [memory management](docs/server.md#memory-and-eviction). |
+| Memcached text | A separate text endpoint sharing string values is implemented; completion requires its differential text checks, cross-protocol checks and persistence smoke cases. See [memcached](docs/memcached.md). |
+
+The next compatibility work is to resolve the implementation differences identified in the expanded suite, including selected list mutation counters, query-buffer resizing/accounting, pause/expiry interactions and introspection results. Cases that require excluded features remain labelled separately. Changes should retain the supported reply and persistence behaviour and preserve the existing baseline pass set.
+
+## Efficiency work
+
+Trace and profile the accepted command path with the benchmark harness first. Use the measurements to choose one coherent improvement at a time, with its workload, allocation/memory effect and expected observable change stated before implementation. Compare each improvement against a clean recorded run under the same resource assignments and report the measured ratio for that workload. Keep negative results, client limits and excluded cases visible.
+
+The dedicated-machine container exam follows measured improvements. Its frozen design, CPU assignments, equal memory caps, idle/temperature/power gates, rotated engine order and receipt-verified collection live under `bench/testbed`. The [benchmark documentation](docs/benchmarks.md) explains how the committed report was obtained and how to prepare another run. The roadmap promises no dates or universal performance target.
+
+## Scope boundary
+
+Eski remains a single-node engine. Lua scripting, executable function libraries, modules, network replication, Sentinel and Cluster are excluded. FUNCTION compatibility replies describe a server with no executable libraries; WAIT-related replies do not create replica durability. Local transactions, blocking operations and persistence remain part of the engine.
+
+Distributed placement, routing, failover and managed operation belong to a separate coordination layer, planned in Rust. That layer is not implemented in this repository. Keeping this boundary explicit lets the engine's tests and measurements describe one node's actual guarantees.

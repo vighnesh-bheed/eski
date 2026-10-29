@@ -48,9 +48,9 @@ elif args[0] == "run" and "-d" in args:
     print("docker: cannot start the server", file=sys.stderr)
     sys.exit(125)
 elif args[0] == "run" and "--entrypoint" in args:
-    print(os.environ.get("FAKE_DOCKER_LISTING", "THIRD_PARTY_NOTICES.md ODIN-LICENSE build-info.txt"))
+    print(os.environ.get("FAKE_DOCKER_LISTING", "LICENSE THIRD_PARTY_NOTICES.md ODIN-LICENSE build-info.txt"))
 elif args[0] == "run":
-    print("eski v=0.1.0")
+    print(os.environ.get("FAKE_DOCKER_VERSION", "eski v=0.1.0 license=Apache-2.0"))
 elif args[:2] == ["volume", "create"]:
     print(args[-1])
 elif args[0] == "ps":
@@ -215,7 +215,7 @@ class ImageTest(unittest.TestCase):
 
 
 class CleanupTest(unittest.TestCase):
-    def fake(self, tmp, config=None, listing=None):
+    def fake(self, tmp, config=None, listing=None, version=None):
         exe = Path(tmp) / "docker"
         exe.write_text(FAKE_DOCKER.format(python=sys.executable))
         exe.chmod(0o755)
@@ -223,6 +223,8 @@ class CleanupTest(unittest.TestCase):
         env = {"FAKE_DOCKER_LOG": str(log), "FAKE_DOCKER_CONFIG": json.dumps(config or GOOD_CONFIG)}
         if listing is not None:
             env["FAKE_DOCKER_LISTING"] = listing
+        if version is not None:
+            env["FAKE_DOCKER_VERSION"] = version
         return exe, log, env
 
     def run_main(self, exe, env, extra=()):
@@ -267,6 +269,21 @@ class CleanupTest(unittest.TestCase):
             self.assertIn("holds /opt/odin", err)
             calls = [json.loads(line) for line in log.read_text().splitlines()]
             self.assertFalse(any(c[:2] == ["volume", "create"] for c in calls))
+
+    def test_missing_project_licence_stops_before_any_volume(self):
+        cases = (
+            ("eski v=0.1.0", None, "license=Apache-2.0"),
+            ("eski v=0.1.0 license=MIT", None, "license=Apache-2.0"),
+            (None, "THIRD_PARTY_NOTICES.md ODIN-LICENSE build-info.txt", "lacks LICENSE"),
+        )
+        for version, listing, expected in cases:
+            with self.subTest(version=version, listing=listing), tempfile.TemporaryDirectory() as tmp:
+                exe, log, env = self.fake(tmp, listing=listing, version=version)
+                rc, err = self.run_main(exe, env)
+                self.assertEqual(rc, 1)
+                self.assertIn(expected, err)
+                calls = [json.loads(line) for line in log.read_text().splitlines()]
+                self.assertFalse(any(c[:2] == ["volume", "create"] for c in calls))
 
 
 if __name__ == "__main__":

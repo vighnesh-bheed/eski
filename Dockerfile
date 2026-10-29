@@ -33,17 +33,23 @@ RUN test "$(dpkg --print-architecture)" = amd64; \
 
 WORKDIR /build
 COPY src/ src/
+COPY LICENSE /out/doc/LICENSE
 COPY THIRD_PARTY_NOTICES.md /out/doc/THIRD_PARTY_NOTICES.md
 ARG BUILD_JOBS=2
 ARG SOURCE_REVISION=unknown
 ARG ESKI_VERSION=unknown
+ARG ESKI_LICENSE=Apache-2.0
 RUN /opt/odin/odin check src -vet -strict-style -thread-count:"${BUILD_JOBS}"; \
     /opt/odin/odin build src -o:speed -thread-count:"${BUILD_JOBS}" -out:/out/eski; \
-    if [ "$ESKI_VERSION" != unknown ]; then test "$(/out/eski -v)" = "eski v=${ESKI_VERSION}"; fi; \
+    test "$(/out/eski -v | sed -n 's/.* license=//p')" = "$ESKI_LICENSE"; \
+    if [ "$ESKI_VERSION" != unknown ]; then test "$(/out/eski -v)" = "eski v=${ESKI_VERSION} license=${ESKI_LICENSE}"; fi; \
     cp /opt/odin/LICENSE /out/doc/ODIN-LICENSE; \
     { \
         printf 'name=eski\n'; \
         printf 'version=%s\n' "$(/out/eski -v)"; \
+        printf 'license=%s\n' "$ESKI_LICENSE"; \
+        printf 'license_sha256=%s\n' "$(sha256sum /out/doc/LICENSE | cut -d' ' -f1)"; \
+        printf 'notices_sha256=%s\n' "$(sha256sum /out/doc/THIRD_PARTY_NOTICES.md | cut -d' ' -f1)"; \
         printf 'binary_path=/usr/local/bin/eski\n'; \
         printf 'binary_sha256=%s\n' "$(sha256sum /out/eski | cut -d' ' -f1)"; \
         printf 'source_revision=%s\n' "$SOURCE_REVISION"; \
@@ -65,9 +71,11 @@ FROM ${BASE_IMAGE} AS runtime
 ARG BASE_IMAGE
 ARG SOURCE_REVISION=unknown
 ARG ESKI_VERSION=unknown
+ARG ESKI_LICENSE=Apache-2.0
 LABEL org.opencontainers.image.title="eski" \
       org.opencontainers.image.description="Eski, a Redis compatible in-memory data store" \
       org.opencontainers.image.version="${ESKI_VERSION}" \
+      org.opencontainers.image.licenses="${ESKI_LICENSE}" \
       org.opencontainers.image.revision="${SOURCE_REVISION}" \
       org.opencontainers.image.base.name="${BASE_IMAGE}"
 RUN groupadd --gid 10001 eski && \
