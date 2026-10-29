@@ -88,7 +88,12 @@ def ratios(dataset, workload):
         return ''
     mine = table.get((workload['key'], subject['target'])) or {}
     if not mine.get('ops'):
-        return '%s has no valid repetition in this workload.' % subject['label']
+        excluded = mine.get('excluded') or []
+        reasons = sorted({reason.replace('_', ' ') for item in excluded for reason in item.get('reasons') or [] if not reason.startswith('case ')})
+        text = '%s has no valid repetition in this workload' % subject['label']
+        if excluded:
+            text += ': %d excluded (%s); their values are the hollow circles' % (len(excluded), ', '.join(reasons) or 'see the table')
+        return text + '.'
     bits = []
     for engine in dataset['engines']:
         other = table.get((workload['key'], engine['target'])) or {}

@@ -112,7 +112,7 @@ def panel(dataset, workload, metric, x, y, width, height, colors, heading=None):
     valid = [stats['max'] / divisor for _, cell in entries if cell and (stats := cell.get(metric))]
     excluded = [item[metric] / divisor for _, cell in entries if cell for item in cell.get('excluded') or [] if item.get(metric) is not None]
     top_valid = max(valid) if valid else 0
-    candidates = [value for value in excluded if value <= top_valid * 1.5] if valid else excluded
+    candidates = [value for value in excluded if value <= top_valid * 2] if valid else excluded
     ticks = nice_ticks(max(valid + candidates) * 1.08 if (valid or candidates) else 1)
     scale = ticks[-1]
     left, right, top, bottom = 44, 8, 26 if heading else 10, 24

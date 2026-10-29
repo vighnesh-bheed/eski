@@ -105,6 +105,9 @@ class WorkflowTests(unittest.TestCase):
             shutil.copy2(Path(__file__).with_name(name), base / 'bench' / name)
         (base / 'tools' / 'bin').mkdir(parents=True)
         self.executable(base / 'tools' / 'bin' / 'tmux', TMUX)
+        (base / 'tools' / 'lib').mkdir()
+        (base / 'tools' / 'lib' / 'libfixture.so.1.0.4').write_bytes(b'fixture library')
+        (base / 'tools' / 'lib' / 'libfixture.so.1').symlink_to('libfixture.so.1.0.4')
         for phase, repetitions in (('calibration', 1), ('benchmark', 4)):
             directory = base / 'plans' / phase
             directory.mkdir(parents=True)
@@ -249,6 +252,9 @@ class WorkflowTests(unittest.TestCase):
             inventory = json.load(handle.extractfile('exports/inventory.json'))
         self.assertEqual(set(inventory), names - {'exports/inventory.json'})
         self.assertEqual(inventory['protocol.json']['sha256'], workflow.digest(self.root / 'protocol.json'))
+        self.assertFalse(any(name.startswith('workspace/tools/') for name in names))
+        self.assertEqual(receipt['tools_verified_not_archived'], 3)
+        self.assertIsNone(receipt['exporter'])
         before = (self.control / 'workflow.json').read_bytes()
         self.invoke('_run', code=2)
         self.assertEqual((self.control / 'workflow.json').read_bytes(), before)
@@ -335,6 +341,50 @@ class WorkflowTests(unittest.TestCase):
         done = subprocess.run(['bash', str(outside / 'exam.sh'), 'status'], env=self.env, capture_output=True, text=True, timeout=60)
         self.assertEqual(done.returncode, 2)
         self.assertIn('installed by bench/testbed/install.py', done.stderr)
+
+    def profile_entry(self, name):
+        path = self.root / 'workspace' / 'profile.json'
+        profile = json.loads(path.read_text())
+        profile['files'][name] = workflow.digest(self.root / 'workspace' / name)
+        path.write_text(json.dumps(profile))
+
+    def test_tool_links_are_verified_but_not_archived(self):
+        files, notes = workflow.export_files(self.root)
+        self.assertEqual(notes, dict(tools_verified_not_archived=3, exporter=None))
+        self.assertFalse(any(path.is_relative_to(self.root / 'workspace' / 'tools') for path in files))
+        self.assertIn(self.root / 'workspace' / 'bench' / 'exam_scheduler.py', files)
+        library = self.root / 'workspace' / 'tools' / 'lib' / 'libfixture.so.1.0.4'
+        library.write_bytes(b'changed library')
+        with self.assertRaisesRegex(ValueError, 'changed before export: tools/lib/libfixture'):
+            workflow.export_files(self.root)
+        library.write_bytes(b'fixture library')
+        link = self.root / 'workspace' / 'tools' / 'lib' / 'libfixture.so.1'
+        link.unlink()
+        link.symlink_to('../../plans/benchmark/plan.json')
+        self.profile_entry('tools/lib/libfixture.so.1')
+        with self.assertRaisesRegex(ValueError, 'outside the tools directory'):
+            workflow.export_files(self.root)
+
+    def test_links_outside_the_tools_directory_stay_unsafe(self):
+        (self.root / 'workspace' / 'bench' / 'linked.py').symlink_to('exam_scheduler.py')
+        self.profile_entry('bench/linked.py')
+        with self.assertRaisesRegex(ValueError, 'unsafe workspace inventory entry: bench/linked.py'):
+            workflow.export_files(self.root)
+
+    def test_a_replaced_exporter_is_recorded_and_nothing_else_may_change(self):
+        installed = self.root / 'workspace' / 'bench' / 'exam_workflow.py'
+        recorded = workflow.digest(installed)
+        installed.write_text(installed.read_text() + '\n')
+        with patch.object(workflow, 'exporter_path', return_value=installed.resolve()):
+            files, notes = workflow.export_files(self.root)
+            self.assertIn(installed, files)
+            self.assertEqual(notes['exporter'], dict(path='workspace/bench/exam_workflow.py', sha256=workflow.digest(installed), recorded_sha256=recorded, matches=False))
+            plan = self.root / 'workspace' / 'plans' / 'benchmark' / 'plan.json'
+            plan.write_text(plan.read_text() + ' ')
+            with self.assertRaisesRegex(ValueError, 'changed before export: plans/benchmark/plan.json'):
+                workflow.export_files(self.root)
+        with self.assertRaisesRegex(ValueError, 'changed before export: bench/exam_workflow.py'):
+            workflow.export_files(self.root)
 
     def test_experiment_fields_are_closed(self):
         path = self.root / 'workspace' / 'plans' / 'benchmark' / 'experiment.json'

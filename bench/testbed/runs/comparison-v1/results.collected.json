@@ -1,0 +1,29 @@
+{
+ "archive": "/home/vighnesh/workdesk/side-projects/eski/.internal/worktrees/testbed/bench/results/comparison-v1/results.tar.gz",
+ "bytes": 12659948,
+ "destination": "/home/vighnesh/workdesk/side-projects/eski/.internal/worktrees/testbed/bench/results/comparison-v1/results",
+ "files": 3551,
+ "host": "vbheed@192.168.0.165",
+ "kind": "results",
+ "receipt": {
+  "archive": "results.tar.gz",
+  "bytes": 12659948,
+  "created_at": 1793252034.0897472,
+  "exporter": {
+   "matches": false,
+   "path": "workspace/bench/exam_workflow.py",
+   "recorded_sha256": "4660ff49bfcd0dede4ce808aee7a7e0bb39087524affd24b360cd55bec951531",
+   "sha256": "4b028096bc2f099b5263ba42cbacdbdc968db787de73381b6e509f0bbf6352bb"
+  },
+  "files": 3551,
+  "inventory": "exports/inventory.json",
+  "root": "comparison-v1",
+  "schema": "eski-exam-export-v1",
+  "sha256": "72ca759d03a688dcc1b64add04e4d8ed37142eeb7a3997494c907d3b93b84493",
+  "tools_verified_not_archived": 20,
+  "workflow_status": "DONE WITH EXCLUSIONS"
+ },
+ "root": "comparison-v1",
+ "sha256": "72ca759d03a688dcc1b64add04e4d8ed37142eeb7a3997494c907d3b93b84493",
+ "verified_at": 1793252072.7787743
+}

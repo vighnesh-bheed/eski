@@ -193,6 +193,18 @@ class ReportTests(unittest.TestCase):
         self.assertIn('Fixture CPU', light)
         self.assertIn('excluded repetition 2', (output / 'latency-p99.svg').read_text())
 
+    def test_excluded_values_stay_on_scale_unless_far_outside(self):
+        engines = [dict(target='eski-docker', label='Eski'), dict(target='redis', label='Redis 7.4.12')]
+        excluded = [dict(repetition=n, state='invalid', reasons=['thermal_throttling'], ops=1.7e6 + n, p99=0.4, mem=1.0) for n in range(1, 5)]
+        dataset = dict(engines=engines, workloads=[dict(key='w', name='w', index=0)],
+                       summary=[dict(workload='w', engine='eski-docker', repetitions=0, client_limited=0, excluded=excluded, ops=None, p99=None, mem=None),
+                                dict(workload='w', engine='redis', repetitions=4, client_limited=0, excluded=[dict(repetition=1, state='invalid', reasons=['timing_anomaly'], ops=5e9, p99=1.0, mem=1.0)],
+                                     ops=dict(median=1.07e6, min=1.06e6, max=1.08e6, values=[1.06e6, 1.07e6, 1.07e6, 1.08e6]), p99=None, mem=None)])
+        text = '\n'.join(charts.panel(dataset, dataset['workloads'][0], 'ops', 0, 0, 300, 200, charts.paint('light')))
+        self.assertEqual(text.count('<circle'), 4)
+        self.assertEqual(text.count('l4 7 h-8 z'), 1)
+        self.assertIn('no valid run', text)
+
     def test_tick_and_label_arithmetic(self):
         self.assertEqual(charts.nice_ticks(4.2), [0, 2, 4, 6])
         self.assertEqual(charts.nice_ticks(200000), [0, 50000, 100000, 150000, 200000])

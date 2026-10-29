@@ -470,6 +470,20 @@ def unsafe(root, path):
         (root / Path(*relative.parts[:index])).is_symlink() for index in range(1, len(relative.parts)))
 
 
+def exporter_path():
+    return Path(__file__).resolve()
+
+
+def tool_directory(base, profile):
+    tool_bin = profile.get('tool_bin')
+    if not tool_bin:
+        return None
+    relative = Path(tool_bin)
+    if relative.is_absolute() or not relative.parts or '..' in relative.parts:
+        raise ValueError('tool_bin must be a relative path inside the workspace')
+    return base / relative.parts[0]
+
+
 def export_files(root):
     files = [path for path in root.iterdir() if path.is_file()]
     for relative in EXPORTED_DIRECTORIES:
@@ -479,17 +493,30 @@ def export_files(root):
     base = workspace(root)
     profile = load(base / 'profile.json')
     files.append(base / 'profile.json')
+    tools = tool_directory(base, profile)
+    exporter = exporter_path()
+    notes = dict(tools_verified_not_archived=0, exporter=None)
     for name, expected in sorted((profile.get('files') or {}).items()):
         source = base / name
+        if tools is not None and source.is_relative_to(tools):
+            if not source.resolve().is_relative_to(tools.resolve()):
+                raise ValueError('tool inventory entry resolves outside the tools directory: ' + name)
+            if digest(source) != expected:
+                raise ValueError('workspace file changed before export: ' + name)
+            notes['tools_verified_not_archived'] += 1
+            continue
         if not source.resolve().is_relative_to(base.resolve()) or source.is_symlink():
             raise ValueError('unsafe workspace inventory entry: ' + name)
-        if digest(source) != expected:
+        observed = digest(source)
+        if source.resolve() == exporter:
+            notes['exporter'] = dict(path='workspace/' + name, sha256=observed, recorded_sha256=expected, matches=observed == expected)
+        elif observed != expected:
             raise ValueError('workspace file changed before export: ' + name)
         files.append(source)
     for path in files:
         if unsafe(root, path):
             raise ValueError('unsafe archive input: ' + str(path))
-    return sorted(set(files))
+    return sorted(set(files)), notes
 
 
 def export(root):
@@ -504,7 +531,7 @@ def export(root):
         number += 1
     name = 'results.tar.gz' if number == 1 else 'results-%d.tar.gz' % number
     output = exports / name
-    files = export_files(root)
+    files, notes = export_files(root)
     inventory = {str(path.relative_to(root)): dict(sha256=digest(path), bytes=path.stat().st_size) for path in files}
     module.atomic(exports / 'inventory.json', inventory)
     descriptor, temporary = tempfile.mkstemp(prefix='.results-', dir=exports)
@@ -519,7 +546,8 @@ def export(root):
     finally:
         Path(temporary).unlink(missing_ok=True)
     receipt = dict(schema=EXPORT_SCHEMA, archive=name, sha256=digest(output), bytes=output.stat().st_size, files=len(inventory),
-                   inventory='exports/inventory.json', root=root.name, workflow_status=state.get('status', 'NOT STARTED'), created_at=time.time())
+                   inventory='exports/inventory.json', root=root.name, workflow_status=state.get('status', 'NOT STARTED'), created_at=time.time(),
+                   tools_verified_not_archived=notes['tools_verified_not_archived'], exporter=notes['exporter'])
     module.atomic(exports / 'receipt.json', receipt)
     module.metrics.append_json(exports / 'receipts.jsonl', receipt)
     return receipt
