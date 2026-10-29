@@ -1162,6 +1162,12 @@ def apply_probe(items, probe):
             item.setdefault("skip_targets", {})["eski"] = "eski lacks " + ", ".join(missing)
 
 
+def json_reply_value(value):
+    if isinstance(value, list):
+        return all(json_reply_value(part) for part in value)
+    return value is None or type(value) in (str, bool, int) or (type(value) is float and math.isfinite(value))
+
+
 def validate_item(item, where):
     for field in ("suite", "name", "key", "clients"):
         if field not in item:
@@ -1170,9 +1176,34 @@ def validate_item(item, where):
         raise SystemExit(f"spec.py: {where} key {item['key']!r} is not usable as a file name")
     if not item["clients"]:
         raise SystemExit(f"spec.py: {where} has no clients")
-    for c in item["clients"]:
+    if "warmup" in item and not isinstance(item["warmup"], dict):
+        raise SystemExit(f"spec.py: {where} warmup declaration must be an object")
+    if "warmup" in item and not item["warmup"]:
+        raise SystemExit(f"spec.py: {where} warmup declaration cannot be empty")
+    for c in item["clients"] + [item[name] for name in ("preload", "warmup") if item.get(name)]:
+        if not isinstance(c, dict):
+            raise SystemExit(f"spec.py: {where} client declaration must be an object")
         if c.get("tool") not in CLIENT_TOOLS:
             raise SystemExit(f"spec.py: {where} uses unsupported tool {c.get('tool')}")
+        if not isinstance(c.get("argv"), list) or not all(isinstance(value, str) for value in c["argv"]):
+            raise SystemExit(f"spec.py: {where} client argv must be an array of strings")
+    if item.get("warmup") and item.get("flush_each_run"):
+        raise SystemExit(f"spec.py: {where} cannot flush the warmed dataset before the timed clients")
+    check = item.get("check")
+    if check is not None and not isinstance(check, dict):
+        raise SystemExit(f"spec.py: {where} check declaration must be an object")
+    if check is not None and "replies" in check:
+        if not isinstance(check["replies"], list):
+            raise SystemExit(f"spec.py: {where} check.replies must be an array")
+        for n, assertion in enumerate(check["replies"]):
+            at = f"{where} check.replies[{n}]"
+            if not isinstance(assertion, dict) or set(assertion) != {"argv", "equals"}:
+                raise SystemExit(f"spec.py: {at} must contain argv and equals")
+            argv = assertion["argv"]
+            if not isinstance(argv, list) or not argv or not all(isinstance(value, str) for value in argv) or not argv[0]:
+                raise SystemExit(f"spec.py: {at} argv must be a nonempty array of strings with a command")
+            if not json_reply_value(assertion["equals"]):
+                raise SystemExit(f"spec.py: {at} equals must be a JSON scalar, array or null")
 
 
 class RespError:
@@ -1255,6 +1286,26 @@ class Resp:
         if kind == b"#":
             return rest == b"t"
         raise ConnectionError(f"unexpected RESP type {kind!r}")
+
+
+def decoded_reply(value):
+    if isinstance(value, RespError):
+        raise ValueError(value.message)
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    if isinstance(value, list):
+        return [decoded_reply(part) for part in value]
+    if json_reply_value(value):
+        return value
+    raise ValueError(f"unsupported reply value {value!r}")
+
+
+def same_reply(observed, expected):
+    if type(observed) is not type(expected):
+        return False
+    if isinstance(expected, list):
+        return len(observed) == len(expected) and all(same_reply(left, right) for left, right in zip(observed, expected))
+    return observed == expected
 
 
 def text_of(value):
@@ -1564,8 +1615,7 @@ def cmd_shell(a):
     plan = load_json(a.plan)
     items = plan_items(plan)
     if a.summary:
-        images = sorted({c.get("image") for i in items for c in i["clients"] if c.get("image")} |
-                        {(i.get("preload") or {}).get("image") for i in items if (i.get("preload") or {}).get("image")})
+        images = sorted({c.get("image") for i in items for c in i["clients"] + [i[name] for name in ("preload", "warmup") if i.get(name)] if c.get("image")})
         print(f"PLAN_COUNT={len(items)}")
         print("PLAN_IMAGES=(" + " ".join(q(x) for x in images) + ")")
         return 0
@@ -1594,6 +1644,12 @@ def cmd_shell(a):
     scalar("IT_PRELOAD_CPUS", pre.get("cpus", ""))
     scalar("IT_PRELOAD_TIMEOUT", pre.get("timeout", ""))
     array("IT_PRELOAD_ARGV", pre.get("argv", []))
+    warmup = item.get("warmup") or {}
+    scalar("IT_WARMUP_TOOL", warmup.get("tool", ""))
+    scalar("IT_WARMUP_IMAGE", warmup.get("image", ""))
+    scalar("IT_WARMUP_CPUS", warmup.get("cpus", ""))
+    scalar("IT_WARMUP_TIMEOUT", warmup.get("timeout", ""))
+    array("IT_WARMUP_ARGV", warmup.get("argv", []))
     clients = item["clients"]
     scalar("IT_CLIENTS", len(clients))
     array("IT_CLIENT_TOOL", [c["tool"] for c in clients])
@@ -1650,7 +1706,7 @@ def cmd_seed(a):
         if sent or item.get("init_lua"):
             out["init"] = {"commands": sent, "errors": errors, "lua_scripts": len(item.get("init_lua") or []), "lua_errors": lua_errors}
         check = item.get("check")
-        if check and failure is None:
+        if check and failure is None and ("keyspacelen" in check or "keyspacelen_min" in check):
             start = time.monotonic()
             attempt = 0
             found = keyspace_size(conn)
@@ -1662,11 +1718,25 @@ def cmd_seed(a):
                 time.sleep(min(2 ** attempt, max(0.0, a.check_timeout - (time.monotonic() - start))))
                 attempt += 1
                 found = keyspace_size(conn)
-            out["keyspace"] = dict(check, found=found, ok=ok, seconds=round(time.monotonic() - start, 1))
+            out["keyspace"] = dict({k: v for k, v in check.items() if k != "replies"},
+                                   found=found, ok=ok, seconds=round(time.monotonic() - start, 1))
             if not ok:
                 want = check.get("keyspacelen", check.get("keyspacelen_min"))
                 op = "exactly" if "keyspacelen" in check else "at least"
                 failure = f"keyspace check failed: expected {op} {want} keys after the preload, found {found}"
+        if check and "replies" in check and failure is None:
+            out["replies"] = []
+            for assertion in check["replies"]:
+                argv, expected = assertion["argv"], assertion["equals"]
+                try:
+                    observed = decoded_reply(conn.call(*argv))
+                    ok = same_reply(observed, expected)
+                except (OSError, ConnectionError, ValueError) as error:
+                    observed = {"error": str(error)}
+                    ok = False
+                out["replies"].append({"argv": argv, "expected": expected, "observed": observed, "ok": ok})
+                if not ok and failure is None:
+                    failure = f"reply check failed for {' '.join(argv)[:80]}: expected {expected!r}, observed {observed!r}"
     finally:
         conn.close()
     write_json(a.out, out)
