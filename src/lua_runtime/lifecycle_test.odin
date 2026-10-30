@@ -77,6 +77,26 @@ native_command :: proc "c" (opaque: rawptr, resp: i32, argc: c.size_t, args: [^]
 	if command == "WRITE" {
 		return native_fixed("+OK\r\n", OK, 1)
 	}
+	if command == "WRONGTYPE" {
+		return native_fixed("-WRONGTYPE planned type failure\r\n")
+	}
+	if command == "DENIED" {
+		return native_fixed("-NOPERM planned permission failure\r\n")
+	}
+	if command == "OOM" {
+		return native_fixed("-OOM planned memory failure\r\n")
+	}
+	if command == "ARGUMENTS" {
+		expected := []string{"2", "2.0", "0", "0", "2", "2.5", "-2", "-0", "-0.0"}
+		state.valid = state.valid && int(argc) == len(expected)+1
+		if state.valid {
+			for text, index in expected {
+				argument := args[index+1]
+				state.valid = state.valid && string(argument.data[:int(argument.len)]) == text
+			}
+		}
+		return native_fixed("+OK\r\n")
+	}
 	if command != "ROUND" {
 		state.valid = false
 		return native_fixed("-ERR unexpected native command\r\n", BRIDGE)
@@ -264,4 +284,71 @@ ffi_fresh_globals_and_sandbox_rejection_release :: proc(t: ^testing.T) {
 			native_finish(t, &result, ERROR)
 		}
 	}
+}
+
+@(test)
+ffi_host_error_origins_and_thrown_tagged_values :: proc(t: ^testing.T) {
+	state := Native_Test_State{valid = true}
+	defer native_state_close(&state)
+	callbacks := Callbacks{command = native_command, opaque = &state}
+	cases := []struct{source, frame: string, status: i32}{
+		{"return redis.call('FAIL')", "-ERR planned callback failure\r\n", ERROR},
+		{"return redis.call('WRONGTYPE')", "-WRONGTYPE planned type failure\r\n", ERROR},
+		{"return redis.call('DENIED')", "-NOPERM planned permission failure\r\n", ERROR},
+		{"return redis.call('OOM')", "-OOM planned memory failure\r\n", ERROR},
+		{"local ok,x=pcall(function() return redis.call('FAIL') end) return {ok,type(x),x}", "*3\r\n$-1\r\n$6\r\nstring\r\n$28\r\nERR planned callback failure\r\n", OK},
+		{"local _,x=pcall(function() return redis.call('FAIL') end) error(x,0)", "-ERR ERR planned callback failure\r\n", ERROR},
+		{"xpcall(function() redis.call('FAIL') end,function(x) return x end) error('ERR after',0)", "-ERR ERR after\r\n", ERROR},
+		{"error('ERR plain',0)", "-ERR ERR plain\r\n", ERROR},
+		{"error('WRONGTYPE ordinary',0)", "-ERR WRONGTYPE ordinary\r\n", ERROR},
+		{"error(redis.error_reply('CUSTOM tagged'),0)", "-CUSTOM tagged\r\n", ERROR},
+		{"error(redis.error_reply('ERR first\\r\\n+second'),0)", "-ERR first  +second\r\n", ERROR},
+		{"error(redis.error_reply('ERR left\\0right'),0)", "-ERR left\x00right\r\n", ERROR},
+		{"error(redis.error_reply(''),0)", "-ERR \r\n", ERROR},
+		{"return redis.error_reply('')", "-ERR \r\n", OK},
+		{"return {err=''}", "-\r\n", OK},
+		{"return redis.error_reply('custom message')", "-custom message\r\n", OK},
+	}
+	for item in cases {
+		result := native_eval(item.source, callbacks = &callbacks)
+		native_finish(t, &result, item.status, item.frame)
+	}
+	testing.expect(t, state.valid)
+}
+
+@(test)
+ffi_numeric_arguments_preserve_explicit_string_bytes :: proc(t: ^testing.T) {
+	state := Native_Test_State{valid = true}
+	defer native_state_close(&state)
+	callbacks := Callbacks{command = native_command, opaque = &state}
+	result := native_eval("return redis.call('ARGUMENTS',2.0,'2.0',tonumber('-0.0'),0.0,2,2.5,-2.0,'-0','-0.0')", callbacks = &callbacks)
+	native_finish(t, &result, OK, "+OK\r\n")
+	testing.expect(t, state.valid && state.calls == 1)
+}
+
+@(test)
+ffi_fresh_random_sequences_and_explicit_seed_repeatability :: proc(t: ^testing.T) {
+	source := "return {math.random(1,1000000000),math.random(1,1000000000),math.random(1,1000000000),math.random(1,1000000000)}"
+	initial := native_eval(source)
+	different := false
+	for _ in 0..<8 {
+		result := native_eval(source)
+		if initial.data != nil && result.data != nil {
+			different = different || string(initial.data[:int(initial.len)]) != string(result.data[:int(result.len)])
+		}
+		native_finish(t, &result, OK)
+	}
+	native_finish(t, &initial, OK)
+	testing.expect(t, different)
+	seeded_source := "math.randomseed(317,29) return {math.random(1,1000000000),math.random(1,1000000000),math.random(1,1000000000)}"
+	seeded := native_eval(seeded_source)
+	for _ in 0..<8 {
+		result := native_eval(seeded_source)
+		testing.expect(t, seeded.data != nil && result.data != nil)
+		if seeded.data != nil && result.data != nil {
+			testing.expect_value(t, string(result.data[:int(result.len)]), string(seeded.data[:int(seeded.len)]))
+		}
+		native_finish(t, &result, OK)
+	}
+	native_finish(t, &seeded, OK)
 }

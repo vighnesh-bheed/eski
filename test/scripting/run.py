@@ -131,6 +131,61 @@ class Fixture(unittest.TestCase):
 class Compatibility(Fixture):
     portable = True
 
+    def test_random_defaults_vary_and_explicit_seed_repeats(self):
+        source = 'return {math.random(1,1000000000),math.random(1,1000000000),math.random(1,1000000000)}'
+        rows = self.client.pipeline([('EVAL', source, 0)]*8)
+        self.assertTrue(all(len(row) == 3 and all(type(value) is int and 1 <= value <= 1000000000 for value in row) for row in rows))
+        self.assertGreater(len(set(tuple(row) for row in rows)), 1)
+        seeded = 'math.randomseed(317); '+source
+        repeated = self.client.pipeline([('EVAL', seeded, 0)]*8)
+        self.assertEqual(repeated, [repeated[0]]*8)
+
+    def test_returned_and_thrown_error_tables_preserve_content_and_frames(self):
+        cases = ((b'', 'ERR '), (b'CUSTOM tagged', 'CUSTOM tagged'), (b'OOM tagged', 'OOM tagged'),
+                 (b'ERR first\r\n+second', 'ERR first  +second'), (b'ERR left\x00right', 'ERR left'))
+        for body in ('return redis.error_reply(ARGV[1])', 'error(redis.error_reply(ARGV[1]),0)'):
+            for message, expected in cases:
+                with self.subTest(body=body, message=message):
+                    result, following = self.client.pipeline([('EVAL', body, 0, message), ('PING', 'following-error')])
+                    self.assertIsInstance(result, ServerError)
+                    self.assertTrue(str(result).startswith(expected), repr(result))
+                    self.assertNotIn('\r', str(result))
+                    self.assertNotIn('\n', str(result))
+                    self.assertEqual(following, b'following-error')
+                    self.assertFalse(self.client.available(.01))
+        self.assertEqual(str(self.error(('EVAL', 'return {err=""}', 0))), '')
+        self.error(('EVAL', 'error({},0)', 0), 'ERR ')
+        self.assertEqual(self.client.call('EVAL', 'return {}', 0), [])
+        self.healthy()
+
+    def test_host_error_classes_and_global_pcall_string_origins_are_preserved(self):
+        self.client.call('SET', 'error:typed', 'string')
+        result = self.error(('EVAL', "return redis.call('LPUSH','error:typed','x')", 0))
+        self.assertTrue(str(result).startswith('WRONGTYPE '), repr(result))
+        result = self.error(('EVAL', "return redis.call('GET')", 0))
+        self.assertTrue(str(result).startswith('ERR '), repr(result))
+        self.assertFalse(str(result).startswith('ERR ERR '), repr(result))
+        source = "local ok,x=pcall(function() return redis.call('LPUSH','error:typed','x') end); return {ok,type(x),x}"
+        result = self.client.call('EVAL', source, 0)
+        self.assertEqual(result[:2], [None, b'string'])
+        self.assertTrue(result[2].startswith(b'WRONGTYPE '))
+        result = self.client.call('EVAL', "local x=redis.pcall('LPUSH','error:typed','x'); return {type(x),x.err}", 0)
+        self.assertEqual(result[0], b'table')
+        self.assertTrue(result[1].startswith(b'WRONGTYPE '))
+        for source, expected in (("error('ERR plain',0)", 'ERR ERR plain'),
+                                 ("local _,x=pcall(function() redis.call('GET') end); error(x,0)", 'ERR ERR '),
+                                 ("xpcall(function() redis.call('GET') end,function(x) return x end); error('ERR after',0)", 'ERR ERR after')):
+            with self.subTest(source=source):
+                self.assertTrue(str(self.error(('EVAL', source, 0))).startswith(expected))
+        self.assertEqual(self.client.call('GET', 'error:typed'), b'string')
+
+    def test_numeric_arguments_canonicalize_floats_without_changing_strings(self):
+        source = "local negativezero=tonumber(ARGV[1])/tonumber(ARGV[2]); redis.call('SET','number:float',2.0); redis.call('SET','number:negative',negativezero); redis.call('SET','number:zero',0.0); redis.call('SET','number:string','2.0'); redis.call('SET','number:negative-string','-0.0'); return redis.call('MGET','number:float','number:negative','number:zero','number:string','number:negative-string')"
+        self.assertEqual(self.client.call('EVAL', source, 0, '0', '-1'), [b'2', b'0', b'0', b'2.0', b'-0.0'])
+        self.assertEqual(self.client.call('EVAL', "return redis.call('INCRBY','number:counter',2.0)", 0), 2)
+        self.error(('EVAL', "return redis.call('INCRBY','number:counter','2.0')", 0), 'integer')
+        self.assertEqual(self.client.call('GET', 'number:counter'), b'2')
+
     def test_binary_source_keys_arguments_and_nil_array_boundary(self):
         key, value, literal = b'key\x00\xff', b'arg\x00\r\n\xff', b'literal\x00\xfe'
         source = b'return {KEYS[1],ARGV[1],[=['+literal+b']=],false,19,nil,"lost"}'
@@ -230,8 +285,12 @@ class Compatibility(Fixture):
             self.addCleanup(client.close)
         client.call('AUTH', 'scripter', 'secret')
         self.assertEqual(client.call('EVAL', "return redis.call('GET','allow:key')", 0), b'yes')
-        self.error(('EVAL', "return redis.call('GET','deny:key')", 0), client=client)
-        self.error(('EVAL', "return redis.call('DEL','allow:key')", 0), client=client)
+        for inner in ("'GET','deny:key'", "'DEL','allow:key'"):
+            for wrapper in ('call', 'pcall'):
+                result = self.error(('EVAL', 'return redis.'+wrapper+'('+inner+')', 0), client=client)
+                self.assertTrue(str(result).startswith('ERR ACL failure in script:'), repr(result))
+        self.assertTrue(str(self.error(('GET', 'deny:key'), client=client)).startswith('NOPERM '))
+        self.assertTrue(str(self.error(('EVAL', 'return 1', 1, 'deny:key'), client=client)).startswith('NOPERM '))
         self.assertEqual(self.client.call('GET', 'allow:key'), b'yes')
 
     def test_multi_keeps_script_error_prior_writes_and_following_commands(self):
@@ -321,6 +380,34 @@ class Compatibility(Fixture):
 
 
 class Integration(Fixture):
+    def test_outer_and_inner_argument_boundaries_reject_before_mutation(self):
+        values = [b'absent-boundary']*4096
+        self.assertEqual(self.client.call('EVAL', 'return {#KEYS,#ARGV,KEYS[4096]}', 4096, *values), [4096, 0, values[-1]])
+        self.assertEqual(self.client.call('EVAL', 'return {#KEYS,#ARGV,ARGV[4096]}', 0, *values), [0, 4096, values[-1]])
+        self.error(('EVAL', "return redis.call('SET','boundary:unexpected','bad')", 0, *values, b'one-more'), 'argument count')
+        source = "return redis.call('EXISTS',unpack(ARGV))"
+        self.assertEqual(self.client.call('EVAL', source, 0, *values[:-1]), 0)
+        self.error(('EVAL', source, 0, *values), 'argument count')
+        self.assertIsNone(self.client.call('GET', 'boundary:unexpected'))
+        self.healthy()
+
+    def test_first_inner_oom_keeps_class_and_later_effect_sequence_can_finish(self):
+        self.client.call('SET', 'oom:existing', 'kept')
+        self.limit('maxmemory', 1)
+        self.client.call('CONFIG', 'SET', 'maxmemory-policy', 'noeviction')
+        self.assertGreater(int(info(self.client, 'memory')['used_memory']), 1)
+        result = self.error(('EVAL', "return redis.call('SET','oom:rejected','bad')", 0))
+        self.assertTrue(str(result).startswith('OOM '), repr(result))
+        self.assertIsNone(self.client.call('GET', 'oom:rejected'))
+        source = "local ok,x=pcall(function() return redis.call('SET','oom:rejected','bad') end); return {ok,type(x),x}"
+        result = self.client.call('EVAL', source, 0)
+        self.assertEqual(result[:2], [None, b'string'])
+        self.assertTrue(result[2].startswith(b'OOM '))
+        self.assertEqual(self.client.call('EVAL', "redis.call('DEL','oom:existing'); return redis.call('SET','oom:after','kept')", 0), 'OK')
+        self.client.call('CONFIG', 'SET', 'maxmemory', 0)
+        self.assertEqual(self.client.call('MGET', 'oom:existing', 'oom:rejected', 'oom:after'), [None, None, b'kept'])
+        self.healthy()
+
     def test_supported_no_write_header_preserves_source_digest_and_policy(self):
         source = b'#!lua flags=no-writes\nreturn redis.call("GET",KEYS[1])'
         self.client.call('SET', 'header:key', 'v')
@@ -435,6 +522,14 @@ class Integration(Fixture):
             self.assertEqual(replies[1], 'PONG')
             self.assertEqual(len(replies), 2)
             self.assertFalse(self.client.available(.01))
+
+        for source in ('return redis.error_reply(ARGV[1])', 'error(redis.error_reply(ARGV[1]),0)'):
+            with self.subTest(binary_error_source=source):
+                result, following = self.client.pipeline([('EVAL', source, 0, b'ERR left\x00right'), ('PING', 'after-binary-error')])
+                self.assertIsInstance(result, ServerError)
+                self.assertEqual(str(result), 'ERR left\x00right')
+                self.assertEqual(following, b'after-binary-error')
+                self.assertFalse(self.client.available(.01))
 
     def test_aof_replays_actual_partial_effects_and_nested_multi(self):
         instance = self.new_server(('--appendonly', 'yes', '--appendfsync', 'always'))

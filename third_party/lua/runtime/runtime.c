@@ -1,7 +1,9 @@
 #define _POSIX_C_SOURCE 200809L
 #include "internal.h"
+#include <stdatomic.h>
 
 unsigned char es_null_token;
+static _Atomic uint64_t es_invocations;
 
 static uint64_t es_clock(void) {
     struct timespec now;
@@ -111,6 +113,7 @@ static int es_pcall(lua_State *L) {
     int n = lua_gettop(L);
     luaL_checkany(L, 1);
     int status = lua_pcall(L, n - 1, LUA_MULTRET, 0);
+    es_context_of(L)->host_error_origin = 0;
     es_check_abort(L);
     lua_pushboolean(L, status == LUA_OK);
     lua_insert(L, 1);
@@ -119,6 +122,7 @@ static int es_pcall(lua_State *L) {
 
 static int es_xpcall_error(lua_State *L) {
     es_context *ctx = es_context_of(L);
+    ctx->host_error_origin = 0;
     if (ctx->sticky) {
         lua_pushstring(L, ctx->failure ? ctx->failure : "script aborted");
         return 1;
@@ -137,6 +141,7 @@ static int es_xpcall(lua_State *L) {
     lua_remove(L, 2);
     lua_insert(L, 1);
     int status = lua_pcall(L, n - 2, LUA_MULTRET, 1);
+    es_context_of(L)->host_error_origin = 0;
     lua_remove(L, 1);
     es_check_abort(L);
     lua_pushboolean(L, status == LUA_OK);
@@ -159,7 +164,13 @@ static eslua_arg *es_arguments(lua_State *L, int first, int *count) {
     eslua_arg *args = n ? es_allocate(ctx, NULL, (size_t)n * sizeof(*args)) : NULL;
     if (n && !args) es_fail(L, ESLUA_MEMORY, "script allocation failed");
     for (int i = 0; i < n; i++) {
+        int numeric = lua_type(L, first + i) == LUA_TNUMBER;
         args[i].data = (const unsigned char *)lua_tolstring(L, first + i, &args[i].len);
+        if (numeric && args[i].len >= 2 && args[i].data[args[i].len - 2] == '.' && args[i].data[args[i].len - 1] == '0')
+            args[i].len -= 2;
+        if (numeric && args[i].len == 2 && args[i].data[0] == '-' && args[i].data[1] == '0') {
+            args[i].data++; args[i].len = 1;
+        }
     }
     *count = n;
     return args;
@@ -183,6 +194,7 @@ static int es_command(lua_State *L, int catch_error) {
     es_parse_response(L, result.data, result.len);
     if (!catch_error && (response_tag == '-' || response_tag == '!')) {
         lua_getfield(L, -1, "err");
+        ctx->host_error_origin = 1;
         return lua_error(L);
     }
     es_check_abort(L);
@@ -201,6 +213,7 @@ static int es_setresp(lua_State *L) {
 static int es_tagged_reply(lua_State *L, const char *key) {
     size_t len;
     const char *text = luaL_checklstring(L, 1, &len);
+    if (len == 0 && strcmp(key, "err") == 0) { text = "ERR "; len = 4; }
     lua_newtable(L);
     lua_pushlstring(L, text, len);
     lua_setfield(L, -2, key);
@@ -230,6 +243,11 @@ static void es_setup(lua_State *L) {
     luaL_requiref(L, LUA_TABLIBNAME, luaopen_table, 1); lua_pop(L, 1);
     luaL_requiref(L, LUA_STRLIBNAME, luaopen_string, 1); lua_pop(L, 1);
     luaL_requiref(L, LUA_MATHLIBNAME, luaopen_math, 1); lua_pop(L, 1);
+    lua_getglobal(L, "math"); lua_getfield(L, -1, "randomseed");
+    lua_pushinteger(L, (lua_Integer)(es_clock() & (uint64_t)LUA_MAXINTEGER));
+    uint64_t sequence = atomic_fetch_add_explicit(&es_invocations, 1, memory_order_relaxed) + 1;
+    lua_pushinteger(L, (lua_Integer)(sequence & (uint64_t)LUA_MAXINTEGER));
+    lua_call(L, 2, 0); lua_pop(L, 1);
     lua_getglobal(L, "string"); lua_pushnil(L); lua_setfield(L, -2, "dump"); lua_pop(L, 1);
     lua_getglobal(L, "table"); lua_getfield(L, -1, "unpack"); lua_setglobal(L, "unpack"); es_function(L, "getn", es_getn); lua_pop(L, 1);
     lua_pushcfunction(L, es_pcall); lua_setglobal(L, "pcall");
@@ -285,6 +303,21 @@ static int es_run(lua_State *L) {
     return 0;
 }
 
+static int es_outer_error(lua_State *L) {
+    es_context *ctx = es_context_of(L);
+    ctx->error_passthrough = ctx->host_error_origin;
+    if (lua_type(L, 1) == LUA_TTABLE) {
+        lua_pushliteral(L, "err"); lua_rawget(L, 1);
+        if (lua_type(L, -1) == LUA_TSTRING) {
+            ctx->error_passthrough = 1;
+            return 1;
+        }
+        lua_pop(L, 1);
+    }
+    lua_pushvalue(L, 1);
+    return 1;
+}
+
 static eslua_options es_options(const eslua_options *input) {
     eslua_options out = input ? *input : (eslua_options){0};
     if (!out.memory_limit) out.memory_limit = 64 * 1024 * 1024;
@@ -307,7 +340,8 @@ static eslua_result es_invoke(eslua_arg source, size_t numkeys, const eslua_arg 
     eslua_result result = {0};
     const char *error = NULL;
     size_t error_len = 0;
-    unsigned char *error_copy = NULL;
+    unsigned char error_copy[4096];
+    int error_passthrough = 0;
     int invalid = (!source.data && source.len) || (numkeys && !keys) || (argc && !args) || (client_resp != 2 && client_resp != 3) || numkeys > INT_MAX || argc > INT_MAX;
     if (!invalid) {
         for (size_t i = 0; i < numkeys; i++) if (!keys[i].data && keys[i].len) invalid = 1;
@@ -332,17 +366,18 @@ static eslua_result es_invoke(eslua_arg source, size_t numkeys, const eslua_arg 
         if (!ctx.L) { result.status = ESLUA_MEMORY; error = "script VM allocation failed"; }
         else {
             *(es_context **)lua_getextraspace(ctx.L) = &ctx;
+            lua_pushcfunction(ctx.L, es_outer_error);
             lua_pushcfunction(ctx.L, es_run);
-            int status = lua_pcall(ctx.L, 0, 0, 0);
+            int status = lua_pcall(ctx.L, 0, 0, 1);
             if (status != LUA_OK || ctx.sticky) {
                 result.status = ctx.sticky ? ctx.sticky : (status == LUA_ERRMEM ? ESLUA_MEMORY : ESLUA_ERROR);
                 error = ctx.failure;
                 if (!error && lua_type(ctx.L, -1) == LUA_TSTRING) {
                     const char *message = lua_tolstring(ctx.L, -1, &error_len);
-                    if (error_len < ctx.options.output_limit) {
-                        error_copy = es_allocate(&ctx, NULL, error_len + 1);
-                        if (error_copy) { memcpy(error_copy, message, error_len); error_copy[error_len] = 0; error = (const char *)error_copy; }
-                    }
+                    if (error_len > sizeof(error_copy)) error_len = sizeof(error_copy);
+                    memcpy(error_copy, message, error_len);
+                    error = (const char *)error_copy;
+                    error_passthrough = ctx.error_passthrough;
                 }
                 if (!error) error = "script execution failed";
             }
@@ -352,14 +387,15 @@ static eslua_result es_invoke(eslua_arg source, size_t numkeys, const eslua_arg 
     if (result.status != ESLUA_OK) {
         es_release(&ctx, ctx.output.data); ctx.output = (es_buffer){0};
         if (!error) error = "script execution failed";
-        size_t n = strlen(error);
+        size_t n = error == (const char *)error_copy ? error_len : strlen(error);
         if (n > 4096) n = 4096;
-        if (ctx.options.output_limit >= n + 7) {
-            ctx.output.data = es_allocate(&ctx, NULL, n + 7);
+        size_t prefix = error_passthrough && n ? 1 : 5;
+        if (ctx.options.output_limit >= n + prefix + 2) {
+            ctx.output.data = es_allocate(&ctx, NULL, n + prefix + 2);
             if (ctx.output.data) {
-                memcpy(ctx.output.data, "-ERR ", 5);
-                for (size_t i = 0; i < n; i++) ctx.output.data[5 + i] = (error[i] == '\r' || error[i] == '\n') ? ' ' : (unsigned char)error[i];
-                memcpy(ctx.output.data + 5 + n, "\r\n", 2); ctx.output.len = n + 7;
+                memcpy(ctx.output.data, "-ERR ", prefix);
+                for (size_t i = 0; i < n; i++) ctx.output.data[prefix + i] = (error[i] == '\r' || error[i] == '\n') ? ' ' : (unsigned char)error[i];
+                memcpy(ctx.output.data + prefix + n, "\r\n", 2); ctx.output.len = n + prefix + 2;
             }
         }
     }

@@ -223,7 +223,7 @@ lua_inner :: proc(run: ^Lua_Invocation, argv: [][]u8) {
 	permission, position := acl_check_user(run.source.user, int(id), argv)
 	if permission != .Ok {
 		acl_log_add(run.source, permission, .Lua, argv, position, nil, transmute([]u8)spec.name if permission == .Cmd else nil)
-		reply_error(client, "NOPERM This user has no permissions to run the command or access its keys or channels from a script")
+		reply_error(client, "ERR ACL failure in script: this user has no permissions to run the command or access its keys or channels")
 		stat_reject(hot, argv)
 		return
 	}

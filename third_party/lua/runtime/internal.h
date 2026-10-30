@@ -34,6 +34,7 @@ typedef struct es_context {
     size_t numkeys, argc;
     uint64_t started;
     int32_t sticky, wrote, script_resp, client_resp, compile_only;
+    int host_error_origin, error_passthrough;
     const char *failure;
     es_buffer output;
 } es_context;

@@ -15,6 +15,8 @@ fi
 PASS=0
 FAIL=0
 SERVER_PID=""
+ACL_SERVER_PID=""
+ACL_REF_CONTAINER="eski-smoke-acl-$$"
 CLI_CONTAINER="eski-smoke-cli-$$"
 REF_PORT="${ESKI_SMOKE_REF_PORT:-$((PORT + 1))}"
 REF_CONTAINER="eski-smoke-ref-$$"
@@ -38,9 +40,14 @@ cleanup() {
 		kill "$MIGRATE_PID" 2>/dev/null
 		wait "$MIGRATE_PID" 2>/dev/null
 	fi
+	if [ -n "$ACL_SERVER_PID" ] && kill -0 "$ACL_SERVER_PID" 2>/dev/null; then
+		kill "$ACL_SERVER_PID" 2>/dev/null
+		wait "$ACL_SERVER_PID" 2>/dev/null
+	fi
 	docker rm -f "$CLI_CONTAINER" >/dev/null 2>&1
 	docker rm -f "$REF_CONTAINER" >/dev/null 2>&1
 	docker rm -f "$MC_REF_CONTAINER" >/dev/null 2>&1
+	docker rm -f "$ACL_REF_CONTAINER" >/dev/null 2>&1
 	rm -f "$LOG"
 	chmod -R u+rwx "$PERSIST_DIR" 2>/dev/null
 	rm -rf "$PERSIST_DIR"
@@ -3815,11 +3822,54 @@ acl_cli() {
 
 acl_wait() {
 	local _
+	ACL_WAIT_LAST=""
 	for _ in $(seq 1 50); do
-		[ "$(docker exec "$CLI_CONTAINER" redis-cli -p "$1" "${@:2}" ping 2>&1)" == "PONG" ] && return 0
+		ACL_WAIT_LAST="$(docker exec "$CLI_CONTAINER" redis-cli -p "$1" "${@:2}" ping 2>&1)"
+		[ "$ACL_WAIT_LAST" == "PONG" ] && return 0
 		sleep 0.1
 	done
 	return 1
+}
+
+acl_pair_ready() {
+	local phase="$1" jport="$2" rport="$3" jpid="$4" name="$5" startup="$6" launched="$7"
+	shift 7
+	local jready=0 rready=0 jlast="not checked" rlast="reference launch failed" diagnostics process_state="exited" reference_running
+	if acl_wait "$jport" "$@"; then jready=1; fi
+	jlast="$ACL_WAIT_LAST"
+	if [ "$launched" -eq 1 ]; then
+		if acl_wait "$rport" "$@"; then rready=1; fi
+		rlast="$ACL_WAIT_LAST"
+	fi
+	if kill -0 "$jpid" 2>/dev/null; then process_state="running"; fi
+	reference_running="$(docker inspect --format '{{.State.Running}}' "$name" 2>&1)"
+	if [ "$jready" -eq 1 ] && [ "$rready" -eq 1 ] && [ "$process_state" == "running" ] && [ "$reference_running" == "true" ]; then
+		return 0
+	fi
+	docker logs --tail 80 "$name" >"$startup.redis.log" 2>&1
+	docker inspect --format '{{json .State}}' "$name" >"$startup.state.log" 2>&1
+	diagnostics="$(
+		printf 'Eski port=%s pid=%s state=%s PING=%s\n' "$jport" "$jpid" "$process_state" "$jlast"
+		printf 'Reference port=%s container=%s launch=%s running=%s PING=%s\n' "$rport" "$name" "$launched" "$reference_running" "$rlast"
+		printf 'Reference launch output:\n'
+		tail -n 20 "$startup.run.log"
+		printf 'Reference state:\n'
+		cat "$startup.state.log"
+		printf 'Reference startup log:\n'
+		cat "$startup.redis.log"
+		printf 'Eski startup log:\n'
+		tail -n 80 "$startup.eski.log"
+	)"
+	fail "ACL $phase setup" "Eski and reference both ready with PONG" "$diagnostics"
+	return 1
+}
+
+acl_stop_pair() {
+	kill "$1" 2>/dev/null
+	wait "$1" 2>/dev/null
+	ACL_SERVER_PID=""
+	cat "$3.eski.log" >>"$LOG"
+	docker rm -f "$2" >/dev/null 2>&1
 }
 
 acl_same() {
@@ -3837,21 +3887,21 @@ acl_log_tail() {
 }
 
 expect_acl_files() {
-	local jport="$((REF_PORT + 4))" rport="$((REF_PORT + 5))" adir="$PERSIST_DIR/acl" jpid name="eski-smoke-acl-$$" hash feed got want content args
+	local jport="$((REF_PORT + 4))" rport="$((REF_PORT + 5))" adir="$PERSIST_DIR/acl" jpid name="$ACL_REF_CONTAINER" hash feed got want content args startup launched
 	mkdir -p "$adir/eski" "$adir/ref"
 	hash="$(printf 'alicepw' | sha256sum | cut -d' ' -f1)"
 	printf 'user alice on #%s ~a* &chan -@all +get +set\nuser bob off nopass resetchannels (+get ~b*) (+set %%W~w*)\nuser default on nopass ~* &* +@all\n' "$hash" >"$adir/eski/users.acl"
 	cp "$adir/eski/users.acl" "$adir/ref/users.acl"
-	"$BINARY" --port "$jport" --dir "$adir/eski" --aclfile users.acl >>"$LOG" 2>&1 &
+	startup="$adir/acl-file-startup"
+	"$BINARY" --port "$jport" --dir "$adir/eski" --aclfile users.acl >"$startup.eski.log" 2>&1 &
 	jpid=$!
-	if ! docker run -d --rm --name "$name" --network=host --user "$(id -u):$(id -g)" -v "$adir/ref:/data" "$IMAGE" redis-server --port "$rport" --dir /data --aclfile users.acl --save "" --appendonly no >/dev/null; then
-		fail "reference Redis with an ACL file" "container started" "docker run failed"
-		kill "$jpid" 2>/dev/null
-		wait "$jpid" 2>/dev/null
+	ACL_SERVER_PID="$jpid"
+	launched=0
+	if docker run -d --name "$name" --network=host --user "$(id -u):$(id -g)" -v "$adir/ref:/data" "$IMAGE" redis-server --port "$rport" --dir /data --aclfile users.acl --save "" --appendonly no >"$startup.run.log" 2>&1; then launched=1; fi
+	if ! acl_pair_ready "ACL file" "$jport" "$rport" "$jpid" "$name" "$startup" "$launched"; then
+		acl_stop_pair "$jpid" "$name" "$startup"
 		return
 	fi
-	acl_wait "$jport"
-	acl_wait "$rport"
 	feed=$'ACL LIST\nACL USERS\nAUTH alice alicepw\nACL WHOAMI\nGET a1\nGET b1\nAUTH default x\nACL SETUSER carol on >c (+get ~x*) %R~r* resetchannels &ch\nACL SETUSER dave skip-sanitize-payload +@all -@dangerous ~*\nACL DELUSER bob\nACL SAVE\nACL LIST'
 	acl_same "acl file load, setuser and save replies" "$(printf '%s\n' "$feed" | acl_cli "$rport")" "$(printf '%s\n' "$feed" | acl_cli "$jport")"
 	acl_same "ACL SAVE file contents" "$(cat "$adir/ref/users.acl")" "$(cat "$adir/eski/users.acl")"
@@ -3872,25 +3922,23 @@ expect_acl_files() {
 	done
 	rm -f "$adir/eski/users.acl" "$adir/ref/users.acl"
 	acl_same "ACL LOAD of a missing file" "$(printf 'ACL LOAD\n' | acl_cli "$rport")" "$(printf 'ACL LOAD\n' | acl_cli "$jport")"
-	kill "$jpid" 2>/dev/null
-	wait "$jpid" 2>/dev/null
-	docker rm -f "$name" >/dev/null 2>&1
+	acl_stop_pair "$jpid" "$name" "$startup"
 	printf 'requirepass secret\nuser dave on >pw ~d* +@read\nuser eve off nopass (+get ~e*)\n' >"$adir/eski/acl.conf"
 	cp "$adir/eski/acl.conf" "$adir/ref/acl.conf"
-	"$BINARY" "$adir/eski/acl.conf" --port "$jport" --dir "$adir/eski" >>"$LOG" 2>&1 &
+	startup="$adir/acl-config-startup"
+	"$BINARY" "$adir/eski/acl.conf" --port "$jport" --dir "$adir/eski" >"$startup.eski.log" 2>&1 &
 	jpid=$!
-	if docker run -d --rm --name "$name" --network=host --user "$(id -u):$(id -g)" -v "$adir/ref:/data" "$IMAGE" redis-server /data/acl.conf --port "$rport" --dir /data --save "" --appendonly no >/dev/null; then
-		acl_wait "$jport" -a secret --no-auth-warning
-		acl_wait "$rport" -a secret --no-auth-warning
-		feed=$'PING\nAUTH dave pw\nACL WHOAMI\nAUTH secret\nACL LIST\nACL SETUSER fred on >x +ping\nCONFIG SET requirepass other\nACL LIST\nCONFIG REWRITE\nACL GETUSER default'
-		acl_same "users from a configuration file" "$(printf '%s\n' "$feed" | acl_cli "$rport")" "$(printf '%s\n' "$feed" | acl_cli "$jport")"
-		acl_same "CONFIG REWRITE user and requirepass lines" "$(grep -E '^(user|requirepass) ' "$adir/ref/acl.conf")" "$(grep -E '^(user|requirepass) ' "$adir/eski/acl.conf")"
-	else
-		fail "reference Redis with users in a configuration file" "container started" "docker run failed"
+	ACL_SERVER_PID="$jpid"
+	launched=0
+	if docker run -d --name "$name" --network=host --user "$(id -u):$(id -g)" -v "$adir/ref:/data" "$IMAGE" redis-server /data/acl.conf --port "$rport" --dir /data --save "" --appendonly no >"$startup.run.log" 2>&1; then launched=1; fi
+	if ! acl_pair_ready "configuration file" "$jport" "$rport" "$jpid" "$name" "$startup" "$launched" -a secret --no-auth-warning; then
+		acl_stop_pair "$jpid" "$name" "$startup"
+		return
 	fi
-	kill "$jpid" 2>/dev/null
-	wait "$jpid" 2>/dev/null
-	docker rm -f "$name" >/dev/null 2>&1
+	feed=$'PING\nAUTH dave pw\nACL WHOAMI\nAUTH secret\nACL LIST\nACL SETUSER fred on >x +ping\nCONFIG SET requirepass other\nACL LIST\nCONFIG REWRITE\nACL GETUSER default'
+	acl_same "users from a configuration file" "$(printf '%s\n' "$feed" | acl_cli "$rport")" "$(printf '%s\n' "$feed" | acl_cli "$jport")"
+	acl_same "CONFIG REWRITE user and requirepass lines" "$(grep -E '^(user|requirepass) ' "$adir/ref/acl.conf")" "$(grep -E '^(user|requirepass) ' "$adir/eski/acl.conf")"
+	acl_stop_pair "$jpid" "$name" "$startup"
 	printf 'user alice on +nocmd\n' >"$adir/eski/bad.acl"
 	cp "$adir/eski/bad.acl" "$adir/ref/bad.acl"
 	for args in "3|--user foo on badrule" "3|--user foo on --user foo off" "3|--user default on --user default off" "3|--user foo (on" "3|--user" "2|--user foo on +nocmd" "1|--aclfile bad.acl" "1|--aclfile bad.acl --user foo on" "1|--aclfile nofile.acl"; do
