@@ -1,8 +1,8 @@
 # Threading
 
-Eski has two separate opt-in worker paths. The earlier LCS compute stage was qualified at `83024e3`. The new keyspace-worker stage is under development and has not been compiled or tested. Prior LCS checks, conformance records and performance measurements do not validate the new source; no keyspace-worker throughput or compatibility claim is made.
+Eski has two separate opt-in worker paths. The earlier LCS compute stage was qualified at `83024e3`. The guarded GET/plain SET keyspace path has passed its native ownership tests and dedicated external correctness driver, including address and thread sanitizer runs. The full package gate, smoke and baseline compatibility checks also pass with workers disabled and enabled. No keyspace-worker benchmark has been run or speedup claimed; prior LCS measurements remain separate evidence.
 
-## Keyspace workers (unverified)
+## Keyspace workers
 
 This stage targets GET and exactly three-argument `SET key value` on strings without expiry or absent keys. Each key belongs to one worker, which performs its reads and value replacement in FIFO order. The coordinator owns routing, sockets, normal command/ACL admission, statistics and reply delivery. Workers are disabled by default.
 
@@ -14,11 +14,11 @@ The pool accepts at most 64 outstanding jobs, including completed results awaiti
 
 Options such as NX, XX, GET, KEEPTTL and expiry forms are outside this path. Expiring or nonstring entries, entries carrying memcached item metadata, multi-key commands, transactions and the rest of the command surface use the coordinator. Watching/tracking/notifications, blocked consumers, monitors/pubsub, memory-pressure policies, LFU, memcached, AOF, pause/loading and persistence lifecycle state also prevent worker admission. Normal command errors and feature behavior remain the responsibility of the coordinator path, after pending work is reconciled; these fallbacks do not supply parallel execution of those features.
 
-Before a legacy command or feature can observe the keyspace, a barrier freezes admission, drains accepted jobs and reconciles worker-owned values and access metadata. Reconciliation transfers state without executing SET again; GET-only entries retain their encoding. Save/fork/shutdown paths require a reconciled view, and workers join before raw forks or destruction. These are the implementation's intended boundaries and remain unverified. Barriers can stall foreground work and erase the benefit of short bursts of eligible commands.
+Before a legacy command or feature can observe the keyspace, a barrier freezes admission, drains accepted jobs and reconciles worker-owned values and access metadata. Reconciliation transfers state without executing SET again; GET-only entries retain their encoding. Save/fork/shutdown paths require a reconciled view, and workers join before raw forks or destruction. Dedicated correctness checks exercise these boundaries. Barriers can stall foreground work and erase the benefit of short bursts of eligible commands.
 
 The budget bounds admitted requested bytes for directory records, copied keys, values and task/result storage, including their allocation headers. Owned records and values remain charged between jobs until a barrier reclaims them; zero pending jobs does not imply zero pool memory. Coordinator ready-ticket bookkeeping is accounted separately and sits outside that pool cap. It is not a process-RSS limit. Old legacy copies and current worker values coexist until reconciliation; reply references may retain overwritten values, and libc can retain freed heap allocations afterward. Consequently RSS can grow temporarily and remain elevated after the pool drains. Database storage, socket buffers, thread resources and allocator overhead have their own costs.
 
-`INFO server` adds these observations for the new stage. INFO itself takes the legacy barrier, so pending jobs, records and pool bytes describe the post-drain state rather than live occupancy. Their presence does not imply that this unverified path has been qualified.
+`INFO server` adds these observations for the keyspace path. INFO itself takes the legacy barrier, so pending jobs, records and pool bytes describe the post-drain state rather than live occupancy.
 
 | Field | Meaning |
 | --- | --- |
@@ -37,7 +37,18 @@ The budget bounds admitted requested bytes for directory records, copied keys, v
 
 Command latency/statistics include queueing and coordinator completion delay. Distinct worker IDs and measured CPU activity would be needed to establish CPU parallelism; neither counters nor service wall time provide that evidence on their own.
 
-The source has not yet been built, exercised, checked under sanitizers or compared with its compatibility baseline. The existing LCS tools below do not constitute tests or a benchmark of this keyspace path. Broader worker execution of commands and features remains future work; distributed management is still a separate layer.
+## Keyspace correctness checks
+
+Ten native ownership tests pass in strict debug, ASan with leak detection and TSan. They exercise FIFO histories, immutable GET references across later SETs, bounded outstanding jobs, rejection, allocation/refcount reclamation and pause/stop/restart. The dedicated 20-case external driver passes against release, address-sanitized and thread-sanitized servers.
+
+```sh
+odin test src/keyspace -debug -vet -strict-style -define:ODIN_TEST_THREADS=1
+python3 -I test/threading/keyspace.py
+```
+
+The driver covers binary/empty values, storage boundaries, pipeline/RESP/database order, reply suppression, half-close, disconnected writes, counters, TTL/type/SET-option fallbacks, read-only import and No-Touch behavior. It also checks ACL/renamed commands, transactions/WATCH, tracking/notifications/monitoring, blocking/pause/memory policies, rejected admissions, memcached, RDB saves/forks/reloads and automatic saves, AOF enable/rewrite/restart/disable, and shutdown persistence. It uses isolated localhost servers and temporary data directories. `--server /path/to/eski` selects a binary; otherwise `ESKI_THREADING_BIN` or `bin/eski` is used. `--case 'test_*snapshot*'` selects a method glob. The package runner includes this driver once per run and never starts a benchmark.
+
+The current default configuration preserves all 1,504 Tcl baseline passes with zero regressions; the expanded run still has the existing 20 failures. The full package gate passes all 90 runs. Smoke passes all 2,428 checks with workers disabled and with two workers enabled. Both configurations preserve all 1,504 Tcl baseline passes with zero regressions, while retaining the existing 20 expanded failures. The dedicated passes cover the executed correctness and lifetime checks; they do not establish throughput or universal race safety. Broader worker execution of commands and features remains future work, and distributed management is a separate layer.
 
 ## LCS compute workers
 
@@ -157,4 +168,4 @@ Clients are independent Python processes with explicit affinities; this tool mea
 
 `--require-parallel` requires a valid multi-worker LCS case with positive CPU time in at least two compute thread IDs and summed compute CPU above one core. A multi-worker timed case using synchronous fallback is excluded. Ratios compare matching workloads with the baseline; client limits can distort either measurement, so the ratio is an observed value rather than a lower bound on engine scaling. Summaries keep per-workload medians/ranges and exclusions separate. There is no overall score. The historical [benchmark tables](benchmarks.md) remain a separate experiment.
 
-The LCS comparison measures snapshot computation, not the unverified GET/plain SET stage above. Broader worker execution still requires multi-key scheduling, transaction atomicity and coordinated expiry/eviction/persistence designs. No distributed control plane is implemented here. See the [roadmap](../ROADMAP.md).
+The LCS comparison measures snapshot computation and supplies no GET/plain SET speedup result. Broader worker execution still requires multi-key scheduling, transaction atomicity and coordinated expiry/eviction/persistence designs. No distributed control plane is implemented here. See the [roadmap](../ROADMAP.md).

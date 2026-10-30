@@ -6,6 +6,12 @@ PORT="${ESKI_SMOKE_PORT:-6399}"
 IMAGE="${ESKI_REDIS_IMAGE:-docker.io/library/redis:7}"
 EXTERNAL="${ESKI_SMOKE_EXTERNAL:-0}"
 BENCH="${ESKI_SMOKE_BENCH:-0}"
+KEYSPACE_THREADS="${ESKI_SMOKE_KEYSPACE_THREADS:-0}"
+BINARY="${ESKI_SMOKE_BINARY:-./bin/eski}"
+if [ -n "${ESKI_SMOKE_BINARY:-}" ] && [ ! -x "$BINARY" ]; then
+	printf 'ESKI_SMOKE_BINARY is not executable: %s\n' "$BINARY" >&2
+	exit 1
+fi
 PASS=0
 FAIL=0
 SERVER_PID=""
@@ -164,42 +170,42 @@ else
 fi
 
 if [ "$EXTERNAL" != "1" ]; then
-	if [ ! -x bin/eski ]; then
+	if [ ! -x "$BINARY" ]; then
 		./build.sh || exit 1
 	fi
-	./bin/eski --port "$PORT" --enable-debug-command yes --dir "$PERSIST_DIR" --memcached-port "$MC_PORT" >"$LOG" 2>&1 &
+	"$BINARY" --port "$PORT" --enable-debug-command yes --dir "$PERSIST_DIR" --memcached-port "$MC_PORT" --keyspace-threads "$KEYSPACE_THREADS" >"$LOG" 2>&1 &
 	SERVER_PID=$!
 fi
 
-storage_server_check="$(python3 -I test/storage/server.py --server bin/eski --port "${ESKI_STORAGE_PORT:-$((PORT + 20))}" 2>&1)"
+storage_server_check="$(python3 -I test/storage/server.py --server "$BINARY" --port "${ESKI_STORAGE_PORT:-$((PORT + 20))}" 2>&1)"
 if [ "$?" -eq 0 ]; then
 	pass
 else
 	fail "storage memory reports and persistence" "all bounded server regressions pass" "$storage_server_check"
 fi
 
-hash_idle_check="$(python3 -I test/hashtype/idle.py --server bin/eski --port "${ESKI_HASH_IDLE_PORT:-$((PORT + 21))}" 2>&1)"
+hash_idle_check="$(python3 -I test/hashtype/idle.py --server "$BINARY" --port "${ESKI_HASH_IDLE_PORT:-$((PORT + 21))}" 2>&1)"
 if [ "$?" -eq 0 ]; then
 	pass
 else
 	fail "idle hash member migration" "hashes finish bounded quiet work with expiry disabled" "$hash_idle_check"
 fi
 
-set_idle_check="$(python3 -I test/settype/idle.py --server bin/eski --port "${ESKI_SET_IDLE_PORT:-$((PORT + 22))}" 2>&1)"
+set_idle_check="$(python3 -I test/settype/idle.py --server "$BINARY" --port "${ESKI_SET_IDLE_PORT:-$((PORT + 22))}" 2>&1)"
 if [ "$?" -eq 0 ]; then
 	pass
 else
 	fail "idle set member migration" "sets in nonzero databases finish quiet work with expiry disabled" "$set_idle_check"
 fi
 
-zset_idle_check="$(python3 -I test/zsettype/idle.py --server bin/eski --port "${ESKI_ZSET_IDLE_PORT:-$((PORT + 23))}" 2>&1)"
+zset_idle_check="$(python3 -I test/zsettype/idle.py --server "$BINARY" --port "${ESKI_ZSET_IDLE_PORT:-$((PORT + 23))}" 2>&1)"
 if [ "$?" -eq 0 ]; then
 	pass
 else
 	fail "idle zset dictionary migration" "multiple zsets finish quiet work in nonzero databases with expiry disabled" "$zset_idle_check"
 fi
 
-slab_server_check="$(python3 -I test/slab/server.py --server bin/eski --port "${ESKI_SLAB_PORT:-$((PORT + 24))}" 2>&1)"
+slab_server_check="$(python3 -I test/slab/server.py --server "$BINARY" --port "${ESKI_SLAB_PORT:-$((PORT + 24))}" 2>&1)"
 if [ "$?" -eq 0 ]; then
 	pass
 else
@@ -505,9 +511,9 @@ expect "active expiry visits database 7" "0" -n 7 dbsize
 expect "active expiry visits database 12" "1" -n 12 dbsize
 expect_match "info keyspace drops emptied databases" $'^# Keyspace\r?\ndb12:keys=1,expires=1,avg_ttl=[0-9]+,subexpiry=0\r?$' info keyspace
 expect "flushall after active expiry" "OK" flushall
-if [ -x bin/eski ]; then
+if [ -x "$BINARY" ]; then
 	for bad in 0:"argument must be between 1 and 2147483647 inclusive" 1025:"eski supports at most 1024 databases" x:"argument couldn't be parsed into an integer"; do
-		got="$(./bin/eski --port "$PORT" --databases "${bad%%:*}" 2>&1)"
+		got="$("$BINARY" --port "$PORT" --databases "${bad%%:*}" 2>&1)"
 		rc=$?
 		want="$(printf '\n*** FATAL CONFIG FILE ERROR (eski 0.1.0) ***\nReading the configuration file, at line 3\n>>> '"'"'databases "%s"'"'"'\n%s' "${bad%%:*}" "${bad#*:}")"
 		if [ "$rc" == "1" ] && [ "$got" == "$want" ]; then pass; else fail "databases option rejects ${bad%%:*}" "exit 1 with $want" "$rc $got"; fi
@@ -3836,7 +3842,7 @@ expect_acl_files() {
 	hash="$(printf 'alicepw' | sha256sum | cut -d' ' -f1)"
 	printf 'user alice on #%s ~a* &chan -@all +get +set\nuser bob off nopass resetchannels (+get ~b*) (+set %%W~w*)\nuser default on nopass ~* &* +@all\n' "$hash" >"$adir/eski/users.acl"
 	cp "$adir/eski/users.acl" "$adir/ref/users.acl"
-	./bin/eski --port "$jport" --dir "$adir/eski" --aclfile users.acl >>"$LOG" 2>&1 &
+	"$BINARY" --port "$jport" --dir "$adir/eski" --aclfile users.acl >>"$LOG" 2>&1 &
 	jpid=$!
 	if ! docker run -d --rm --name "$name" --network=host --user "$(id -u):$(id -g)" -v "$adir/ref:/data" "$IMAGE" redis-server --port "$rport" --dir /data --aclfile users.acl --save "" --appendonly no >/dev/null; then
 		fail "reference Redis with an ACL file" "container started" "docker run failed"
@@ -3871,7 +3877,7 @@ expect_acl_files() {
 	docker rm -f "$name" >/dev/null 2>&1
 	printf 'requirepass secret\nuser dave on >pw ~d* +@read\nuser eve off nopass (+get ~e*)\n' >"$adir/eski/acl.conf"
 	cp "$adir/eski/acl.conf" "$adir/ref/acl.conf"
-	./bin/eski "$adir/eski/acl.conf" --port "$jport" --dir "$adir/eski" >>"$LOG" 2>&1 &
+	"$BINARY" "$adir/eski/acl.conf" --port "$jport" --dir "$adir/eski" >>"$LOG" 2>&1 &
 	jpid=$!
 	if docker run -d --rm --name "$name" --network=host --user "$(id -u):$(id -g)" -v "$adir/ref:/data" "$IMAGE" redis-server /data/acl.conf --port "$rport" --dir /data --save "" --appendonly no >/dev/null; then
 		acl_wait "$jport" -a secret --no-auth-warning
@@ -3888,7 +3894,7 @@ expect_acl_files() {
 	printf 'user alice on +nocmd\n' >"$adir/eski/bad.acl"
 	cp "$adir/eski/bad.acl" "$adir/ref/bad.acl"
 	for args in "3|--user foo on badrule" "3|--user foo on --user foo off" "3|--user default on --user default off" "3|--user foo (on" "3|--user" "2|--user foo on +nocmd" "1|--aclfile bad.acl" "1|--aclfile bad.acl --user foo on" "1|--aclfile nofile.acl"; do
-		got="$(timeout 5 ./bin/eski --port "$jport" --dir "$adir/eski" ${args#*|} 2>&1 | acl_log_tail "${args%%|*}")"
+		got="$(timeout 5 "$BINARY" --port "$jport" --dir "$adir/eski" ${args#*|} 2>&1 | acl_log_tail "${args%%|*}")"
 		want="$(timeout 20 docker run --rm --network=none --user "$(id -u):$(id -g)" -v "$adir/ref:/data" "$IMAGE" redis-server --port 0 --dir /data ${args#*|} 2>&1 | grep -v 'Configured to not listen anywhere' | acl_log_tail "${args%%|*}")"
 		acl_same "startup with ${args#*|}" "$want" "$got"
 	done
@@ -3904,6 +3910,10 @@ MASKED = {"port", "dir", "bind"}
 COMPUTE_DEFAULTS = {"compute-threads": b"0", "compute-max-memory": b"134217728"}
 COMPUTE_INFO = ("compute_threads_configured", "compute_threads_active", "compute_jobs_pending", "compute_memory_reserved",
                 "compute_jobs_submitted", "compute_jobs_completed", "compute_jobs_cancelled", "compute_sync_fallbacks", "compute_worker_nanoseconds")
+KEYSPACE_DEFAULTS = {"keyspace-threads": str(int(sys.argv[4])).encode(), "keyspace-max-memory": b"134217728"}
+KEYSPACE_INFO = ("keyspace_threads_configured", "keyspace_threads_active", "keyspace_jobs_pending", "keyspace_memory_used",
+                 "keyspace_records", "keyspace_jobs_submitted", "keyspace_jobs_completed", "keyspace_gets", "keyspace_sets",
+                 "keyspace_sync_fallbacks", "keyspace_barriers", "keyspace_worker_nanoseconds")
 SKIP_SET = {"port", "dir", "bind", "requirepass", "masterauth"}
 PROBES = ["abc", "-1", "-9223372036854775808", "9223372036854775807", "18446744073709551615",
           "99999999999999999999", "", "1%", "-5%", "0", "1k", "1kb", "yes", "no", "100 10", "normal 1 2 3"]
@@ -3972,23 +3982,25 @@ j, r = Conn(ESKI), Conn(REF)
 failures = []
 checks = 0
 compute_config = {}
-for name, default in COMPUTE_DEFAULTS.items():
+for name, default in (COMPUTE_DEFAULTS | KEYSPACE_DEFAULTS).items():
     checks += 1
     actual = j.cmd("config", "get", name)
     if not isinstance(actual, list) or len(actual) != 2 or actual[0] != name.encode() or not isinstance(actual[1], bytes) or not actual[1].isdigit():
         failures.append("Eski CONFIG GET %s has invalid metadata: %r" % (name, actual))
         continue
     compute_config[name] = int(actual[1])
-    if sys.argv[3] != "1" and actual[1] != default:
+    if (sys.argv[3] != "1" or name == "keyspace-threads") and actual[1] != default:
         failures.append("Eski CONFIG GET %s default: expected %r observed %r" % (name, default, actual[1]))
 server_fields = [line.split(b":", 1) for line in j.cmd("info", "server").splitlines() if b":" in line]
-for name in COMPUTE_INFO:
+for name in COMPUTE_INFO + KEYSPACE_INFO:
     checks += 1
     values = [value for key, value in server_fields if key == name.encode()]
     if len(values) != 1 or not values[0].isdigit():
         failures.append("Eski INFO %s must occur once with a nonnegative integer: %r" % (name, values))
     elif name == "compute_threads_configured" and int(values[0]) != compute_config.get("compute-threads"):
         failures.append("Eski INFO compute_threads_configured disagrees with CONFIG GET compute-threads")
+    elif name == "keyspace_threads_configured" and int(values[0]) != compute_config.get("keyspace-threads"):
+        failures.append("Eski INFO keyspace_threads_configured disagrees with CONFIG GET keyspace-threads")
 names = sorted(as_dict(r.cmd("config", "get", "*"))[1].keys())
 for pat in PATTERNS + [[n] for n in names] + [[n.upper()] for n in names[:20]] + [[h] for h in HIDDEN]:
     checks += 1
@@ -4026,7 +4038,7 @@ PY
 
 expect_config_parity() {
 	local got
-	got="$(timeout 300 python3 -I -c "$CONFIG_PY" "$PORT" "$REF_PORT" "$EXTERNAL" 2>&1)"
+	got="$(timeout 300 python3 -I -c "$CONFIG_PY" "$PORT" "$REF_PORT" "$EXTERNAL" "$KEYSPACE_THREADS" 2>&1)"
 	if [ $? -eq 0 ]; then pass; else fail "CONFIG GET and SET of every parameter match redis" "no differences" "$got"; fi
 }
 
@@ -4040,7 +4052,7 @@ expect_config_files() {
 	mkdir -p "$cdir/eski" "$cdir/ref"
 	printf '# written by the smoke test\nport %s\n\nmaxmemory 100mb\nsave 900 1\nsave 300 10\nhash-max-ziplist-entries 20\nrename-command flushdb badger\ninclude %s\n' "$cport" "$cdir/eski/inc.conf" >"$cdir/eski/eski.conf"
 	printf 'hz 20\n' >"$cdir/eski/inc.conf"
-	./bin/eski "$cdir/eski/eski.conf" --dir "$cdir/eski" >>"$LOG" 2>&1 &
+	"$BINARY" "$cdir/eski/eski.conf" --dir "$cdir/eski" >>"$LOG" 2>&1 &
 	cpid=$!
 	for _ in $(seq 1 50); do
 		[ "$(docker exec "$CLI_CONTAINER" redis-cli -p "$cport" ping 2>&1)" == "PONG" ] && break
@@ -4068,7 +4080,7 @@ expect_config_files() {
 		want="$(config_conf_value "$rport")"
 		docker rm -f "$name" >/dev/null 2>&1
 		sed -i '/^dir /d' "$cdir/ref/from-eski.conf"
-		./bin/eski "$cdir/ref/from-eski.conf" --port "$cport" --dir "$cdir/eski" >>"$LOG" 2>&1 &
+		"$BINARY" "$cdir/ref/from-eski.conf" --port "$cport" --dir "$cdir/eski" >>"$LOG" 2>&1 &
 		cpid=$!
 		for _ in $(seq 1 50); do
 			[ "$(docker exec "$CLI_CONTAINER" redis-cli -p "$cport" ping 2>&1)" == "PONG" ] && break
@@ -7616,7 +7628,7 @@ CMDS
 			printf 'CONFIG SET slowlog-log-slower-than 10000\nCONFIG SET slowlog-max-len 128\nCONFIG SET latency-monitor-threshold 0\nCONFIG SET latency-tracking yes\nFLUSHALL\nSLOWLOG RESET\nLATENCY RESET\nCONFIG RESETSTAT\n' | ref_pipe >/dev/null
 		}
 		info_layout() {
-			docker exec "$CLI_CONTAINER" redis-cli -p "$1" info "${@:2}" 2>&1 | tr -d '\r' | awk -F: -v keep=" $info_stat_values " -v extra=" eski_version compute_threads_configured compute_threads_active compute_jobs_pending compute_memory_reserved compute_jobs_submitted compute_jobs_completed compute_jobs_cancelled compute_sync_fallbacks compute_worker_nanoseconds " '/^#/ || $0 == "" { print; next } index(extra, " " $1 " ") || $1 ~ /^(cmdstat_|errorstat_|latency_percentiles_usec_)/ { next } index(keep, " " $1 " ") { print; next } { print $1 }'
+			docker exec "$CLI_CONTAINER" redis-cli -p "$1" info "${@:2}" 2>&1 | tr -d '\r' | awk -F: -v keep=" $info_stat_values " -v extra=" eski_version compute_threads_configured compute_threads_active compute_jobs_pending compute_memory_reserved compute_jobs_submitted compute_jobs_completed compute_jobs_cancelled compute_sync_fallbacks compute_worker_nanoseconds keyspace_threads_configured keyspace_threads_active keyspace_jobs_pending keyspace_memory_used keyspace_records keyspace_jobs_submitted keyspace_jobs_completed keyspace_gets keyspace_sets keyspace_sync_fallbacks keyspace_barriers keyspace_worker_nanoseconds " '/^#/ || $0 == "" { print; next } index(extra, " " $1 " ") || $1 ~ /^(cmdstat_|errorstat_|latency_percentiles_usec_)/ { next } index(keep, " " $1 " ") { print; next } { print $1 }'
 		}
 		info_headers() {
 			docker exec "$CLI_CONTAINER" redis-cli -p "$1" info "${@:2}" 2>&1 | tr -d '\r' | grep '^#'
@@ -7912,7 +7924,7 @@ restart_eski() {
 	if [ -n "$SERVER_PID" ]; then
 		wait "$SERVER_PID" 2>/dev/null
 	fi
-	./bin/eski --port "$PORT" --enable-debug-command yes --dir "$PERSIST_DIR" --memcached-port "$MC_PORT" >>"$LOG" 2>&1 &
+	"$BINARY" --port "$PORT" --enable-debug-command yes --dir "$PERSIST_DIR" --memcached-port "$MC_PORT" --keyspace-threads "$KEYSPACE_THREADS" >>"$LOG" 2>&1 &
 	SERVER_PID=$!
 	for _ in $(seq 1 100); do
 		if [ "$(cli ping)" == "PONG" ]; then
@@ -8064,7 +8076,7 @@ if [ "$EXTERNAL" != "1" ]; then
 			cli shutdown >/dev/null 2>&1
 		fi
 		wait "$SERVER_PID" 2>/dev/null
-		./bin/eski --port "$PORT" --enable-debug-command yes --dir "$PERSIST_DIR" --memcached-port "$MC_PORT" "$@" >>"$LOG" 2>&1 &
+		"$BINARY" --port "$PORT" --enable-debug-command yes --dir "$PERSIST_DIR" --memcached-port "$MC_PORT" --keyspace-threads "$KEYSPACE_THREADS" "$@" >>"$LOG" 2>&1 &
 		SERVER_PID=$!
 		for _ in $(seq 1 100); do
 			if [ "$(cli ping)" == "PONG" ]; then
@@ -8218,7 +8230,7 @@ fi
 if [ -n "$MIGRATE_REF_OUTPUT" ]; then
 	echo "migrate: eski into a second eski on port $MIGRATE_PORT"
 	mkdir -p "$PERSIST_DIR/second"
-	./bin/eski --port "$MIGRATE_PORT" --enable-debug-command yes --bind 127.0.0.1 --dir "$PERSIST_DIR/second" >>"$LOG" 2>&1 &
+	"$BINARY" --port "$MIGRATE_PORT" --enable-debug-command yes --bind 127.0.0.1 --dir "$PERSIST_DIR/second" --keyspace-threads "$KEYSPACE_THREADS" >>"$LOG" 2>&1 &
 	MIGRATE_PID=$!
 	up=0
 	for _ in $(seq 1 100); do

@@ -103,6 +103,8 @@ for script in test/*/run.py; do
 	fi
 done
 
+run_script "test/threading/keyspace.py" "keyspace"
+
 if [ "$ran" -eq 0 ]; then
 	echo "no test packages found yet"
 else

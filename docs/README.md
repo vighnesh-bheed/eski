@@ -24,7 +24,7 @@ Start with [build, run and test](build-run-test.md) and [architecture](architect
 | Topic | Page |
 | --- | --- |
 | RESP, connections and client controls | [Connections and protocol](connections-and-protocol.md) |
-| Optional LCS compute workers and unverified GET/plain SET workers | [Threading](threading.md) |
+| Optional LCS compute workers and guarded GET/plain SET workers | [Threading](threading.md) |
 | Configuration, introspection, memory limits and eviction | [Server management](server.md) |
 | Users, selectors, key patterns and authentication | [ACL](acl.md) |
 | Snapshots, append-only files and payload transfer | [Persistence](persistence.md) |
@@ -32,6 +32,6 @@ Start with [build, run and test](build-run-test.md) and [architecture](architect
 
 The [roadmap](../ROADMAP.md) states the verification conditions and the work still ahead. Performance tables describe the committed run, with its exclusions and client limits; conformance baseline success means its recorded passing tests were preserved. Neither result is an unrestricted compatibility or deployment-safety claim.
 
-The new default-disabled keyspace-worker source is uncompiled and untested. Its guarded GET/plain SET path is separate from the previously qualified LCS stage, and no recorded conformance or performance result validates the new changes.
+The default-disabled keyspace-worker path has passed native ownership tests and its dedicated external correctness driver, including sanitizer runs. The full package gate, smoke and baseline compatibility checks also pass with workers disabled and enabled. Its guarded GET/plain SET scope is separate from the previously qualified LCS stage; no keyspace-worker performance result is claimed.
 
 Eski is licensed under [Apache-2.0](../LICENSE). Third-party components retain their own terms; see [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
