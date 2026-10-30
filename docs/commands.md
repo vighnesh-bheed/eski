@@ -1,8 +1,8 @@
 # Command inventory
 
-Generated from a temporary instance of the built executable using `COMMAND DOCS`, `COMMAND LIST` and `COMMAND COUNT`. The inventory contains 229 top-level commands and 319 names including subcommands. Metadata describes the protocol surface; the [command-group pages](README.md) and [conformance record](conformance.md) define implemented behavior and remaining gaps. Registered compatibility entries for excluded execution features do not provide scripting, replication or clustering.
+Generated from a temporary instance of the built executable using `COMMAND DOCS`, `COMMAND LIST` and `COMMAND COUNT`. The inventory contains 234 top-level commands and 330 names including subcommands. Metadata describes the protocol surface; the [command-group pages](README.md) and [conformance record](conformance.md) define implemented behavior and remaining gaps. Lua evaluation has the scope documented in [scripting](scripting.md); compatibility entries do not provide executable function libraries, replication or clustering.
 
-Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test/readme_tables.py --check`. Use `--server HOST:PORT` to inspect an existing instance without starting one. The canonical command-metadata SHA256 is `2ecd2aa75ebc99420ed0e30ba2a2ee07c1ed748b1c049c2300bfa56bc64c2142`.
+Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test/readme_tables.py --check`. Use `--server HOST:PORT` to inspect an existing instance without starting one. The canonical command-metadata SHA256 is `67ac9bba0a0dd54e31f76b176837bf2dcb4dd893238b3132b72793bc0716e4ae`.
 
 ## Bitmap
 
@@ -192,6 +192,10 @@ Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test
 
 | Command | Arguments | Metadata summary |
 | --- | --- | --- |
+| `EVAL` | `<script> <numkeys> [<key> ...] [<arg> ...]` | Executes a server-side Lua script. |
+| `EVAL_RO` | `<script> <numkeys> [<key> ...] [<arg> ...]` | Executes a read-only server-side Lua script. |
+| `EVALSHA` | `<sha1> <numkeys> [<key> ...] [<arg> ...]` | Executes a server-side Lua script by SHA1 digest. |
+| `EVALSHA_RO` | `<sha1> <numkeys> [<key> ...] [<arg> ...]` | Executes a read-only server-side Lua script by SHA1 digest. |
 | `FUNCTION` | — | Compatibility entry; excluded execution features remain unavailable. A container for function commands. |
 | `FUNCTION DELETE` | `<library-name>` | Compatibility entry; excluded execution features remain unavailable. Deletes a library and its functions. |
 | `FUNCTION DUMP` | — | Compatibility entry; excluded execution features remain unavailable. Dumps all libraries into a serialized binary payload. |
@@ -202,6 +206,13 @@ Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test
 | `FUNCTION LOAD` | `[REPLACE] <function-code>` | Compatibility entry; excluded execution features remain unavailable. Creates a library. |
 | `FUNCTION RESTORE` | `<serialized-value> [(FLUSH \| APPEND \| REPLACE)]` | Compatibility entry; excluded execution features remain unavailable. Restores all libraries from a payload. |
 | `FUNCTION STATS` | — | Compatibility entry; excluded execution features remain unavailable. Returns information about a function during execution. |
+| `SCRIPT` | — | A container for Lua scripts management commands. |
+| `SCRIPT DEBUG` | `(YES \| SYNC \| NO)` | Unsupported subcommand; script debugging is unavailable. Sets the debug mode of server-side Lua scripts. |
+| `SCRIPT EXISTS` | `<sha1> ...` | Determines whether server-side Lua scripts exist in the script cache. |
+| `SCRIPT FLUSH` | `[(ASYNC \| SYNC)]` | Removes all server-side Lua scripts from the script cache. |
+| `SCRIPT HELP` | — | Returns helpful text about the different subcommands. |
+| `SCRIPT KILL` | — | Terminates a server-side Lua script during execution. |
+| `SCRIPT LOAD` | `<script>` | Loads a server-side Lua script to the script cache. |
 
 ## Server
 

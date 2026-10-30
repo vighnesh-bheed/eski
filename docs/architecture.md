@@ -40,7 +40,7 @@ EVAL-style scripting embeds a pinned Lua 5.5.1 C VM behind the Odin host's binar
 
 The coordinator reconciles keyspace workers before entry and runs admitted inner commands synchronously through a dedicated reply capture. Callbacks reuse actual caller ACL, key hooks, tracking, statistics and translated AOF effects without recursively dispatching on the live source connection. Expiry checks retain frozen command time, including inside EXEC, while TIME reports wall-clock time. Other ordinary commands, maintenance and blocked consumers cannot interleave; restricted BUSY service can authenticate clients and process cancellation/no-save abort requests. Connection activity retains real wall time without advancing the expiry clock.
 
-Successful inner writes survive later errors and join one AOF effect group, including scripts inside MULTI. Fresh library tables, text-only loading, unavailable loaders/metatables/finalizers, bounded allocation/output/depth and sticky terminal failures limit the runtime surface. Hooks remain cooperative and scripts consume foreground time. See [scripting](scripting.md) for the supported API, Lua 5.5/5.1 differences, cancellation policy and pending combined qualification.
+Successful inner writes survive later errors and join one AOF effect group, including scripts inside MULTI. Fresh library tables, text-only loading, unavailable loaders/metatables/finalizers, bounded allocation/output/depth and sticky terminal failures limit the runtime surface. Hooks remain cooperative and scripts consume foreground time. See [scripting](scripting.md) for the supported API, Lua 5.5/5.1 differences, cancellation policy and verification results.
 
 ## Keyspace and values
 

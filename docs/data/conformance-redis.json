@@ -39,16 +39,12 @@
     "expire::RANDOMKEY: Lazy-expire should not be wrapped in MULTI/EXEC",
     "expire::SCAN: Lazy-expire should not be wrapped in MULTI/EXEC",
     "info::memory: database and pubsub overhead and rehashing dict count",
-    "introspection-2::COMMAND LIST FILTERBY ACLCAT - list all commands/subcommands",
     "introspection-2::COMMAND LIST FILTERBY PATTERN - list all commands/subcommands",
     "other::Coverage: HELP commands",
     "pause::Test RO scripts are not blocked by pause RO",
     "pause::Test both active and passive expires are skipped during client pause",
     "pause::Test may-replicate commands are rejected in RO scripts",
-    "pause::Test read-only scripts in multi-exec are not blocked by pause RO",
-    "pause::Test scripts are blocked by pause RO",
     "pause::Test the randomkey command will not cause the server to get into an infinite loop during the client pause write",
-    "pause::Test write scripts in multi-exec are blocked by pause RO",
     "querybuf::query buffer resized correctly",
     "querybuf::query buffer resized correctly when not idle",
     "querybuf::query buffer resized correctly with fat argv",
@@ -57,10 +53,10 @@
     "type/list::MULTI + LPUSH + EXPIRE + DEBUG SLEEP on blocked client, key already expired",
     "type/list::SWAPDB wants to wake blocked client, but the key already expired"
   ],
-  "generated_at": "2026-10-30T02:13:07Z",
+  "generated_at": "2026-10-30T21:11:48Z",
   "schema": "eski-docs-conformance-v1",
   "source_mode": "baseline",
-  "source_summary_sha256": "27807119d282c5852b116cbe10695404c03a7dcbc280978e798efef46d9fc9b9",
+  "source_summary_sha256": "759182ac6d1882772ad9ec1b02201ee41a24cbb88f1473f67df30b1b4e946720",
   "suite": {
     "external_skip_lifted": "tests/unit/type/hash-field-expire.tcl:59,886,998 tests/unit/maxmemory.tcl:1,146,430,593 tests/unit/memefficiency.tcl:27 tests/unit/info.tcl:26,503 tests/unit/acl.tcl:1 tests/unit/acl-v2.tcl:1 tests/unit/auth.tcl:1,13",
     "name": "redis",
@@ -71,8 +67,8 @@
   },
   "totals": {
     "errored": 0,
-    "failed": 20,
-    "passed": 2047,
+    "failed": 16,
+    "passed": 2051,
     "skipped": 151,
     "units_run": 43
   },
@@ -180,20 +176,15 @@
     },
     "introspection-2": {
       "errored": 0,
-      "failed": 2,
+      "failed": 1,
       "failures": [
         {
-          "category": "excluded feature",
-          "reason": "The test expects excluded scripting or cluster command registrations.",
-          "test": "COMMAND LIST FILTERBY ACLCAT - list all commands/subcommands"
-        },
-        {
-          "category": "excluded feature",
-          "reason": "The test expects excluded scripting or cluster command registrations.",
+          "category": "compatibility gap",
+          "reason": "The recorded command inventory differs; inspect the named assertion and the remaining function/cluster exclusions.",
           "test": "COMMAND LIST FILTERBY PATTERN - list all commands/subcommands"
         }
       ],
-      "passed": 40,
+      "passed": 41,
       "skipped": 5
     },
     "keyspace": {
@@ -267,31 +258,16 @@
     },
     "pause": {
       "errored": 0,
-      "failed": 7,
+      "failed": 4,
       "failures": [
         {
           "category": "excluded feature",
-          "reason": "The test requires scripting or executable function libraries, which are excluded.",
-          "test": "Test scripts are blocked by pause RO"
-        },
-        {
-          "category": "excluded feature",
-          "reason": "The test requires scripting or executable function libraries, which are excluded.",
+          "reason": "The test requires executable function libraries, which are excluded.",
           "test": "Test RO scripts are not blocked by pause RO"
         },
         {
-          "category": "excluded feature",
-          "reason": "The test requires scripting or executable function libraries, which are excluded.",
-          "test": "Test read-only scripts in multi-exec are not blocked by pause RO"
-        },
-        {
-          "category": "excluded feature",
-          "reason": "The test requires scripting or executable function libraries, which are excluded.",
-          "test": "Test write scripts in multi-exec are blocked by pause RO"
-        },
-        {
-          "category": "excluded feature",
-          "reason": "The test requires scripting or executable function libraries, which are excluded.",
+          "category": "compatibility gap",
+          "reason": "The test exercises Lua scripting; this recorded assertion remains a compatibility gap.",
           "test": "Test may-replicate commands are rejected in RO scripts"
         },
         {
@@ -305,7 +281,7 @@
           "test": "Test the randomkey command will not cause the server to get into an infinite loop during the client pause write"
         }
       ],
-      "passed": 11,
+      "passed": 14,
       "skipped": 1
     },
     "protocol": {
@@ -378,8 +354,8 @@
       "failed": 1,
       "failures": [
         {
-          "category": "excluded feature",
-          "reason": "The test requires scripting or executable function libraries, which are excluded.",
+          "category": "compatibility gap",
+          "reason": "The test exercises Lua scripting; this recorded assertion remains a compatibility gap.",
           "test": "SORT sorted set BY nosort works as expected from scripts"
         }
       ],

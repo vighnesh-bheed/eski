@@ -3,7 +3,7 @@
 ![Conformance baseline](docs/img/conformance.svg)
 ![Recorded benchmark ratio](docs/img/benchmark-ratio.svg)
 
-Eski is a free and open source in-memory data store for a single machine, with an Odin host and an embedded C Lua runtime, accessed through the Redis protocol. It implements strings, hashes with field expiry, lists, sets, sorted sets, geospatial operations, bitmaps, HyperLogLog, streams, pub/sub, transactions, persistence, Lua evaluation and an optional memcached text endpoint. Executable function libraries, modules, replication, Sentinel and Cluster are outside this repository's scope. Lua uses a documented API subset; its final combined qualification is in progress. Compatibility is measured by the checks below; a baseline pass is a regression result over a recorded set of tests.
+Eski is a free and open source in-memory data store for a single machine, with an Odin host and an embedded C Lua runtime, accessed through the Redis protocol. It implements strings, hashes with field expiry, lists, sets, sorted sets, geospatial operations, bitmaps, HyperLogLog, streams, pub/sub, transactions, persistence, Lua evaluation and an optional memcached text endpoint. Executable function libraries, modules, replication, Sentinel and Cluster are outside this repository's scope. Lua uses the documented [scripting subset](docs/scripting.md). Compatibility is measured by the checks below; a baseline pass is a regression result over a recorded set of tests.
 
 ## Try it
 
@@ -22,6 +22,7 @@ redis-cli -p 6399 SET demo:message hello
 redis-cli -p 6399 GET demo:message
 redis-cli -p 6399 HSET demo:user name Ada
 redis-cli -p 6399 HGETALL demo:user
+redis-cli -p 6399 EVAL 'return redis.call("INCR",KEYS[1])' 1 demo:counter
 ```
 
 The example binds to loopback explicitly. Configure network access and [ACLs](docs/acl.md) before exposing a listener. Authentication and persistence are opt-in; [build, run and test](docs/build-run-test.md) covers compiler discovery, configuration files, containers, durability and every verification layer.
@@ -48,7 +49,7 @@ The generated tables separate the checked-in baseline from the recorded expanded
 
 <!-- BEGIN GENERATED CONFORMANCE -->
 
-The recorded gate preserves **1504 / 1504 baseline passes** across 28 compared units, with **0 regressions**. The expanded recorded run has **2047 passes, 20 failures and 151 skips** across 43 units. Its remaining failures include excluded execution features and compatibility gaps; see the [recorded results and explanations](docs/conformance.md).
+The recorded gate preserves **1504 / 1504 baseline passes** across 28 compared units, with **0 regressions**. The expanded recorded run has **2051 passes, 16 failures and 151 skips** across 43 units. Its remaining failures include excluded execution features and compatibility gaps; see the [recorded results and explanations](docs/conformance.md).
 
 | Unit | Passed | Failed | Skipped | Unit errors |
 | --- | ---: | ---: | ---: | ---: |
@@ -129,7 +130,7 @@ The following inventory is generated from the running server's `COMMAND DOCS` me
 
 <!-- BEGIN GENERATED COMMANDS -->
 
-The running executable registers **229 top-level commands** and **319 commands including subcommands**. Compatibility stubs remain subject to the exclusions above. [Arguments and metadata summaries](docs/commands.md) come from `COMMAND DOCS`; every name below is cross-checked against `COMMAND LIST`.
+The running executable registers **234 top-level commands** and **330 commands including subcommands**. Compatibility stubs remain subject to the exclusions above. [Arguments and metadata summaries](docs/commands.md) come from `COMMAND DOCS`; every name below is cross-checked against `COMMAND LIST`.
 
 | Group | Registered commands and subcommands |
 | --- | --- |
@@ -141,7 +142,7 @@ The running executable registers **229 top-level commands** and **319 commands i
 | hyperloglog | `PFADD`, `PFCOUNT`, `PFDEBUG`, `PFMERGE`, `PFSELFTEST` |
 | list | `BLMOVE`, `BLMPOP`, `BLPOP`, `BRPOP`, `BRPOPLPUSH`, `LINDEX`, `LINSERT`, `LLEN`, `LMOVE`, `LMPOP`, `LPOP`, `LPOS`, `LPUSH`, `LPUSHX`, `LRANGE`, `LREM`, `LSET`, `LTRIM`, `RPOP`, `RPOPLPUSH`, `RPUSH`, `RPUSHX` |
 | pubsub | `PSUBSCRIBE`, `PUBLISH`, `PUBSUB`, `PUBSUB CHANNELS`, `PUBSUB HELP`, `PUBSUB NUMPAT`, `PUBSUB NUMSUB`, `PUBSUB SHARDCHANNELS`, `PUBSUB SHARDNUMSUB`, `PUNSUBSCRIBE`, `SPUBLISH`, `SSUBSCRIBE`, `SUBSCRIBE`, `SUNSUBSCRIBE`, `UNSUBSCRIBE` |
-| scripting | `FUNCTION`, `FUNCTION DELETE`, `FUNCTION DUMP`, `FUNCTION FLUSH`, `FUNCTION HELP`, `FUNCTION KILL`, `FUNCTION LIST`, `FUNCTION LOAD`, `FUNCTION RESTORE`, `FUNCTION STATS` |
+| scripting | `EVAL`, `EVAL_RO`, `EVALSHA`, `EVALSHA_RO`, `FUNCTION`, `FUNCTION DELETE`, `FUNCTION DUMP`, `FUNCTION FLUSH`, `FUNCTION HELP`, `FUNCTION KILL`, `FUNCTION LIST`, `FUNCTION LOAD`, `FUNCTION RESTORE`, `FUNCTION STATS`, `SCRIPT`, `SCRIPT DEBUG`, `SCRIPT EXISTS`, `SCRIPT FLUSH`, `SCRIPT HELP`, `SCRIPT KILL`, `SCRIPT LOAD` |
 | server | `ACL`, `ACL CAT`, `ACL DELUSER`, `ACL DRYRUN`, `ACL GENPASS`, `ACL GETUSER`, `ACL HELP`, `ACL LIST`, `ACL LOAD`, `ACL LOG`, `ACL SAVE`, `ACL SETUSER`, `ACL USERS`, `ACL WHOAMI`, `BGREWRITEAOF`, `BGSAVE`, `COMMAND`, `COMMAND COUNT`, `COMMAND DOCS`, `COMMAND GETKEYS`, `COMMAND GETKEYSANDFLAGS`, `COMMAND HELP`, `COMMAND INFO`, `COMMAND LIST`, `CONFIG`, `CONFIG GET`, `CONFIG HELP`, `CONFIG RESETSTAT`, `CONFIG REWRITE`, `CONFIG SET`, `DBSIZE`, `DEBUG`, `FLUSHALL`, `FLUSHDB`, `INFO`, `LASTSAVE`, `LATENCY`, `LATENCY DOCTOR`, `LATENCY GRAPH`, `LATENCY HELP`, `LATENCY HISTOGRAM`, `LATENCY HISTORY`, `LATENCY LATEST`, `LATENCY RESET`, `MEMORY`, `MEMORY DOCTOR`, `MEMORY HELP`, `MEMORY MALLOC-STATS`, `MEMORY PURGE`, `MEMORY STATS`, `MEMORY USAGE`, `MONITOR`, `SAVE`, `SHUTDOWN`, `SLOWLOG`, `SLOWLOG GET`, `SLOWLOG HELP`, `SLOWLOG LEN`, `SLOWLOG RESET`, `SWAPDB`, `TIME` |
 | set | `SADD`, `SCARD`, `SDIFF`, `SDIFFSTORE`, `SINTER`, `SINTERCARD`, `SINTERSTORE`, `SISMEMBER`, `SMEMBERS`, `SMISMEMBER`, `SMOVE`, `SPOP`, `SRANDMEMBER`, `SREM`, `SSCAN`, `SUNION`, `SUNIONSTORE` |
 | sorted-set | `BZMPOP`, `BZPOPMAX`, `BZPOPMIN`, `ZADD`, `ZCARD`, `ZCOUNT`, `ZDIFF`, `ZDIFFSTORE`, `ZINCRBY`, `ZINTER`, `ZINTERCARD`, `ZINTERSTORE`, `ZLEXCOUNT`, `ZMPOP`, `ZMSCORE`, `ZPOPMAX`, `ZPOPMIN`, `ZRANDMEMBER`, `ZRANGE`, `ZRANGEBYLEX`, `ZRANGEBYSCORE`, `ZRANGESTORE`, `ZRANK`, `ZREM`, `ZREMRANGEBYLEX`, `ZREMRANGEBYRANK`, `ZREMRANGEBYSCORE`, `ZREVRANGE`, `ZREVRANGEBYLEX`, `ZREVRANGEBYSCORE`, `ZREVRANK`, `ZSCAN`, `ZSCORE`, `ZUNION`, `ZUNIONSTORE` |
