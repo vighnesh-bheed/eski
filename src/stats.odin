@@ -257,6 +257,15 @@ stat_slowlog :: proc(c: ^Conn, st: ^Cmd_Stats, argv: [][]u8, us: i64) {
 	slowlog_push(c, st, argv, us)
 }
 
+stat_keyspace_complete :: proc(c: ^Conn, parent: ^Cmd_Hot, argv: [][]u8, ticks: u64) {
+	us := stat_sane_us(mono_ticks_us(ticks))
+	srv.stat_commands += 1
+	stat_el_cmd_sum += us
+	stat_latency_sample(&parent.stats, us)
+	stat_record(&parent.stats, us)
+	stat_slowlog(c, &parent.stats, argv, us)
+}
+
 @(private = "file")
 stat_take_carry :: proc(c: ^Conn) -> i64 {
 	if len(stat_blocked) == 0 {

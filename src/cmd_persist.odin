@@ -466,6 +466,7 @@ persist_save_internal :: proc(filename: string) -> bool {
 }
 
 persist_rdb_save :: proc() -> bool {
+	keyspace_fence()
 	if pst.child_pid > 0 && !pst.child_aof {
 		plog(LOG_WARNING, "Background save already in progress")
 		return false
@@ -482,12 +483,14 @@ persist_rdb_save :: proc() -> bool {
 }
 
 persist_bgsave :: proc() -> bool {
+	keyspace_fence()
 	if pst.child_pid > 0 {
 		return false
 	}
 	pst.dirty_before_bgsave = pst.dirty
 	pst.lastbgsave_try = persist_unix_now()
 	persist_progress_prepare()
+	keyspace_before_fork()
 	compute_before_fork()
 	start := now_ns()
 	pid, err := linux.fork()
@@ -1203,6 +1206,7 @@ persist_ll_hex16 :: proc "contextless" (l: ^Log_Line, v: u64) {
 }
 
 persist_rdb_load :: proc(merge: bool, at_startup: bool) -> Load_Result {
+	keyspace_fence()
 	name := persist_filename()
 	pbuf: [PERSIST_PATH_MAX]u8
 	fd, err := linux.open(persist_cstr(name, pbuf[:]), {.CLOEXEC})
@@ -1265,6 +1269,7 @@ Shutdown_Flag :: enum u8 {
 Shutdown_Flags :: bit_set[Shutdown_Flag;u8]
 
 persist_finish_shutdown :: proc(flags: Shutdown_Flags) -> bool {
+	keyspace_shutdown()
 	compute_shutdown()
 	server_close_listeners()
 	remove_pid_file()
@@ -1273,6 +1278,7 @@ persist_finish_shutdown :: proc(flags: Shutdown_Flags) -> bool {
 }
 
 persist_prepare_shutdown :: proc(flags_in: Shutdown_Flags) -> bool {
+	keyspace_fence()
 	flags := flags_in
 	if pst.loading {
 		flags += {.Nosave}
@@ -1318,6 +1324,7 @@ persist_signal_flags :: proc(sig: i32) -> Shutdown_Flags {
 }
 
 persist_cron :: proc() {
+	keyspace_collect()
 	if pending := intrinsics.atomic_load_explicit(&persist_sig_pending, .Acquire); pending != 0 {
 		sig := intrinsics.atomic_load_explicit(&persist_sig_last, .Acquire)
 		persist_signal_log(sig)

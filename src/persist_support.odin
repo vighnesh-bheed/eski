@@ -420,7 +420,7 @@ persist_serve_events :: proc() {
 		ev := events[i]
 		fd := linux.Fd(u32(ev.data.u64))
 		if u32(ev.data.u64 >> 32) == 0 {
-			if fd != mc_lfd {
+			if fd != mc_lfd && fd != keyspace_event_fd() && fd != compute_event_fd() && fd != lazy_efd {
 				accept_clients(fd, .Redis)
 			}
 			continue
@@ -469,6 +469,7 @@ persist_signal_log :: proc(sig: i32) {
 
 persist_signal_loading_exit :: proc() {
 	persist_signal_log(intrinsics.atomic_load_explicit(&persist_sig_last, .Acquire))
+	keyspace_shutdown()
 	compute_shutdown()
 	plog(LOG_WARNING, "Eski is now ready to exit, bye bye...")
 	linux.exit_group(0)

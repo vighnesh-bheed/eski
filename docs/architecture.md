@@ -1,6 +1,6 @@
 # Architecture
 
-Eski has one foreground coordinator loop that owns live keyspace and connection state. Each connection owns its input/output buffers, authentication state, selected database, protocol mode and optional subscription, tracking, blocked-operation or transaction state. Linux epoll supplies readiness events; the loop accepts connections, reads available bytes, executes requests and flushes replies. Optional [LCS compute workers](threading.md) use immutable snapshots and private workspaces while the coordinator continues servicing other connections.
+Eski has one foreground coordinator loop that owns connection state and, in the default configuration, the live keyspace. Each connection owns its input/output buffers, authentication state, selected database, protocol mode and optional subscription, tracking, blocked-operation or transaction state. Linux epoll supplies readiness events; the loop accepts connections, reads available bytes, executes requests and flushes replies. Optional [LCS compute workers](threading.md) use immutable snapshots and private workspaces while the coordinator continues servicing other connections. A separate, default-disabled keyspace-worker stage is uncompiled and untested; its narrow GET/plain SET ownership path is described below.
 
 ```mermaid
 flowchart LR
@@ -16,6 +16,10 @@ flowchart LR
     Snapshot --> Compute[Optional pure compute workers]
     Compute --> Complete[Coordinator completion and identity check]
     Complete --> Reply
+    Dispatch --> Shards[Optional GET/plain SET shards, unverified]
+    Shards --> Complete
+    Shards --> Barrier[Drain and reconcile for legacy execution]
+    Barrier --> Keys
 ```
 
 ## Parsing and execution
@@ -24,7 +28,11 @@ The request parser distinguishes complete, incomplete and malformed input and ap
 
 The default temporary allocator is reset at the event-loop iteration boundary. A command can use scratch storage for transient processing, but data retained by the database, a queued operation or a connection must own its allocation. Replies remain owned until written. See [connections and protocol](connections-and-protocol.md) and [transactions](transactions.md).
 
-Eligible large LCS requests can leave one pending computation on a connection. Their arguments and values are copied before admission, and later commands on that connection wait for completion. Worker code accesses its private snapshots/workspace; the coordinator formats replies and updates hooks/statistics. Admission has fixed job and byte bounds and falls back to synchronous execution under pressure, inside transactions/loading, or for tracking-enabled sources. GET/SET and other keyspace handlers retain coordinator ownership. Compute workers stop and join before background persistence forks and shutdown; see [threading](threading.md) for lifecycle and observation details.
+Eligible large LCS requests can leave one pending computation on a connection. Their arguments and values are copied before admission, and later commands on that connection wait for completion. Worker code accesses its private snapshots/workspace; the coordinator formats replies and updates hooks/statistics. Admission has fixed job and byte bounds and falls back to synchronous execution under pressure, inside transactions/loading, or for tracking-enabled sources. This qualified compute stage leaves keyspace handlers on the coordinator. Compute workers stop and join before background persistence forks and shutdown; see [threading](threading.md) for lifecycle and observation details.
+
+The unverified keyspace-worker stage gives one worker exclusive ownership of an eligible key's current string value and access clock. The coordinator owns the routing directory and retains an older legacy copy until a barrier reconciles state. Requests for each key are FIFO, and the coordinator delivers results in each connection's command order. Workers operate on independent owned allocations; they do not use legacy table/slab pointers or connection buffers. Only GET and plain SET of nonexpiring strings or absent keys are candidates.
+
+An unsupported command, active observing feature or failed admission stops new shard work and drains accepted operations before the coordinator reads the legacy database. Reconciliation transfers changed values and access metadata without replaying commands. Persistence saves, forks and normal shutdown require the same consistent view; raw forks additionally require joined workers. A barrier can stall foreground progress. This design has not been compiled or exercised, and its existing test suites and measurements have not yet qualified these new boundaries. See the [current scope](threading.md#keyspace-workers-unverified).
 
 ## Keyspace and values
 

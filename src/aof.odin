@@ -3927,6 +3927,7 @@ aof_in_exec :: proc() -> bool {
 }
 
 aof_rewrite_background :: proc() -> bool {
+	keyspace_fence()
 	if pst.child_pid > 0 || pst.loading || aof.loading {
 		return false
 	}
@@ -3941,6 +3942,7 @@ aof_rewrite_background :: proc() -> bool {
 	aof.rewrite_preamble = aof.preamble
 	aof.rewrite_state = aof.state
 	persist_progress_prepare()
+	keyspace_before_fork()
 	compute_before_fork()
 	start := now_ns()
 	pid, ferr := linux.fork()
@@ -4215,6 +4217,7 @@ aof_kill_child :: proc() {
 }
 
 aof_start :: proc() -> bool {
+	keyspace_fence()
 	if !aof.started {
 		aof.wanted = true
 		return true
@@ -4967,6 +4970,7 @@ aof_load_all :: proc(at_startup: bool) -> Aof_Load_Result {
 
 @(private = "file")
 aof_load_manifest :: proc(m: ^Aof_Manifest, at_startup: bool) -> Aof_Load_Result {
+	keyspace_fence()
 	if !m.has_base && len(m.incr) == 0 {
 		return .Not_Exist
 	}

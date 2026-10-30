@@ -66,6 +66,9 @@ Conn :: struct {
 	compute:     ^Lcs_Task,
 	compute_token: u64,
 	read_eof:    bool,
+	keyspace:    ^Keyspace_Task,
+	keyspace_token: u64,
+	keyspace_ready: bool,
 }
 
 Server :: struct {
@@ -456,6 +459,7 @@ tx_queued_bytes :: #force_inline proc(c: ^Conn) -> i64 {
 }
 
 conn_close :: proc(c: ^Conn) {
+	keyspace_conn_closed(c)
 	compute_conn_closed(c)
 	if len(acl_doomed) > 0 {
 		acl_forget(c)
@@ -663,7 +667,7 @@ resume_held_clients :: proc() {
 }
 
 process_input :: proc(c: ^Conn) {
-	for !c.close_after && c.rpos < c.rlen && c.blocked == .None && c.compute == nil {
+	for !c.close_after && c.rpos < c.rlen && c.blocked == .None && c.compute == nil && c.keyspace == nil && !c.keyspace_ready {
 		start := c.rpos
 		r := parse_command(c)
 		if r != .Command {
@@ -702,7 +706,7 @@ process_input :: proc(c: ^Conn) {
 		c.need = 0
 		c.rpeak = 0
 	}
-	if c.read_eof && c.compute == nil && !c.held {
+	if c.read_eof && c.compute == nil && c.keyspace == nil && !c.keyspace_ready && !c.held {
 		c.close_after = true
 	}
 }
@@ -755,11 +759,12 @@ conn_read :: proc(c: ^Conn) {
 		if c.kind == .Redis {
 			process_input(c)
 		} else {
+			keyspace_fence()
 			mc_process_input(c)
 		}
 	}
 	if eof {
-		if c.compute != nil {
+		if c.compute != nil || c.keyspace != nil || c.keyspace_ready {
 			c.read_eof = true
 			epoll_set(c.fd, .MOD, c.want_write, c.id)
 			conn_flush(c)
@@ -866,6 +871,7 @@ server_run :: proc() -> bool {
 	persist_startup()
 	compute_start()
 	defer compute_shutdown()
+	defer keyspace_shutdown()
 	log_startup()
 	maxmemory_startup_warning()
 	el_after_sleep()
@@ -886,13 +892,18 @@ server_run :: proc() -> bool {
 			timeout = 0
 		}
 		if tracking_clients > 0 {
+			keyspace_fence()
 			tracking_before_sleep()
 		}
 		if cfg.maxmemory_clients != 0 {
+			keyspace_fence()
 			evict_clients(nil)
 		}
 		if len(acl_doomed) > 0 {
 			acl_close_doomed()
+		}
+		if len(keyspace_ready) > 0 {
+			timeout = 0
 		}
 		el_before_sleep()
 		n, werr := linux.epoll_wait(srv.epfd, &events[0], MAX_EVENTS, timeout)
@@ -909,7 +920,7 @@ server_run :: proc() -> bool {
 			ev := events[i]
 			fd := linux.Fd(u32(ev.data.u64))
 			if u32(ev.data.u64 >> 32) == 0 {
-				if fd == compute_event_fd() {
+				if fd == keyspace_event_fd() || fd == compute_event_fd() {
 					continue
 				} else if fd == lazy_efd {
 					lazyfree_drain()
@@ -928,7 +939,9 @@ server_run :: proc() -> bool {
 			handle_event(c, ev.events)
 		}
 		compute_tick()
+		keyspace_tick()
 		if aof.feed || len(aof.deferred) > 0 || len(aof.buf) > 0 {
+			keyspace_fence()
 			aof_start := mono_now()
 			aof_before_sleep()
 			el_note_aof(aof_start)
@@ -937,12 +950,15 @@ server_run :: proc() -> bool {
 			pause_clear()
 		}
 		if srv.resume_due {
+			keyspace_fence()
 			resume_held_clients()
 		}
 		if block_work != 0 {
+			keyspace_fence()
 			block_before_sleep()
 		}
 		if evict_timer {
+			keyspace_fence()
 			evict_timer_step()
 		}
 		db_tick()

@@ -1036,6 +1036,40 @@ db_key_state :: proc(db: ^Db, key: []u8) -> (exists: bool, expired: bool) #no_bo
 	return true, exp != 0 && exp <= srv.now_ms
 }
 
+keyspace_store_seed :: proc(db: ^Db, key: []u8) -> (value: []u8, clock: u32, exists, eligible: bool) {
+	l := lookup_make(key)
+	t, i := db_locate(db, &l)
+	if i < 0 {
+		return nil, 0, false, true
+	}
+	if t.slots[i].meta.expire_at != 0 {
+		return nil, 0, false, false
+	}
+	e := entry_view(db, t, i)
+	if entry_type(e) != .String || mc_meta_get(db, e.kp) != nil {
+		return nil, 0, false, false
+	}
+	return e.val, entry_lru(e), true, true
+}
+
+keyspace_store_import :: proc(db: ^Db, key, value: []u8, clock: u32, changed: bool) {
+	if changed {
+		saved := store_no_touch
+		store_no_touch = true
+		e, _ := db_upsert_in(db, key)
+		entry_assign(e, value)
+		entry_set_expire(e, 0)
+		entry_set_lru(e, clock)
+		store_no_touch = saved
+		return
+	}
+	l := lookup_make(key)
+	t, i := db_locate(db, &l)
+	if i >= 0 {
+		entry_set_lru(entry_view(db, t, i), clock)
+	}
+}
+
 db_find_read :: proc(key: []u8) -> ^Entry {
 	e := db_find(key)
 	if e == nil {

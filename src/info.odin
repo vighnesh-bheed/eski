@@ -317,6 +317,7 @@ info_server :: proc(b: ^[dynamic]u8) {
 	info_line_str(b, "config_file", config_file)
 	info_line_int(b, "io_threads_active", 0)
 	compute_info(b)
+	keyspace_info(b)
 	if srv.nlfd > 0 {
 		sb_str(b, "listener0:name=tcp")
 		for a in config_bind {

@@ -214,12 +214,14 @@ special_mc_port := Config_Special{config_mc_port_set, config_mc_port_get, config
 special_mc_item_size := Config_Special{config_mc_item_size_set, config_mc_item_size_get, config_mc_item_size_rewrite}
 special_databases := Config_Special{config_databases_set, config_databases_get, config_databases_rewrite}
 
-CONFIG_TABLE_LEN :: 190
+CONFIG_TABLE_LEN :: 192
 
 configs: [CONFIG_TABLE_LEN]Config
 
 config_table_init :: proc() {
 	t := [?]Config {
+		{name = "keyspace-threads", type = .Num, flags = {.Immutable, .Hidden}, def = 0, lo = 0, hi = 64, store = &keyspace_threads},
+		{name = "keyspace-max-memory", type = .Num, flags = {.Immutable, .Hidden, .Memory}, def = 128 * 1024 * 1024, lo = 0, hi = LLONG_MAX_CFG, store = &keyspace_max_memory},
 		{name = "compute-threads", type = .Num, flags = {.Immutable, .Hidden}, def = 0, lo = 0, hi = 64, store = &compute_threads},
 		{name = "compute-max-memory", type = .Num, flags = {.Immutable, .Hidden, .Memory}, def = 128 * 1024 * 1024, lo = 0, hi = LLONG_MAX_CFG, store = &compute_max_memory},
 		{name = "rdbchecksum", type = .Bool, flags = {.Immutable}, def = 1, store = &pst.checksum},

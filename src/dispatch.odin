@@ -191,6 +191,10 @@ rename_command :: proc(from: []u8, to: []u8) -> string {
 
 execute :: proc(c: ^Conn, argv: [][]u8) {
 	slot := lookup_entry(argv[0])
+	resolved := slot.cmd if slot != nil else nil
+	if !keyspace_candidate(resolved, argv) {
+		keyspace_fence()
+	}
 	if slot == nil {
 		c.last_cmd = "NULL"
 		stat_cur = nil
@@ -209,13 +213,21 @@ execute :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	if c.acl_gate && acl_reject(c, cmd, st, argv) {
+		keyspace_fence()
 		return
 	}
 	if cmd_hooks {
+		keyspace_fence()
 		execute_hooked(c, cmd, st, argv)
 		return
 	}
-	if pst.gate_active && execute_gate(c, cmd, st, argv) {
+	if pst.gate_active {
+		keyspace_fence()
+		if execute_gate(c, cmd, st, argv) {
+			return
+		}
+	}
+	if keyspace_candidate(cmd, argv) && keyspace_try(c, cmd, st, argv) {
 		return
 	}
 	db_cur = c.db

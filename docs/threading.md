@@ -1,6 +1,47 @@
-# LCS compute workers
+# Threading
 
-Eski can run the dynamic-programming computation of large LCS requests on worker threads. The coordinator still owns the live keyspace, sockets, argument checks, ACL, expiry/access updates, transactions, notifications and replies. This stage provides CPU parallelism between eligible LCS requests from different connections. GET, SET and other keyspace commands execute on the coordinator.
+Eski has two separate opt-in worker paths. The earlier LCS compute stage was qualified at `83024e3`. The new keyspace-worker stage is under development and has not been compiled or tested. Prior LCS checks, conformance records and performance measurements do not validate the new source; no keyspace-worker throughput or compatibility claim is made.
+
+## Keyspace workers (unverified)
+
+This stage targets GET and exactly three-argument `SET key value` on strings without expiry or absent keys. Each key belongs to one worker, which performs its reads and value replacement in FIFO order. The coordinator owns routing, sockets, normal command/ACL admission, statistics and reply delivery. Workers are disabled by default.
+
+The startup settings are `keyspace-threads` (0 through 64, default 0) and `keyspace-max-memory` (default 128 MiB; zero forces coordinator fallback). Both are immutable after startup and hidden from wildcard CONFIG discovery, including `CONFIG GET '*'` and `CONFIG GET 'keyspace-*'`. Exact-name inspection uses `CONFIG GET keyspace-threads` and `CONFIG GET keyspace-max-memory`; CONFIG SET cannot change them. These settings are independent of LCS `compute-threads` and the compatibility `io-threads` setting.
+
+Workers own independent current values while the coordinator retains legacy copies. Each connection waits for its pending operation before executing a later pipeline command. A GET result retains its immutable value until the coordinator copies the reply. An accepted SET continues if its client disconnects; losing the connection discards delivery, not an executed write.
+
+The pool accepts at most 64 outstanding jobs, including completed results awaiting coordinator reclamation. Its Linux worker thread name is `eski-keyspace`, separate from the LCS workers named `eski-compute`. These names describe intended roles; thread names or configured counts alone do not prove simultaneous command execution.
+
+Options such as NX, XX, GET, KEEPTTL and expiry forms are outside this path. Expiring or nonstring entries, entries carrying memcached item metadata, multi-key commands, transactions and the rest of the command surface use the coordinator. Watching/tracking/notifications, blocked consumers, monitors/pubsub, memory-pressure policies, LFU, memcached, AOF, pause/loading and persistence lifecycle state also prevent worker admission. Normal command errors and feature behavior remain the responsibility of the coordinator path, after pending work is reconciled; these fallbacks do not supply parallel execution of those features.
+
+Before a legacy command or feature can observe the keyspace, a barrier freezes admission, drains accepted jobs and reconciles worker-owned values and access metadata. Reconciliation transfers state without executing SET again; GET-only entries retain their encoding. Save/fork/shutdown paths require a reconciled view, and workers join before raw forks or destruction. These are the implementation's intended boundaries and remain unverified. Barriers can stall foreground work and erase the benefit of short bursts of eligible commands.
+
+The budget bounds admitted requested bytes for directory records, copied keys, values and task/result storage, including their allocation headers. Owned records and values remain charged between jobs until a barrier reclaims them; zero pending jobs does not imply zero pool memory. Coordinator ready-ticket bookkeeping is accounted separately and sits outside that pool cap. It is not a process-RSS limit. Old legacy copies and current worker values coexist until reconciliation; reply references may retain overwritten values, and libc can retain freed heap allocations afterward. Consequently RSS can grow temporarily and remain elevated after the pool drains. Database storage, socket buffers, thread resources and allocator overhead have their own costs.
+
+`INFO server` adds these observations for the new stage. INFO itself takes the legacy barrier, so pending jobs, records and pool bytes describe the post-drain state rather than live occupancy. Their presence does not imply that this unverified path has been qualified.
+
+| Field | Meaning |
+| --- | --- |
+| `keyspace_threads_configured` | Startup worker setting; zero disables this path. |
+| `keyspace_threads_active` | Existing worker threads, including parked threads. |
+| `keyspace_jobs_pending` | Accepted jobs awaiting coordinator completion handling. |
+| `keyspace_memory_used` | Charged pool allocation bytes; excludes separate coordinator ready-ticket storage. |
+| `keyspace_records` | Owned key records awaiting reconciliation. |
+| `keyspace_jobs_submitted` | Cumulative accepted worker requests. |
+| `keyspace_jobs_completed` | Cumulative handled worker completions, including clients whose replies cannot be delivered. |
+| `keyspace_gets` | Completed worker GET requests. |
+| `keyspace_sets` | Completed worker SET requests, including disconnected clients' committed writes. |
+| `keyspace_sync_fallbacks` | Candidate requests rejected by record classification, startup, capacity, byte budget or submission after the global eligibility checks; excludes disabled/feature-excluded requests and other command forms. |
+| `keyspace_barriers` | Reconciliation barriers that encountered owned records or pending jobs. |
+| `keyspace_worker_nanoseconds` | Sum of worker service elapsed durations, measured as wall time rather than CPU time. |
+
+Command latency/statistics include queueing and coordinator completion delay. Distinct worker IDs and measured CPU activity would be needed to establish CPU parallelism; neither counters nor service wall time provide that evidence on their own.
+
+The source has not yet been built, exercised, checked under sanitizers or compared with its compatibility baseline. The existing LCS tools below do not constitute tests or a benchmark of this keyspace path. Broader worker execution of commands and features remains future work; distributed management is still a separate layer.
+
+## LCS compute workers
+
+Eski can run the dynamic-programming computation of large LCS requests on worker threads. In this earlier stage, the coordinator owns the live keyspace, sockets, argument checks, ACL, expiry/access updates, transactions, notifications and replies. It provides CPU parallelism between eligible LCS requests from different connections; its qualified scope leaves GET, SET and other keyspace commands on the coordinator.
 
 Compute workers are disabled by default. Enable them at startup:
 
@@ -116,4 +157,4 @@ Clients are independent Python processes with explicit affinities; this tool mea
 
 `--require-parallel` requires a valid multi-worker LCS case with positive CPU time in at least two compute thread IDs and summed compute CPU above one core. A multi-worker timed case using synchronous fallback is excluded. Ratios compare matching workloads with the baseline; client limits can distort either measurement, so the ratio is an observed value rather than a lower bound on engine scaling. Summaries keep per-workload medians/ranges and exclusions separate. There is no overall score. The historical [benchmark tables](benchmarks.md) remain a separate experiment.
 
-Broader parallel reads and writes still require explicit keyspace ownership, multi-key scheduling, transaction and persistence designs. This stage does not implement that work or a distributed control plane. See the [roadmap](../ROADMAP.md).
+The LCS comparison measures snapshot computation, not the unverified GET/plain SET stage above. Broader worker execution still requires multi-key scheduling, transaction atomicity and coordinated expiry/eviction/persistence designs. No distributed control plane is implemented here. See the [roadmap](../ROADMAP.md).
