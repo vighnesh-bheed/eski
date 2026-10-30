@@ -1,6 +1,6 @@
 # Eski documentation
 
-Eski is a single-node in-memory engine written in Odin. Redis protocol clients can use its implemented command surface, and an optional second listener speaks the memcached text protocol. The generated inventory and conformance results describe the tested surface; accepted compatibility settings or registered stubs do not imply a replication, scripting or cluster implementation.
+Eski is a single-node in-memory engine with an Odin host and embedded Lua 5.5.1 C runtime. Redis protocol clients can use its implemented command surface, and an optional second listener speaks the memcached text protocol. Lua evaluation has the subset and qualification status described below; accepted compatibility settings or registered stubs do not imply executable function libraries, replication or clustering.
 
 Start with [build, run and test](build-run-test.md) and [architecture](architecture.md). Use the [generated command reference](commands.md) for the current registry and argument metadata, [conformance](conformance.md) for recorded coverage and differences, and [benchmarks](benchmarks.md) for measured workloads and methodology.
 
@@ -18,6 +18,7 @@ Start with [build, run and test](build-run-test.md) and [architecture](architect
 | Stream records and consumer groups | [Streams](streams.md) |
 | Subscription delivery, notifications and cache invalidation | [Pub/sub, notifications and tracking](pubsub-notifications-tracking.md) |
 | Queued transactions, watches and blocked clients | [Transactions](transactions.md) |
+| Lua evaluation, source cache, effects, limits and cancellation | [Scripting](scripting.md) |
 
 ## Running the engine
 
@@ -32,6 +33,6 @@ Start with [build, run and test](build-run-test.md) and [architecture](architect
 
 The [roadmap](../ROADMAP.md) states the verification conditions and the work still ahead. Performance tables describe the committed run, with its exclusions and client limits; conformance baseline success means its recorded passing tests were preserved. Neither result is an unrestricted compatibility or deployment-safety claim.
 
-The default-disabled keyspace-worker path has passed native ownership tests and its dedicated external correctness driver, including sanitizer runs. The full package gate, smoke and baseline compatibility checks also pass with workers disabled and enabled. Its guarded GET/plain SET scope is separate from the previously qualified LCS stage; no keyspace-worker performance result is claimed.
+The default-disabled keyspace-worker path was qualified at `78eb2f1` through native ownership and external correctness checks, sanitizers, the package gate, smoke and baseline compatibility checks in both worker configurations. Its guarded GET/plain SET scope is separate from the earlier LCS stage; no keyspace-worker performance result is claimed. Lua evaluation is subsequent work whose final combined qualification remains in progress; [scripting verification](scripting.md#verification) separates its current evidence.
 
 Eski is licensed under [Apache-2.0](../LICENSE). Third-party components retain their own terms; see [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).

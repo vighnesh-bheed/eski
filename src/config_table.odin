@@ -214,12 +214,16 @@ special_mc_port := Config_Special{config_mc_port_set, config_mc_port_get, config
 special_mc_item_size := Config_Special{config_mc_item_size_set, config_mc_item_size_get, config_mc_item_size_rewrite}
 special_databases := Config_Special{config_databases_set, config_databases_get, config_databases_rewrite}
 
-CONFIG_TABLE_LEN :: 192
+CONFIG_TABLE_LEN :: 196
 
 configs: [CONFIG_TABLE_LEN]Config
 
 config_table_init :: proc() {
 	t := [?]Config {
+		{name = "lua-max-memory", type = .Num, flags = {.Hidden, .Memory}, def = 64 * 1024 * 1024, lo = 4096, hi = LLONG_MAX_CFG, store = &lua_max_memory},
+		{name = "lua-max-output", type = .Num, flags = {.Hidden, .Memory}, def = 16 * 1024 * 1024, lo = 4096, hi = LLONG_MAX_CFG, store = &lua_max_output},
+		{name = "lua-max-bridge-memory", type = .Num, flags = {.Hidden, .Memory}, def = 32 * 1024 * 1024, lo = 4096, hi = LLONG_MAX_CFG, store = &lua_max_bridge_memory},
+		{name = "lua-max-cache-memory", type = .Num, flags = {.Hidden, .Memory}, def = 32 * 1024 * 1024, lo = 4096, hi = LLONG_MAX_CFG, store = &lua_max_cache_memory, check = lua_cache_limit_check},
 		{name = "keyspace-threads", type = .Num, flags = {.Immutable, .Hidden}, def = 0, lo = 0, hi = 64, store = &keyspace_threads},
 		{name = "keyspace-max-memory", type = .Num, flags = {.Immutable, .Hidden, .Memory}, def = 128 * 1024 * 1024, lo = 0, hi = LLONG_MAX_CFG, store = &keyspace_max_memory},
 		{name = "compute-threads", type = .Num, flags = {.Immutable, .Hidden}, def = 0, lo = 0, hi = 64, store = &compute_threads},

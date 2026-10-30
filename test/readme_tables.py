@@ -230,7 +230,9 @@ def command_table(commands, compact=False):
         for name, fields in items:
             arguments = ' '.join(argument_text(arg) for arg in fields.get('arguments') or [])
             summary = fields.get('summary', '')
-            if name.split('|')[0] in ('function', 'script', 'cluster', 'sentinel'):
+            if name == 'script|debug':
+                summary = 'Unsupported subcommand; script debugging is unavailable. ' + summary
+            elif name.split('|')[0] in ('function', 'cluster', 'sentinel'):
                 summary = 'Compatibility entry; excluded execution features remain unavailable. ' + summary
             lines.append('| %s | %s | %s |' % (table_code(name.upper().replace('|', ' ')), table_code(arguments) if arguments else '—', md(summary)))
         lines.append('')
@@ -371,10 +373,14 @@ def failure_explanation(unit, name, reason):
     text = (name + ' ' + reason).lower()
     if 'sync' in text or 'replication_stream' in text:
         return 'The test observes a replication stream; replication is outside the single-node scope.'
-    if any(token in text for token in ('eval', 'script', 'library metadata')):
-        return 'The test requires scripting or executable function libraries, which are excluded.'
+    if any(token in text for token in ('fcall', 'function load', 'function list', 'function dump',
+                                       'function restore', 'function flush', 'function library',
+                                       'function libraries', 'library metadata')):
+        return 'The test requires executable function libraries, which are excluded.'
+    if any(token in text for token in ('eval', 'script')):
+        return 'The test exercises Lua scripting; this recorded assertion remains a compatibility gap.'
     if unit == 'introspection-2':
-        return 'The test expects excluded scripting or cluster command registrations.'
+        return 'The recorded command inventory differs; inspect the named assertion and the remaining function/cluster exclusions.'
     if unit == 'querybuf':
         return 'The test assumes reference query-buffer allocation and resize behavior; Eski uses its own buffer policy.'
     if unit == 'info':
@@ -566,7 +572,7 @@ def render_outputs(commands, baseline, observed, dataset, readme):
     commands_page = ('# Command inventory\n\nGenerated from a temporary instance of the built executable using `COMMAND DOCS`, `COMMAND LIST` and `COMMAND COUNT`. '
                      'The inventory contains %d top-level commands and %d names including subcommands. Metadata describes the protocol surface; '
                      'the [command-group pages](README.md) and [conformance record](conformance.md) define implemented behavior and remaining gaps. '
-                     'Registered compatibility entries for excluded execution features do not provide scripting, replication or clustering.\n\n'
+                     'Lua evaluation has the scope documented in [scripting](scripting.md); compatibility entries do not provide executable function libraries, replication or clustering.\n\n'
                      'Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test/readme_tables.py --check`. '
                      'Use `--server HOST:PORT` to inspect an existing instance without starting one. The canonical command-metadata SHA256 is `%s`.\n\n%s\n') % (
                          top_count, command_count, digest, command_table(commands))

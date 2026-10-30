@@ -252,7 +252,7 @@ parse_client_type :: proc(s: []u8) -> (Client_Type, bool) {
 }
 
 conn_age :: proc(c: ^Conn) -> i64 {
-	return srv.now_ms / 1000 - c.ctime_ms / 1000
+	return max(0, lua_connection_clock() / 1000 - c.ctime_ms / 1000)
 }
 
 client_info_line :: proc(b: ^[dynamic]u8, other: ^Conn, self: ^Conn, argv: [][]u8) {
@@ -269,7 +269,7 @@ client_info_line :: proc(b: ^[dynamic]u8, other: ^Conn, self: ^Conn, argv: [][]u
 	sb_str(b, " age=")
 	sb_int(b, conn_age(other))
 	sb_str(b, " idle=")
-	sb_int(b, srv.now_ms / 1000 - other.atime_ms / 1000)
+	sb_int(b, max(0, lua_connection_clock() / 1000 - other.atime_ms / 1000))
 	sb_str(b, " flags=")
 	nflags := len(b)
 	if .Monitor in other.flags {

@@ -29,6 +29,8 @@ if ! command -v python3 >/dev/null 2>&1; then
 	exit 1
 fi
 
+bash tools/build_lua.sh all
+
 ran=0
 work="$(mktemp -d "${TMPDIR:-/tmp}/eski-packages.XXXXXX")"
 trap 'rm -rf "$work"' EXIT

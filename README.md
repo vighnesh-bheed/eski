@@ -3,11 +3,11 @@
 ![Conformance baseline](docs/img/conformance.svg)
 ![Recorded benchmark ratio](docs/img/benchmark-ratio.svg)
 
-Eski is a free and open source in-memory data store for a single machine, written in Odin and accessed through the Redis protocol. It implements strings, hashes with field expiry, lists, sets, sorted sets, geospatial operations, bitmaps, HyperLogLog, streams, pub/sub, transactions, persistence and an optional memcached text endpoint. Scripting, executable functions, modules, replication, Sentinel and Cluster are outside this repository's scope. Compatibility is measured by the checks below; a baseline pass is a regression result over a recorded set of tests.
+Eski is a free and open source in-memory data store for a single machine, with an Odin host and an embedded C Lua runtime, accessed through the Redis protocol. It implements strings, hashes with field expiry, lists, sets, sorted sets, geospatial operations, bitmaps, HyperLogLog, streams, pub/sub, transactions, persistence, Lua evaluation and an optional memcached text endpoint. Executable function libraries, modules, replication, Sentinel and Cluster are outside this repository's scope. Lua uses a documented API subset; its final combined qualification is in progress. Compatibility is measured by the checks below; a baseline pass is a regression result over a recorded set of tests.
 
 ## Try it
 
-Build on Linux with Odin, clang and Python available. The compiler release used by the container build is pinned in [Dockerfile](Dockerfile).
+Build on Linux with Odin, clang, GNU ar, sha256sum, flock and Python available. The compiler release used by the container build is pinned in [Dockerfile](Dockerfile); Lua sources and patches are vendored for offline dependency builds.
 
 ```sh
 ./build.sh check
@@ -30,7 +30,9 @@ The example binds to loopback explicitly. Configure network access and [ACLs](do
 
 The coordinator runs on a single event-loop thread. Linux epoll reports ready sockets, each connection keeps its input and output buffers, and the parser retains incomplete requests until more bytes arrive. Complete arguments reach a command registry whose entries connect handlers with arity, flags, key specifications and argument metadata. Handlers operate on the selected database and write typed RESP replies. Optional [compute workers](docs/threading.md) run expensive LCS calculations over owned input snapshots. Pipelining preserves each connection's command order. Workers are disabled by default.
 
-A separate, default-disabled keyspace-worker path handles guarded GET and plain SET on strings without expiry. Workers own eligible values and serialize requests for each key; other commands and features use the coordinator after a reconciliation barrier. Native ownership tests and dedicated external correctness checks pass, including address and thread sanitizer runs. The full package gate, smoke and baseline compatibility checks pass with workers disabled and enabled. No keyspace-worker benchmark or speedup is claimed. The [threading guide](docs/threading.md#keyspace-workers) describes the tested scope and memory/latency costs.
+A separate, default-disabled keyspace-worker path handles guarded GET and plain SET on strings without expiry. Workers own eligible values and serialize requests for each key; other commands and features use the coordinator after a reconciliation barrier. At threading checkpoint `78eb2f1`, native ownership and dedicated external correctness checks passed, including address and thread sanitizer runs, along with the package, smoke and baseline compatibility gates in both worker configurations. No keyspace-worker benchmark or speedup is claimed. The [threading guide](docs/threading.md#keyspace-workers) describes the tested scope and memory/latency costs.
+
+[Lua scripts](docs/scripting.md) run in a fresh Lua 5.5.1 VM on the coordinator. EVAL/EVALSHA and their read-only variants use the caller's ACL and command-effect hooks; SCRIPT provides source-cache and cancellation controls. Successful writes remain after a later script error, and AOF persists command effects. Lua 5.5 language behavior and the supplied libraries differ from the reference's Lua 5.1 environment. Resource budgets, denied inner commands and BUSY/KILL behavior are explicit in the scripting guide.
 
 Each event-loop iteration has a scratch allocation lifetime. Values and connection state that survive that iteration use owned storage instead. This separates transient parsing and reply work from data stored in the keyspace. Lazy freeing, bounded maintenance and persistence work have their own lifetimes; the foreground loop is not a promise that every command has constant latency.
 
@@ -42,7 +44,7 @@ The source is organized by command group. Files such as `src/cmd_string.odin`, `
 
 ## Compatibility and verification
 
-The generated tables separate the checked-in baseline from the recorded expanded suite. Remaining differences include buffer accounting, selected pause/expiry behaviour, mutation counters and introspection replies, alongside tests requiring deliberately excluded features. The [conformance page](docs/conformance.md) names the failing tests and the commands that reproduce the runs. These records predate the current keyspace-worker changes; their dedicated correctness checks are described separately in the [threading guide](docs/threading.md#keyspace-correctness-checks).
+The generated tables separate the checked-in baseline from the recorded expanded suite. Remaining differences include buffer accounting, selected pause/expiry behaviour, mutation counters and introspection replies, alongside tests requiring deliberately excluded features. The [conformance page](docs/conformance.md) names the recorded failures and commands that reproduce the runs. These tables use the committed snapshot; current Lua and worker checks are described separately in the [scripting](docs/scripting.md#verification) and [threading](docs/threading.md#keyspace-correctness-checks) guides.
 
 <!-- BEGIN GENERATED CONFORMANCE -->
 

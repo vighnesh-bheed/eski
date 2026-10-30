@@ -33,13 +33,16 @@ RUN test "$(dpkg --print-architecture)" = amd64; \
 
 WORKDIR /build
 COPY src/ src/
+COPY third_party/lua/ third_party/lua/
+COPY tools/build_lua.sh tools/source_digest.sh tools/
 COPY LICENSE /out/doc/LICENSE
 COPY THIRD_PARTY_NOTICES.md /out/doc/THIRD_PARTY_NOTICES.md
 ARG BUILD_JOBS=2
 ARG SOURCE_REVISION=unknown
 ARG ESKI_VERSION=unknown
 ARG ESKI_LICENSE=Apache-2.0
-RUN /opt/odin/odin check src -vet -strict-style -thread-count:"${BUILD_JOBS}"; \
+RUN bash tools/build_lua.sh release; \
+    /opt/odin/odin check src -vet -strict-style -thread-count:"${BUILD_JOBS}"; \
     /opt/odin/odin build src -o:speed -thread-count:"${BUILD_JOBS}" -out:/out/eski; \
     test "$(/out/eski -v | sed -n 's/.* license=//p')" = "$ESKI_LICENSE"; \
     if [ "$ESKI_VERSION" != unknown ]; then test "$(/out/eski -v)" = "eski v=${ESKI_VERSION} license=${ESKI_LICENSE}"; fi; \
@@ -53,7 +56,12 @@ RUN /opt/odin/odin check src -vet -strict-style -thread-count:"${BUILD_JOBS}"; \
         printf 'binary_path=/usr/local/bin/eski\n'; \
         printf 'binary_sha256=%s\n' "$(sha256sum /out/eski | cut -d' ' -f1)"; \
         printf 'source_revision=%s\n' "$SOURCE_REVISION"; \
-        printf 'source_sha256=%s\n' "$(find src -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"; \
+        printf 'source_sha256=%s\n' "$(bash tools/source_digest.sh)"; \
+        printf 'lua_version=5.5.1\n'; \
+        printf 'lua_source_archive_sha256=%s\n' "$(sha256sum third_party/lua/vendor/lua-5.5.1.tar.gz | cut -d' ' -f1)"; \
+        printf 'lua_manifest_sha256=%s\n' "$(sha256sum third_party/lua/manifest.json | cut -d' ' -f1)"; \
+        printf 'lua_library_sha256=%s\n' "$(sha256sum .build/lua/release/libeslua-runtime.a | cut -d' ' -f1)"; \
+        printf 'lua_build_input_sha256=%s\n' "$(cat .build/lua/release/input.sha256)"; \
         printf 'build_flags=-o:speed -thread-count:%s\n' "$BUILD_JOBS"; \
         printf 'check_flags=-vet -strict-style\n'; \
         printf 'odin_version=%s\n' "$(/opt/odin/odin version | awk '{print $NF}')"; \

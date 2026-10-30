@@ -391,7 +391,7 @@ info_stats :: proc(b: ^[dynamic]u8) {
 	info_line_int(b, "expire_cycle_cpu_milliseconds", stat_expire_cycle_us / 1000)
 	info_line_int(b, "evicted_keys", stat_evicted_keys)
 	info_line_int(b, "evicted_clients", stat_evicted_clients)
-	info_line_int(b, "evicted_scripts", 0)
+	info_line_int(b, "evicted_scripts", lua_cache_evictions)
 	info_line_int(b, "total_eviction_exceeded_time", eviction_exceeded_total_us() / 1000)
 	info_line_int(b, "current_eviction_exceeded_time", eviction_exceeded_current_us() / 1000)
 	info_line_int(b, "keyspace_hits", srv.stat_hits)

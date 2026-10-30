@@ -909,7 +909,7 @@ tracking_after_command :: proc(c: ^Conn, cmd: ^Command, argv: [][]u8) {
 
 tracking_remember_keys :: proc(c: ^Conn, cmd: ^Command, argv: [][]u8) {
 	st := c.pubsub
-	if st == nil || cmd == nil {
+	if st == nil || cmd == nil || lua_is_eval(cmd) {
 		return
 	}
 	flags := st.trk

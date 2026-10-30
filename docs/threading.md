@@ -1,6 +1,6 @@
 # Threading
 
-Eski has two separate opt-in worker paths. The earlier LCS compute stage was qualified at `83024e3`. The guarded GET/plain SET keyspace path has passed its native ownership tests and dedicated external correctness driver, including address and thread sanitizer runs. The full package gate, smoke and baseline compatibility checks also pass with workers disabled and enabled. No keyspace-worker benchmark has been run or speedup claimed; prior LCS measurements remain separate evidence.
+Eski has two separate opt-in worker paths. The earlier LCS compute stage was qualified at `83024e3`. At checkpoint `78eb2f1`, the guarded GET/plain SET keyspace path passed native ownership and external correctness checks, address/thread sanitizers, and the package, smoke and baseline compatibility gates in both worker configurations. Subsequent [Lua integration](scripting.md) is qualified separately and fences worker state before script execution. No keyspace-worker benchmark has been run or speedup claimed; prior LCS measurements remain separate evidence.
 
 ## Keyspace workers
 
@@ -48,7 +48,7 @@ python3 -I test/threading/keyspace.py
 
 The driver covers binary/empty values, storage boundaries, pipeline/RESP/database order, reply suppression, half-close, disconnected writes, counters, TTL/type/SET-option fallbacks, read-only import and No-Touch behavior. It also checks ACL/renamed commands, transactions/WATCH, tracking/notifications/monitoring, blocking/pause/memory policies, rejected admissions, memcached, RDB saves/forks/reloads and automatic saves, AOF enable/rewrite/restart/disable, and shutdown persistence. It uses isolated localhost servers and temporary data directories. `--server /path/to/eski` selects a binary; otherwise `ESKI_THREADING_BIN` or `bin/eski` is used. `--case 'test_*snapshot*'` selects a method glob. The package runner includes this driver once per run and never starts a benchmark.
 
-The current default configuration preserves all 1,504 Tcl baseline passes with zero regressions; the expanded run still has the existing 20 failures. The full package gate passes all 90 runs. Smoke passes all 2,428 checks with workers disabled and with two workers enabled. Both configurations preserve all 1,504 Tcl baseline passes with zero regressions, while retaining the existing 20 expanded failures. The dedicated passes cover the executed correctness and lifetime checks; they do not establish throughput or universal race safety. Broader worker execution of commands and features remains future work, and distributed management is a separate layer.
+At `78eb2f1`, both worker configurations preserved all 1,504 Tcl baseline passes with zero regressions and retained the existing 20 expanded failures. The package gate passed all 90 runs, and smoke passed all 2,428 checks in each configuration. These receipts precede Lua integration. Dedicated passes cover the executed correctness and lifetime checks; they do not establish throughput or universal race safety. Broader worker execution of commands and features remains future work, and distributed management is a separate layer.
 
 ## LCS compute workers
 

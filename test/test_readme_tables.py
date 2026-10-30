@@ -136,7 +136,7 @@ class Inputs(FixtureInputs, unittest.TestCase):
     def test_failure_categories_distinguish_exclusions_and_actual_gaps(self):
         self.assertIn('outside the single-node scope', tables.failure_explanation('type/list', 'SWAPDB', 'unknown SYNC'))
         self.assertIn('compatibility gap', tables.failure_explanation('type/list', 'dirty', 'Expected 3 == 2'))
-        self.assertIn('excluded', tables.failure_explanation('pause', 'scripts are blocked', 'Timeout'))
+        self.assertIn('compatibility gap', tables.failure_explanation('pause', 'scripts are blocked', 'Timeout'))
         self.assertIn('compatibility gap', tables.failure_explanation('pause', 'active expiry', 'Expected 2 == 0'))
 
     def test_resp_reader_accepts_nested_values_and_rejects_truncation(self):
@@ -161,11 +161,18 @@ class Inputs(FixtureInputs, unittest.TestCase):
             {'type': 'string', 'name': 'key'},
             {'type': 'oneof', 'arguments': [{'type': 'string', 'name': 'left'}, {'type': 'string', 'name': 'right'}]},
             {'type': 'pure-token', 'token': '`literal``'}]}}
+        commands['script|debug'] = {'group': 'scripting', 'summary': 'Sets the script debug mode.'}
+        commands['script|load'] = {'group': 'scripting', 'summary': 'Compiles and caches source.'}
         rendered = tables.command_table(commands)
         self.assertIn('| `EXAMPLE` | ``` <key> (<left> \\| <right>) `LITERAL`` ``` | Choose &lt;key&gt; \\| &lt;other&gt;. |', rendered)
         self.assertNotIn('&lt;key&gt; (', rendered)
         self.assertEqual(tables.table_code('`literal`'), '`` `literal` ``')
         self.assertEqual(tables.table_code('  spaced  '), '`   spaced   `')
+        debug_row = next(line for line in rendered.splitlines() if line.startswith('| `SCRIPT DEBUG` |'))
+        load_row = next(line for line in rendered.splitlines() if line.startswith('| `SCRIPT LOAD` |'))
+        self.assertIn('Unsupported subcommand', debug_row)
+        self.assertNotIn('Unsupported', load_row)
+        self.assertNotIn('Compatibility entry', load_row)
 
 
 @unittest.skipUnless(BINARY.is_file(), 'build bin/eski for live documentation tests')

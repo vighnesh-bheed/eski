@@ -11,6 +11,8 @@ redis-cli -p 6399 DBSIZE
 
 `DBSIZE` counts keys in the selected database. `FLUSHDB` and `FLUSHALL` remove one or every local database and accept synchronous/asynchronous release modes. `SWAPDB` swaps two local databases. These commands can invalidate watched keys and client-side caches. Use them with the permissions and data-loss consequences appropriate to the application.
 
+Lua uses dynamic `lua-max-memory`, `lua-max-output`, `lua-max-bridge-memory` and `lua-max-cache-memory` controls, defaulting to 64/16/32/32 MiB with a 4096-byte minimum. Inspect them by exact CONFIG GET names; wildcard discovery omits them. They bound requested VM, output, bridge and source-cache bytes rather than process RSS. `busy-reply-threshold` (`lua-time-limit`) defaults to 5000 ms and enables restricted BUSY/KILL service after that threshold. Zero disables this service, so ordinary shutdown waits for script completion. The [scripting guide](scripting.md#resource-and-cancellation-controls) explains errors, signals and the post-write no-save escape.
+
 ## Memory and eviction
 
 `maxmemory 0` is unlimited. A nonzero value works with `maxmemory-policy`: `noeviction`, `allkeys-lru`, `allkeys-lfu`, `allkeys-random`, `volatile-lru`, `volatile-lfu`, `volatile-random` or `volatile-ttl`. Volatile policies consider expiring keys. LRU/LFU policies use sampled/access metadata rather than a complete sorted history. `maxmemory-samples` and eviction effort settings affect this work. When no eligible key can be evicted, allocation-requiring writes can fail.
@@ -23,6 +25,6 @@ This accounting limit is not an operating-system RSS limit. Allocator capacity, 
 
 `TIME` returns server time. `SLOWLOG` supports `GET`, `LEN` and `RESET`; `LATENCY` supports event/history, graph, doctor, reset and histogram diagnostics. Configure the relevant thresholds before expecting samples. `MONITOR` streams observed commands and can impose significant output work. `DEBUG` is disabled by default and intended for development/testing; its availability is controlled by `enable-debug-command`.
 
-`FUNCTION` provides compatibility replies for an empty library set; it cannot load or execute application functions. Lua, modules, replication, Sentinel and Cluster are excluded even where a config name or metadata category is accepted. The separate Rust coordination product is not part of this executable.
+`FUNCTION` provides compatibility replies for an empty library set; it cannot load or execute application functions. Lua evaluation uses the documented [scripting subset](scripting.md); modules, replication, Sentinel and Cluster remain excluded even where a config name or metadata category is accepted. The separate Rust coordination product is not part of this executable.
 
 Verify with `bash test/run_packages.sh`, `bash test/smoke.sh` and `./test/conformance/run.sh --suite redis --units info,info-command,introspection,introspection-2,latency-monitor,slowlog,limits,maxmemory,memefficiency,lazyfree`. [Conformance](conformance.md) distinguishes accounting/introspection differences from tests requiring excluded features.

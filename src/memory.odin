@@ -160,7 +160,7 @@ mem_keyspace :: #force_inline proc "contextless" () -> int {
 }
 
 mem_used :: #force_inline proc "contextless" () -> int {
-	return intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed) + ht.maintenance_metadata() + st.maintenance_metadata() + zt.maintenance_metadata() + mem_startup + db_used_memory + mem_keyspace() + storage_dead_payload + ps_memory + conn_mem + tx_mem_total + mem_aof_buffer() + lazyfree_pending_bytes() + compute_reserved + keyspace_memory_used()
+	return intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed) + ht.maintenance_metadata() + st.maintenance_metadata() + zt.maintenance_metadata() + mem_startup + db_used_memory + mem_keyspace() + storage_dead_payload + ps_memory + conn_mem + tx_mem_total + mem_aof_buffer() + lazyfree_pending_bytes() + compute_reserved + keyspace_memory_used() + lua_memory_used()
 }
 
 mem_not_counted :: #force_inline proc "contextless" () -> int {
@@ -216,7 +216,7 @@ mem_overhead :: proc() -> (mh: Mem_Overhead) {
 	mh.frag_bytes = mem_sample_rss - i64(mem_sample_used)
 	mh.clients = conn_mem + tx_mem_total
 	mh.aof = mem_aof_buffer()
-	total := mem_startup + mh.clients + mh.aof + mem_keyspace() + ht.maintenance_metadata() + st.maintenance_metadata() + zt.maintenance_metadata() + intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed) + compute_reserved + keyspace_memory_used()
+	total := mem_startup + mh.clients + mh.aof + mem_keyspace() + ht.maintenance_metadata() + st.maintenance_metadata() + zt.maintenance_metadata() + intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed) + compute_reserved + keyspace_memory_used() + lua_memory_used()
 	mh.lut = mem_keyspace()
 	for &d in dbs {
 		mh.keys += db_size_of(&d)
@@ -310,19 +310,19 @@ info_memory :: proc(b: ^[dynamic]u8) {
 	info_line_int(b, "allocator_muzzy", 0)
 	info_line_int(b, "total_system_memory", mem_system)
 	info_line_human(b, "total_system_memory_human", mem_system)
-	info_line_int(b, "used_memory_lua", 0)
-	info_line_int(b, "used_memory_vm_eval", 0)
-	info_line_human(b, "used_memory_lua_human", 0)
-	info_line_int(b, "used_memory_scripts_eval", 0)
-	info_line_int(b, "number_of_cached_scripts", 0)
+	info_line_int(b, "used_memory_lua", i64(lua_active.vm_bytes) if lua_active != nil else 0)
+	info_line_int(b, "used_memory_vm_eval", i64(lua_active.vm_bytes) if lua_active != nil else 0)
+	info_line_human(b, "used_memory_lua_human", i64(lua_active.vm_bytes) if lua_active != nil else 0)
+	info_line_int(b, "used_memory_scripts_eval", i64(lua_cache_bytes))
+	info_line_int(b, "number_of_cached_scripts", i64(lua_cache_count))
 	info_line_int(b, "number_of_functions", 0)
 	info_line_int(b, "number_of_libraries", 0)
 	info_line_int(b, "used_memory_vm_functions", 0)
-	info_line_int(b, "used_memory_vm_total", 0)
-	info_line_human(b, "used_memory_vm_total_human", 0)
+	info_line_int(b, "used_memory_vm_total", i64(lua_active.vm_bytes) if lua_active != nil else 0)
+	info_line_human(b, "used_memory_vm_total_human", i64(lua_active.vm_bytes) if lua_active != nil else 0)
 	info_line_int(b, "used_memory_functions", 0)
-	info_line_int(b, "used_memory_scripts", 0)
-	info_line_human(b, "used_memory_scripts_human", 0)
+	info_line_int(b, "used_memory_scripts", i64(lua_cache_bytes+lua_retired_bytes))
+	info_line_human(b, "used_memory_scripts_human", i64(lua_cache_bytes+lua_retired_bytes))
 	info_line_int(b, "maxmemory", i64(maxmemory_bytes))
 	info_line_human(b, "maxmemory_human", i64(maxmemory_bytes))
 	info_line_str(b, "maxmemory_policy", EVICT_POLICY_NAMES[maxmemory_policy])
@@ -444,7 +444,7 @@ memory_stats :: proc(c: ^Conn) {
 	reply_kv_int(c, "clients.normal", i64(mh.clients))
 	reply_kv_int(c, "cluster.links", 0)
 	reply_kv_int(c, "aof.buffer", i64(mh.aof))
-	reply_kv_int(c, "lua.caches", 0)
+	reply_kv_int(c, "lua.caches", i64(lua_cache_bytes+lua_retired_bytes))
 	reply_kv_int(c, "functions.caches", 0)
 	for &d in dbs {
 		if db_size_of(&d) == 0 {

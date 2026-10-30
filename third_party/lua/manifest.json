@@ -1,0 +1,91 @@
+{
+  "abi_header": "include/eslua.h",
+  "callback_response_lifetime": "Until next command-callback entry or evaluation return; busy/log callbacks do not release host response ownership",
+  "component": "Eski embedded Lua runtime",
+  "first_party_origin": "Original implementation; no Redis implementation source",
+  "language_boundary": "Lua5.5 runtime, selected Redis-style API subset; not Lua5.1-equivalent",
+  "odin_binding": "include/eslua_ffi.odin",
+  "patches": [
+    {
+      "applied_sha256": "8316492ee2b9b684554fa6916e10cd3ece71983ba6a783988e0b044a24347d0d",
+      "applied_source_hunks": "patches/0b29f408433e92953cc72b1d3e06c7ac8139e439.source.patch",
+      "commit": "0b29f408433e92953cc72b1d3e06c7ac8139e439",
+      "original": "patches/0b29f408433e92953cc72b1d3e06c7ac8139e439.patch",
+      "original_sha256": "0d196ef065208c578e1a26ce792b8e4399a507ff446e9128e285ea2b5e9c7993",
+      "purpose": "GC parameter negative-shift undefined behavior",
+      "url": "https://github.com/lua/lua/commit/0b29f408433e92953cc72b1d3e06c7ac8139e439.patch"
+    },
+    {
+      "applied_sha256": "dd4c93549af7445d6b924989a4b11cd937227a2867b9d7deda53fb570868b910",
+      "applied_source_hunks": "patches/e8533201cd2448d668c9b64758fc44205544b27f.source.patch",
+      "commit": "e8533201cd2448d668c9b64758fc44205544b27f",
+      "original": "patches/e8533201cd2448d668c9b64758fc44205544b27f.patch",
+      "original_sha256": "a535288b7a5037aaa5cedb8f75bd8fe2c1d56bb171e241de49b0a350e9ae9f69",
+      "purpose": "NaN numeric-for behavior",
+      "url": "https://github.com/lua/lua/commit/e8533201cd2448d668c9b64758fc44205544b27f.patch"
+    },
+    {
+      "applied_sha256": "bb74aac22966bd0ef61e2a23a03ec8821c0c15cf950ec2f4849b82655fb11e87",
+      "applied_source_hunks": "patches/b35736b9d71182bae67492af2a387b3f6e89fd05.source.patch",
+      "commit": "b35736b9d71182bae67492af2a387b3f6e89fd05",
+      "original": "patches/b35736b9d71182bae67492af2a387b3f6e89fd05.patch",
+      "original_sha256": "45ffbc5cf56fe982bcf22b99bdc5914f2a987324d0b2864fe410a444eb0f09e3",
+      "purpose": "negative-zero subtraction optimization",
+      "url": "https://github.com/lua/lua/commit/b35736b9d71182bae67492af2a387b3f6e89fd05.patch"
+    },
+    {
+      "applied_sha256": "81c303f33c61dc84956d3ad485d6ed91d7a78500d2782f3219309022a682830e",
+      "applied_source_hunks": "patches/15b2a78106f85a3f8ef2efe5683148d9dad84b33.source.patch",
+      "commit": "15b2a78106f85a3f8ef2efe5683148d9dad84b33",
+      "original": "patches/15b2a78106f85a3f8ef2efe5683148d9dad84b33.patch",
+      "original_sha256": "a7b45fb306544a48c1d968c6c7c6872f63862e1e1f0763281ab67c935e21da20",
+      "purpose": "coroutine close after error",
+      "url": "https://github.com/lua/lua/commit/15b2a78106f85a3f8ef2efe5683148d9dad84b33.patch"
+    }
+  ],
+  "schema": 1,
+  "shim_sources": [
+    "runtime/runtime.c",
+    "runtime/resp.c",
+    "runtime/codecs.c",
+    "runtime/bits.c"
+  ],
+  "upstream": {
+    "archive": "vendor/lua-5.5.1.tar.gz",
+    "copyright": "Copyright (C) 1994-2026 Lua.org, PUC-Rio.",
+    "license": "MIT",
+    "name": "Lua",
+    "notice": "LICENSE.lua",
+    "sha256": "1c4b4068d67061f2a2231ad2b5422e77acea1487ea9890f6320af614f4373dce",
+    "source_directory": "vendor/lua-5.5.1/src",
+    "url": "https://www.lua.org/ftp/lua-5.5.1.tar.gz",
+    "version": "5.5.1"
+  },
+  "vm_sources": [
+    "vendor/lua-5.5.1/src/lapi.c",
+    "vendor/lua-5.5.1/src/lcode.c",
+    "vendor/lua-5.5.1/src/lctype.c",
+    "vendor/lua-5.5.1/src/ldebug.c",
+    "vendor/lua-5.5.1/src/ldo.c",
+    "vendor/lua-5.5.1/src/ldump.c",
+    "vendor/lua-5.5.1/src/lfunc.c",
+    "vendor/lua-5.5.1/src/lgc.c",
+    "vendor/lua-5.5.1/src/llex.c",
+    "vendor/lua-5.5.1/src/lmem.c",
+    "vendor/lua-5.5.1/src/lobject.c",
+    "vendor/lua-5.5.1/src/lopcodes.c",
+    "vendor/lua-5.5.1/src/lparser.c",
+    "vendor/lua-5.5.1/src/lstate.c",
+    "vendor/lua-5.5.1/src/lstring.c",
+    "vendor/lua-5.5.1/src/ltable.c",
+    "vendor/lua-5.5.1/src/ltm.c",
+    "vendor/lua-5.5.1/src/lundump.c",
+    "vendor/lua-5.5.1/src/lvm.c",
+    "vendor/lua-5.5.1/src/lzio.c",
+    "vendor/lua-5.5.1/src/lauxlib.c",
+    "vendor/lua-5.5.1/src/lbaselib.c",
+    "vendor/lua-5.5.1/src/lmathlib.c",
+    "vendor/lua-5.5.1/src/lstrlib.c",
+    "vendor/lua-5.5.1/src/ltablib.c"
+  ]
+}

@@ -1052,6 +1052,19 @@ keyspace_store_seed :: proc(db: ^Db, key: []u8) -> (value: []u8, clock: u32, exi
 	return e.val, entry_lru(e), true, true
 }
 
+lua_store_reply_bound :: proc(db: ^Db, key: []u8) -> u128 {
+	l := lookup_make(key)
+	t, i := db_locate(db, &l)
+	if i < 0 {
+		return 0
+	}
+	e := entry_view(db, t, i)
+	if entry_type(e) == .String {
+		return u128(len(e.val)) + 64
+	}
+	return u128(entry_memory(e))*64 + 128
+}
+
 keyspace_store_import :: proc(db: ^Db, key, value: []u8, clock: u32, changed: bool) {
 	if changed {
 		saved := store_no_touch

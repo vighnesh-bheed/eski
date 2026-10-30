@@ -107,7 +107,7 @@ info_value() {
 }
 
 source_digest() {
-  (cd "$ROOT_DIR" && find src -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+  (cd "$ROOT_DIR" && bash tools/source_digest.sh)
 }
 
 import_image() {
@@ -166,7 +166,7 @@ VERSION=${VERSION%%$'\r'}
 
 [ "$(info_value binary_sha256 "$WORK/build-info.txt")" = "$BIN_SHA" ] || die "the binary in $ID does not match the sha256 its build info records"
 [ "$(info_value version "$WORK/build-info.txt")" = "$VERSION" ] || die "the image prints '$VERSION' but its build info records '$(info_value version "$WORK/build-info.txt")'"
-[ "$(info_value source_sha256 "$WORK/build-info.txt")" = "$SOURCE_SHA" ] || die "the image was built from a source tree other than $ROOT_DIR/src (the tree changed during the build?)"
+[ "$(info_value source_sha256 "$WORK/build-info.txt")" = "$SOURCE_SHA" ] || die "the image was built from a source and Lua dependency tree other than $ROOT_DIR (the tree changed during the build?)"
 [ "$(info_value license "$WORK/build-info.txt")" = "$SOURCE_LICENSE" ] || die "the image records a licence other than $SOURCE_LICENSE"
 [ "$(sha256_of "$WORK/LICENSE")" = "$(sha256_of "$ROOT_DIR/LICENSE")" ] || die "the image holds a project licence different from $ROOT_DIR/LICENSE"
 [ "$(sha256_of "$WORK/THIRD_PARTY_NOTICES.md")" = "$(sha256_of "$ROOT_DIR/THIRD_PARTY_NOTICES.md")" ] || die "the image holds third party notices different from this tree"

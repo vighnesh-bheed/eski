@@ -3911,6 +3911,8 @@ COMPUTE_DEFAULTS = {"compute-threads": b"0", "compute-max-memory": b"134217728"}
 COMPUTE_INFO = ("compute_threads_configured", "compute_threads_active", "compute_jobs_pending", "compute_memory_reserved",
                 "compute_jobs_submitted", "compute_jobs_completed", "compute_jobs_cancelled", "compute_sync_fallbacks", "compute_worker_nanoseconds")
 KEYSPACE_DEFAULTS = {"keyspace-threads": str(int(sys.argv[4])).encode(), "keyspace-max-memory": b"134217728"}
+LUA_DEFAULTS = {"lua-max-memory": b"67108864", "lua-max-output": b"16777216",
+                "lua-max-bridge-memory": b"33554432", "lua-max-cache-memory": b"33554432"}
 KEYSPACE_INFO = ("keyspace_threads_configured", "keyspace_threads_active", "keyspace_jobs_pending", "keyspace_memory_used",
                  "keyspace_records", "keyspace_jobs_submitted", "keyspace_jobs_completed", "keyspace_gets", "keyspace_sets",
                  "keyspace_sync_fallbacks", "keyspace_barriers", "keyspace_worker_nanoseconds")
@@ -3922,7 +3924,8 @@ HIDDEN = ["use-exit-on-panic", "aof-disable-auto-gc", "rdb-key-save-delay", "key
 PATTERNS = [["*"], ["*max*"], ["maxmemory*"], ["*of"], ["hash-*"], ["?z"], ["[a-c]*"], ["*ziplist*"],
             ["list-*"], ["nonexistent"], ["MAXMEMORY"], ["maxmemory", "MAXMEMORY"],
             ["maxmemory", "maxmemory*", "bind", "*of"], ["*", "maxmemory"], ["slave*"], ["*-*-*-*"],
-            ["\\*"], ["[^a]*"], ["*lazy*"], ["tls-*"], ["cluster-*"], ["*cpulist"], ["*_*"]]
+            ["\\*"], ["[^a]*"], ["*lazy*"], ["tls-*"], ["cluster-*"], ["*cpulist"], ["*_*"],
+            ["lua-max-*"], ["LUA-MAX-*"]]
 
 
 class Conn:
@@ -3982,15 +3985,20 @@ j, r = Conn(ESKI), Conn(REF)
 failures = []
 checks = 0
 compute_config = {}
-for name, default in (COMPUTE_DEFAULTS | KEYSPACE_DEFAULTS).items():
+for name, default in (COMPUTE_DEFAULTS | KEYSPACE_DEFAULTS | LUA_DEFAULTS).items():
     checks += 1
     actual = j.cmd("config", "get", name)
     if not isinstance(actual, list) or len(actual) != 2 or actual[0] != name.encode() or not isinstance(actual[1], bytes) or not actual[1].isdigit():
         failures.append("Eski CONFIG GET %s has invalid metadata: %r" % (name, actual))
         continue
     compute_config[name] = int(actual[1])
-    if (sys.argv[3] != "1" or name == "keyspace-threads") and actual[1] != default:
+    if (sys.argv[3] != "1" or name == "keyspace-threads" or name in LUA_DEFAULTS) and actual[1] != default:
         failures.append("Eski CONFIG GET %s default: expected %r observed %r" % (name, default, actual[1]))
+for name, default in LUA_DEFAULTS.items():
+    checks += 1
+    actual = j.cmd("config", "get", name.upper())
+    if actual != [name.upper().encode(), default]:
+        failures.append("Eski exact uppercase CONFIG GET %s: expected %r observed %r" % (name, default, actual))
 server_fields = [line.split(b":", 1) for line in j.cmd("info", "server").splitlines() if b":" in line]
 for name in COMPUTE_INFO + KEYSPACE_INFO:
     checks += 1

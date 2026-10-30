@@ -14,7 +14,10 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     odin = os.environ.get("ODIN") or shutil.which("odin") or str(Path.home() / "odin/current/odin")
+    dependency_mode = args.sanitize or "release"
+    subprocess.run(["bash", str(root / "tools/build_lua.sh"), dependency_mode], check=True, cwd=root, timeout=180)
     with tempfile.TemporaryDirectory(prefix="eski-storage-test-") as temporary:
+        (Path(temporary) / ".build").symlink_to(root / ".build", target_is_directory=True)
         work = Path(temporary) / "src"
         shutil.copytree(root / "src", work)
         shutil.copyfile(root / "test/storage/main.odin", work / "main.odin")

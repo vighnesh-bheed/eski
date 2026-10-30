@@ -122,6 +122,7 @@ persist_cmd_bits: [PERSIST_CMD_SET]Persist_Cmd_Flags
 
 @(private = "file")
 persist_write_names := [?]string {
+	"eval", "evalsha",
 	"append", "bitfield", "bitop", "blmove", "blmpop", "blpop", "brpop", "brpoplpush", "bzmpop", "bzpopmax", "bzpopmin",
 	"copy", "decr", "decrby", "del", "expire", "expireat", "flushall", "flushdb", "geoadd", "georadius",
 	"georadiusbymember", "geosearchstore", "getdel", "getex", "getset", "hdel", "hexpire", "hexpireat", "hincrby",

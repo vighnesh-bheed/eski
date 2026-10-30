@@ -154,6 +154,7 @@ def dataset(gen):
     stream_ids = [f"{1000 + i}-{gen}" for i in range(60)]
     writes = [
         ("SET", p + "string", f"value-{gen}"),
+        ("EVAL", "return redis.call('SET',KEYS[1],ARGV[1])", 1, p + "script", f"script-{gen}"),
         ("SET", p + "integer", str(1234567 + gen)),
         ("INCRBY", p + "integer", "10"),
         ("SET", p + "binary", binary),
@@ -191,6 +192,7 @@ def dataset(gen):
     expect = {
         0: {
             p + "string": ("string", f"value-{gen}".encode()),
+            p + "script": ("string", f"script-{gen}".encode()),
             p + "integer": ("string", str(1234577 + gen).encode()),
             p + "binary": ("string", binary),
             p + "large": ("string", large),

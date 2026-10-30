@@ -156,7 +156,7 @@ compute_tick :: proc() {
 			continue
 		}
 		c.compute = nil
-		c.atime_ms = srv.now_ms
+		c.atime_ms = max(c.atime_ms, lua_connection_clock())
 		if !task.suppressed {
 			lcs_reply(c, task.a, task.b, task.table, task.text, task.cells, task.want)
 		}
@@ -215,7 +215,7 @@ lcs_try_compute :: proc(c: ^Conn, argv: [][]u8, a, b: []u8, cells: int, want: Lc
 	if compute_threads == 0 || cells < COMPUTE_LCS_MIN_CELLS {
 		return false
 	}
-	if tx_exec_conn != nil || pst.loading || aof.loading || pst.in_child || c.fd < 0 || .Tracking in c.ps || compute_pending >= cp.CAPACITY || cp.active_workers(&compute_pool) == 0 {
+	if lua_active != nil || tx_exec_conn != nil || pst.loading || aof.loading || pst.in_child || c.fd < 0 || .Tracking in c.ps || compute_pending >= cp.CAPACITY || cp.active_workers(&compute_pool) == 0 {
 		compute_fallbacks += 1
 		return false
 	}

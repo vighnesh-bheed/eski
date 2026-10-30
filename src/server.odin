@@ -66,6 +66,7 @@ Conn :: struct {
 	compute:     ^Lcs_Task,
 	compute_token: u64,
 	read_eof:    bool,
+	lua_busy_bytes: int,
 	keyspace:    ^Keyspace_Task,
 	keyspace_token: u64,
 	keyspace_ready: bool,
@@ -103,6 +104,9 @@ srv: Server
 events: [MAX_EVENTS]linux.EPoll_Event
 
 update_clock :: #force_inline proc() {
+	if lua_active != nil {
+		return
+	}
 	ts, _ := linux.clock_gettime(.REALTIME)
 	srv.now_ms = i64(ts.time_sec) * 1000 + i64(ts.time_nsec / 1_000_000)
 	lru_now = u32(srv.now_ms / 1000) & LRU_CLOCK_MAX
@@ -417,8 +421,8 @@ accept_clients :: proc(lfd: linux.Fd, kind: Conn_Kind) {
 		c.wbuf = mem_alloc(WBUF_INIT)
 		c.wcap = WBUF_INIT
 		conn_mem += size_of(Conn) + RBUF_INIT + WBUF_INIT
-		c.ctime_ms = srv.now_ms
-		c.atime_ms = srv.now_ms
+		c.ctime_ms = lua_connection_clock()
+		c.atime_ms = c.ctime_ms
 		c.last_cmd = "NULL"
 		c.db = &dbs[0]
 		c.resp = RESP2
@@ -525,9 +529,10 @@ conn_flush :: proc(c: ^Conn) -> bool {
 			return false
 		}
 		c.wpos += n
+		c.lua_busy_bytes = max(0, c.lua_busy_bytes-n)
 		stat_writes_processed += 1
 		stat_net_output_bytes += i64(n)
-		c.atime_ms = srv.now_ms
+		c.atime_ms = max(c.atime_ms, lua_connection_clock())
 		if c.wpos < c.wlen {
 			break
 		}
@@ -713,7 +718,7 @@ process_input :: proc(c: ^Conn) {
 
 conn_read :: proc(c: ^Conn) {
 	eof := false
-	c.atime_ms = srv.now_ms
+	c.atime_ms = max(c.atime_ms, lua_connection_clock())
 	for {
 		want := max(c.rlen + READ_MIN_FREE, c.need)
 		if want > c.rcap {
@@ -805,6 +810,7 @@ handle_event :: proc(c: ^Conn, evs: linux.EPoll_Event_Set) {
 }
 
 server_cron :: proc() {
+	lua_cache_reap(16)
 	mem_cron()
 	persist_cron()
 	db_active_expire()

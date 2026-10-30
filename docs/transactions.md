@@ -30,6 +30,8 @@ EXEC
 
 Blocking list, sorted-set and stream reads register a wait when used normally. Timeouts or relevant mutations wake the connection, and disconnect cleanup releases its wait state. A blocking command executed from a transaction does not pause the transaction until another client writes; it returns its immediate result when no eligible data is available. `CLIENT UNBLOCK` can end a client's wait using timeout or error behaviour.
 
-Atomic foreground execution is separate from durability. A successful `EXEC` does not acknowledge a replica, and local AOF synchronization depends on [persistence settings](persistence.md). Lua and executable functions are excluded; applications cannot submit server-side scripts to combine arbitrary logic here.
+EVAL/EVALSHA and their read-only variants can run as queued transaction commands. A script error retains its prior successful writes and appears in the EXEC result; later queued commands still run. Scripts use the enclosing transaction's AOF effect group and frozen command time for expiry checks; TIME remains wall-clock. Nested transaction controls and blocking commands are rejected through `redis.call`. The [scripting guide](scripting.md) documents the Lua/library subset, command restrictions and cancellation behavior; executable FUNCTION libraries remain excluded.
+
+Atomic foreground execution is separate from durability. A successful `EXEC` does not acknowledge a replica, and local AOF synchronization depends on [persistence settings](persistence.md).
 
 Verify with `bash test/run_packages.sh`, `bash test/smoke.sh` and `./test/conformance/run.sh --suite redis --units multi,type/list-2,type/zset,type/stream-cgroups`. The [conformance report](conformance.md) records remaining supported-behaviour differences and tests requiring excluded features.

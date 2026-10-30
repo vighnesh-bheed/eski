@@ -27,7 +27,9 @@ wbuf_grow :: proc(c: ^Conn, n: int) {
 			return
 		}
 	}
-	newcap := max(c.wcap * 2, c.wlen + n, WBUF_INIT)
+	floor := 256 if lua_effect_owner(c) else WBUF_INIT
+	newcap := max(c.wcap * 2, c.wlen + n, floor)
+	newcap = min(newcap, lua_capture_capacity(c))
 	stat_reply_buffer_expands += 1
 	c.wbuf = ([^]u8)(runtime.heap_resize(c.wbuf, newcap))
 	if c.fd >= 0 {
@@ -53,6 +55,9 @@ reply_raw :: proc(c: ^Conn, s: []u8) #no_bounds_check {
 	if n == 0 {
 		return
 	}
+	if !lua_capture_allow(c, n) {
+		return
+	}
 	p := wb_reserve(c, n)
 	intrinsics.mem_copy_non_overlapping(p, raw_data(s), n)
 	c.wlen += n
@@ -66,6 +71,9 @@ reply_str :: #force_inline proc(c: ^Conn, s: string) {
 @(private = "file")
 reply_line :: proc(c: ^Conn, prefix: u8, s: []u8) #no_bounds_check {
 	n := len(s)
+	if !lua_capture_allow(c, n+3) {
+		return
+	}
 	p := wb_reserve(c, n + 3)
 	p[0] = prefix
 	if n > 0 {
@@ -78,6 +86,9 @@ reply_line :: proc(c: ^Conn, prefix: u8, s: []u8) #no_bounds_check {
 
 @(private = "file")
 reply_prefixed_int :: #force_inline proc(c: ^Conn, prefix: u8, v: i64) #no_bounds_check {
+	if !lua_capture_allow(c, 24) {
+		return
+	}
 	p := wb_reserve(c, 24)
 	p[0] = prefix
 	n := format_i64(&p[1], v)
@@ -108,6 +119,9 @@ reply_error_parts :: proc(c: ^Conn, parts: ..string) #no_bounds_check {
 	n := 3
 	for s in parts {
 		n += len(s)
+	}
+	if !lua_capture_allow(c, n) {
+		return
 	}
 	p := wb_reserve(c, n)
 	p[0] = '-'
@@ -182,6 +196,9 @@ reply_attribute :: proc(c: ^Conn, pairs: int) -> bool {
 
 reply_bulk :: proc(c: ^Conn, s: []u8) #no_bounds_check {
 	n := len(s)
+	if !lua_capture_allow(c, n+26) {
+		return
+	}
 	p := wb_reserve(c, n + 26)
 	p[0] = '$'
 	h := format_i64(&p[1], i64(n)) + 1
@@ -238,6 +255,9 @@ reply_verbatim :: proc(c: ^Conn, s: []u8, format: string = "txt") #no_bounds_che
 		return
 	}
 	reply_prefixed_int(c, '=', i64(len(s) + 4))
+	if !lua_capture_allow(c, 4) {
+		return
+	}
 	p := wb_reserve(c, 4)
 	for i in 0 ..< 3 {
 		p[i] = format[i] if i < len(format) else ' '

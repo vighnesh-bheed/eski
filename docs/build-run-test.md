@@ -2,7 +2,7 @@
 
 ## Build
 
-The server uses Linux system calls and epoll. The supplied container build targets Linux amd64 and pins its compiler archive and distribution packages in [Dockerfile](../Dockerfile). Native builds need Odin, clang and Python. Build scripts choose `ODIN` when set, then `odin` on PATH, then `$HOME/odin/current/odin`. The compiler selected must be executable; clang must be on PATH.
+The server uses Linux system calls and epoll. Its host implementation is Odin and its embedded Lua runtime is C, with the Lua MIT notice retained in [third-party notices](../THIRD_PARTY_NOTICES.md#lua-551). The supplied container build targets Linux amd64 and pins its compiler archive and distribution packages in [Dockerfile](../Dockerfile). Native builds need Odin, clang, GNU ar, sha256sum, flock and Python. Build scripts choose `ODIN` when set, then `odin` on PATH, then `$HOME/odin/current/odin`. The compiler selected must be executable; clang must be on PATH.
 
 Run from the repository root:
 
@@ -11,7 +11,17 @@ Run from the repository root:
 ./build.sh
 ```
 
-`check` type-checks the source, test and benchmark packages with vet and strict style and scans Odin source for comments. The default build is the optimized release executable at `bin/eski`. `./build.sh debug` and `./build.sh sanitizer` replace that same output with a debug or address-sanitized build. Rebuild release before comparing performance. A compiler can be selected explicitly with `ODIN=/path/to/odin ./build.sh`.
+The build first verifies and compiles the pinned Lua 5.5.1 sources, official patches and protection shim vendored under `third_party/lua`. Normal native builds download nothing. Generated static archives live under `.build/lua`; unchanged, hash-verified dependencies are reused. `ESKI_LUA_CC` and `ESKI_LUA_AR` select the C compiler and archiver when needed.
+
+`check` type-checks the source, test and benchmark packages with vet and strict style and scans Odin source for comments. The default build is the optimized release executable at `bin/eski`. `./build.sh debug`, `./build.sh sanitizer` and `./build.sh thread-sanitizer` replace that same output with a debug, address-sanitized or thread-sanitized build. The VM and shim are instrumented together for either sanitizer mode. Rebuild release before comparing performance. A compiler can be selected explicitly with `ODIN=/path/to/odin ./build.sh`.
+
+Prepare dependencies before invoking Odin directly:
+
+```sh
+bash tools/build_lua.sh all
+```
+
+The helper also accepts `release`, `address` or `thread` to prepare one archive. Debug and ordinary builds use the release archive. The Odin binding selects the address or thread archive through `ODIN_SANITIZER_FLAGS` when the matching sanitizer is enabled. Keep `.build` beside `src` when copying the source into another build directory; the storage test driver preserves this layout automatically.
 
 ## Run and configure
 
@@ -57,7 +67,7 @@ docker run --rm --name eski -p 127.0.0.1:6399:6399 \
   -v eski-data:/data eski:local --bind 0.0.0.0 --port 6399 --appendonly yes
 ```
 
-The runtime image runs as its unprivileged Eski user and uses `/data`. A named volume preserves local persistence across replacement containers. `bench/image.sh` builds and verifies an image manifest and can export/import an image archive; use `bash bench/image.sh --help` for its options. The image's documentation directory carries the project and applicable third-party licence notices.
+The runtime image runs as its unprivileged Eski user and uses `/data`. A named volume preserves local persistence across replacement containers. `bench/image.sh` builds and verifies an image manifest and can export/import an image archive; use `bash bench/image.sh --help` for its options. Its source identity covers Odin source, the vendored Lua runtime and patches, and the dependency build scripts. The image's documentation directory carries the project and applicable third-party licence notices, and its build-info records the Lua source, manifest and compiled library hashes.
 
 ## Verification
 
@@ -67,11 +77,15 @@ bash test/run_packages.sh
 bash test/smoke.sh
 ```
 
-The package runner executes native unit packages in debug, address-sanitizer and release modes, then runs the Python harness drivers. It writes temporary binaries and removes them on exit. Individual packages can be tested with `odin test src/listpack -debug`; drivers such as `python3 -I test/request_parser/run.py` include their own boundary and model checks.
+The package runner prepares all three Lua archives, executes native unit packages in debug, address-sanitizer and release modes, then runs the Python harness drivers. It writes temporary test binaries and removes them on exit. Individual packages can be tested with `odin test src/listpack -debug`; drivers such as `python3 -I test/request_parser/run.py` include their own boundary and model checks.
 
 The LCS driver can target a separate executable with `python3 -I test/threading/run.py --server /path/to/eski`. The keyspace driver is `python3 -I test/threading/keyspace.py --server /path/to/eski`. The package runner runs each driver once and uses `ESKI_THREADING_BIN` when set, otherwise the current `bin/eski`; these invocations collect correctness results only. `python3 -I -m unittest discover -s test/threading -p 'test_*.py'` checks their protocol/model/measurement helpers. The [threading guide](threading.md#keyspace-correctness-checks) describes the dedicated keyspace checks; its separate LCS section includes native overlap tests, loading fallback checks, diagnostic builds and an explicitly opt-in performance tool.
 
-Ten native keyspace ownership tests pass in strict debug, ASan with leak detection and TSan. All 20 dedicated keyspace driver cases pass against release, address-sanitized and thread-sanitized servers. The default configuration preserves all 1,504 Tcl baseline passes with zero regressions and retains the existing 20 expanded failures. The full package gate passes all 90 runs. Smoke passes all 2,428 checks with workers disabled and with two workers enabled, and the enabled configuration also preserves all 1,504 Tcl baseline passes with zero regressions. No keyspace-worker benchmark has been run. The earlier LCS qualification at `83024e3` and committed conformance/benchmark inputs remain separate evidence.
+The new scripting driver is `python3 -I test/scripting/run.py --server /path/to/eski`; it is discovered once by the package runner. It uses `ESKI_SCRIPTING_BIN`, then `ESKI_THREADING_BIN`, then `bin/eski` when no executable is supplied. Its original cases cover source/cache behavior, command effects and persistence, ACL/read-only policy, sandbox and resource limits, BUSY/KILL authentication and lifetime, worker boundaries, tracking and observer order, and JSON/MessagePack/bit/SHA1 helpers. It never compiles a server or collects benchmarks. `--case 'Class.method*'` selects checks; `--reference-port PORT` runs only the portable subset against an explicitly isolated localhost reference server and clears that server's database and script cache.
+
+The current Lua source passes all 45 dedicated driver cases against release, address-sanitized and thread-sanitized servers. Nine native FFI tests pass in debug, ASan with leak detection and TSan; strict checks pass for all 52 packages. All 15 portable cases pass against stock Redis 7.4.12. The final full package, smoke and Tcl gates are still in progress; these results establish the executed boundaries rather than full scripting compatibility.
+
+At threading checkpoint `78eb2f1`, ten native keyspace ownership tests passed in strict debug, ASan with leak detection and TSan. All 20 dedicated keyspace driver cases passed against release, address-sanitized and thread-sanitized servers. Both default and enabled-worker configurations preserved all 1,504 Tcl baseline passes with zero regressions and retained the existing 20 expanded failures. The package gate passed all 90 runs, and smoke passed all 2,428 checks in each worker configuration. These results precede the new Lua runtime, build wiring and scripting cases, whose combined qualification is pending. No keyspace-worker benchmark has been run. The earlier LCS qualification at `83024e3` and committed conformance/benchmark inputs remain separate evidence.
 
 Conformance downloads the pinned upstream Tcl test suite and verifies its archive hash. It prefers a native Tcl interpreter and can use Docker when needed. `--baseline` fails when a previously passing test regresses. Without that option, the runner applies its stricter failure policy. It restarts Eski for each unit; `--external HOST:PORT` instead uses an existing server. Results and unit logs go to `test/conformance/results/`. See `./test/conformance/run.sh --help` for unit selection, tags, Tcl selection, ports and timeouts. The [generated conformance page](conformance.md) separates the baseline from the recorded expanded run and explains the current failures.
 

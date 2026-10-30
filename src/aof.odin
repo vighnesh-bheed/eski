@@ -255,6 +255,9 @@ expire_now :: #force_inline proc "contextless" () -> i64 {
 	if aof.loading {
 		return 0
 	}
+	if lua_active != nil {
+		return lua_active.frozen_ms
+	}
 	return srv.now_ms
 }
 
@@ -2168,7 +2171,7 @@ aof_cmd_begin :: proc(c: ^Conn, cmd: ^Command, argv: [][]u8) {
 		return
 	}
 	if aof.in_tx {
-		if c == aof_tx_conn && (tx_exec_conn != nil || (c != nil && .Multi in c.txf)) {
+		if lua_effect_owner(c) || (c == aof_tx_conn && (tx_exec_conn != nil || (c != nil && .Multi in c.txf))) {
 			aof_cmd_prepare(c, cmd, argv)
 			return
 		}
@@ -3296,7 +3299,7 @@ aof_after_command :: proc(c: ^Conn, cmd: ^Command, flags: Persist_Cmd_Flags, arg
 
 @(private = "file")
 aof_after_inner :: proc(c: ^Conn, cmd: ^Command, kind: Aof_Kind, flags: Persist_Cmd_Flags, argv: [][]u8, pending: int) {
-	if cmd == nil || len(argv) == 0 || aof_is_queueing(c, kind) {
+	if cmd == nil || len(argv) == 0 || lua_is_eval(cmd) || aof_is_queueing(c, kind) {
 		return
 	}
 	if aof_snap_cmd != nil && aof_snap_cmd != cmd {

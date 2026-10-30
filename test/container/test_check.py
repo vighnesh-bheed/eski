@@ -108,9 +108,13 @@ class DatasetTest(unittest.TestCase):
         kinds = {kind for keys in expected.values() for kind, _ in keys.values()}
         self.assertEqual(kinds, {"string", "list", "hash", "set", "zset", "stream"})
         self.assertEqual(sorted(writes), [0, check.SECOND_DB])
+        scripts = [argv for argv in writes[0] if argv[0] == "EVAL"]
+        self.assertEqual(scripts, [("EVAL", "return redis.call('SET',KEYS[1],ARGV[1])", 1, "g0:script", "script-0")])
+        self.assertEqual(expected[0][scripts[0][3]], ("string", scripts[0][4].encode()))
         for db in writes:
+            effect_keys = {argv[3] if argv[0] == "EVAL" else argv[1] for argv in writes[db]}
             for key in expected[db]:
-                self.assertTrue(any(argv[1] == key for argv in writes[db]), key)
+                self.assertIn(key, effect_keys)
         self.assertTrue(any(argv[0] == "PFADD" for argv in writes[0]))
         self.assertTrue(any(argv[0] == "GEOADD" for argv in writes[0]))
         self.assertTrue(any(argv[0] == "HEXPIRE" for argv in writes[0]))

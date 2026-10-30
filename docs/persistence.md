@@ -24,6 +24,8 @@ From another terminal, write a value, request `BGSAVE`, wait for `INFO persisten
 
 `BGREWRITEAOF` compacts the log with a background rewrite; related rewrite thresholds and incremental-fsync options tune scheduling/I/O. Startup validates manifests and payloads and applies the configured truncated-tail policy. Inspect logs and `INFO persistence` when a load/rewrite fails. `WAITAOF` can request local AOF synchronization, but reports zero replica acknowledgements; a local request fails if AOF is disabled. `WAIT` likewise reports no replicas. No network replication exists.
 
+[Lua evaluation](scripting.md) records translated command effects, including successful writes before a later script error, rather than EVALSHA or cached source. Script effects form an AOF group and join an enclosing MULTI group; relative expiry keeps its absolute deadline on replay. The source cache is ephemeral and absent from RDB/AOF, so a restart can return NOSCRIPT even when the script's stored data was restored.
+
 ## Payload transfer and shutdown
 
 `DUMP` returns a serialized key payload without its key TTL. `RESTORE key ttl payload` validates that payload and accepts `REPLACE`, `ABSTTL`, `IDLETIME` and `FREQ` under their option checks. Use a binary-safe client. `MIGRATE` transfers keys to another endpoint using payload restore, with `COPY`, `REPLACE`, `AUTH`, `AUTH2` and multi-key `KEYS` forms. Transfer is an explicit client operation; it does not establish continuous replication or cluster failover.

@@ -54,6 +54,9 @@ keyspace_candidate :: proc(cmd: ^Command, argv: [][]u8) -> bool {
 }
 
 keyspace_eligible :: proc(c: ^Conn) -> bool {
+	if lua_active != nil {
+		return false
+	}
 	return keyspace_threads > 0 && keyspace_max_memory > 0 && !keyspace_in_fence && c.fd >= 0 && c.kind == .Redis && c.db != nil && c.compute == nil && c.keyspace == nil && !c.keyspace_ready && c.blocked == .None && !c.held && !c.close_after && c.ps == {} && .Multi not_in c.txf && tx_exec_conn == nil && !deny_blocking && tx_multi_count == 0 && !cmd_hooks && !key_hooks && watch_total == 0 && !tracking_on && tracking_clients == 0 && notify_active == {} && len(monitors) == 0 && len(ps_conns) == 0 && ps_exec == nil && !ps_hooked && ps_held_count == 0 && block_work == 0 && block_count() == 0 && lazy_blocked == 0 && maxmemory_bytes == 0 && cfg.maxmemory_clients == 0 && !client_buckets_on && !evict_timer && !lfu_policy && mc_port == 0 && mc_flush_at == 0 && srv.pause_end_ms == 0 && srv.held_count == 0 && !srv.resume_due && !cron_paused && !pst.loading && !pst.serve_while_loading && !pst.in_child && !pst.gate_active && pst.child_pid <= 0 && !pst.bgsave_scheduled && aof.state == .Off && !aof.wanted && !aof.feed && !aof.loading && len(aof.buf) == 0 && len(aof.deferred) == 0
 }
 
@@ -113,7 +116,7 @@ keyspace_complete :: proc(job: ^ks.Job) {
 	valid := c != nil && c.id == task.client_id && c.keyspace == task && c.keyspace_token == task.token
 	if valid {
 		c.keyspace = nil
-		c.atime_ms = srv.now_ms
+		c.atime_ms = max(c.atime_ms, lua_connection_clock())
 		if !task.suppressed {
 			if job.op == .Set {
 				reply_ok(c)
