@@ -28,7 +28,7 @@ The example binds to loopback explicitly. Configure network access and [ACLs](do
 
 ## How it works
 
-The foreground command path runs on a single event-loop thread. Linux epoll reports ready sockets, each connection keeps its input and output buffers, and the parser retains incomplete requests until more bytes arrive. Complete arguments reach a command registry whose entries connect handlers with arity, flags, key specifications and argument metadata. Handlers operate on the selected database and write typed RESP replies. Pipelining reuses a connection's buffers while each command still executes in order.
+The coordinator runs on a single event-loop thread. Linux epoll reports ready sockets, each connection keeps its input and output buffers, and the parser retains incomplete requests until more bytes arrive. Complete arguments reach a command registry whose entries connect handlers with arity, flags, key specifications and argument metadata. Handlers operate on the selected database and write typed RESP replies. Optional [compute workers](docs/threading.md) run expensive LCS calculations over owned input snapshots; GET, SET and live keyspace ownership stay on the coordinator. Pipelining preserves each connection's command order. Compute workers are disabled by default.
 
 Each event-loop iteration has a scratch allocation lifetime. Values and connection state that survive that iteration use owned storage instead. This separates transient parsing and reply work from data stored in the keyspace. Lazy freeing, bounded maintenance and persistence work have their own lifetimes; the foreground loop is not a promise that every command has constant latency.
 

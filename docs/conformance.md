@@ -6,7 +6,7 @@ A baseline PASS checks the preserved passing tests in its compared units. It doe
 
 ## Reproduce and refresh
 
-Build with `./build.sh`, then run `./test/conformance/run.sh --suite redis --baseline test/conformance/baseline-redis.json`. Run `./test/conformance/run.sh --suite redis` without the baseline to apply the strict failure rule. Refresh the public snapshot from an actual run with `python3 -I test/readme_tables.py --record-conformance test/conformance/results/latest-redis.json`, then run `python3 -I test/readme_tables.py --check`. The refresh keeps aggregate counts, exact failing test identities, authored reasons and the baseline comparison, while omitting local paths, raw assertion code and stack traces. The preserved snapshot was generated at `2026-10-29T22:59:52Z`; reruns can change timings and expose different outcomes.
+Build with `./build.sh`, then run `./test/conformance/run.sh --suite redis --baseline test/conformance/baseline-redis.json`. Run `./test/conformance/run.sh --suite redis` without the baseline to apply the strict failure rule. Refresh the public snapshot from an actual run with `python3 -I test/readme_tables.py --record-conformance test/conformance/results/latest-redis.json`, then run `python3 -I test/readme_tables.py --check`. The refresh keeps aggregate counts, exact failing test identities, authored reasons and the baseline comparison, while omitting local paths, raw assertion code and stack traces. The preserved snapshot was generated at `2026-10-30T02:13:07Z`; reruns can change timings and expose different outcomes.
 
 ## Baseline units
 

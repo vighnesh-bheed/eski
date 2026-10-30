@@ -24,6 +24,7 @@ Start with [build, run and test](build-run-test.md) and [architecture](architect
 | Topic | Page |
 | --- | --- |
 | RESP, connections and client controls | [Connections and protocol](connections-and-protocol.md) |
+| Optional snapshot-based LCS compute workers | [Threading](threading.md) |
 | Configuration, introspection, memory limits and eviction | [Server management](server.md) |
 | Users, selectors, key patterns and authentication | [ACL](acl.md) |
 | Snapshots, append-only files and payload transfer | [Persistence](persistence.md) |

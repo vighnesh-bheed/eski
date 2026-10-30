@@ -229,7 +229,10 @@ execute :: proc(c: ^Conn, argv: [][]u8) {
 	t0 := mono_now()
 	cmd.handler(c, argv)
 	ticks := mono_now() - t0
-	if ticks < st.limit_ticks {
+	deferred := compute_note_deferred(c, cmd, st, t0)
+	if deferred {
+		stat_cur = nil
+	} else if ticks < st.limit_ticks {
 		#no_bounds_check st.small[(ticks * mono_mul) >> 32] += 1
 		srv.stat_commands += 1
 	} else {
@@ -314,7 +317,10 @@ execute_hooked :: #force_no_inline proc(c: ^Conn, cmd: ^Command, st: ^Cmd_Hot, a
 	cmd.handler(c, argv)
 	ticks := mono_now() - t0
 	ps_hooked = false
-	if ticks < st.limit_ticks {
+	deferred := compute_note_deferred(c, cmd, st, t0)
+	if deferred {
+		stat_cur = nil
+	} else if ticks < st.limit_ticks {
 		#no_bounds_check st.small[(ticks * mono_mul) >> 32] += 1
 		srv.stat_commands += 1
 	} else {

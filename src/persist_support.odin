@@ -4,6 +4,13 @@ import "base:runtime"
 import "core:sys/linux"
 import "rdb"
 
+foreign import libc_persist_signals "system:c"
+
+foreign libc_persist_signals {
+	@(link_name = "signal")
+	persist_libc_signal :: proc "c" (sig: linux.Signal, handler: linux.Sig_Handler_Fn) -> linux.Sig_Handler_Fn ---
+}
+
 PERSIST_LOADING_EVENTS_BYTES :: 2 * 1024 * 1024
 
 PERSIST_PATH_MAX :: 4096
@@ -27,6 +34,8 @@ persist_policy_lfu :: #force_inline proc "contextless" () -> bool {
 persist_sig_pending: i32
 
 persist_sig_last: i32
+
+#assert(intrinsics.atomic_type_is_lock_free(i32))
 
 Log_Line :: struct {
 	buf:  [4096]u8,
@@ -293,10 +302,8 @@ persist_debug_delay :: proc "contextless" (usec: i64) {
 
 persist_child_setup :: proc() {
 	pst.in_child = true
-	sa: linux.Sig_Action
-	sa.special = .SIG_DFL
-	linux.rt_sigaction(.SIGTERM, &sa, nil)
-	linux.rt_sigaction(.SIGINT, &sa, nil)
+	persist_set_signal(.SIGTERM, nil)
+	persist_set_signal(.SIGINT, nil)
 	server_close_listeners()
 	if mc_lfd >= 0 {
 		linux.close(mc_lfd)
@@ -430,36 +437,48 @@ persist_serve_events :: proc() {
 }
 
 persist_signal_handler :: proc "c" (sig: linux.Signal) {
-	if intrinsics.volatile_load(&persist_sig_pending) != 0 && sig == .SIGINT {
-		plog(LOG_WARNING, "You insist... exiting now.")
-		tbuf: [64]u8
-		name := persist_temp_name(linux.getpid(), tbuf[:])
-		cbuf: [80]u8
-		linux.unlink(persist_cstr(name, cbuf[:]))
+	intrinsics.atomic_store_explicit(&persist_sig_last, i32(sig), .Relaxed)
+	pending := intrinsics.atomic_add_explicit(&persist_sig_pending, 1, .Acq_Rel)
+	if pending != 0 && sig == .SIGINT {
 		linux.exit_group(1)
 	}
+}
+
+persist_set_signal :: proc "contextless" (sig: linux.Signal, handler: linux.Sig_Handler_Fn) -> bool {
+	previous := persist_libc_signal(sig, handler)
+	return transmute(uintptr)previous != ~uintptr(0)
+}
+
+persist_signal_pending :: proc "contextless" () -> bool {
+	return intrinsics.atomic_load_explicit(&persist_sig_pending, .Acquire) != 0
+}
+
+persist_signal_log :: proc(sig: i32) {
 	msg := "Received shutdown signal, scheduling shutdown..."
-	#partial switch sig {
-	case .SIGINT:
+	switch sig {
+	case i32(linux.Signal.SIGINT):
 		msg = "Received SIGINT scheduling shutdown..."
-	case .SIGTERM:
+	case i32(linux.Signal.SIGTERM):
 		msg = "Received SIGTERM scheduling shutdown..."
 	}
 	if pst.loading {
 		msg = "Received shutdown signal during loading, scheduling shutdown."
 	}
 	plog(LOG_WARNING, msg)
-	intrinsics.volatile_store(&persist_sig_last, i32(sig))
-	intrinsics.volatile_store(&persist_sig_pending, 1)
+}
+
+persist_signal_loading_exit :: proc() {
+	persist_signal_log(intrinsics.atomic_load_explicit(&persist_sig_last, .Acquire))
+	compute_shutdown()
+	plog(LOG_WARNING, "Eski is now ready to exit, bye bye...")
+	linux.exit_group(0)
 }
 
 persist_install_signals :: proc() {
-	sa: linux.Sig_Action
-	sa.handler = persist_signal_handler
-	linux.rt_sigaction(.SIGTERM, &sa, nil)
-	sb: linux.Sig_Action
-	sb.handler = persist_signal_handler
-	linux.rt_sigaction(.SIGINT, &sb, nil)
+	if !persist_set_signal(.SIGTERM, persist_signal_handler) || !persist_set_signal(.SIGINT, persist_signal_handler) {
+		plog(LOG_WARNING, "Cannot install shutdown signal handlers")
+		linux.exit_group(1)
+	}
 }
 
 persist_raw_locate :: proc(db: ^Db, key: []u8) -> (^Table, int) {

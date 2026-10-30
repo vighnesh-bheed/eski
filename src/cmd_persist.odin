@@ -488,6 +488,7 @@ persist_bgsave :: proc() -> bool {
 	pst.dirty_before_bgsave = pst.dirty
 	pst.lastbgsave_try = persist_unix_now()
 	persist_progress_prepare()
+	compute_before_fork()
 	start := now_ns()
 	pid, err := linux.fork()
 	if err != .NONE {
@@ -1151,9 +1152,8 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool) -> Load_Result {
 			if cfg.key_load_delay != 0 {
 				persist_debug_delay(cfg.key_load_delay)
 			}
-			if keys_seen & 1023 == 0 && intrinsics.volatile_load(&persist_sig_pending) != 0 && pst.loading {
-				plog(LOG_WARNING, "Eski is now ready to exit, bye bye...")
-				linux.exit_group(0)
+			if keys_seen & 1023 == 0 && persist_signal_pending() && pst.loading {
+				persist_signal_loading_exit()
 			}
 			continue
 		}
@@ -1265,6 +1265,7 @@ Shutdown_Flag :: enum u8 {
 Shutdown_Flags :: bit_set[Shutdown_Flag;u8]
 
 persist_finish_shutdown :: proc(flags: Shutdown_Flags) -> bool {
+	compute_shutdown()
 	server_close_listeners()
 	remove_pid_file()
 	plog(LOG_WARNING, "Eski is now ready to exit, bye bye...")
@@ -1317,15 +1318,16 @@ persist_signal_flags :: proc(sig: i32) -> Shutdown_Flags {
 }
 
 persist_cron :: proc() {
-	if intrinsics.volatile_load(&persist_sig_pending) != 0 {
-		sig := intrinsics.volatile_load(&persist_sig_last)
+	if pending := intrinsics.atomic_load_explicit(&persist_sig_pending, .Acquire); pending != 0 {
+		sig := intrinsics.atomic_load_explicit(&persist_sig_last, .Acquire)
+		persist_signal_log(sig)
 		flags := persist_signal_flags(sig)
 		if persist_prepare_shutdown(flags) {
 			persist_finish_shutdown(flags)
 		}
 		name := "SIGINT" if sig == i32(linux.Signal.SIGINT) else "SIGTERM"
 		plog(LOG_WARNING, name, " received but errors trying to shut down the server, check the logs for more information")
-		intrinsics.volatile_store(&persist_sig_pending, 0)
+		intrinsics.atomic_sub_explicit(&persist_sig_pending, pending, .Acq_Rel)
 	}
 	persist_check_child()
 	aof_cron()

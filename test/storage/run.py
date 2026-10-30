@@ -9,6 +9,8 @@ import tempfile
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("debug", "release"), default="debug")
+    parser.add_argument("--sanitize", choices=("address", "thread"))
+    parser.add_argument("--mapping-only", action="store_true")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     odin = os.environ.get("ODIN") or shutil.which("odin") or str(Path.home() / "odin/current/odin")
@@ -32,7 +34,13 @@ def main():
             raise SystemExit("expected exactly one actual memory sampler for the test getter")
         memory.write_text(actual_memory + '\nstorage_test_memory_sample :: proc() -> (allocated: int, rss: i64, libc_allocated: int) {\n\tmi := mallinfo2()\n\tmem_sample()\n\treturn mem_sample_allocated, mem_sample_rss, int(mi.uordblks + mi.hblkhd)\n}\n')
         binary = Path(temporary) / "storage-test"
-        subprocess.run([odin, "build", str(work), "-debug" if args.mode == "debug" else "-o:speed", "-thread-count:2", "-vet", "-strict-style", "-out:" + str(binary)], check=True, timeout=180)
+        flags = ["-debug" if args.mode == "debug" else "-o:speed"]
+        if args.sanitize:
+            flags.append("-sanitize:" + args.sanitize)
+        subprocess.run([odin, "build", str(work), *flags, "-thread-count:2", "-vet", "-strict-style", "-out:" + str(binary)], check=True, timeout=180)
+        if args.mapping_only:
+            subprocess.run([str(binary), "mapping-lifetime"], check=True, timeout=10, cwd=temporary)
+            return
         subprocess.run([str(binary)], check=True, timeout=60, cwd=temporary)
         for capacity in (-1, 0, 15, 17, 1 << 62):
             result = subprocess.run([str(binary), "invalid", str(capacity)], capture_output=True, text=True, timeout=10, cwd=temporary)

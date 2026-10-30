@@ -1,6 +1,6 @@
 # Architecture
 
-Eski has one foreground command-processing loop. Each connection owns its input/output buffers, authentication state, selected database, protocol mode and optional subscription, tracking, blocked-operation or transaction state. Linux epoll supplies readiness events; the loop accepts connections, reads available bytes, executes complete requests and flushes replies.
+Eski has one foreground coordinator loop that owns live keyspace and connection state. Each connection owns its input/output buffers, authentication state, selected database, protocol mode and optional subscription, tracking, blocked-operation or transaction state. Linux epoll supplies readiness events; the loop accepts connections, reads available bytes, executes requests and flushes replies. Optional [LCS compute workers](threading.md) use immutable snapshots and private workspaces while the coordinator continues servicing other connections.
 
 ```mermaid
 flowchart LR
@@ -12,6 +12,10 @@ flowchart LR
     Reply --> Output[Connection output buffer]
     Output --> Socket
     Dispatch --> Effects[Watches, notifications, tracking and persistence feed]
+    Dispatch --> Snapshot[Owned LCS snapshots and workspace]
+    Snapshot --> Compute[Optional pure compute workers]
+    Compute --> Complete[Coordinator completion and identity check]
+    Complete --> Reply
 ```
 
 ## Parsing and execution
@@ -19,6 +23,8 @@ flowchart LR
 The request parser distinguishes complete, incomplete and malformed input and applies array/bulk limits before dispatch. It preserves input ownership where inline parsing needs a stable buffer. A connection can pipeline multiple complete commands. Dispatch resolves a registered command and optional subcommand, checks arity, derives key arguments, enforces ACL and loading/transaction restrictions, and invokes the handler. RESP2 and RESP3 use the same command semantics with protocol-appropriate reply forms.
 
 The default temporary allocator is reset at the event-loop iteration boundary. A command can use scratch storage for transient processing, but data retained by the database, a queued operation or a connection must own its allocation. Replies remain owned until written. See [connections and protocol](connections-and-protocol.md) and [transactions](transactions.md).
+
+Eligible large LCS requests can leave one pending computation on a connection. Their arguments and values are copied before admission, and later commands on that connection wait for completion. Worker code accesses its private snapshots/workspace; the coordinator formats replies and updates hooks/statistics. Admission has fixed job and byte bounds and falls back to synchronous execution under pressure, inside transactions/loading, or for tracking-enabled sources. GET/SET and other keyspace handlers retain coordinator ownership. Compute workers stop and join before background persistence forks and shutdown; see [threading](threading.md) for lifecycle and observation details.
 
 ## Keyspace and values
 

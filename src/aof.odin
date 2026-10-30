@@ -3941,6 +3941,7 @@ aof_rewrite_background :: proc() -> bool {
 	aof.rewrite_preamble = aof.preamble
 	aof.rewrite_state = aof.state
 	persist_progress_prepare()
+	compute_before_fork()
 	start := now_ns()
 	pid, ferr := linux.fork()
 	if ferr != .NONE {
@@ -4868,9 +4869,8 @@ aof_load_commands :: proc(r: ^Aof_Reader, name: string, is_last: bool, done_befo
 				persist_serve_events()
 			}
 		}
-		if count & 1023 == 0 && intrinsics.volatile_load(&persist_sig_pending) != 0 && pst.loading {
-			plog(LOG_WARNING, "Eski is now ready to exit, bye bye...")
-			linux.exit_group(0)
+		if count & 1023 == 0 && persist_signal_pending() && pst.loading {
+			persist_signal_loading_exit()
 		}
 	}
 }

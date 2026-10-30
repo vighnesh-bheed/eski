@@ -25,6 +25,10 @@ The next compatibility work is to resolve the implementation differences identif
 
 ## Efficiency work
 
+The first compute-worker stage offloads eligible large LCS calculations over coordinator-owned snapshots. It has bounded jobs/reservations, per-connection order, synchronous transaction/loading/tracked-source fallback and explicit cancellation/fork/shutdown ownership. Workers are opt-in; GET, SET and the live keyspace remain coordinator-owned. Its completion condition is the [threading checks](docs/threading.md), including deterministic kernel overlap, independent LCS expectations, external-client lifetime/order regressions, sanitizer coverage and a recorded bounded scaling comparison. A new performance claim requires new measurements; the existing benchmark tables describe their historical run.
+
+Parallel reads and writes beyond LCS remain future work. They need keyspace ownership or lock domains, multi-key scheduling, transaction atomicity, expiry/eviction coordination and persistence boundaries before commands can safely execute concurrently. The separate Rust coordination layer does not supply these single-process guarantees.
+
 Trace and profile the accepted command path with the benchmark harness first. Use the measurements to choose one coherent improvement at a time, with its workload, allocation/memory effect and expected observable change stated before implementation. Compare each improvement against a clean recorded run under the same resource assignments and report the measured ratio for that workload. Keep negative results, client limits and excluded cases visible.
 
 The dedicated-machine container exam follows measured improvements. Its frozen design, CPU assignments, equal memory caps, idle/temperature/power gates, rotated engine order and receipt-verified collection live under `bench/testbed`. The [benchmark documentation](docs/benchmarks.md) explains how the committed report was obtained and how to prepare another run. The roadmap promises no dates or universal performance target.

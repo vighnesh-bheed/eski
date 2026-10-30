@@ -63,6 +63,9 @@ Conn :: struct {
 	user:        ^Acl_User,
 	mbulk_max:   int,
 	inline_owner: ^Request_Inline_Owner,
+	compute:     ^Lcs_Task,
+	compute_token: u64,
+	read_eof:    bool,
 }
 
 Server :: struct {
@@ -331,6 +334,11 @@ epoll_set :: proc(fd: linux.Fd, op: linux.EPoll_Ctl_Opcode, want_out: bool, id: 
 		events = {.IN, .OUT} if want_out else {.IN},
 		data = {u64 = u64(u32(fd)) | u64(u32(id)) << 32},
 	}
+	if id != 0 && int(fd) >= 0 && int(fd) < len(srv.conns) {
+		if c := srv.conns[fd]; c != nil && c.id == id && c.read_eof {
+			ev.events -= {.IN}
+		}
+	}
 	return linux.epoll_ctl(srv.epfd, op, fd, &ev)
 }
 
@@ -448,6 +456,7 @@ tx_queued_bytes :: #force_inline proc(c: ^Conn) -> i64 {
 }
 
 conn_close :: proc(c: ^Conn) {
+	compute_conn_closed(c)
 	if len(acl_doomed) > 0 {
 		acl_forget(c)
 	}
@@ -654,7 +663,7 @@ resume_held_clients :: proc() {
 }
 
 process_input :: proc(c: ^Conn) {
-	for !c.close_after && c.rpos < c.rlen && c.blocked == .None {
+	for !c.close_after && c.rpos < c.rlen && c.blocked == .None && c.compute == nil {
 		start := c.rpos
 		r := parse_command(c)
 		if r != .Command {
@@ -692,6 +701,9 @@ process_input :: proc(c: ^Conn) {
 		c.rcap = RBUF_INIT
 		c.need = 0
 		c.rpeak = 0
+	}
+	if c.read_eof && c.compute == nil && !c.held {
+		c.close_after = true
 	}
 }
 
@@ -747,6 +759,12 @@ conn_read :: proc(c: ^Conn) {
 		}
 	}
 	if eof {
+		if c.compute != nil {
+			c.read_eof = true
+			epoll_set(c.fd, .MOD, c.want_write, c.id)
+			conn_flush(c)
+			return
+		}
 		if len(aof.buf) > 0 {
 			aof_flush_for_reply()
 		}
@@ -795,9 +813,10 @@ server_cron :: proc() {
 }
 
 ignore_sigpipe :: proc() {
-	sa: linux.Sig_Action
-	sa.special = .SIG_IGN
-	linux.rt_sigaction(.SIGPIPE, &sa, nil)
+	if !persist_set_signal(.SIGPIPE, transmute(linux.Sig_Handler_Fn)uintptr(1)) {
+		write_fd(2, "eski: cannot ignore SIGPIPE\n")
+		linux.exit_group(1)
+	}
 }
 
 server_run :: proc() -> bool {
@@ -845,6 +864,8 @@ server_run :: proc() -> bool {
 	}
 	mem_init()
 	persist_startup()
+	compute_start()
+	defer compute_shutdown()
 	log_startup()
 	maxmemory_startup_warning()
 	el_after_sleep()
@@ -888,7 +909,9 @@ server_run :: proc() -> bool {
 			ev := events[i]
 			fd := linux.Fd(u32(ev.data.u64))
 			if u32(ev.data.u64 >> 32) == 0 {
-				if fd == lazy_efd {
+				if fd == compute_event_fd() {
+					continue
+				} else if fd == lazy_efd {
 					lazyfree_drain()
 				} else {
 					accept_clients(fd, .Memcached if fd == mc_lfd else .Redis)
@@ -904,6 +927,7 @@ server_run :: proc() -> bool {
 			}
 			handle_event(c, ev.events)
 		}
+		compute_tick()
 		if aof.feed || len(aof.deferred) > 0 || len(aof.buf) > 0 {
 			aof_start := mono_now()
 			aof_before_sleep()

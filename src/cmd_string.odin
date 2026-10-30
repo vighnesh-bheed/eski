@@ -664,7 +664,6 @@ cmd_incrbyfloat :: proc(c: ^Conn, argv: [][]u8) {
 	reply_bulk(c, text)
 }
 
-@(private = "file")
 Lcs_Want :: struct {
 	length:   bool,
 	ranges:   bool,
@@ -805,10 +804,13 @@ cmd_lcs :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	width := len(b) + 1
-	cells := (len(a) + 1) * width
 	limit := string_max_len()
 	if i64(len(a) + 1) > limit / 4 / i64(width) {
 		reply_error(c, ERR_LCS_MEMORY)
+		return
+	}
+	cells := (len(a) + 1) * width
+	if lcs_try_compute(c, argv, a, b, cells, want) {
 		return
 	}
 	extra := min(len(a), len(b))
@@ -819,31 +821,17 @@ cmd_lcs :: proc(c: ^Conn, argv: [][]u8) {
 	}
 	defer mem_free(block)
 	table := cast([^]u32)block
-	#no_bounds_check {
-		for j in 0 ..< width {
-			table[j] = 0
-		}
-		for i in 1 ..= len(a) {
-			row := i * width
-			above := row - width
-			table[row] = 0
-			ai := a[i - 1]
-			for j in 1 ..< width {
-				if ai == b[j - 1] {
-					table[row + j] = table[above + j - 1] + 1
-				} else {
-					table[row + j] = max(table[above + j], table[row + j - 1])
-				}
-			}
-		}
-	}
+	lcs_fill(a, b, table, nil)
+	lcs_reply(c, a, b, table, cast([^]u8)(&table[cells]), cells, want)
+}
+
+lcs_reply :: proc(c: ^Conn, a, b: []u8, table: [^]u32, text: [^]u8, cells: int, want: Lcs_Want) {
 	total := table[cells - 1]
 	if want.length {
 		reply_int(c, i64(total))
 		return
 	}
 	if !want.ranges {
-		text := ([^]u8)(&table[cells])
 		lcs_walk(c, a, b, table, 0, false, false, text)
 		reply_bulk(c, text[:total])
 		return

@@ -3901,6 +3901,9 @@ import sys
 ESKI = int(sys.argv[1])
 REF = int(sys.argv[2])
 MASKED = {"port", "dir", "bind"}
+COMPUTE_DEFAULTS = {"compute-threads": b"0", "compute-max-memory": b"134217728"}
+COMPUTE_INFO = ("compute_threads_configured", "compute_threads_active", "compute_jobs_pending", "compute_memory_reserved",
+                "compute_jobs_submitted", "compute_jobs_completed", "compute_jobs_cancelled", "compute_sync_fallbacks", "compute_worker_nanoseconds")
 SKIP_SET = {"port", "dir", "bind", "requirepass", "masterauth"}
 PROBES = ["abc", "-1", "-9223372036854775808", "9223372036854775807", "18446744073709551615",
           "99999999999999999999", "", "1%", "-5%", "0", "1k", "1kb", "yes", "no", "100 10", "normal 1 2 3"]
@@ -3968,6 +3971,24 @@ def as_dict(reply):
 j, r = Conn(ESKI), Conn(REF)
 failures = []
 checks = 0
+compute_config = {}
+for name, default in COMPUTE_DEFAULTS.items():
+    checks += 1
+    actual = j.cmd("config", "get", name)
+    if not isinstance(actual, list) or len(actual) != 2 or actual[0] != name.encode() or not isinstance(actual[1], bytes) or not actual[1].isdigit():
+        failures.append("Eski CONFIG GET %s has invalid metadata: %r" % (name, actual))
+        continue
+    compute_config[name] = int(actual[1])
+    if sys.argv[3] != "1" and actual[1] != default:
+        failures.append("Eski CONFIG GET %s default: expected %r observed %r" % (name, default, actual[1]))
+server_fields = [line.split(b":", 1) for line in j.cmd("info", "server").splitlines() if b":" in line]
+for name in COMPUTE_INFO:
+    checks += 1
+    values = [value for key, value in server_fields if key == name.encode()]
+    if len(values) != 1 or not values[0].isdigit():
+        failures.append("Eski INFO %s must occur once with a nonnegative integer: %r" % (name, values))
+    elif name == "compute_threads_configured" and int(values[0]) != compute_config.get("compute-threads"):
+        failures.append("Eski INFO compute_threads_configured disagrees with CONFIG GET compute-threads")
 names = sorted(as_dict(r.cmd("config", "get", "*"))[1].keys())
 for pat in PATTERNS + [[n] for n in names] + [[n.upper()] for n in names[:20]] + [[h] for h in HIDDEN]:
     checks += 1
@@ -4005,12 +4026,12 @@ PY
 
 expect_config_parity() {
 	local got
-	got="$(timeout 300 python3 -I -c "$CONFIG_PY" "$PORT" "$REF_PORT" 2>&1)"
+	got="$(timeout 300 python3 -I -c "$CONFIG_PY" "$PORT" "$REF_PORT" "$EXTERNAL" 2>&1)"
 	if [ $? -eq 0 ]; then pass; else fail "CONFIG GET and SET of every parameter match redis" "no differences" "$got"; fi
 }
 
 config_conf_value() {
-	docker exec "$CLI_CONTAINER" redis-cli -p "$1" config get '*' 2>&1 | paste - - | grep -v -E '^(port|dir|bind)	' | LC_ALL=C sort
+	docker exec "$CLI_CONTAINER" redis-cli -p "$1" config get '*' 2>&1 | paste - - | awk -F '\t' '$1 != "port" && $1 != "dir" && $1 != "bind"' | LC_ALL=C sort
 }
 
 expect_config_files() {
@@ -7595,7 +7616,7 @@ CMDS
 			printf 'CONFIG SET slowlog-log-slower-than 10000\nCONFIG SET slowlog-max-len 128\nCONFIG SET latency-monitor-threshold 0\nCONFIG SET latency-tracking yes\nFLUSHALL\nSLOWLOG RESET\nLATENCY RESET\nCONFIG RESETSTAT\n' | ref_pipe >/dev/null
 		}
 		info_layout() {
-			docker exec "$CLI_CONTAINER" redis-cli -p "$1" info "${@:2}" 2>&1 | tr -d '\r' | awk -F: -v keep=" $info_stat_values " '/^#/ || $0 == "" { print; next } $1 == "eski_version" || $1 ~ /^(cmdstat_|errorstat_|latency_percentiles_usec_)/ { next } index(keep, " " $1 " ") { print; next } { print $1 }'
+			docker exec "$CLI_CONTAINER" redis-cli -p "$1" info "${@:2}" 2>&1 | tr -d '\r' | awk -F: -v keep=" $info_stat_values " -v extra=" eski_version compute_threads_configured compute_threads_active compute_jobs_pending compute_memory_reserved compute_jobs_submitted compute_jobs_completed compute_jobs_cancelled compute_sync_fallbacks compute_worker_nanoseconds " '/^#/ || $0 == "" { print; next } index(extra, " " $1 " ") || $1 ~ /^(cmdstat_|errorstat_|latency_percentiles_usec_)/ { next } index(keep, " " $1 " ") { print; next } { print $1 }'
 		}
 		info_headers() {
 			docker exec "$CLI_CONTAINER" redis-cli -p "$1" info "${@:2}" 2>&1 | tr -d '\r' | grep '^#'

@@ -57,10 +57,10 @@
     "type/list::MULTI + LPUSH + EXPIRE + DEBUG SLEEP on blocked client, key already expired",
     "type/list::SWAPDB wants to wake blocked client, but the key already expired"
   ],
-  "generated_at": "2026-10-29T22:59:52Z",
+  "generated_at": "2026-10-30T02:13:07Z",
   "schema": "eski-docs-conformance-v1",
   "source_mode": "baseline",
-  "source_summary_sha256": "2621840d2661647d3184a862c0b7bd01361cf431fa272ffb9d7a3b54a733cb36",
+  "source_summary_sha256": "27807119d282c5852b116cbe10695404c03a7dcbc280978e798efef46d9fc9b9",
   "suite": {
     "external_skip_lifted": "tests/unit/type/hash-field-expire.tcl:59,886,998 tests/unit/maxmemory.tcl:1,146,430,593 tests/unit/memefficiency.tcl:27 tests/unit/info.tcl:26,503 tests/unit/acl.tcl:1 tests/unit/acl-v2.tcl:1 tests/unit/auth.tcl:1,13",
     "name": "redis",

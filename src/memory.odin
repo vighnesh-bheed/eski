@@ -160,7 +160,7 @@ mem_keyspace :: #force_inline proc "contextless" () -> int {
 }
 
 mem_used :: #force_inline proc "contextless" () -> int {
-	return intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed) + ht.maintenance_metadata() + st.maintenance_metadata() + zt.maintenance_metadata() + mem_startup + db_used_memory + mem_keyspace() + storage_dead_payload + ps_memory + conn_mem + tx_mem_total + mem_aof_buffer() + lazyfree_pending_bytes()
+	return intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed) + ht.maintenance_metadata() + st.maintenance_metadata() + zt.maintenance_metadata() + mem_startup + db_used_memory + mem_keyspace() + storage_dead_payload + ps_memory + conn_mem + tx_mem_total + mem_aof_buffer() + lazyfree_pending_bytes() + compute_reserved
 }
 
 mem_not_counted :: #force_inline proc "contextless" () -> int {
@@ -216,7 +216,7 @@ mem_overhead :: proc() -> (mh: Mem_Overhead) {
 	mh.frag_bytes = mem_sample_rss - i64(mem_sample_used)
 	mh.clients = conn_mem + tx_mem_total
 	mh.aof = mem_aof_buffer()
-	total := mem_startup + mh.clients + mh.aof + mem_keyspace() + ht.maintenance_metadata() + st.maintenance_metadata() + zt.maintenance_metadata() + intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed)
+	total := mem_startup + mh.clients + mh.aof + mem_keyspace() + ht.maintenance_metadata() + st.maintenance_metadata() + zt.maintenance_metadata() + intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed) + compute_reserved
 	mh.lut = mem_keyspace()
 	for &d in dbs {
 		mh.keys += db_size_of(&d)

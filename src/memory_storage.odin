@@ -1,7 +1,7 @@
 package main
 
 import "base:intrinsics"
-import "core:sys/linux"
+import "core:sys/posix"
 
 Storage_Kind :: enum u8 {
 	Table,
@@ -27,7 +27,7 @@ storage_unmap :: proc "contextless" (base: [^]u8, size: int, kind: Storage_Kind,
 	if size == 0 {
 		return
 	}
-	if linux.munmap(base, uint(size)) != .NONE {
+	if posix.munmap(base, uint(size)) != .OK {
 		store_fatal("cannot release storage memory")
 	}
 	switch kind {

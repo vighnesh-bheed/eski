@@ -2,6 +2,7 @@ package main
 
 import "core:strconv"
 import "core:sys/linux"
+import "core:sys/posix"
 import "rdb"
 
 read_rss :: proc() -> i64 {
@@ -43,11 +44,11 @@ debug_sleep :: proc(arg: []u8) {
 		return
 	}
 	us := i64(scaled)
-	ts := linux.Time_Spec {
-		time_sec  = uint(us / 1_000_000),
-		time_nsec = uint(us % 1_000_000) * 1000,
+	ts := posix.timespec {
+		tv_sec  = auto_cast us / 1_000_000,
+		tv_nsec = auto_cast (us % 1_000_000) * 1000,
 	}
-	for linux.nanosleep(&ts, &ts) == .EINTR {
+	for posix.nanosleep(&ts, &ts) != .OK && posix.errno() == .EINTR {
 	}
 	update_clock()
 }

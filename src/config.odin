@@ -2661,7 +2661,7 @@ clients_timeout_cron :: proc() {
 	now := srv.now_ms / 1000
 	for i := 0; i < len(srv.conns); i += 1 {
 		c := srv.conns[i]
-		if c == nil || c.kind != .Redis || c.blocked != .None || c.held || .Subscribed in c.ps {
+		if c == nil || c.kind != .Redis || c.blocked != .None || c.compute != nil || c.held || .Subscribed in c.ps {
 			continue
 		}
 		if now - c.atime_ms / 1000 > cfg.timeout {

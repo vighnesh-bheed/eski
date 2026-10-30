@@ -38,6 +38,8 @@ The command-line forms are:
 
 `-` requests configuration from standard input. Configuration options can be passed as `--name value`; the `-p` shortcut is accepted for `--port`. A configuration file uses whitespace-separated directives and supports quoted arguments. Command-line directives are applied through the same configuration loader. Check actual values with `CONFIG GET`; use [server management](server.md) for runtime changes and immutable or protected settings. The CLI version output includes the project licence, while protocol version fields retain their protocol meaning.
 
+Optional LCS compute workers use `--compute-threads 2 --compute-max-memory 128mb`. They are disabled by default and both controls are startup-only. They parallelize eligible calculations over owned snapshots while the coordinator keeps keyspace and connection ownership. See [threading](threading.md) for fallback behavior, INFO counters and the current scope.
+
 For example:
 
 ```sh
@@ -64,6 +66,8 @@ bash test/smoke.sh
 ```
 
 The package runner executes native unit packages in debug, address-sanitizer and release modes, then runs the Python harness drivers. It writes temporary binaries and removes them on exit. Individual packages can be tested with `odin test src/listpack -debug`; drivers such as `python3 -I test/request_parser/run.py` include their own boundary and model checks.
+
+The threading driver can target a separate executable with `python3 -I test/threading/run.py --server /path/to/eski`. The package runner uses `ESKI_THREADING_BIN` for this driver when set, otherwise the current `bin/eski`; it runs correctness checks only. `python3 -I -m unittest discover -s test/threading -p 'test_*.py'` checks its protocol/model/measurement helpers. The [threading guide](threading.md#correctness-checks) includes native overlap tests, loading fallback checks, separate thread/address-sanitized builds and an explicitly opt-in bounded performance tool.
 
 Conformance downloads the pinned upstream Tcl test suite and verifies its archive hash. It prefers a native Tcl interpreter and can use Docker when needed. `--baseline` fails when a previously passing test regresses. Without that option, the runner applies its stricter failure policy. It restarts Eski for each unit; `--external HOST:PORT` instead uses an existing server. Results and unit logs go to `test/conformance/results/`. See `./test/conformance/run.sh --help` for unit selection, tags, Tcl selection, ports and timeouts. The [generated conformance page](conformance.md) separates the baseline from the recorded expanded run and explains the current failures.
 
