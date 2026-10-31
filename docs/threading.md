@@ -1,58 +1,109 @@
 # Threading
 
-Eski has two separate opt-in worker paths. The earlier LCS compute stage was qualified at `83024e3`. At checkpoint `78eb2f1`, the guarded GET/plain SET keyspace path passed native ownership and external correctness checks, address/thread sanitizers, and the package, smoke and baseline compatibility gates in both worker configurations. Subsequent [Lua integration](scripting.md) is qualified separately and fences worker state before script execution. No keyspace-worker benchmark has been run or speedup claimed; prior LCS measurements remain separate evidence.
+Eski has two independent, opt-in worker paths: keyspace commands and large LCS calculations. Both are disabled by default. The current keyspace implementation has dedicated datatype, feature, memory-policy and sanitizer checks. The [verification record](build-run-test.md#verification) also covers upstream compatibility, Lua and persistence; each result applies to its executed cases and documented exclusions. Performance benchmarking of the expanded keyspace path is deferred, and no new throughput or speedup claim is made here. Earlier LCS measurements describe the earlier compute stage.
 
 ## Keyspace workers
 
-This stage targets GET and exactly three-argument `SET key value` on strings without expiry or absent keys. Each key belongs to one worker, which performs its reads and value replacement in FIFO order. The coordinator owns routing, sockets, normal command/ACL admission, statistics and reply delivery. Workers are disabled by default.
+Keyspace workers execute eligible string, list, hash, set, sorted-set, geo, stream, bitmap and HyperLogLog commands. This includes string options and TTL operations, atomic multi-key reads/writes and algebra, nonblocking stream/group operations, and COPY, RENAME, MOVE, DUMP and RESTORE. The coordinator still owns command/ACL admission, sockets, replies, statistics, observers and persistence publication.
 
-The startup settings are `keyspace-threads` (0 through 64, default 0) and `keyspace-max-memory` (default 128 MiB; zero forces coordinator fallback). Both are immutable after startup and hidden from wildcard CONFIG discovery, including `CONFIG GET '*'` and `CONFIG GET 'keyspace-*'`. Exact-name inspection uses `CONFIG GET keyspace-threads` and `CONFIG GET keyspace-max-memory`; CONFIG SET cannot change them. These settings are independent of LCS `compute-threads` and the compatibility `io-threads` setting.
+Enable workers explicitly, starting with a small count and a budget appropriate to the stored values:
 
-Workers own independent current values while the coordinator retains legacy copies. Each connection waits for its pending operation before executing a later pipeline command. A GET result retains its immutable value until the coordinator copies the reply. An accepted SET continues if its client disconnects; losing the connection discards delivery, not an executed write.
+```sh
+./bin/eski --bind 127.0.0.1 --port 6399 \
+  --keyspace-threads 2 --keyspace-max-memory 128mb
+```
 
-The pool accepts at most 64 outstanding jobs, including completed results awaiting coordinator reclamation. Its Linux worker thread name is `eski-keyspace`, separate from the LCS workers named `eski-compute`. These names describe intended roles; thread names or configured counts alone do not prove simultaneous command execution.
+| Startup option | Default | Meaning |
+| --- | --- | --- |
+| `keyspace-threads` | `0` | Worker count, from 0 through 64; zero disables this path. |
+| `keyspace-max-memory` | 128 MiB | Budget for admitted worker allocations and reservations; zero forces coordinator execution. |
 
-Options such as NX, XX, GET, KEEPTTL and expiry forms are outside this path. Expiring or nonstring entries, entries carrying memcached item metadata, multi-key commands, transactions and the rest of the command surface use the coordinator. Watching/tracking/notifications, blocked consumers, monitors/pubsub, memory-pressure policies, LFU, memcached, AOF, pause/loading and persistence lifecycle state also prevent worker admission. Normal command errors and feature behavior remain the responsibility of the coordinator path, after pending work is reconciled; these fallbacks do not supply parallel execution of those features.
+These settings are immutable after startup and hidden from wildcard CONFIG discovery, including `CONFIG GET '*'` and `CONFIG GET 'keyspace-*'`. Inspect them by exact name with `CONFIG GET keyspace-threads` and `CONFIG GET keyspace-max-memory`. They are independent of LCS `compute-threads` and the compatibility `io-threads` setting. No particular count or budget is a measured performance recommendation.
 
-Before a legacy command or feature can observe the keyspace, a barrier freezes admission, drains accepted jobs and reconciles worker-owned values and access metadata. Reconciliation transfers state without executing SET again; GET-only entries retain their encoding. Save/fork/shutdown paths require a reconciled view, and workers join before raw forks or destruction. Dedicated correctness checks exercise these boundaries. Barriers can stall foreground work and erase the benefit of short bursts of eligible commands.
+Each database/key identity has an owner. Commands touching multiple owners wait for all required owners and execute once, preserving atomic key changes and owner order. Disjoint owners can execute commands concurrently. Each connection waits for its pending command before processing another pipeline command. The coordinator publishes completions, effects and replies in accepted order. An accepted mutation survives client disconnect; delivery is discarded when its original connection no longer exists.
 
-The budget bounds admitted requested bytes for directory records, copied keys, values and task/result storage, including their allocation headers. Owned records and values remain charged between jobs until a barrier reclaims them; zero pending jobs does not imply zero pool memory. Coordinator ready-ticket bookkeeping is accounted separately and sits outside that pool cap. It is not a process-RSS limit. Old legacy copies and current worker values coexist until reconciliation; reply references may retain overwritten values, and libc can retain freed heap allocations afterward. Consequently RSS can grow temporarily and remain elevated after the pool drains. Database storage, socket buffers, thread resources and allocator overhead have their own costs.
+Workers use independently owned values and datatype clones, not mutable legacy table/slab pointers or socket buffers. The coordinator retains an older database view until reconciliation. A barrier drains accepted work, imports values and metadata without executing those commands again, then releases their storage. Background fork paths join workers before forking; the parent can start workers again while its child writes the independent snapshot. Loading, script/transaction execution and shutdown retain their explicit lifecycle boundaries.
 
-`INFO server` adds these observations for the keyspace path. INFO itself takes the legacy barrier, so pending jobs, records and pool bytes describe the post-drain state rather than live occupancy.
+### Features and coordinator boundaries
+
+| Situation | Execution behavior |
+| --- | --- |
+| AOF, WATCH, tracking including NOLOOP, notifications and MONITOR | Eligible commands remain worker candidates; the coordinator publishes ordered effects and persistence records. |
+| Other connections blocked on keys | Unrelated keys remain worker candidates. A command touching a registered blocked key reconciles and uses existing coordinator wakeup behavior. Blocking commands themselves stay on the coordinator. |
+| Memcached endpoint enabled | Ordinary Redis keys remain candidates. Keys carrying Memcached item metadata use the coordinator; Memcached input retains its coordinator barrier. |
+| Maxmemory, client limits or LFU configured | Configuration alone does not disable workers. Actual pressure or ongoing eviction takes coordinator execution; LFU access uses captured policy/time and private worker random state. |
+| CLIENT PAUSE | Commands already permitted by pause admission can use workers. Expired keys and hashes use the coordinator during the pause to preserve frozen physical expiry. |
+| SCAN, KEYS, RANDOMKEY, global operations, EXEC and Lua/functions | Coordinator barriers provide a consistent database view. Transactions and scripts execute atomically with respect to worker commands. |
+| Persistence commands and physical storage diagnostics, including OBJECT and MEMORY inspection | Coordinator barriers retain authoritative lifecycle and storage accounting. |
+| Loading, a persistence child, a held/subscribed connection or transaction execution | Coordinator execution. Tracking alone does not exclude a connection. |
+| Capacity, classification, validation or allocation failure | Coordinator execution or ordered legacy retry after reconciliation. Accepted admission is preserved during retry. |
+
+The pool accepts at most 64 outstanding jobs, including completed results awaiting coordinator reclamation. Its Linux thread name is `eski-keyspace`; LCS threads use `eski-compute`. Barriers, serialization and cloned data can make short bursts costly. Thread names, counters and callback wall time do not establish speedup.
+
+### Memory and AOF representation
+
+The worker budget charges requested bytes for records, copied arguments, immutable strings, datatype clones, task/results and temporary reservations. Conservative undo, decode and serialization reservations can force coordinator fallback even when the final value would fit. Owned records and results remain charged until reclaimed; zero pending jobs does not imply zero pool memory. Coordinator ready-ticket bookkeeping is accounted separately.
+
+This is not a process-RSS limit. Legacy database objects and independent worker objects can coexist, replies can retain overwritten values, and libc or retired allocation services can retain storage after logical release. Database storage, socket buffers, threads and allocator overhead have additional costs. AOF capture also needs an undo copy and immutable postimage before allowing later owner work; snapshot failure restores worker state and retries the original accepted command once through the coordinator.
+
+Plain worker SET commands retain canonical SET records. Worker hash commands publish canonical translated command effects, including individual `HDEL` records for fields actually expired and absolute `HPEXPIREAT` deadlines for successful field-expiry changes and retained HINCRBYFLOAT field deadlines. Collection reads that only filter expired fields do not create expiry deletions. Other eligible commands may use transaction-grouped `RESTORE ... REPLACE ABSTTL` postimages and explicit deletions. The log therefore need not contain the original command spelling or match coordinator AOF bytes. These representations preserve durable values, absolute TTLs and datatype metadata and have independent replay checks. Normal no-op/dirty accounting still controls propagation; an internal allocation change without a durable mutation is not automatically persisted. Keep normal AOF recovery and rewrite procedures from [persistence](persistence.md).
+
+### Observation
+
+`INFO server` adds the fields below. INFO itself reconciles state, so pending counts and pool bytes are observations after that barrier rather than live occupancy.
 
 | Field | Meaning |
 | --- | --- |
-| `keyspace_threads_configured` | Startup worker setting; zero disables this path. |
+| `keyspace_threads_configured` | Startup worker count; zero disables this path. |
 | `keyspace_threads_active` | Existing worker threads, including parked threads. |
 | `keyspace_jobs_pending` | Accepted jobs awaiting coordinator completion handling. |
-| `keyspace_memory_used` | Charged pool allocation bytes; excludes separate coordinator ready-ticket storage. |
+| `keyspace_memory_used` | Charged pool bytes; excludes separate ready-ticket storage. |
 | `keyspace_records` | Owned key records awaiting reconciliation. |
 | `keyspace_jobs_submitted` | Cumulative accepted worker requests. |
-| `keyspace_jobs_completed` | Cumulative handled worker completions, including clients whose replies cannot be delivered. |
-| `keyspace_gets` | Completed worker GET requests. |
-| `keyspace_sets` | Completed worker SET requests, including disconnected clients' committed writes. |
-| `keyspace_sync_fallbacks` | Candidate requests rejected by record classification, startup, capacity, byte budget or submission after the global eligibility checks; excludes disabled/feature-excluded requests and other command forms. |
+| `keyspace_jobs_completed` | Handled completions, including disconnected clients and retries. |
+| `keyspace_gets`, `keyspace_sets` | Successfully completed worker GET and SET requests. |
+| `keyspace_sync_fallbacks` | Resource/submission failures and failed accepted jobs sent to legacy retry; not every coordinator-routed command. |
 | `keyspace_barriers` | Reconciliation barriers that encountered owned records or pending jobs. |
-| `keyspace_worker_nanoseconds` | Sum of worker service elapsed durations, measured as wall time rather than CPU time. |
+| `keyspace_worker_nanoseconds` | Sum of worker service wall time, not CPU time. |
 
-Command latency/statistics include queueing and coordinator completion delay. Distinct worker IDs and measured CPU activity would be needed to establish CPU parallelism; neither counters nor service wall time provide that evidence on their own.
+Successful deferred command latency includes queueing and coordinator completion delay. These counters help establish admission and cleanup; they do not replace a controlled performance measurement.
 
 ## Keyspace correctness checks
 
-Ten native ownership tests pass in strict debug, ASan with leak detection and TSan. They exercise FIFO histories, immutable GET references across later SETs, bounded outstanding jobs, rejection, allocation/refcount reclamation and pause/stop/restart. The dedicated 20-case external driver passes against release, address-sanitized and thread-sanitized servers.
+The current whole-node datatype driver has 26 cases. The feature driver has 14 cases, with only independent Redis replay skipped unless an explicit reference port is supplied. Four memory/frontend cases cover configured limits, actual pressure, LFU and Memcached interactions. Dedicated whole-node address/thread sanitizer runs cover these integrations. Native ownership tests additionally exercise FIFO histories, multi-owner scheduling, immutable references, capacity, cancellation, restart and allocation reclamation.
+
+| Check | Coverage |
+| --- | --- |
+| `test/threading/full_keyspace.py` | All datatype families/options, multi-key atomicity, RESP2/3, TTL, cross-database identity, COPY/RENAME/MOVE, DUMP/RESTORE and malformed restore payloads. |
+| `test/threading/features.py` | WATCH, tracking/NOLOOP, notifications/monitor ordering, blocked keys, pause/expiry, accepted disconnects, AOF restart, snapshot rollback, pressure/error replay and reply suppression. |
+| `test/compatibility/memory_threading.py` | Under-budget admission, LFU/No-Touch, OOM recovery and Memcached metadata/CAS/flush boundaries. |
+| `test/compatibility/hfe_aof.py` | Canonical field-expiry persistence, immediate/lazy deletion, prechecks and database ownership after move/copy/swap. |
+| `test/threading/keyspace.py` | Lifecycle, ownership, admission counters, replies, persistence and shared-endpoint boundaries. |
+| `src/keyspace` native tests | Ownership, multi-owner ordering, bounded storage, cancellation and lifecycle. |
+
+Use an already-built executable; these drivers do not compile it or run benchmarks:
 
 ```sh
 odin test src/keyspace -debug -vet -strict-style -define:ODIN_TEST_THREADS=1
-python3 -I test/threading/keyspace.py
+python3 -I test/threading/full_keyspace.py --server /path/to/eski
+python3 -I test/threading/features.py --server /path/to/eski
+python3 -I test/compatibility/memory_threading.py --server /path/to/eski
 ```
 
-The driver covers binary/empty values, storage boundaries, pipeline/RESP/database order, reply suppression, half-close, disconnected writes, counters, TTL/type/SET-option fallbacks, read-only import and No-Touch behavior. It also checks ACL/renamed commands, transactions/WATCH, tracking/notifications/monitoring, blocking/pause/memory policies, rejected admissions, memcached, RDB saves/forks/reloads and automatic saves, AOF enable/rewrite/restart/disable, and shutdown persistence. It uses isolated localhost servers and temporary data directories. `--server /path/to/eski` selects a binary; otherwise `ESKI_THREADING_BIN` or `bin/eski` is used. `--case 'test_*snapshot*'` selects a method glob. The package runner includes this driver once per run and never starts a benchmark.
+The drivers own isolated localhost servers and temporary data directories. `--case 'test_*pattern*'` selects a method glob in the datatype/feature drivers. For independent AOF interoperability, provide an explicitly disposable, empty local Redis 7.4 instance:
 
-At `78eb2f1`, both worker configurations preserved all 1,504 Tcl baseline passes with zero regressions and retained the existing 20 expanded failures. The package gate passed all 90 runs, and smoke passed all 2,428 checks in each configuration. These receipts precede Lua integration. Dedicated passes cover the executed correctness and lifetime checks; they do not establish throughput or universal race safety. Broader worker execution of commands and features remains future work, and distributed management is a separate layer.
+```sh
+python3 -I test/threading/features.py --server /path/to/eski \
+  --case '*external_redis*' --reference-port PORT
+```
+
+That case requires every reference database to be empty, then replays active RESP AOF files and checks values, absolute TTLs, field expiry, stream pending entries and cross-database state. The reference is modified by replay. Its no-dirty bitmap and passive-expiry checks distinguish intended propagation from byte-for-byte command equivalence.
+
+For whole-node sanitizer checks, first prepare the matching Lua archive as described in [build, run and test](build-run-test.md), build with `-sanitize:address` or `-sanitize:thread`, and pass that executable to the same drivers. No suppressions are required by the recorded whole-node worker checks. Sanitizer success covers exercised paths, not universal race safety. The [verification record](build-run-test.md#verification) separates these checks from the upstream fixture modes, resource limits and historical LCS measurements.
 
 ## LCS compute workers
 
-Eski can run the dynamic-programming computation of large LCS requests on worker threads. In this earlier stage, the coordinator owns the live keyspace, sockets, argument checks, ACL, expiry/access updates, transactions, notifications and replies. It provides CPU parallelism between eligible LCS requests from different connections; its qualified scope leaves GET, SET and other keyspace commands on the coordinator.
+Eski can run the dynamic-programming computation of large LCS requests on worker threads. For the LCS computation, the coordinator owns the live keyspace, sockets, argument checks, ACL, expiry/access updates, transactions, notifications and replies. It provides CPU parallelism between eligible LCS requests from different connections; it remains independent of the keyspace command pool.
 
 Compute workers are disabled by default. Enable them at startup:
 
@@ -140,9 +191,9 @@ Storage release uses libc-intercepted `munmap` so sanitizers observe the end of 
 
 DEBUG SLEEP also uses libc's intercepted sleep boundary so diagnostic runtimes can deliver application signal callbacks while the coordinator is held. The double-interrupt regression retains its prompt-exit deadline under instrumentation.
 
-## Bounded performance comparison
+## Historical LCS performance comparison
 
-Performance collection is explicitly opt-in through a separate tool. Supply an already-built candidate and a preserved previous release executable. Select separate server, client and controller physical cores from the machine's topology. The example below uses an explicit ordered worker list and separate coordinator CPU; adapt it to the machine rather than copying CPU numbers blindly.
+The tool and measurements in this section belong to the earlier LCS compute stage. Expanded keyspace-worker benchmarking is deferred. LCS performance collection is explicitly opt-in through a separate tool. Supply an already-built candidate and a preserved previous release executable. Select separate server, client and controller physical cores from the machine's topology. The example below uses an explicit ordered worker list and separate coordinator CPU; adapt it to the machine rather than copying CPU numbers blindly.
 
 ```sh
 taskset -c 7 python3 -I test/threading/perf.py \
@@ -168,4 +219,4 @@ Clients are independent Python processes with explicit affinities; this tool mea
 
 `--require-parallel` requires a valid multi-worker LCS case with positive CPU time in at least two compute thread IDs and summed compute CPU above one core. A multi-worker timed case using synchronous fallback is excluded. Ratios compare matching workloads with the baseline; client limits can distort either measurement, so the ratio is an observed value rather than a lower bound on engine scaling. Summaries keep per-workload medians/ranges and exclusions separate. There is no overall score. The historical [benchmark tables](benchmarks.md) remain a separate experiment.
 
-The LCS comparison measures snapshot computation and supplies no GET/plain SET speedup result. Broader worker execution still requires multi-key scheduling, transaction atomicity and coordinated expiry/eviction/persistence designs. No distributed control plane is implemented here. See the [roadmap](../ROADMAP.md).
+The LCS comparison measures snapshot computation and supplies no performance result for the expanded keyspace worker implementation. No distributed control plane is implemented here. See the [roadmap](../ROADMAP.md).

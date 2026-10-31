@@ -21,6 +21,7 @@ Ps_Entry :: struct {
 }
 
 Ps_State :: struct {
+	metadata_accounted, metadata_shared: int,
 	lists:        [Ps_Kind][dynamic]^Ps_Entry,
 	deferred:     [dynamic]u8,
 	mark:         int,
@@ -76,6 +77,7 @@ ps_state :: proc(c: ^Conn) -> ^Ps_State {
 	if c.pubsub == nil {
 		c.pubsub = new(Ps_State)
 		c.pubsub.slot = -1
+		client_metadata_sync(c)
 	}
 	return c.pubsub
 }
@@ -143,6 +145,7 @@ ps_emit :: proc(t: ^Conn, frame: []u8) #no_bounds_check {
 push_write :: proc(t: ^Conn, data: []u8) {
 	if t == ps_exec {
 		append(&t.pubsub.deferred, ..data)
+		client_metadata_sync(t)
 		return
 	}
 	n := len(data)
@@ -159,11 +162,8 @@ push_write :: proc(t: ^Conn, data: []u8) {
 }
 
 ps_obuf_usage :: proc(t: ^Conn) -> u64 {
-	pending := t.wlen - t.wpos
-	if pending <= WBUF_INIT {
-		return 0
-	}
-	return u64(pending - WBUF_INIT)
+	if t.wlen <= t.wpos || t.wcap <= WBUF_INIT { return 0 }
+	return u64(t.wcap)
 }
 
 @(private)
@@ -293,6 +293,7 @@ pubsub_conn_closed :: proc(c: ^Conn) {
 	ps_unmark(c)
 	delete(st.trk_prefixes)
 	delete(st.deferred)
+	client_metadata_drop_ps(c)
 	free(st)
 	c.pubsub = nil
 }

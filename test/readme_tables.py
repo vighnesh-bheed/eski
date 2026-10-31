@@ -230,9 +230,7 @@ def command_table(commands, compact=False):
         for name, fields in items:
             arguments = ' '.join(argument_text(arg) for arg in fields.get('arguments') or [])
             summary = fields.get('summary', '')
-            if name == 'script|debug':
-                summary = 'Unsupported subcommand; script debugging is unavailable. ' + summary
-            elif name.split('|')[0] in ('function', 'cluster', 'sentinel'):
+            if name.split('|')[0] in ('cluster', 'sentinel'):
                 summary = 'Compatibility entry; excluded execution features remain unavailable. ' + summary
             lines.append('| %s | %s | %s |' % (table_code(name.upper().replace('|', ' ')), table_code(arguments) if arguments else '—', md(summary)))
         lines.append('')
@@ -376,11 +374,11 @@ def failure_explanation(unit, name, reason):
     if any(token in text for token in ('fcall', 'function load', 'function list', 'function dump',
                                        'function restore', 'function flush', 'function library',
                                        'function libraries', 'library metadata')):
-        return 'The test requires executable function libraries, which are excluded.'
+        return 'The recorded snapshot predates executable Function libraries; their current qualification is described in the scripting guide.'
     if any(token in text for token in ('eval', 'script')):
         return 'The test exercises Lua scripting; this recorded assertion remains a compatibility gap.'
     if unit == 'introspection-2':
-        return 'The recorded command inventory differs; inspect the named assertion and the remaining function/cluster exclusions.'
+        return 'The recorded command inventory differs; inspect the named assertion and the excluded cluster commands.'
     if unit == 'querybuf':
         return 'The test assumes reference query-buffer allocation and resize behavior; Eski uses its own buffer policy.'
     if unit == 'info':
@@ -395,6 +393,11 @@ def failure_explanation(unit, name, reason):
 
 
 def failure_table(summary):
+    if not any(unit['failures'] for unit in summary['units'].values()):
+        note = 'No test failures were recorded.'
+        if summary['totals']['errored']:
+            note += ' Unit errors remain visible in the expanded snapshot table.'
+        return note
     lines = ['| Unit and test | Category | Explanation |', '| --- | --- | --- |']
     for unit_name, unit in sorted(summary['units'].items()):
         for failure in unit['failures']:
@@ -555,10 +558,22 @@ def render_outputs(commands, baseline, observed, dataset, readme):
     command_count = len(commands)
     top_count = sum('|' not in name for name in commands)
     digest = hashlib.sha256(json.dumps(commands, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    has_issues = observed['totals']['failed'] != 0 or observed['totals']['errored'] != 0
+    if has_issues:
+        result_note = 'Recorded failures and unit errors are described in the [conformance record](docs/conformance.md).'
+        scope_note = 'Some upstream tests require excluded features, and this snapshot records the failures or unit errors shown below. '
+    else:
+        result_note = 'No test failures or unit errors were recorded; skipped tests do not establish coverage. See the [conformance record](docs/conformance.md).'
+        scope_note = 'No test failures or unit errors were recorded in the expanded snapshot. Skipped tests and omitted fixtures do not establish coverage. '
+    compared_passes = sum(observed['units'].get(name, {}).get('passed', 0) for name in baseline['units'])
+    compared_note = 'The observed run records **%d passes in the %d compared units**' % (compared_passes, len(baseline['units']))
+    if not regressions and compared_passes > expected:
+        compared_note += ', including **%d additional passes** beyond the protected baseline' % (compared_passes - expected)
+    compared_note += '.'
     conformance_block = ('The recorded gate preserves **%d / %d baseline passes** across %d compared units, with **%d regressions**. '
-                         'The expanded recorded run has **%d passes, %d failures and %d skips** across %d units. '
-                         'Its remaining failures include excluded execution features and compatibility gaps; see the [recorded results and explanations](docs/conformance.md).\n\n%s') % (
-                             preserved, expected, len(baseline['units']), len(regressions), observed['totals']['passed'], observed['totals']['failed'], observed['totals']['skipped'], len(observed['units']), conformance_table(baseline))
+                         'The expanded recorded run has **%d passes, %d failures and %d skips** across %d units, with **%d unit errors**. '
+                         '%s %s\n\n%s') % (
+                             preserved, expected, len(baseline['units']), len(regressions), observed['totals']['passed'], observed['totals']['failed'], observed['totals']['skipped'], len(observed['units']), observed['totals']['errored'], compared_note, result_note, conformance_table(observed))
     benchmark_block = ('Recorded medians from `bench/testbed/runs/comparison-v1`, using valid repetitions only. '
                        'These are measurements from one machine, not a claim about every workload or deployment.\n\n%s\n\n'
                        '† At least one included repetition was client limited. The observed GET 64 B pipeline 1 median throughput ratio '
@@ -572,7 +587,7 @@ def render_outputs(commands, baseline, observed, dataset, readme):
     commands_page = ('# Command inventory\n\nGenerated from a temporary instance of the built executable using `COMMAND DOCS`, `COMMAND LIST` and `COMMAND COUNT`. '
                      'The inventory contains %d top-level commands and %d names including subcommands. Metadata describes the protocol surface; '
                      'the [command-group pages](README.md) and [conformance record](conformance.md) define implemented behavior and remaining gaps. '
-                     'Lua evaluation has the scope documented in [scripting](scripting.md); compatibility entries do not provide executable function libraries, replication or clustering.\n\n'
+                     'Lua scripts, Function libraries and debugging have the scope documented in [scripting](scripting.md). Replication and clustering remain outside the node scope.\n\n'
                      'Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test/readme_tables.py --check`. '
                      'Use `--server HOST:PORT` to inspect an existing instance without starting one. The canonical command-metadata SHA256 is `%s`.\n\n%s\n') % (
                          top_count, command_count, digest, command_table(commands))
@@ -581,18 +596,19 @@ def render_outputs(commands, baseline, observed, dataset, readme):
                         'The baseline records %d passes and %d failures in %d units. The expanded snapshot records %d passes, %d failures and %d skips in %d units. '
                         'The baseline gate preserves %d of %d baseline passes, with %d regressions.\n\n'
                         'A baseline PASS checks the preserved passing tests in its compared units. It does not claim that every selected upstream test passes. '
-                        'Some upstream tests require excluded features, and others expose the compatibility gaps listed below. '
-                        'A unit with zero passing tests does not establish coverage; external-server mode can omit blocks that require suite-managed servers.\n\n'
+                        '%s'
+                        'A unit with zero passing tests does not establish coverage; external-server mode can omit blocks that require suite-managed servers. '
+                        'Managed fixtures and resource limits are described in [build, run and test](build-run-test.md#verification) and [scripting](scripting.md#verification).\n\n'
                         '## Reproduce and refresh\n\n'
-                        'Build with `./build.sh`, then run `./test/conformance/run.sh --suite redis --baseline test/conformance/baseline-redis.json`. '
-                        'Run `./test/conformance/run.sh --suite redis` without the baseline to apply the strict failure rule. '
+                        'Build with `./build.sh`, then run `./test/conformance/run.sh --suite redis --tags "-needs:repl" --baseline test/conformance/baseline-redis.json`. '
+                        'Run `./test/conformance/run.sh --suite redis --tags "-needs:repl"` without the baseline to apply the strict failure rule. '
                         'Refresh the public snapshot from an actual run with '
                         '`python3 -I test/readme_tables.py --record-conformance test/conformance/results/latest-redis.json`, '
                         'then run `python3 -I test/readme_tables.py --check`. The refresh keeps aggregate counts, exact failing test identities, '
                         'authored reasons and the baseline comparison, while omitting local paths, raw assertion code and stack traces. '
                         'The preserved snapshot was generated at `%s`; reruns can change timings and expose different outcomes.\n\n'
-                        '## Baseline units\n\n%s\n\n## Expanded snapshot\n\n%s\n\n## Recorded failures\n\n%s\n') % (
-                            baseline['suite']['tag'], baseline['suite']['sha256'], baseline['suite'].get('tags', ''), baseline['totals']['passed'], baseline['totals']['failed'], len(baseline['units']), observed['totals']['passed'], observed['totals']['failed'], observed['totals']['skipped'], len(observed['units']), preserved, expected, len(regressions), observed.get('generated_at', 'not recorded'), conformance_table(baseline), conformance_table(observed), failure_table(observed))
+                        '## Protected historical baseline\n\n%s\n\n## Expanded recorded snapshot\n\n%s\n\n## Recorded failures\n\n%s\n') % (
+                            baseline['suite']['tag'], baseline['suite']['sha256'], baseline['suite'].get('tags', ''), baseline['totals']['passed'], baseline['totals']['failed'], len(baseline['units']), observed['totals']['passed'], observed['totals']['failed'], observed['totals']['skipped'], len(observed['units']), preserved, expected, len(regressions), scope_note, observed.get('generated_at', 'not recorded'), conformance_table(baseline), conformance_table(observed), failure_table(observed))
     method = dataset.get('design', {}).get('methodology', {})
     method_text = '\n\n'.join(str(method[key]) for key in sorted(method))
     identities = ['| Engine | Image reference | Measured image ID | Recorded version |', '| --- | --- | --- | --- |']

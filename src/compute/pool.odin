@@ -1,6 +1,7 @@
 package compute
 
 import "base:intrinsics"
+import "base:runtime"
 import "core:sync"
 import "core:sys/linux"
 import "core:thread"
@@ -30,6 +31,9 @@ Pool :: struct {
 	mutex:       sync.Mutex,
 	ready:       sync.Cond,
 	threads:     [MAX_WORKERS]^thread.Thread,
+	worker_enter: proc(),
+	worker_leave: proc(),
+	assertion_failure: runtime.Assertion_Failure_Proc,
 	nthreads:    int,
 	initialized: bool,
 	accepting:   bool,
@@ -64,6 +68,9 @@ notify_completion :: proc "contextless" (fd: linux.Fd) {
 @(private = "file")
 worker_main :: proc(t: ^thread.Thread) {
 	p := (^Pool)(t.data)
+	context.assertion_failure_proc = p.assertion_failure if p.assertion_failure != nil else context.assertion_failure_proc
+	if p.worker_enter != nil { p.worker_enter() }
+	defer { if p.worker_leave != nil { p.worker_leave() } }
 	for {
 		sync.mutex_lock(&p.mutex)
 		for p.queue_len == 0 && !p.stopping {
@@ -93,7 +100,7 @@ worker_main :: proc(t: ^thread.Thread) {
 	}
 }
 
-init :: proc(p: ^Pool, workers: int) -> bool {
+init :: proc(p: ^Pool, workers: int, worker_enter: proc() = nil, worker_leave: proc() = nil, assertion_failure: runtime.Assertion_Failure_Proc = nil) -> bool {
 	if p == nil || workers < 1 || workers > MAX_WORKERS {
 		return false
 	}
@@ -113,6 +120,9 @@ init :: proc(p: ^Pool, workers: int) -> bool {
 		p.initialized = true
 	}
 	p.stopping = false
+	p.worker_enter = worker_enter
+	p.worker_leave = worker_leave
+	p.assertion_failure = assertion_failure
 	sync.mutex_unlock(&p.mutex)
 	for i in 0 ..< workers {
 		t := thread.create(worker_main, name = "eski-compute")

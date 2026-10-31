@@ -583,12 +583,12 @@ expect "command docs" "" command docs nosuchcmd
 expect "command info" "" command info nosuchcmd
 expect_match "command count" '^[1-9][0-9]*$' command count
 
-expect_match "hello 3" $'^server eski\nversion 0\\.1\\.0\nproto 3\nid [0-9]+\nmode standalone\nrole master\nmodules $' hello 3
+expect_match "hello 3" $'^server eski\nversion 7\\.4\\.11\nproto 3\nid [0-9]+\nmode standalone\nrole master\nmodules $' hello 3
 expect "hello 4" $'NOPROTO unsupported protocol version' hello 4
 got="$(printf 'HELLO 3 SETNAME r3conn\nCLIENT INFO\nRESET\nCLIENT INFO\n' | docker exec -i "$CLI_CONTAINER" redis-cli -p "$PORT" 2>&1)"
 if [[ "$got" =~ name=r3conn\ [^$'\n']*\ resp=3\  ]] && [[ "$got" =~ RESET$'\n'id=[0-9]+\ [^$'\n']*\ name=\ [^$'\n']*\ resp=2\  ]]; then pass; else fail "hello 3 switches the connection and reset switches it back" "resp=3 then resp=2" "$got"; fi
 expect "hello bad version" $'ERR Protocol version is not an integer or out of range' hello abc
-expect_match "hello 2" $'^server\neski\nversion\n0\\.1\\.0\nproto\n2\nid\n[0-9]+\nmode\nstandalone\nrole\nmaster\nmodules$' hello 2
+expect_match "hello 2" $'^server\neski\nversion\n7\\.4\\.11\nproto\n2\nid\n[0-9]+\nmode\nstandalone\nrole\nmaster\nmodules$' hello 2
 expect_match "hello no args" $'^server\neski\n' hello
 
 expect_pipe "client name" $'\nOK\nmyname\nOK\nERR Client names cannot contain spaces, newlines or special characters.\n\nmyname' "$(cat <<'CMDS'
@@ -766,7 +766,7 @@ waited="$(elapsed_ms "$start")"
 if [ "$got" == $'$2\nv2' ] && [ "$waited" -ge 300 ]; then pass; else fail "pause all holds reads until the timeout" "v2 after >= 300 ms" "$got after $waited ms"; fi
 exec {held}>&-
 
-expect "config get save" "save" config get save
+expect "config get save" $'save\n3600 1 300 100 60 10000' config get save
 expect "config get appendonly" $'appendonly\nno' config get appendonly
 expect "config get maxmemory" $'maxmemory\n0' config get maxmemory
 expect "config get unknown" "" config get nonexistentparam
@@ -777,7 +777,7 @@ expect "config set maxmemory back to 0" "OK" config set maxmemory 0
 expect "config resetstat" "OK" config resetstat
 
 info="$(cli info | tr -d '\r')"
-for field in redis_version:7.0.0 eski_version:0.1.0 redis_mode:standalone os:Linux arch_bits:64 process_id: tcp_port:$PORT uptime_in_seconds: connected_clients: used_memory: used_memory_human: used_memory_rss: used_memory_rss_human: total_connections_received: total_commands_processed: instantaneous_ops_per_sec: expired_keys: keyspace_hits: keyspace_misses:; do
+for field in redis_version:7.4.11 eski_version:0.1.0 redis_mode:standalone os:Linux arch_bits:64 process_id: tcp_port:$PORT uptime_in_seconds: connected_clients: used_memory: used_memory_human: used_memory_rss: used_memory_rss_human: total_connections_received: total_commands_processed: instantaneous_ops_per_sec: expired_keys: keyspace_hits: keyspace_misses:; do
 	if printf '%s\n' "$info" | grep -q "^$field"; then pass; else fail "info has $field" "$field" "missing"; fi
 done
 if printf '%s\n' "$info" | grep -q '^db0:keys=1,expires=0,avg_ttl=0,subexpiry=0$'; then pass; else fail "info keyspace line" "db0:keys=1,expires=0,avg_ttl=0,subexpiry=0" "$(printf '%s\n' "$info" | grep db0)"; fi
@@ -3959,12 +3959,12 @@ COMPUTE_DEFAULTS = {"compute-threads": b"0", "compute-max-memory": b"134217728"}
 COMPUTE_INFO = ("compute_threads_configured", "compute_threads_active", "compute_jobs_pending", "compute_memory_reserved",
                 "compute_jobs_submitted", "compute_jobs_completed", "compute_jobs_cancelled", "compute_sync_fallbacks", "compute_worker_nanoseconds")
 KEYSPACE_DEFAULTS = {"keyspace-threads": str(int(sys.argv[4])).encode(), "keyspace-max-memory": b"134217728"}
-LUA_DEFAULTS = {"lua-max-memory": b"67108864", "lua-max-output": b"16777216",
-                "lua-max-bridge-memory": b"33554432", "lua-max-cache-memory": b"33554432"}
+LUA_DEFAULTS = {"lua-max-memory": b"9223372036854775807", "lua-max-output": b"536870912",
+                "lua-max-bridge-memory": b"9223372036854775807", "lua-max-cache-memory": b"9223372036854775807"}
 KEYSPACE_INFO = ("keyspace_threads_configured", "keyspace_threads_active", "keyspace_jobs_pending", "keyspace_memory_used",
                  "keyspace_records", "keyspace_jobs_submitted", "keyspace_jobs_completed", "keyspace_gets", "keyspace_sets",
                  "keyspace_sync_fallbacks", "keyspace_barriers", "keyspace_worker_nanoseconds")
-SKIP_SET = {"port", "dir", "bind", "requirepass", "masterauth"}
+SKIP_SET = {"port", "dir", "bind", "requirepass", "masterauth", "tls-cluster", "tls-replication"}
 PROBES = ["abc", "-1", "-9223372036854775808", "9223372036854775807", "18446744073709551615",
           "99999999999999999999", "", "1%", "-5%", "0", "1k", "1kb", "yes", "no", "100 10", "normal 1 2 3"]
 HIDDEN = ["use-exit-on-panic", "aof-disable-auto-gc", "rdb-key-save-delay", "key-load-delay",
@@ -4029,9 +4029,20 @@ def as_dict(reply):
     return (len(reply), d)
 
 
+def allocator(conn):
+    fields = [line.split(b":", 1) for line in conn.cmd("info", "memory").splitlines() if b":" in line]
+    values = [value for key, value in fields if key == b"mem_allocator"]
+    return values[0] if len(values) == 1 else None
+
+
 j, r = Conn(ESKI), Conn(REF)
 failures = []
 checks = 0
+allocator_j, allocator_r = allocator(j), allocator(r)
+allocator_difference = allocator_j == b"libc" and isinstance(allocator_r, bytes) and allocator_r.startswith(b"jemalloc-")
+checks += 1
+if not allocator_difference:
+    failures.append("allocator capability fixture: expected Eski libc and Redis jemalloc, observed %r and %r" % (allocator_j, allocator_r))
 compute_config = {}
 for name, default in (COMPUTE_DEFAULTS | KEYSPACE_DEFAULTS | LUA_DEFAULTS).items():
     checks += 1
@@ -4073,14 +4084,28 @@ for n in names:
         continue
     for v in [cur_r] + PROBES:
         checks += 1
-        a, b = j.cmd("config", "set", n, v), r.cmd("config", "set", n, v)
-        if a != b:
-            failures.append("CONFIG SET %s %r: eski %r redis %r" % (n, v, a, b))
-        ga, gb = j.cmd("config", "get", n), r.cmd("config", "get", n)
-        if ga != gb:
-            failures.append("CONFIG GET %s after SET %r: eski %r redis %r" % (n, v, ga, gb))
-        j.cmd("config", "set", n, cur_r)
-        r.cmd("config", "set", n, cur_r)
+        try:
+            a, b = j.cmd("config", "set", n, v), r.cmd("config", "set", n, v)
+            ga, gb = j.cmd("config", "get", n), r.cmd("config", "get", n)
+            if allocator_difference and n == "activedefrag" and v == "yes":
+                expected = b"-ERR CONFIG SET failed (possibly related to argument 'activedefrag') - Active defragmentation cannot be enabled: this build uses libc without allocator relocation support."
+                if a != expected or b != b"+OK":
+                    failures.append("CONFIG SET activedefrag yes allocator capability: eski %r redis %r" % (a, b))
+                if ga != [b"activedefrag", b"no"] or gb != [b"activedefrag", b"yes"]:
+                    failures.append("CONFIG GET activedefrag after allocator-specific SET: eski %r redis %r" % (ga, gb))
+            else:
+                if a != b:
+                    failures.append("CONFIG SET %s %r: eski %r redis %r" % (n, v, a, b))
+                if ga != gb:
+                    failures.append("CONFIG GET %s after SET %r: eski %r redis %r" % (n, v, ga, gb))
+        finally:
+            try:
+                j.cmd("config", "set", n, cur_j)
+            finally:
+                r.cmd("config", "set", n, cur_r)
+        restored_j, restored_r = j.cmd("config", "get", n), r.cmd("config", "get", n)
+        if restored_j != [n.encode(), cur_j] or restored_r != [n.encode(), cur_r]:
+            failures.append("CONFIG GET %s after restoring both fixtures: eski %r redis %r" % (n, restored_j, restored_r))
 final_j, final_r = as_dict(j.cmd("config", "get", "*")), as_dict(r.cmd("config", "get", "*"))
 checks += 1
 if final_j != final_r:
@@ -4125,7 +4150,7 @@ expect_config_files() {
 	wait "$cpid" 2>/dev/null
 	sed -i -e '/^include /d' -e '/^rename-command /d' -e '/^dir /d' "$cdir/eski/eski.conf"
 	cp "$cdir/eski/eski.conf" "$cdir/ref/from-eski.conf"
-	if docker run -d --rm --name "$name" --network=host --user "$(id -u):$(id -g)" -v "$cdir/ref:/data" "$IMAGE" redis-server /data/from-eski.conf --port "$rport" --dir /data >/dev/null; then
+	if docker run -d --rm --name "$name" --network=host --user "$(id -u):$(id -g)" -v "$cdir/ref:/data" "$IMAGE" redis-server /data/from-eski.conf --port "$rport" --dir /data --protected-mode yes >/dev/null; then
 		for _ in $(seq 1 50); do
 			[ "$(docker exec "$CLI_CONTAINER" redis-cli -p "$rport" ping 2>&1)" == "PONG" ] && break
 			sleep 0.1
@@ -4396,7 +4421,7 @@ expect_same_eviction() {
 	done
 }
 
-if docker run -d --rm --name "$REF_CONTAINER" --network=host "$IMAGE" redis-server --port "$REF_PORT" --bind 127.0.0.1 --save "" --appendonly no --enable-debug-command yes >/dev/null; then
+if docker run -d --rm --name "$REF_CONTAINER" --network=host "$IMAGE" redis-server --port "$REF_PORT" --bind 127.0.0.1 --protected-mode yes --save "3600 1 300 100 60 10000" --appendonly no --enable-debug-command yes >/dev/null; then
 	ref_ready=0
 	for _ in $(seq 1 100); do
 		if [ "$(ref_cli ping)" == "PONG" ]; then

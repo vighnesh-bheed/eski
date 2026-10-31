@@ -87,6 +87,8 @@ reader_remaining :: proc "contextless" (r: ^Reader) -> i64 {
 @(private)
 LZF_MAX_RATIO :: 100
 
+LZF_DECODE_MAX_RATIO :: LZF_MAX_RATIO
+
 reader_init_mem :: proc "contextless" (r: ^Reader, data: []u8, checksum: bool) {
 	r^ = {}
 	r.fd = -1
@@ -119,6 +121,14 @@ reader_destroy :: proc "contextless" (r: ^Reader) {
 
 reader_offset :: proc "contextless" (r: ^Reader) -> i64 {
 	return r.consumed + i64(r.pos)
+}
+
+reader_poll_progress :: proc "contextless" (r: ^Reader) {
+	if r.progress == nil || r.tick_every <= 0 { return }
+	offset := reader_offset(r)
+	if offset < r.next_tick { return }
+	r.next_tick = offset + min(r.tick_every, max(i64) - offset)
+	r.progress(r)
 }
 
 reader_reason :: proc "contextless" (r: ^Reader) -> string {

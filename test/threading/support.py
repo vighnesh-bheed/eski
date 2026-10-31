@@ -184,6 +184,9 @@ class Server:
                 if candidate.call('PING') == 'PONG':
                     candidate.close()
                     return self
+            except ServerError as error:
+                if not str(error).startswith('LOADING '):
+                    raise
             except (OSError, EOFError):
                 pass
             finally:

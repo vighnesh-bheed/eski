@@ -2,6 +2,7 @@ package main
 
 import "base:intrinsics"
 import "base:runtime"
+import lr "lua_runtime"
 import ht "hashtype"
 import st "settype"
 import zt "zsettype"
@@ -160,7 +161,7 @@ mem_keyspace :: #force_inline proc "contextless" () -> int {
 }
 
 mem_used :: #force_inline proc "contextless" () -> int {
-	return intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed) + ht.maintenance_metadata() + st.maintenance_metadata() + zt.maintenance_metadata() + mem_startup + db_used_memory + mem_keyspace() + storage_dead_payload + ps_memory + conn_mem + tx_mem_total + mem_aof_buffer() + lazyfree_pending_bytes() + compute_reserved + keyspace_memory_used() + lua_memory_used()
+	return intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed) + ht.maintenance_metadata() + st.maintenance_metadata() + zt.maintenance_metadata() + mem_startup + db_used_memory + mem_keyspace() + storage_dead_payload + client_metadata_total + client_registry_memory() + conn_mem + tx_mem_total + mem_aof_buffer() + lazyfree_pending_bytes() + compute_reserved + keyspace_memory_used() + lua_memory_used() + stat_error_memory() + diagnostics_memory_used()
 }
 
 mem_not_counted :: #force_inline proc "contextless" () -> int {
@@ -185,7 +186,7 @@ mem_sample :: proc() {
 	mapped, retired, _ := ht.maintenance_memory()
 	set_mapped, set_retired, _ := st.maintenance_memory()
 	zset_mapped, zset_retired, _ := zt.maintenance_memory()
-	mem_sample_allocated = int(mi.uordblks + mi.hblkhd) + slab_live + storage_table_allocated() + mapped - retired + set_mapped - set_retired + zset_mapped - zset_retired + intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed)
+	mem_sample_allocated = int(mi.uordblks + mi.hblkhd) + slab_live + storage_table_allocated() + mapped - retired + set_mapped - set_retired + zset_mapped - zset_retired + intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed) + diagnostics_memory_used()
 	mem_sample_ms = srv.now_ms
 }
 
@@ -214,9 +215,9 @@ mem_overhead :: proc() -> (mh: Mem_Overhead) {
 	mh.allocated = mem_sample_allocated
 	mh.frag = f32(mem_sample_rss) / f32(max(mem_sample_used, 1))
 	mh.frag_bytes = mem_sample_rss - i64(mem_sample_used)
-	mh.clients = conn_mem + tx_mem_total
+	mh.clients = conn_mem + tx_mem_total + client_metadata_total
 	mh.aof = mem_aof_buffer()
-	total := mem_startup + mh.clients + mh.aof + mem_keyspace() + ht.maintenance_metadata() + st.maintenance_metadata() + zt.maintenance_metadata() + intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed) + compute_reserved + keyspace_memory_used() + lua_memory_used()
+	total := mem_startup + mh.clients + client_registry_memory() + mh.aof + mem_keyspace() + ht.maintenance_metadata() + st.maintenance_metadata() + zt.maintenance_metadata() + intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed) + compute_reserved + keyspace_memory_used() + lua_memory_used() + stat_error_memory() + diagnostics_memory_used()
 	mh.lut = mem_keyspace()
 	for &d in dbs {
 		mh.keys += db_size_of(&d)
@@ -289,6 +290,9 @@ info_line_ratio :: proc(b: ^[dynamic]u8, name: string, v: f32, percent: bool) {
 }
 
 info_memory :: proc(b: ^[dynamic]u8) {
+	library_host, _ := lua_library_memory()
+	library_vm := int(lr.functions_active_stats().current_bytes)
+	eval_vm := int(lr.eval_stats().current_bytes)
 	mem_note_peak()
 	mh := mem_overhead()
 	used := i64(mh.total)
@@ -310,19 +314,19 @@ info_memory :: proc(b: ^[dynamic]u8) {
 	info_line_int(b, "allocator_muzzy", 0)
 	info_line_int(b, "total_system_memory", mem_system)
 	info_line_human(b, "total_system_memory_human", mem_system)
-	info_line_int(b, "used_memory_lua", i64(lua_active.vm_bytes) if lua_active != nil else 0)
-	info_line_int(b, "used_memory_vm_eval", i64(lua_active.vm_bytes) if lua_active != nil else 0)
-	info_line_human(b, "used_memory_lua_human", i64(lua_active.vm_bytes) if lua_active != nil else 0)
+	info_line_int(b, "used_memory_lua", i64(eval_vm))
+	info_line_int(b, "used_memory_vm_eval", i64(eval_vm))
+	info_line_human(b, "used_memory_lua_human", i64(eval_vm))
 	info_line_int(b, "used_memory_scripts_eval", i64(lua_cache_bytes))
 	info_line_int(b, "number_of_cached_scripts", i64(lua_cache_count))
-	info_line_int(b, "number_of_functions", 0)
-	info_line_int(b, "number_of_libraries", 0)
-	info_line_int(b, "used_memory_vm_functions", 0)
-	info_line_int(b, "used_memory_vm_total", i64(lua_active.vm_bytes) if lua_active != nil else 0)
-	info_line_human(b, "used_memory_vm_total_human", i64(lua_active.vm_bytes) if lua_active != nil else 0)
-	info_line_int(b, "used_memory_functions", 0)
-	info_line_int(b, "used_memory_scripts", i64(lua_cache_bytes+lua_retired_bytes))
-	info_line_human(b, "used_memory_scripts_human", i64(lua_cache_bytes+lua_retired_bytes))
+	info_line_int(b, "number_of_functions", i64(lua_function_count))
+	info_line_int(b, "number_of_libraries", i64(lua_library_count))
+	info_line_int(b, "used_memory_vm_functions", i64(library_vm))
+	info_line_int(b, "used_memory_vm_total", i64(eval_vm+library_vm))
+	info_line_human(b, "used_memory_vm_total_human", i64(eval_vm+library_vm))
+	info_line_int(b, "used_memory_functions", i64(library_host))
+	info_line_int(b, "used_memory_scripts", i64(lua_cache_bytes+lua_retired_bytes+library_host))
+	info_line_human(b, "used_memory_scripts_human", i64(lua_cache_bytes+lua_retired_bytes+library_host))
 	info_line_int(b, "maxmemory", i64(maxmemory_bytes))
 	info_line_human(b, "maxmemory_human", i64(maxmemory_bytes))
 	info_line_str(b, "maxmemory_policy", EVICT_POLICY_NAMES[maxmemory_policy])
@@ -431,7 +435,7 @@ memory_stats :: proc(c: ^Conn) {
 	mh := mem_overhead()
 	ndbs := 0
 	for &d in dbs {
-		if db_size_of(&d) > 0 {
+		if mem_db_overhead(&d) > 0 {
 			ndbs += 1
 		}
 	}
@@ -445,9 +449,10 @@ memory_stats :: proc(c: ^Conn) {
 	reply_kv_int(c, "cluster.links", 0)
 	reply_kv_int(c, "aof.buffer", i64(mh.aof))
 	reply_kv_int(c, "lua.caches", i64(lua_cache_bytes+lua_retired_bytes))
-	reply_kv_int(c, "functions.caches", 0)
+	library_host, _ := lua_library_memory()
+	reply_kv_int(c, "functions.caches", i64(library_host))
 	for &d in dbs {
-		if db_size_of(&d) == 0 {
+		if mem_db_overhead(&d) == 0 {
 			continue
 		}
 		clear(&scratch)
@@ -597,8 +602,50 @@ client_eviction_limit :: proc() -> int {
 	return max(actual, CLIENT_EVICT_MIN)
 }
 
+memory_worker_admissible :: proc() -> bool {
+	over, _ := memory_state_over()
+	limit := client_eviction_limit()
+	return !over && !evict_timer && (limit == 0 || conn_mem + tx_mem_total + client_metadata_total <= limit)
+}
+
+Memory_Worker_Access :: struct {
+	lfu: bool,
+	clock: u32,
+	minutes: u16,
+	log_factor, decay_time: int,
+	random: u64,
+}
+
+memory_worker_access_snapshot :: proc "contextless" () -> Memory_Worker_Access {
+	return Memory_Worker_Access{lfu = lfu_policy, clock = lru_clock(), minutes = lfu_minutes(), log_factor = lfu_log_factor, decay_time = lfu_decay_time, random = rng_next() if lfu_policy else 0}
+}
+
+memory_worker_access_touch :: proc "contextless" (access: ^Memory_Worker_Access, clock: u32, created: bool = false) -> u32 {
+	if !access.lfu { return access.clock }
+	if created { return u32(access.minutes) << 8 | LFU_INIT_VAL }
+	counter := i64(u8(clock))
+	if access.decay_time > 0 {
+		last := i64(u16(clock >> 8))
+		now := i64(access.minutes)
+		elapsed := now - last if now >= last else LFU_TIME_MAX - last + now
+		periods := elapsed / i64(access.decay_time)
+		counter = max(0, counter - periods)
+	}
+	if counter < 255 {
+		x := access.random
+		x ~= x << 13
+		x ~= x >> 7
+		x ~= x << 17
+		access.random = x
+		r := f64(x >> 11) / f64(u64(1) << 53)
+		base := max(f64(counter - LFU_INIT_VAL), 0)
+		if r < 1.0 / (base * f64(access.log_factor) + 1) { counter += 1 }
+	}
+	return u32(access.minutes) << 8 | u32(counter)
+}
+
 conn_memory :: proc(c: ^Conn) -> int {
-	return size_of(Conn) + c.rcap + c.wcap + tx_multi_mem(c) + request_inline_memory(c)
+	return size_of(Conn) + c.rcap + c.wcap + len(c.name) + len(c.lib_name) + len(c.lib_ver) + tx_multi_mem(c) + request_inline_memory(c) + transport_connection_memory(c) + client_metadata_memory(c)
 }
 
 @(private = "file")
@@ -649,8 +696,10 @@ evict_clients :: #force_no_inline proc(current: ^Conn) -> (evicted_current: bool
 	if limit == 0 {
 		return
 	}
+	if conn_mem + tx_mem_total + client_metadata_total <= limit { return }
+	keyspace_fence()
 	held := 0
-	for conn_mem + tx_mem_total - held >= limit {
+	for conn_mem + tx_mem_total + client_metadata_total - held > limit {
 		victim: ^Conn
 		for t in srv.conns {
 			if !client_evictable(t) {

@@ -44,6 +44,7 @@ case "$mode" in
 	*) lua_mode=release ;;
 esac
 bash tools/build_lua.sh "$lua_mode"
+bash tools/build_diagnostics.sh "$lua_mode"
 
 has_sources() {
 	compgen -G "$1/*.odin" >/dev/null

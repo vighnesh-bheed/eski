@@ -1,6 +1,7 @@
 package hashtype
 
 import xx "core:hash/xxhash"
+import "base:intrinsics"
 
 TABLE_INITIAL_SIZE :: 4
 TABLE_MIN_FILL :: 8
@@ -38,14 +39,14 @@ hash_seed: u64 = 0x5851F42D4C957F2D
 EMPTY_FIELD := [1]u8{0}
 
 set_hash_seed :: proc "contextless" (seed: u64) {
-	hash_seed = seed
+	intrinsics.atomic_store_explicit(&hash_seed, seed, .Relaxed)
 }
 
 hash_field :: #force_inline proc(field: []u8) -> u64 {
 	if len(field) == 0 {
-		return xx.XXH3_64_with_seed(EMPTY_FIELD[:0], hash_seed)
+		return xx.XXH3_64_with_seed(EMPTY_FIELD[:0], intrinsics.atomic_load_explicit(&hash_seed, .Relaxed))
 	}
-	return xx.XXH3_64_with_seed(field, hash_seed)
+	return xx.XXH3_64_with_seed(field, intrinsics.atomic_load_explicit(&hash_seed, .Relaxed))
 }
 
 blob_field :: #force_inline proc "contextless" (b: ^Blob) -> []u8 {

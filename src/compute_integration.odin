@@ -60,7 +60,7 @@ compute_start :: proc() {
 	if compute_threads == 0 || pst.in_child {
 		return
 	}
-	if !cp.init(&compute_pool, int(compute_threads)) {
+	if !cp.init(&compute_pool, int(compute_threads), diagnostics_thread_enter, diagnostics_thread_leave, diagnostics_worker_failure()) {
 		return
 	}
 	if !compute_registered {

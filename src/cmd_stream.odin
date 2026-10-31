@@ -272,6 +272,7 @@ cmd_xlen :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 cmd_xdel :: proc(c: ^Conn, argv: [][]u8) {
+	pst.dirty_explicit = true
 	key := argv[1]
 	e, s, wrong := stream_lookup(key, false)
 	if wrong {
@@ -293,6 +294,7 @@ cmd_xdel :: proc(c: ^Conn, argv: [][]u8) {
 		append(&stream_ids, id)
 	}
 	deleted := st.xdel_apply(s, stream_ids[:])
+	pst.dirty += i64(deleted)
 	stream_sync(e.db, s)
 	if deleted > 0 {
 		signal_key(key)
@@ -304,6 +306,7 @@ cmd_xdel :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 cmd_xtrim :: proc(c: ^Conn, argv: [][]u8) {
+	pst.dirty_explicit = true
 	args, _, err := st.parse_add_trim_args(argv, false)
 	if err != .None {
 		reply_stream_error(c, err)
@@ -321,6 +324,7 @@ cmd_xtrim :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	removed := st.trim(s, &args)
+	pst.dirty += removed
 	stream_sync(e.db, s)
 	if removed > 0 {
 		signal_key(key)

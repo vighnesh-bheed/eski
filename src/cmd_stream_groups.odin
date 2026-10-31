@@ -577,7 +577,7 @@ cmd_xack :: proc(c: ^Conn, argv: [][]u8) {
 	if acked > 0 {
 		stream_sync(e.db, s)
 		signal_key(key)
-		group_changes(1)
+		group_changes(acked)
 	}
 	reply_int(c, i64(acked))
 }

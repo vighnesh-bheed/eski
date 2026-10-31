@@ -172,6 +172,7 @@ set_copy_attach :: proc(dst: ^Entry, obj: rawptr) {
 }
 
 cmd_sadd :: proc(c: ^Conn, argv: [][]u8) {
+	pst.dirty_explicit = true
 	key := argv[1]
 	e, s, wrong := set_lookup(key, false)
 	if wrong {
@@ -189,6 +190,7 @@ cmd_sadd :: proc(c: ^Conn, argv: [][]u8) {
 	for member in argv[2:] {
 		added += int(st.add(s, member))
 	}
+	pst.dirty += i64(added)
 	set_done(e, s)
 	if added > 0 {
 		signal_key(key)
@@ -198,6 +200,7 @@ cmd_sadd :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 cmd_srem :: proc(c: ^Conn, argv: [][]u8) {
+	pst.dirty_explicit = true
 	key := argv[1]
 	e, s, wrong := set_lookup(key, false)
 	if wrong {
@@ -210,6 +213,7 @@ cmd_srem :: proc(c: ^Conn, argv: [][]u8) {
 			removed += int(st.remove(s, member))
 		}
 	}
+	pst.dirty += i64(removed)
 	if removed > 0 {
 		set_done(e, s)
 		empty := st.size(s) == 0
@@ -226,6 +230,7 @@ cmd_srem :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 cmd_smove :: proc(c: ^Conn, argv: [][]u8) {
+	pst.dirty_explicit = true
 	source, destination, member := argv[1], argv[2], argv[3]
 	_, src, wrong := set_lookup(source, false)
 	if wrong {
@@ -269,6 +274,7 @@ cmd_smove :: proc(c: ^Conn, argv: [][]u8) {
 		de = db_find(destination)
 	}
 	added := st.add(dst, member)
+	pst.dirty += 1 + i64(added)
 	set_done(de, dst)
 	if added {
 		signal_key(destination)
@@ -324,6 +330,7 @@ spop_with_count :: proc(c: ^Conn, argv: [][]u8) {
 	}
 	n := min(requested, i64(st.size(s)))
 	reply_set(c, int(n))
+	pst.dirty += n
 	if n == 0 {
 		return
 	}
@@ -368,6 +375,7 @@ spop_with_count :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 cmd_spop :: proc(c: ^Conn, argv: [][]u8) {
+	pst.dirty_explicit = true
 	if len(argv) > 3 {
 		reply_error(c, "ERR syntax error")
 		return
@@ -387,6 +395,7 @@ cmd_spop :: proc(c: ^Conn, argv: [][]u8) {
 	}
 	st.popped_reset(&set_pop)
 	st.pop_random(s, &set_pop)
+	pst.dirty += 1
 	reply_set_value(c, st.popped_get(&set_pop, 0))
 	set_done(e, s)
 	empty := st.size(s) == 0
@@ -480,19 +489,23 @@ set_gather :: proc(c: ^Conn, keys: [][]u8) -> (ok: bool, empty: int) {
 }
 
 set_store_delete :: proc(key: []u8) {
-	removed, _ := db_remove(key)
+	removed, expired := db_remove(key)
+	pst.dirty_explicit = true
 	if removed {
+		if !expired { pst.dirty += 1 }
 		signal_key(key)
 		notify(.Generic, "del", key)
 	}
 }
 
 set_store_result :: proc(c: ^Conn, key: []u8, d: st.Set, event: string) {
+	pst.dirty_explicit = true
 	n := st.size(d)
 	if n == 0 {
 		st.destroy(d)
 		set_store_delete(key)
 	} else {
+		pst.dirty += 1
 		e, _ := db_upsert(key)
 		set_attach(e, d)
 		entry_set_expire(e, 0)
@@ -503,6 +516,7 @@ set_store_result :: proc(c: ^Conn, key: []u8, d: st.Set, event: string) {
 }
 
 sinter_generic :: proc(c: ^Conn, keys: [][]u8, dstkey: []u8, store: bool) {
+	if store { pst.dirty_explicit = true }
 	ok, _ := set_gather(c, keys)
 	if !ok {
 		return
@@ -524,6 +538,7 @@ sinter_generic :: proc(c: ^Conn, keys: [][]u8, dstkey: []u8, store: bool) {
 }
 
 sunion_diff_generic :: proc(c: ^Conn, keys: [][]u8, dstkey: []u8, store: bool, op: st.Op) {
+	if store { pst.dirty_explicit = true }
 	ok, _ := set_gather(c, keys)
 	if !ok {
 		return

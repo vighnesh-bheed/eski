@@ -131,6 +131,67 @@ class Fixture(unittest.TestCase):
 class Compatibility(Fixture):
     portable = True
 
+    def test_bignum_text_sanitizes_line_breaks_in_both_client_protocols(self):
+        for protocol in (2, 3):
+            self.client.call('HELLO', protocol)
+            for payload in (b'123\r\n123', b'', b'word'):
+                with self.subTest(protocol=protocol, payload=payload):
+                    self.client.send('EVAL', 'return {big_number=ARGV[1]}', 0, payload)
+                    self.assertEqual(self.client.take(1), b'$' if protocol == 2 else b'(')
+                    text = payload.replace(b'\r', b' ').replace(b'\n', b' ')
+                    if protocol == 2:
+                        self.assertEqual(int(self.client.line()), len(text))
+                        self.assertEqual(self.client.take(len(text)+2), text+b'\r\n')
+                    else:
+                        self.assertEqual(self.client.line(), text)
+                    self.assertEqual(self.client.call('PING'), 'PONG')
+
+    def test_forwarded_error_stats_use_the_public_boolean_marker(self):
+        source = "local e=redis.pcall('GET');return {type(e.ignore_error_stats_update),e.ignore_error_stats_update}"
+        self.assertEqual(self.client.call('EVAL', source, 0), [b'boolean', 1])
+        cases = (
+            ("return redis.call('GET')", 1),
+            ("return redis.pcall('GET')", 1),
+            ("redis.pcall('GET');return redis.error_reply('ERR independent')", 2),
+            ("return {err='ERR manual',ignore_error_stats_update=true}", 0),
+            ("return {err='ERR manual',ignore_error_stats_update=false}", 1),
+            ("return {err='ERR manual',ignore_error_stats_update=1}", 1),
+        )
+        for source, expected in cases:
+            with self.subTest(source=source):
+                self.client.call('CONFIG', 'RESETSTAT')
+                self.error(('EVAL', source, 0))
+                self.assertEqual(int(info(self.client, 'stats')['total_error_replies']), expected)
+
+    def test_nested_error_stats_count_new_errors_and_preserve_array_framing(self):
+        for source, count in (
+            ("return {redis.error_reply('ERR nested')}", 1),
+            ("return {redis.pcall('GET')}", 1),
+            ("return {{err='ERR manual',ignore_error_stats_update=true}}", 0),
+            ("return {{err='ERR manual',ignore_error_stats_update=1}}", 1),
+            ("return {{err='CUSTOM first'},{{err='OTHER second'},{err='ERR ignored',ignore_error_stats_update=true}},redis.pcall('GET')}", 3),
+        ):
+            with self.subTest(source=source):
+                self.client.call('CONFIG', 'RESETSTAT')
+                result, following = self.client.pipeline([('EVAL', source, 0), ('PING', 'after-nested-errors')])
+                self.assertIsInstance(result, list)
+                self.assertIsInstance(result[0], ServerError)
+                self.assertEqual(following, b'after-nested-errors')
+                self.assertFalse(self.client.available(.01))
+                self.assertEqual(int(info(self.client, 'stats')['total_error_replies']), count)
+        errors = info(self.client, 'errorstats')
+        self.assertEqual(errors['errorstat_CUSTOM'], 'count=1')
+        self.assertEqual(errors['errorstat_OTHER'], 'count=1')
+        self.assertEqual(errors['errorstat_ERR'], 'count=1')
+
+    def test_acl_check_distinguishes_wrong_arity_and_unknown_commands(self):
+        for arguments, expected in (("'eval','script'", 'Wrong number of args'), ("'get'", 'Wrong number of args'),
+                                    ("'unknown-command'", 'Invalid command passed')):
+            with self.subTest(arguments=arguments):
+                error = self.error(('EVAL', 'return redis.acl_check_cmd('+arguments+')', 0), expected)
+                self.assertFalse(str(error).startswith('ERR ERR '))
+        self.healthy()
+
     def test_random_defaults_vary_and_explicit_seed_repeats(self):
         source = 'return {math.random(1,1000000000),math.random(1,1000000000),math.random(1,1000000000)}'
         rows = self.client.pipeline([('EVAL', source, 0)]*8)
@@ -380,14 +441,33 @@ class Compatibility(Fixture):
 
 
 class Integration(Fixture):
-    def test_outer_and_inner_argument_boundaries_reject_before_mutation(self):
-        values = [b'absent-boundary']*4096
-        self.assertEqual(self.client.call('EVAL', 'return {#KEYS,#ARGV,KEYS[4096]}', 4096, *values), [4096, 0, values[-1]])
-        self.assertEqual(self.client.call('EVAL', 'return {#KEYS,#ARGV,ARGV[4096]}', 0, *values), [0, 4096, values[-1]])
-        self.error(('EVAL', "return redis.call('SET','boundary:unexpected','bad')", 0, *values, b'one-more'), 'argument count')
+    def test_attributes_are_ignored_by_the_inner_resp3_parser(self):
+        self.client.call('DEBUG', 'SET-DISABLE-DENY-SCRIPTS', 1)
+        source = "redis.setresp(3);return redis.call('DEBUG','PROTOCOL','attrib')"
+        self.assertEqual(self.client.call('EVAL', source, 0), b'Some real reply following the attribute')
+        self.client.call('DEBUG', 'SET-DISABLE-DENY-SCRIPTS', 0)
+        self.error(('EVAL', source, 0), 'not allowed')
+        self.healthy()
+
+    def test_explicit_deprecated_apis_preserve_environment_and_gc_lifetimes(self):
+        server = self.new_server(('--lua-enable-deprecated-api', 'yes'))
+        client = server.client()
+        source = "local f=function()return value end;local e={value=7};setfenv(f,e);return {f(),getfenv(f)==e,type(newproxy(true))}"
+        self.assertEqual(client.call('EVAL', source, 0), [7, 1, b'userdata'])
+        source = "local n=0;do local p=newproxy(true);getmetatable(p).__gc=function()n=n+1 end end;collectgarbage('collect');return n"
+        self.assertEqual(client.call('EVAL', source, 0), 1)
+        self.error(('CONFIG', 'SET', 'lua-enable-deprecated-api', 'no'), 'immutable', client)
+        self.healthy(client)
+
+    def test_large_argument_vectors_and_invalid_inner_values_are_atomic(self):
+        values = [b'absent-boundary']*4097
+        self.assertEqual(self.client.call('EVAL', 'return {#KEYS,#ARGV,KEYS[4097]}', len(values), *values), [len(values), 0, values[-1]])
+        self.assertEqual(self.client.call('EVAL', 'return {#KEYS,#ARGV,ARGV[4097]}', 0, *values), [0, len(values), values[-1]])
         source = "return redis.call('EXISTS',unpack(ARGV))"
-        self.assertEqual(self.client.call('EVAL', source, 0, *values[:-1]), 0)
-        self.error(('EVAL', source, 0, *values), 'argument count')
+        self.assertEqual(self.client.call('EVAL', source, 0, *values), 0)
+        for value in ('{}', 'true', 'function() end'):
+            with self.subTest(value=value):
+                self.error(('EVAL', "return redis.call('SET','boundary:unexpected',"+value+")", 0), 'arguments')
         self.assertIsNone(self.client.call('GET', 'boundary:unexpected'))
         self.healthy()
 
@@ -415,41 +495,96 @@ class Integration(Fixture):
         self.assertEqual(digest, hashlib.sha1(source).hexdigest().encode())
         self.assertEqual(self.client.call('EVALSHA', digest, 1, 'header:key'), b'v')
         self.error(('EVAL', b'#!lua flags=no-writes\nreturn redis.call("SET","header:key","bad")', 0), 'read-only')
-        for header in (b'#!python', b'#!lua flags=unknown', b'#!lua flags=allow-oom'):
+        for flag in (b'no-writes', b'allow-oom', b'allow-stale', b'no-cluster', b'allow-cross-slot-keys',
+                     b'no-writes,allow-oom,allow-stale,no-cluster,allow-cross-slot-keys'):
+            with self.subTest(flag=flag):
+                flagged = b'#!lua flags='+flag+b'\nreturn 31'
+                digest = self.client.call('SCRIPT', 'LOAD', flagged)
+                self.assertEqual(digest, hashlib.sha1(flagged).hexdigest().encode())
+                self.assertEqual(self.client.call('EVALSHA_RO', digest, 0), 31)
+        for header in (b'#!python', b'#!lua flags=unknown', b'#!lua unknown=value'):
             self.error(('SCRIPT', 'LOAD', header+b'\nreturn 1'))
         self.assertEqual(self.client.call('GET', 'header:key'), b'v')
 
-    def test_sandbox_denies_escapes_globals_bytecode_and_finalizers(self):
-        blocked = ('load', 'loadfile', 'loadstring', 'dofile', 'require', 'package', 'io', 'os', 'debug',
-                   'collectgarbage', 'coroutine', 'getmetatable', 'setmetatable', 'rawget', 'rawset')
+    def test_sandbox_denies_process_files_globals_and_binary_loaders(self):
+        blocked = ('loadfile', 'dofile', 'require', 'package', 'io', 'debug', 'getfenv', 'setfenv', 'newproxy')
         source = 'local names={'+','.join(json.dumps(name) for name in blocked)+'}; for _,name in ipairs(names) do local ok,v=pcall(function() return _G[name] end); if ok and v~=nil then return name end end; return "blocked"'
         self.assertEqual(self.client.call('EVAL', source, 0), b'blocked')
-        self.assertEqual(self.client.call('EVAL', 'return string.dump==nil and 1 or 0', 0), 1)
-        self.error(('EVAL', 'forbidden_new_global=1; return 1', 0), 'global')
+        self.assertEqual(self.client.call('EVAL', 'return {type(os.clock),type(os.execute),type(os.exit),type(os.time),type(os.date)}', 0),
+                         [b'function', b'nil', b'nil', b'nil', b'nil'])
+        self.error(('EVAL', 'forbidden_new_global=1; return 1', 0), 'readonly')
         self.error(('EVAL', 'return forbidden_new_global', 0), 'global')
         for source in (b'\x1bLua\x55\x00invalid', b'\x1bLJ\x02invalid'):
             self.error(('EVAL', source, 0))
             self.error(('SCRIPT', 'LOAD', source))
-        self.error(('EVAL', "local t=setmetatable({}, {__gc=function() redis.call('SET','finalized','bad') end}); return 1", 0))
+        source = "return string.dump(function() return 7 end)"
+        dumped = self.client.call('EVAL', source, 0)
+        self.assertTrue(dumped.startswith(b'\x1bLua\x51'))
+        self.error(('EVAL', dumped, 0))
+        self.error(('SCRIPT', 'LOAD', dumped))
+        source = "local f,e=loadstring(ARGV[1]); return {type(f),type(e)}"
+        self.assertEqual(self.client.call('EVAL', source, 0, dumped), [b'nil', b'string'])
+        source = "local sent=false; local f,e=load(function() if not sent then sent=true; return ARGV[1] end end); return {type(f),type(e)}"
+        self.assertEqual(self.client.call('EVAL', source, 0, dumped), [b'nil', b'string'])
+        self.assertEqual(self.client.call('EVAL', "local t=setmetatable({}, {__gc=function() redis.call('SET','finalized','bad') end}); t=nil; collectgarbage('collect'); return 1", 0), 1)
         self.assertIsNone(self.client.call('GET', 'finalized'))
         self.healthy()
 
-    def test_each_invocation_gets_fresh_mutable_library_tables(self):
-        self.assertEqual(self.client.call('EVAL', 'math.saved=19; redis.saved=23; cjson.saved=29; return math.saved+redis.saved+cjson.saved', 0), 71)
-        self.assertEqual(self.client.call('EVAL', 'return {math.saved==nil and 1 or 0,redis.saved==nil and 1 or 0,cjson.saved==nil and 1 or 0}', 0), [1, 1, 1])
-        self.assertEqual(self.client.call('EVAL', 'table.insert=nil; return 1', 0), 1)
+    def test_builtin_tables_are_readonly_across_invocations(self):
+        for library in ('math', 'redis', 'cjson', 'cmsgpack', 'struct', 'bit', 'table', 'string', 'coroutine', 'os', '_G'):
+            for operation in (library+'.saved=19', "rawset("+library+",'saved',19)", 'setmetatable('+library+',{})'):
+                with self.subTest(operation=operation):
+                    self.error(('EVAL', operation+'; return 1', 0), 'readonly')
+        self.error(('EVAL', 'table.insert=nil; return 1', 0), 'readonly')
         self.assertEqual(self.client.call('EVAL', 'local t={}; table.insert(t,7); return t', 0), [7])
+        self.assertEqual(self.client.call('EVAL', 'return {math.saved==nil and 1 or 0,redis.saved==nil and 1 or 0,cjson.saved==nil and 1 or 0}', 0), [1, 1, 1])
+
+    def test_library_configuration_persists_until_script_flush(self):
+        self.assertEqual(self.client.call('EVAL', 'return cjson.encode_number_precision(5)', 0), 5)
+        self.assertEqual(self.client.call('EVAL', 'return cjson.encode_number_precision()', 0), 5)
+        self.assertEqual(self.client.call('EVAL', 'return cjson.encode(1.23456789)', 0), b'1.2346')
+        self.client.call('SCRIPT', 'FLUSH', 'SYNC')
+        self.assertEqual(self.client.call('EVAL', 'return cjson.encode_number_precision()', 0), 14)
+
+    def test_text_loaders_coroutines_and_mutable_local_metatables(self):
+        self.assertEqual(self.client.call('EVAL', "return loadstring('return 9')()", 0), 9)
+        source = "local chunks={'return ', '11'}; return load(function() return table.remove(chunks,1) end)()"
+        self.assertEqual(self.client.call('EVAL', source, 0), 11)
+        source = "local co=coroutine.create(function() coroutine.yield('paused'); return 'done' end); local a,b=coroutine.resume(co); local s=coroutine.status(co); local c,d=coroutine.resume(co); return {a,b,s,c,d,coroutine.status(co)}"
+        self.assertEqual(self.client.call('EVAL', source, 0), [1, b'paused', b'suspended', 1, b'done', b'dead'])
+        source = "local mt={__index=function(t,k) return 'fallback:'..k end}; local t=setmetatable({},mt); rawset(t,'value',7); return {rawget(t,'value'),t.missing,getmetatable(t)==mt and 1 or 0,type(collectgarbage('count')),os.clock()>=0 and 1 or 0}"
+        self.assertEqual(self.client.call('EVAL', source, 0), [7, b'fallback:missing', 1, b'number', 1])
 
     def test_unsafe_and_reentrant_inner_commands_reject_without_context_damage(self):
-        commands = (('EVAL', 'return 1', 0), ('SCRIPT', 'FLUSH'), ('MULTI',), ('EXEC',), ('SELECT', 1),
-                    ('CLIENT', 'RESET'), ('CONFIG', 'GET', '*'), ('SAVE',), ('FLUSHDB',),
-                    ('BLPOP', 'blocked', 0), ('MIGRATE', '127.0.0.1', 1, 'x', 0, 1), ('KEYS', '*'))
+        commands = (('EVAL', 'return 1', 0), ('SCRIPT', 'FLUSH'), ('MULTI',), ('EXEC',),
+                    ('CLIENT', 'RESET'), ('CONFIG', 'GET', '*'), ('SAVE',))
         self.client.call('SET', 'retained', 'yes')
         for arguments in commands:
             with self.subTest(command=arguments):
                 source = "return redis.call(unpack(ARGV))"
                 self.error(('EVAL', source, 0, *arguments), 'not allowed')
         self.assertEqual(self.client.call('GET', 'retained'), b'yes')
+        self.healthy()
+
+    def test_script_safe_keyspace_commands_keep_client_database_and_never_block(self):
+        self.client.call('SET', 'retained', 'yes')
+        source = "redis.call('SELECT',1); redis.call('SET','selected:key','db1'); return redis.call('KEYS','selected:*')"
+        self.assertEqual(self.client.call('EVAL', source, 0), [b'selected:key'])
+        self.assertEqual(self.client.call('GET', 'retained'), b'yes')
+        self.assertIsNone(self.client.call('GET', 'selected:key'))
+        self.assertIsNone(self.client.call('EVAL', "return redis.call('GET','selected:key')", 0))
+        self.client.call('SELECT', 1)
+        self.assertEqual(self.client.call('GET', 'selected:key'), b'db1')
+        self.client.call('SELECT', 0)
+        self.assertIsNone(self.client.call('EVAL', "return redis.call('BLPOP','blocked',0)", 0))
+        self.client.call('LPUSH', 'blocked', 'ready')
+        self.assertEqual(self.client.call('EVAL', "return redis.call('BLPOP','blocked',0)", 0), [b'blocked', b'ready'])
+        self.assertEqual(self.client.call('EVAL', "return redis.call('MIGRATE','127.0.0.1',1,'missing-key',0,1)", 0), 'NOKEY')
+        self.assertEqual(self.client.call('EVAL', "return redis.call('FLUSHDB')", 0), 'OK')
+        self.assertIsNone(self.client.call('GET', 'retained'))
+        self.client.call('SELECT', 1)
+        self.assertEqual(self.client.call('GET', 'selected:key'), b'db1')
+        self.client.call('SELECT', 0)
         self.healthy()
 
     def test_output_memory_depth_and_cycle_failures_cleanup(self):
@@ -460,10 +595,17 @@ class Integration(Fixture):
         self.limit('lua-max-memory', 128 << 10)
         self.error(('EVAL', 'local t={}; for i=1,20000 do t[i]=string.rep("x",100) end; return #t', 0))
         self.healthy()
-        for source in ('local t={}; t[1]=t; return t', 'local t={}; for i=1,80 do t={t} end; return t',
-                       'local t={}; t.t=t; return cjson.encode(t)', 'local t={}; t[1]=t; return cmsgpack.pack(t)'):
+        for source in ('local t={}; t[1]=t; return t', 'local t={}; t.t=t; return cjson.encode(t)'):
             self.error(('EVAL', source, 0))
             self.healthy()
+        nested = self.client.call('EVAL', 'local t={}; for i=1,80 do t={t} end; return t', 0)
+        for unused in range(80):
+            self.assertIsInstance(nested, list)
+            self.assertEqual(len(nested), 1)
+            nested = nested[0]
+        self.assertEqual(nested, [])
+        self.assertEqual(self.client.call('EVAL', 'local t={}; t[1]=t; return cmsgpack.pack(t)', 0), b'\x91'*16+b'\xc0')
+        self.healthy()
         self.client.call('CONFIG', 'SET', 'lua-max-memory', 4096)
         self.error(('EVAL', 'return 1', 0))
         self.client.call('CONFIG', 'SET', 'lua-max-memory', 128 << 10)
@@ -497,7 +639,10 @@ class Integration(Fixture):
         self.assertEqual(self.client.pipeline([('EVAL', source, 0) for source in sources]), list(range(510)))
         digests = [hashlib.sha1(source).hexdigest() for source in (sources[0], sources[-1])]
         self.assertEqual(self.client.call('SCRIPT', 'EXISTS', pinned, *digests), [1, 0, 1])
-        self.assertGreaterEqual(int(info(self.client, 'stats')['evicted_scripts']), 10)
+        self.assertEqual(int(info(self.client, 'stats')['evicted_scripts']), 10)
+        self.client.call('CONFIG', 'RESETSTAT')
+        self.assertEqual(int(info(self.client, 'stats')['evicted_scripts']), 0)
+        self.assertEqual(self.client.call('SCRIPT', 'EXISTS', pinned, *digests), [1, 0, 1])
         self.assertEqual(self.client.call('EVALSHA', pinned, 0), 9001)
 
     def test_cache_memory_accounting_follows_real_source_ownership(self):
@@ -527,7 +672,10 @@ class Integration(Fixture):
             with self.subTest(binary_error_source=source):
                 result, following = self.client.pipeline([('EVAL', source, 0, b'ERR left\x00right'), ('PING', 'after-binary-error')])
                 self.assertIsInstance(result, ServerError)
-                self.assertEqual(str(result), 'ERR left\x00right')
+                expected = 'ERR left'
+                if source.startswith('error('):
+                    expected += ' script: '+hashlib.sha1(source.encode()).hexdigest()+', on @user_script:1.'
+                self.assertEqual(str(result), expected)
                 self.assertEqual(following, b'after-binary-error')
                 self.assertFalse(self.client.available(.01))
 
@@ -632,6 +780,34 @@ class Busy(Fixture):
         self.assertIsInstance(result, ServerError)
         self.assertIn('kill', str(result).casefold())
         self.healthy()
+
+    def test_transaction_started_while_busy_discards_rejected_commands(self):
+        self.client.call('SET', 'busy:transaction', 1)
+        self.client.send('EVAL', 'while true do end', 0)
+        control = self.busy_client()
+        actor = self.server.client()
+        self.assertEqual(actor.call('MULTI'), 'OK')
+        self.error(('INCR', 'busy:transaction'), 'BUSY', actor)
+        self.kill(control)
+        self.assertEqual(actor.call('INCR', 'busy:transaction'), 'QUEUED')
+        self.error(('EXEC',), 'previous errors', actor)
+        self.assertEqual(self.client.call('GET', 'busy:transaction'), b'1')
+        self.assertEqual(actor.call('PING', 'after-abort'), b'after-abort')
+
+    def test_exec_while_busy_aborts_and_leaves_transaction_state(self):
+        self.client.call('SET', 'busy:transaction', 1)
+        actor = self.server.client()
+        self.assertEqual(actor.call('MULTI'), 'OK')
+        self.assertEqual(actor.call('INCR', 'busy:transaction'), 'QUEUED')
+        self.client.send('EVAL', 'while true do end', 0)
+        control = self.busy_client()
+        self.error(('EXEC',), 'EXECABORT Transaction discarded because of: BUSY', actor)
+        self.assertEqual(actor.call('MULTI'), 'OK')
+        self.assertEqual(actor.call('DISCARD'), 'OK')
+        self.assertEqual(actor.call('UNWATCH'), 'OK')
+        self.kill(control)
+        self.assertEqual(self.client.call('GET', 'busy:transaction'), b'1')
+        self.assertEqual(actor.call('PING', 'after-abort'), b'after-abort')
 
     def suppressed_control(self, mode):
         client = self.server.client(timeout=5)

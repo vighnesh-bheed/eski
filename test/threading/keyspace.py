@@ -116,7 +116,7 @@ class Keyspace(unittest.TestCase):
         self.assertEqual(replies[6:10], [b'db1', None, 'OK', [b'db0']])
         self.assertIsInstance(replies[10], list)
         self.assertEqual(replies[11:], [b'db0', b'end'])
-        self.assertEqual(self.snapshot()['keyspace_jobs_submitted'], 7)
+        self.assertEqual(self.snapshot()['keyspace_jobs_submitted'], 8)
 
     def test_reply_off_and_skip_preserve_mutations_and_order(self):
         client = self.server.client()
@@ -125,7 +125,7 @@ class Keyspace(unittest.TestCase):
                           ('SET', 'skipped', 'kept'), ('GET', 'skipped'), ('PING', 'end')])
         self.assertEqual([client.reply() for _ in range(4)], ['OK', b'on', b'kept', b'end'])
         self.assertEqual(self.admin.call('MGET', 'silent', 'skipped'), [b'stored', b'kept'])
-        self.assertEqual(self.snapshot()['keyspace_jobs_submitted'], 4)
+        self.assertEqual(self.snapshot()['keyspace_jobs_submitted'], 5)
 
     def test_half_close_delivers_all_accepted_replies(self):
         for protocol in (2, 3):
@@ -172,7 +172,7 @@ class Keyspace(unittest.TestCase):
             source.read()
         self.admin.call('CONFIG', 'SET', 'client-output-buffer-limit', 'normal 0 0 0')
         after = self.snapshot()
-        self.assertEqual(after['keyspace_jobs_submitted']-before['keyspace_jobs_submitted'], 1)
+        self.assertEqual(after['keyspace_jobs_submitted']-before['keyspace_jobs_submitted'], 2)
         self.assertEqual(after['keyspace_sets']-before['keyspace_sets'], 1)
         self.assertEqual(self.dirty()-dirty, 1)
         self.assertEqual(self.calls('set')-calls, 1)
@@ -201,27 +201,27 @@ class Keyspace(unittest.TestCase):
         self.assertEqual(self.calls('set')-sets, 3)
         self.assertEqual(self.calls('get')-gets, 3)
 
-    def test_type_expiry_and_set_options_fall_back_before_legacy_observation(self):
+    def test_type_errors_retry_and_expiry_and_set_options_use_workers(self):
         self.admin.call('LPUSH', 'typed', 'item')
         before = self.snapshot()
         self.error(self.admin, ('GET', 'typed'), 'WRONGTYPE')
         self.assertEqual(self.admin.call('SET', 'typed', 'string'), 'OK')
         after = self.snapshot()
-        self.assertEqual(after['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'])
+        self.assertEqual(after['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'] + 2)
         self.assertEqual(self.admin.call('GET', 'typed'), b'string')
         self.admin.call('SET', 'ttl', 'old', 'PX', 60000)
         before = self.snapshot()
         self.assertEqual(self.admin.pipeline([('GET', 'ttl'), ('SET', 'ttl', 'persistent'), ('PTTL', 'ttl')]),
                          [b'old', 'OK', -1])
-        self.assertEqual(self.snapshot()['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'])
+        self.assertEqual(self.snapshot()['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'] + 3)
         self.admin.call('DEBUG', 'SET-ACTIVE-EXPIRE', 0)
         self.admin.call('SET', 'expired', 'old', 'PX', 1)
         time.sleep(.02)
         before = self.snapshot()
         self.assertIsNone(self.admin.call('GET', 'expired'))
         after = self.snapshot()
-        self.assertEqual(after['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'])
-        self.assertGreater(after['keyspace_sync_fallbacks'], before['keyspace_sync_fallbacks'])
+        self.assertEqual(after['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'] + 1)
+        self.assertEqual(after['keyspace_sync_fallbacks'], before['keyspace_sync_fallbacks'])
         self.assertEqual(self.admin.pipeline([('SET', 'option', 'v', 'NX'), ('SET', 'option', 'bad', 'NX'),
                                              ('SET', 'option', 'new', 'GET'), ('MGET', 'option', 'typed')]),
                          ['OK', None, b'v', [b'new', b'string']])
@@ -285,14 +285,14 @@ class Keyspace(unittest.TestCase):
             self.assertEqual(self.snapshot(client)['keyspace_jobs_submitted'], 2)
             self.error(client, ('GET', 'renamed'), 'unknown command')
 
-    def test_transactions_watch_and_other_client_multi_are_global_barriers(self):
+    def test_transaction_execution_is_a_barrier_while_watched_and_idle_multi_clients_allow_workers(self):
         writer, watcher = self.server.client(), self.server.client()
         writer.call('SET', 'watched', 'old')
         watcher.call('WATCH', 'watched')
         before = self.snapshot()
         writer.call('SET', 'watched', 'new')
         self.assertEqual(watcher.pipeline([('MULTI',), ('GET', 'watched'), ('EXEC',)]), ['OK', 'QUEUED', None])
-        self.assertEqual(self.snapshot()['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'])
+        self.assertEqual(self.snapshot()['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'] + 1)
         watcher.call('MULTI')
         before = self.snapshot()
         self.assertEqual(writer.pipeline([('SET', 'other', 'v'), ('GET', 'other')]), ['OK', b'v'])
@@ -300,11 +300,11 @@ class Keyspace(unittest.TestCase):
         watcher.call('SET', 'tx:b', 'right')
         watcher.call('MGET', 'tx:a', 'tx:b')
         self.assertEqual(watcher.call('EXEC'), ['OK', 'OK', [b'left', b'right']])
-        self.assertEqual(self.snapshot()['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'])
+        self.assertEqual(self.snapshot()['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'] + 2)
         self.assertEqual(writer.call('GET', 'watched'), b'new')
         self.assertGreater(self.snapshot()['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'])
 
-    def test_tracking_notifications_and_monitor_force_synchronous_observable_commands(self):
+    def test_tracking_notifications_and_monitor_preserve_worker_effect_order(self):
         writer, tracker = self.server.client(), self.server.client()
         writer.call('SET', 'tracked', 'old')
         tracker.call('HELLO', 3)
@@ -315,7 +315,7 @@ class Keyspace(unittest.TestCase):
         frame = tracker.read()
         self.assertIsInstance(frame, Push)
         self.assertEqual(frame, [b'invalidate', [b'tracked']])
-        self.assertEqual(self.snapshot()['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'])
+        self.assertEqual(self.snapshot()['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'] + 2)
         tracker.call('CLIENT', 'TRACKING', 'OFF')
         self.admin.call('CONFIG', 'SET', 'notify-keyspace-events', 'KE$')
         subscriber = self.server.client()
@@ -324,7 +324,7 @@ class Keyspace(unittest.TestCase):
         before = self.snapshot()
         writer.call('SET', 'notified', 'value')
         self.assertEqual(subscriber.read(), [b'message', b'__keyevent@0__:set', b'notified'])
-        self.assertEqual(self.snapshot()['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'])
+        self.assertEqual(self.snapshot()['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'] + 1)
         subscriber.call('UNSUBSCRIBE')
         self.admin.call('CONFIG', 'SET', 'notify-keyspace-events', '')
         monitor = self.server.client()
@@ -332,7 +332,7 @@ class Keyspace(unittest.TestCase):
         before = self.snapshot()
         writer.call('SET', 'monitored', 'value')
         writer.call('GET', 'monitored')
-        self.assertEqual(self.snapshot()['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'])
+        self.assertEqual(self.snapshot()['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'] + 2)
         writer.call('PING', 'monitor-end')
         lines = []
         while not lines or '"monitor-end"' not in lines[-1]:
@@ -340,15 +340,17 @@ class Keyspace(unittest.TestCase):
         self.assertEqual(sum('"set" "monitored" "value"' in line for line in lines), 1)
         self.assertEqual(sum('"get" "monitored"' in line for line in lines), 1)
 
-    def test_blocking_pause_and_memory_policies_keep_global_legacy_semantics(self):
+    def test_blocking_pause_and_memory_policies_preserve_admission_boundaries(self):
         waiter, writer = self.server.client(), self.server.client()
         waiter.send('BLPOP', 'waiting', 0)
         wait_for(lambda: info(self.admin, 'clients').get('blocked_clients') == '1', label='blocked client')
         before = self.snapshot()
         self.assertEqual(writer.pipeline([('SET', 'blocked:other', 'v'), ('GET', 'blocked:other')]), ['OK', b'v'])
-        self.assertEqual(self.snapshot()['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'])
+        self.assertEqual(self.snapshot()['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'] + 2)
+        blocked_before = self.snapshot()['keyspace_jobs_submitted']
         self.admin.call('RPUSH', 'waiting', 'awake')
         self.assertEqual(waiter.reply(), [b'waiting', b'awake'])
+        self.assertEqual(self.snapshot()['keyspace_jobs_submitted'], blocked_before)
         self.admin.call('CLIENT', 'PAUSE', 5000, 'WRITE')
         writer.send_many([('SET', 'paused', 'after'), ('GET', 'paused'), ('ECHO', 'done')])
         self.assertIsNone(self.admin.call('GET', 'paused'))
@@ -360,7 +362,7 @@ class Keyspace(unittest.TestCase):
                 self.admin.call('CONFIG', 'SET', name, enabled)
                 before = self.snapshot()
                 self.assertEqual(writer.pipeline([('SET', 'policy', 'value'), ('GET', 'policy')]), ['OK', b'value'])
-                self.assertEqual(self.snapshot()['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'])
+                self.assertEqual(self.snapshot()['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'] + 2)
                 self.admin.call('CONFIG', 'SET', name, disabled)
 
     def test_multiple_connections_fifo_and_legacy_argv_survive_completion_fences(self):
@@ -420,14 +422,14 @@ class Keyspace(unittest.TestCase):
         self.admin.call('DEBUG', 'RELOAD', 'NOSAVE')
         self.assertEqual(self.admin.call('GET', 'autosaved'), b'worker-write')
 
-    def test_memcached_configuration_keeps_shared_string_store_on_coordinator(self):
+    def test_memcached_metadata_uses_coordinator_while_plain_keys_use_workers(self):
         with socket.socket() as probe:
             probe.bind(('127.0.0.1', 0))
             port = probe.getsockname()[1]
         with server(arguments=('--memcached-port', str(port))) as shared:
             client = shared.client()
             self.assertEqual(client.pipeline([('SET', 'shared', 'redis-write'), ('GET', 'shared')]), ['OK', b'redis-write'])
-            self.assertEqual(self.snapshot(client)['keyspace_jobs_submitted'], 0)
+            self.assertEqual(self.snapshot(client)['keyspace_jobs_submitted'], 2)
             with socket.create_connection(('127.0.0.1', port), timeout=10) as connection:
                 stream = connection.makefile('rb')
                 try:
@@ -438,7 +440,7 @@ class Keyspace(unittest.TestCase):
                     connection.sendall(b'set shared 9 0 8\r\nmc-write\r\n')
                     self.assertEqual(stream.readline(), b'STORED\r\n')
                     self.assertEqual(client.call('GET', 'shared'), b'mc-write')
-                    self.assertEqual(self.snapshot(client)['keyspace_jobs_submitted'], 0)
+                    self.assertEqual(self.snapshot(client)['keyspace_jobs_submitted'], 2)
                 finally:
                     stream.close()
 
@@ -450,7 +452,7 @@ class Keyspace(unittest.TestCase):
         wait_for(lambda: info(self.admin, 'persistence').get('aof_rewrite_in_progress') == '0'
                  and info(self.admin, 'persistence').get('aof_rewrite_scheduled') == '0', label='AOF enable rewrite')
         self.assertEqual(self.admin.pipeline([('SET', 'aof:after', 'logged-value'), ('GET', 'aof:before')]), ['OK', b'actor-value'])
-        self.assertEqual(self.snapshot()['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'])
+        self.assertEqual(self.snapshot()['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'] + 2)
         self.admin.call('BGREWRITEAOF')
         wait_for(lambda: info(self.admin, 'persistence').get('aof_rewrite_in_progress') == '0', label='AOF explicit rewrite')
         self.admin.send('SHUTDOWN', 'NOSAVE')
@@ -462,7 +464,7 @@ class Keyspace(unittest.TestCase):
         self.assertEqual(client.call('MGET', 'aof:before', 'aof:after'), [b'actor-value', b'logged-value'])
         before = self.snapshot(client)
         self.assertEqual(client.call('GET', 'aof:before'), b'actor-value')
-        self.assertEqual(self.snapshot(client)['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'])
+        self.assertEqual(self.snapshot(client)['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'] + 1)
         client.call('CONFIG', 'SET', 'appendonly', 'no')
         self.assertEqual(client.call('SET', 'aof:disabled', 'worker-again'), 'OK')
         self.assertGreater(self.snapshot(client)['keyspace_jobs_submitted'], before['keyspace_jobs_submitted'])

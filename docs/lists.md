@@ -20,4 +20,4 @@ Blocking commands inside `MULTI`/`EXEC` do not suspend execution while waiting f
 
 Large indexed/range/removal operations can traverse many elements on the foreground loop. These lists provide local queue primitives, not replicated delivery or consumer acknowledgement. Use [streams](streams.md) when pending-entry tracking is needed.
 
-Verify with `bash test/listtype/compare.sh`, `bash test/run_packages.sh` and `./test/conformance/run.sh --suite redis --units type/list,type/list-2,type/list-3`. The recorded expanded suite includes a real dirty-counter difference involving blocked list moves/pops, plus tests requiring replication. See [conformance](conformance.md) for the exact cases.
+Verify with `bash test/listtype/compare.sh`, `bash test/run_packages.sh` and `./test/conformance/run.sh --suite redis --units type/list,type/list-2,type/list-3`. The historical expanded snapshot records a dirty-counter difference involving blocked list moves/pops, plus tests requiring replication. See [conformance](conformance.md) for the exact cases.

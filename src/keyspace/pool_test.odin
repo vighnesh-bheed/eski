@@ -479,3 +479,119 @@ independent_shard_producers_and_coordinator_polling_preserve_each_history :: pro
 	}
 	testing.expect(t, memory_used(&p) == 0 && destroy(&p))
 }
+
+multi_owner_increment :: proc "contextless" (job: ^Job) {
+	for record in job.records { record.clock += 1 }
+}
+
+multi_owner_abort :: proc "contextless" (job: ^Job) {
+	job.abort = true
+}
+
+@(test)
+multi_owner_jobs_keep_fifo_across_reversed_and_duplicate_records :: proc(t: ^testing.T) {
+	p: Pool
+	testing.expect(t, init(&p, 3, 1 << 20))
+	records := [3]^Record{
+		record_new(&p, 0, test_bytes("a"), 0, true, test_bytes("a"), 0),
+		record_new(&p, 0, test_bytes("b"), 1, true, test_bytes("b"), 0),
+		record_new(&p, 0, test_bytes("c"), 2, true, test_bytes("c"), 0),
+	}
+	plans := [4][3]^Record{
+		{records[0], records[1], records[2]},
+		{records[2], records[1], records[0]},
+		{records[1], records[1], records[0]},
+		{records[2], records[0], records[2]},
+	}
+	jobs: [4]Job
+	for plan, i in plans {
+		jobs[i] = Job{op = .Custom, record = plan[0], records = plans[i][:], executor = multi_owner_increment}
+		testing.expect(t, submit(&p, &jobs[i]))
+	}
+	pause(&p)
+	count := 0
+	for job := poll(&p); job != nil; job = poll(&p) {
+		testing.expect(t, !job.cancelled && job.arrived == job.participants && job.departed == job.participants)
+		count += 1
+	}
+	testing.expect(t, count == 4 && records[0].clock == 4 && records[1].clock == 4 && records[2].clock == 4)
+	for record in records { testing.expect(t, record_free(&p, record)) }
+	testing.expect(t, memory_used(&p) == 0 && destroy(&p))
+}
+
+@(test)
+failed_owner_job_cancels_following_work_before_mutation_and_can_resume :: proc(t: ^testing.T) {
+	p: Pool
+	testing.expect(t, init(&p, 2, 1 << 20))
+	records := [2]^Record{
+		record_new(&p, 0, test_bytes("a"), 0, true, test_bytes("a"), 0),
+		record_new(&p, 0, test_bytes("b"), 1, true, test_bytes("b"), 0),
+	}
+	first := Job{op = .Custom, record = records[0], records = records[:], executor = multi_owner_abort}
+	second := Job{op = .Custom, record = records[1], records = records[:], executor = multi_owner_increment}
+	testing.expect(t, submit(&p, &first))
+	accepted := submit(&p, &second)
+	pause(&p)
+	count := 0
+	for job := poll(&p); job != nil; job = poll(&p) { count += 1 }
+	testing.expect(t, count == (2 if accepted else 1) && first.abort && (!accepted || second.cancelled))
+	testing.expect(t, records[0].clock == 0 && records[1].clock == 0)
+	testing.expect(t, resume(&p))
+	third := Job{op = .Custom, record = records[0], records = records[:], executor = multi_owner_increment}
+	testing.expect(t, submit(&p, &third))
+	pause(&p)
+	testing.expect(t, poll(&p) == &third && poll(&p) == nil && !third.cancelled)
+	testing.expect(t, records[0].clock == 1 && records[1].clock == 1)
+	for record in records { testing.expect(t, record_free(&p, record)) }
+	testing.expect(t, memory_used(&p) == 0 && destroy(&p))
+}
+
+@(test)
+external_object_reservations_share_the_pool_limit :: proc(t: ^testing.T) {
+	p: Pool
+	testing.expect(t, init(&p, 1, 4096))
+	testing.expect(t, !reserve_external(nil, 1) && !reserve_external(&p, -1))
+	testing.expect(t, reserve_external(&p, 4000) && memory_used(&p) == 4000)
+	testing.expect(t, !reserve_external(&p, 97) && len(allocate(&p, 128)) == 0)
+	testing.expect(t, reserve_external(&p, 96) && memory_used(&p) == 4096)
+	testing.expect(t, !destroy(&p))
+	release_external(&p, 4096)
+	testing.expect(t, memory_used(&p) == 0 && destroy(&p))
+}
+
+callback_enter_count: u32
+callback_leave_count: u32
+callback_context_count: u32
+
+callback_assertion :: proc(prefix, message: string, location: runtime.Source_Code_Location) -> ! {
+	runtime.default_assertion_failure_proc(prefix, message, location)
+}
+
+callback_enter :: proc() {
+	intrinsics.atomic_add_explicit(&callback_enter_count, 1, .Relaxed)
+	if context.assertion_failure_proc == callback_assertion {
+		intrinsics.atomic_add_explicit(&callback_context_count, 1, .Relaxed)
+	}
+}
+
+callback_leave :: proc() {
+	intrinsics.atomic_add_explicit(&callback_leave_count, 1, .Relaxed)
+	if context.assertion_failure_proc == callback_assertion {
+		intrinsics.atomic_add_explicit(&callback_context_count, 1, .Relaxed)
+	}
+}
+
+@(test)
+pool_worker_callback_context_lifecycle :: proc(t: ^testing.T) {
+	callback_enter_count, callback_leave_count, callback_context_count = 0, 0, 0
+	p: Pool
+	testing.expect(t, init(&p, 2, 1024 * 1024, callback_enter, callback_leave, callback_assertion))
+	pause(&p)
+	testing.expect(t, resume(&p))
+	stop(&p)
+	testing.expect(t, resume(&p))
+	testing.expect(t, destroy(&p))
+	testing.expect_value(t, callback_enter_count, u32(4))
+	testing.expect_value(t, callback_leave_count, u32(4))
+	testing.expect_value(t, callback_context_count, u32(8))
+}

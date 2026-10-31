@@ -2,6 +2,8 @@ package main
 
 import "core:strconv"
 import "core:sys/linux"
+import "base:runtime"
+import "base:intrinsics"
 
 Config_Type :: enum u8 {
 	Bool,
@@ -85,7 +87,7 @@ config_save_loaded: bool
 config_bind: [dynamic]string
 config_oom_values := OOM_SCORE_DEFAULTS
 config_oom_base: i64
-config_oom_base_read: bool
+config_oom_applied: bool
 config_replica_host: string
 config_replica_port: i64
 config_percentiles: [dynamic]f64
@@ -273,7 +275,11 @@ config_num_store :: proc(cf: ^Config, v: i64) {
 	case ^u64:
 		p^ = cast(u64)v
 	case ^u8:
-		p^ = u8(v)
+		if p == &cfg.loglevel {
+			intrinsics.atomic_store_explicit(p, u8(v), .Relaxed)
+		} else {
+			p^ = u8(v)
+		}
 	case ^bool:
 		p^ = v != 0
 	case ^string:
@@ -573,8 +579,7 @@ config_set_value :: proc(cf: ^Config, value: []u8) -> (changed: bool, err: strin
 }
 
 conn_is_local :: proc(c: ^Conn) -> bool {
-	a := c.addr[:c.addr_len]
-	return len(a) >= 4 && a[0] == '1' && a[1] == '2' && a[2] == '7' && a[3] == '.'
+	return c.local_peer
 }
 
 protected_allowed :: proc(setting: u8, c: ^Conn) -> bool {
@@ -805,6 +810,7 @@ config_reset_stats :: proc() {
 	aof.delayed_fsync = 0
 	stat_obuf_disconnections = 0
 	stat_qbuf_limit_disconnections = 0
+	lua_cache_evictions = 0
 	stats_reset_server()
 }
 
@@ -889,6 +895,7 @@ config_init :: proc() {
 		}
 	}
 	append(&config_bind, string(clone_bytes(transmute([]u8)string("*"))), string(clone_bytes(transmute([]u8)string("-::*"))))
+	append(&pst.save_params, Save_Param{3600, 1}, Save_Param{300, 100}, Save_Param{60, 10000})
 	append(&config_percentiles, 50, 99, 99.9)
 	config_hz_current = cfg.hz
 }
@@ -2397,9 +2404,14 @@ proc_title_expand :: proc(b: ^[dynamic]u8, template: []u8, title: string) -> boo
 		case "title":
 			sb_str(b, title)
 		case "listen-addr":
-			sb_str(b, config_bind[0] if len(config_bind) > 0 else "*")
-			sb_byte(b, ':')
-			sb_int(b, i64(srv.port))
+			if srv.port != 0 || cfg.tls_port != 0 {
+				sb_str(b, config_bind[0] if len(config_bind) > 0 else "*")
+				sb_byte(b, ':')
+				sb_int(b, i64(srv.port) if srv.port != 0 else cfg.tls_port)
+			} else {
+				sb_str(b, "unixsocket:")
+				sb_str(b, cfg.unixsocket)
+			}
 		case "server-mode":
 		case "config-file":
 			sb_str(b, config_file if config_file != "" else "-")
@@ -2507,6 +2519,7 @@ config_apply_port :: proc() -> string {
 	if !server_relisten() {
 		return "Unable to listen on this port. Check server logs."
 	}
+	process_title_refresh()
 	return ""
 }
 
@@ -2514,20 +2527,19 @@ config_apply_bind :: proc() -> string {
 	if !server_relisten() {
 		return "Failed to bind to specified addresses."
 	}
+	process_title_refresh()
 	return ""
 }
 
 config_apply_tls_port :: proc() -> string {
-	if cfg.tls_port != 0 {
-		return "Unable to update TLS configuration. Check server logs."
-	}
+	if !server_relisten() { return "Unable to update TLS configuration. Check server logs." }
+	process_title_refresh()
 	return ""
 }
 
 config_apply_tls :: proc() -> string {
-	if cfg.tls_port != 0 || cfg.tls_replication || cfg.tls_cluster {
-		return "Unable to update TLS configuration. Check server logs."
-	}
+	if cfg.tls_replication || cfg.tls_cluster { return "TLS replication and cluster connections are outside the single-node scope." }
+	if !tls_configure() { return "Unable to update TLS configuration. Check server logs." }
 	return ""
 }
 
@@ -2616,12 +2628,10 @@ oom_score_read :: proc() -> (i64, bool) {
 }
 
 oom_score_apply :: proc() -> bool {
-	if !config_oom_base_read {
-		if v, ok := oom_score_read(); ok {
-			config_oom_base = v
-		}
-		config_oom_base_read = true
-	}
+	if cfg.oom_score_adj == 0 && !config_oom_applied { return true }
+	cur, ok := oom_score_read()
+	if !ok { return false }
+	if !config_oom_applied { config_oom_base = cur }
 	val := config_oom_base
 	switch cfg.oom_score_adj {
 	case 1:
@@ -2630,8 +2640,8 @@ oom_score_apply :: proc() -> bool {
 		val = config_oom_values[0]
 	}
 	val = clamp(val, -1000, 1000)
-	cur, ok := oom_score_read()
-	if ok && cur == val {
+	if cur == val {
+		config_oom_applied = cfg.oom_score_adj != 0
 		return true
 	}
 	buf: [64]u8
@@ -2645,6 +2655,31 @@ oom_score_apply :: proc() -> bool {
 	n := format_i64(&tmp[0], val)
 	if _, werr := linux.write(fd, tmp[:n]); werr != .NONE {
 		plog(LOG_WARNING, "Unable to write oom_score_adj: ", errno_text(werr))
+		return false
+	}
+	config_oom_applied = cfg.oom_score_adj != 0
+	return true
+}
+
+config_oom_child_apply :: proc "contextless" () -> bool {
+	context = runtime.default_context()
+	if cfg.oom_score_adj == 0 { return true }
+	value := config_oom_values[2]
+	if cfg.oom_score_adj == 1 { value += config_oom_base }
+	value = clamp(value, -1000, 1000)
+	current, ok := oom_score_read()
+	if ok && current == value { return true }
+	buffer: [64]u8
+	fd, err := linux.open(persist_cstr("/proc/self/oom_score_adj", buffer[:]), {.WRONLY, .CLOEXEC})
+	if err != .NONE {
+		plog(LOG_WARNING, "Unable to set child process oom_score_adj: ", errno_text(err))
+		return false
+	}
+	defer linux.close(fd)
+	text: [24]u8
+	n := format_i64(&text[0], value)
+	if _, write_err := linux.write(fd, text[:n]); write_err != .NONE {
+		plog(LOG_WARNING, "Unable to set child process oom_score_adj: ", errno_text(write_err))
 		return false
 	}
 	return true
@@ -2672,6 +2707,7 @@ clients_timeout_cron :: proc() {
 }
 
 config_startup :: proc() {
+	process_title_init()
 	if cfg.logfile != "" {
 		buf: [4096]u8
 		fd, err := linux.open(persist_cstr(cfg.logfile, buf[:]), {.WRONLY, .CREAT, .APPEND, .CLOEXEC}, {.IRUSR, .IWUSR, .IRGRP, .IROTH})
@@ -2680,12 +2716,14 @@ config_startup :: proc() {
 		}
 		log_fd = fd
 	}
-	if cfg.daemonize {
+	supervised := runtime_supervised_requested()
+	if cfg.daemonize && !supervised {
 		daemonize()
 		if cfg.pidfile == "" {
 			cfg.pidfile = "/var/run/redis.pid"
 		}
 	}
+	runtime_operations_init()
 	if cfg.pidfile != "" {
 		create_pid_file()
 	}
@@ -2706,7 +2744,7 @@ config_startup :: proc() {
 
 @(private = "file")
 daemonize :: proc() {
-	pid, err := linux.fork()
+	pid, err := runtime_fork()
 	if err != .NONE {
 		return
 	}

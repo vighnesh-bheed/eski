@@ -35,12 +35,16 @@ persist_sig_pending: i32
 
 persist_sig_last: i32
 
+persist_signal_temp: [80]u8
+persist_signal_saving: i32
+
 #assert(intrinsics.atomic_type_is_lock_free(i32))
 
 Log_Line :: struct {
 	buf:  [4096]u8,
 	n:    int,
 	skip: bool,
+	level: u8,
 }
 
 log_level_rank :: proc "contextless" (level: u8) -> u8 {
@@ -119,7 +123,8 @@ ll_hex :: proc "contextless" (l: ^Log_Line, v: u64) {
 
 ll_begin :: proc "contextless" (l: ^Log_Line, level: u8) {
 	l.n = 0
-	l.skip = log_level_rank(level) < cfg.loglevel
+	l.level = level
+	l.skip = log_level_rank(level) < intrinsics.atomic_load_explicit(&cfg.loglevel, .Relaxed)
 	ll_int(l, i64(linux.getpid()))
 	ll_str(l, ":C " if pst.in_child else ":M ")
 	ts, _ := linux.clock_gettime(.REALTIME)
@@ -162,6 +167,7 @@ ll_end :: proc "contextless" (l: ^Log_Line) {
 	if l.skip {
 		return
 	}
+	runtime_log_syslog(l.level, l.buf[:l.n])
 	l.buf[l.n] = '\n'
 	l.n += 1
 	b := l.buf[:l.n]
@@ -192,6 +198,8 @@ errno_text :: proc "contextless" (e: linux.Errno) -> string {
 		return "No such file or directory"
 	case .EACCES:
 		return "Permission denied"
+	case .EPERM:
+		return "Operation not permitted"
 	case .ENOSPC:
 		return "No space left on device"
 	case .ENOTDIR:
@@ -302,6 +310,7 @@ persist_debug_delay :: proc "contextless" (usec: i64) {
 
 persist_child_setup :: proc() {
 	pst.in_child = true
+	config_oom_child_apply()
 	persist_set_signal(.SIGTERM, nil)
 	persist_set_signal(.SIGINT, nil)
 	server_close_listeners()
@@ -440,6 +449,9 @@ persist_signal_handler :: proc "c" (sig: linux.Signal) {
 	intrinsics.atomic_store_explicit(&persist_sig_last, i32(sig), .Relaxed)
 	pending := intrinsics.atomic_add_explicit(&persist_sig_pending, 1, .Acq_Rel)
 	if pending != 0 && sig == .SIGINT {
+		if intrinsics.atomic_load_explicit(&persist_signal_saving, .Acquire) != 0 {
+			linux.unlink(cstring(raw_data(persist_signal_temp[:])))
+		}
 		linux.exit_group(1)
 	}
 }
@@ -476,6 +488,8 @@ persist_signal_loading_exit :: proc() {
 }
 
 persist_install_signals :: proc() {
+	name := persist_temp_name(linux.getpid(), persist_signal_temp[:])
+	persist_signal_temp[len(name)] = 0
 	if !persist_set_signal(.SIGTERM, persist_signal_handler) || !persist_set_signal(.SIGINT, persist_signal_handler) {
 		plog(LOG_WARNING, "Cannot install shutdown signal handlers")
 		linux.exit_group(1)

@@ -3,8 +3,22 @@ package channels
 import "core:testing"
 import j "../../src"
 
-entry_cost :: proc(name: string) -> int {
-	return j.PS_ENTRY_OVERHEAD + len(name)
+registry_shared_memory :: proc() -> int {
+	n := 0
+	for m in j.ps_maps {
+		for _, e in m { n += size_of(j.Ps_Entry) + len(e.name) + cap(e.subs) * size_of(^j.Conn) }
+	}
+	return n
+}
+
+expect_shared_accounting :: proc(t: ^testing.T, clients: ..^j.Conn) {
+	shared, owned := 0, 0
+	for c in clients {
+		if c.pubsub != nil { shared += c.pubsub.metadata_shared }
+		owned += j.client_metadata_memory(c)
+	}
+	testing.expect_value(t, shared, registry_shared_memory())
+	testing.expect_value(t, j.client_metadata_total, owned)
 }
 
 subscribers :: proc(kind: j.Ps_Kind, name: string) -> []^j.Conn {
@@ -93,37 +107,35 @@ registry_counts_and_duplicates :: proc(t: ^testing.T) {
 registry_memory_accounting :: proc(t: ^testing.T) {
 	context.allocator = suite_allocator()
 	session(t)
-	a := fake()
-	c := fake()
+	a, c := fake(), fake()
 	defer fake_free(a)
 	defer fake_free(c)
-
 	j.ps_subscribe(a, .Channel, u8s("alpha"))
-	testing.expect_value(t, j.ps_memory, entry_cost("alpha") + j.PS_SUB_OVERHEAD)
+	expect_shared_accounting(t, a, c)
+	shared := registry_shared_memory()
 	j.ps_subscribe(a, .Channel, u8s("alpha"))
-	testing.expect_value(t, j.ps_memory, entry_cost("alpha") + j.PS_SUB_OVERHEAD)
+	testing.expect_value(t, registry_shared_memory(), shared)
+	expect_shared_accounting(t, a, c)
 	j.ps_subscribe(c, .Channel, u8s("alpha"))
-	testing.expect_value(t, j.ps_memory, entry_cost("alpha") + 2 * j.PS_SUB_OVERHEAD)
+	expect_shared_accounting(t, a, c)
 	j.ps_subscribe(a, .Pattern, u8s("al*"))
 	j.ps_subscribe(a, .Shard, u8s("alpha"))
 	j.ps_subscribe(c, .Shard, u8s(""))
-	want := entry_cost("alpha") + 2 * j.PS_SUB_OVERHEAD
-	want += entry_cost("al*") + j.PS_SUB_OVERHEAD
-	want += entry_cost("alpha") + j.PS_SUB_OVERHEAD
-	want += entry_cost("") + j.PS_SUB_OVERHEAD
-	testing.expect_value(t, j.ps_memory, want)
-
+	expect_shared_accounting(t, a, c)
+	entry := j.ps_maps[.Channel]["alpha"]
+	channel_cost := size_of(j.Ps_Entry) + len(entry.name) + cap(entry.subs) * size_of(^j.Conn)
+	other_before := c.pubsub.metadata_shared
 	j.ps_unsubscribe(a, .Channel, u8s("alpha"))
-	want -= j.PS_SUB_OVERHEAD
-	testing.expect_value(t, j.ps_memory, want)
+	testing.expect_value(t, c.pubsub.metadata_shared, other_before + channel_cost)
+	expect_shared_accounting(t, a, c)
 	j.ps_unsubscribe(c, .Channel, u8s("alpha"))
-	want -= entry_cost("alpha") + j.PS_SUB_OVERHEAD
-	testing.expect_value(t, j.ps_memory, want)
+	expect_shared_accounting(t, a, c)
 	testing.expect(t, j.ps_maps[.Channel]["alpha"] == nil, "empty channel entries are forgotten")
-
 	j.pubsub_reset(a)
 	j.pubsub_reset(c)
-	testing.expect_value(t, j.ps_memory, 0)
+	expect_shared_accounting(t, a, c)
+	testing.expect_value(t, registry_shared_memory(), 0)
+	testing.expect(t, j.client_metadata_total > 0, "retained per-client state remains accounted until close")
 	testing.expect_value(t, len(j.ps_maps[.Shard]), 0)
 	testing.expect_value(t, len(j.ps_patterns), 0)
 }
@@ -214,7 +226,7 @@ registry_allocations_return_to_baseline :: proc(t: ^testing.T) {
 			j.pubsub_reset(c)
 			take(c)
 		}
-		testing.expect_value(t, j.ps_memory, 0)
+		testing.expect_value(t, registry_shared_memory(), 0)
 		testing.expect_value(t, live_allocations(), baseline)
 	}
 	for c in conns {
@@ -224,6 +236,6 @@ registry_allocations_return_to_baseline :: proc(t: ^testing.T) {
 	for c in conns {
 		fake_free(c)
 	}
-	testing.expect_value(t, j.ps_memory, 0)
+	testing.expect_value(t, registry_shared_memory(), 0)
 	testing.expect_value(t, len(suite_track.bad_free_array), 0)
 }

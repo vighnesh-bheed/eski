@@ -42,27 +42,30 @@ hash_seed: u64 = 0x2545F4914F6CDD1D
 EMPTY_MEMBER := [1]u8{0}
 
 set_seed :: proc "contextless" (seed: u64) {
-	hash_seed = seed
-	sl_rng = seed ~ 0x9E3779B97F4A7C15
-	if sl_rng == 0 {
-		sl_rng = 1
-	}
+	intrinsics.atomic_store_explicit(&hash_seed, seed, .Relaxed)
+	state := seed ~ 0x9E3779B97F4A7C15
+	if state == 0 { state = 1 }
+	intrinsics.atomic_store_explicit(&sl_rng, state, .Relaxed)
 }
 
 hash_member :: proc(member: []u8) -> u64 {
 	if len(member) == 0 {
-		return xxhash.XXH3_64_with_seed(EMPTY_MEMBER[:0], hash_seed)
+		return xxhash.XXH3_64_with_seed(EMPTY_MEMBER[:0], intrinsics.atomic_load_explicit(&hash_seed, .Relaxed))
 	}
-	return xxhash.XXH3_64_with_seed(member, hash_seed)
+	return xxhash.XXH3_64_with_seed(member, intrinsics.atomic_load_explicit(&hash_seed, .Relaxed))
 }
 
 rng_next :: proc "contextless" () -> u64 {
-	x := sl_rng
-	x ~= x << 13
-	x ~= x >> 7
-	x ~= x << 17
-	sl_rng = x
-	return x
+	previous := intrinsics.atomic_load_explicit(&sl_rng, .Relaxed)
+	for {
+		x := previous
+		x ~= x << 13
+		x ~= x >> 7
+		x ~= x << 17
+		observed, exchanged := intrinsics.atomic_compare_exchange_weak_explicit(&sl_rng, previous, x, .Relaxed, .Relaxed)
+		if exchanged { return x }
+		previous = observed
+	}
 }
 
 random_level :: proc "contextless" () -> int {

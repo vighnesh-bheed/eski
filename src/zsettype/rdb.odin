@@ -94,7 +94,7 @@ rdb_load :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> Zset {
 		rdb.corrupt(r, "Invalid sorted set length")
 		return nil
 	}
-	z := create_skiplist(int(count))
+	z := create_skiplist(int(min(count, u64(4096))))
 	maxlen, totlen := 0, 0
 	for _ in 0 ..< count {
 		member, good := rdb.get_string(r, 0)

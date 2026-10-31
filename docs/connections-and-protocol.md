@@ -1,6 +1,6 @@
 # Connections and protocol
 
-Eski listens for IPv4 TCP connections and speaks RESP2 or RESP3. The default RESP port is 6399. Use an explicit bind when starting a local instance:
+Eski accepts IPv4 and IPv6 TCP, Unix-domain sockets and TLS connections, speaking RESP2 or RESP3. The default RESP port is 6399. Use an explicit bind when starting a local instance:
 
 ```sh
 ./bin/eski --bind 127.0.0.1 --port 6399
@@ -8,7 +8,7 @@ redis-cli -p 6399 PING
 redis-cli -p 6399 HELLO 3
 ```
 
-The default configuration has no password and has protected mode off. Configure [ACLs](acl.md) and network access deliberately. The listener implementation does not provide IPv6, TLS or Unix-domain socket transport; configuration names retained for compatibility do not establish those capabilities. An optional IPv6 bind can be skipped, while a required IPv6 bind fails.
+The default configuration has no password and has protected mode off. Configure [ACLs](acl.md) and network access deliberately. `bind` accepts IPv4 and IPv6 addresses; an address prefixed with `-` is optional when unavailable. `unixsocket` enables a local socket path and `unixsocketperm` sets its permissions. TLS uses `tls-port`, `tls-cert-file`, `tls-key-file` and `tls-ca-cert-file`; `tls-auth-clients` defaults to requiring client certificates. Set `port 0` to disable the plaintext TCP listener when using TLS or a Unix socket.
 
 ## Requests and replies
 
@@ -24,4 +24,4 @@ RESP arrays of bulk strings are the binary-safe command form. The parser also ac
 
 `maxclients`, `timeout`, `tcp-keepalive`, `client-query-buffer-limit`, `client-output-buffer-limit` and `maxmemory-clients` bound different resources. Input/output buffers and subscription traffic count toward client memory work; a slow consumer can be disconnected. Large pipelines still require buffering and can delay other foreground work.
 
-Verify with `python3 -I test/request_parser/run.py`, `bash test/run_packages.sh`, `bash test/smoke.sh` and `./test/conformance/run.sh --suite redis --units protocol,querybuf,networking,pause,quit`. These checks cover supported protocol behaviour, not transport features that are absent here.
+Verify with `python3 -I test/request_parser/run.py`, `python3 -I test/compatibility/transport.py --server /path/to/eski`, `bash test/run_packages.sh`, `bash test/smoke.sh` and `./test/conformance/run.sh --suite redis --units protocol,querybuf,networking,pause,quit`. The transport driver covers IPv4/IPv6, Unix sockets, TLS certificate policy, ACLs and connection lifecycle; the [verification record](build-run-test.md#verification) states the upstream fixture coverage and limits.

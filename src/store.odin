@@ -131,6 +131,7 @@ table_empty :: proc "contextless" () -> (t: Table) {
 db_init :: proc() {
 	hash_init(rng_next())
 	hash_store_init()
+	zset_seed()
 	p := ([^]Db)(runtime.heap_alloc(db_count * size_of(Db), true))
 	regs := ([^]ht.Registry)(runtime.heap_alloc(db_count * size_of(ht.Registry), true))
 	sets := ([^]st.Context)(runtime.heap_alloc(db_count * size_of(st.Context), true))
@@ -1018,8 +1019,10 @@ db_find_in :: proc(db: ^Db, key: []u8) -> ^Entry #no_bounds_check {
 	if db.expires > 0 {
 		exp := i64(t.slots[i].meta.expire_at)
 		if exp != 0 && exp <= expire_now() {
-			db_erase_expired(db, t, i)
-			key_expired_event(key, db)
+			if !expiry_deletion_paused() {
+				db_erase_expired(db, t, i)
+				key_expired_event(key, db)
+			}
 			return nil
 		}
 	}
@@ -1050,6 +1053,127 @@ keyspace_store_seed :: proc(db: ^Db, key: []u8) -> (value: []u8, clock: u32, exi
 		return nil, 0, false, false
 	}
 	return e.val, entry_lru(e), true, true
+}
+
+mc_worker_key_admissible :: proc(db: ^Db, key: []u8) -> bool {
+	if db.mc == nil { return true }
+	l := lookup_make(key)
+	t, i := db_locate(db, &l)
+	return i < 0 || mc_meta_get(db, entry_view(db, t, i).kp) == nil
+}
+
+keyspace_store_pause_admissible :: proc(db: ^Db, key: []u8) -> bool {
+	l := lookup_make(key)
+	t, i := db_locate(db, &l)
+	if i < 0 { return true }
+	e := entry_view(db, t, i)
+	return entry_type(e) != .Hash && (e.expire_at == 0 || e.expire_at > expire_now())
+}
+
+keyspace_store_seed_full :: proc(db: ^Db, key: []u8) -> (value: []u8, clock: u32, expires: i64, encoding: u8, exists, eligible: bool) {
+	l := lookup_make(key)
+	t, i := db_locate(db, &l)
+	if i < 0 {
+		return nil, 0, 0, 0, false, true
+	}
+	e := entry_view(db, t, i)
+	if entry_type(e) != .String || mc_meta_get(db, e.kp) != nil {
+		return nil, 0, 0, 0, false, false
+	}
+	return e.val, entry_lru(e), e.expire_at, u8(entry_obj_encoding(e)), true, true
+}
+
+keyspace_store_import_full :: proc(db: ^Db, key, value: []u8, clock: u32, changed, exists: bool, expires: i64, encoding: u8) {
+	if changed && !exists {
+		db_remove_in(db, key)
+		return
+	}
+	if changed {
+		l := lookup_make(key)
+		t, i := db_locate(db, &l)
+		if i >= 0 {
+			entry_set_expire(entry_view(db, t, i), 0)
+		}
+	}
+	keyspace_store_import(db, key, value, clock, changed)
+	if changed {
+		l := lookup_make(key)
+		t, i := db_locate(db, &l)
+		if i >= 0 {
+			e := entry_view(db, t, i)
+			entry_set_expire(e, expires)
+			entry_set_encoding(e, Obj_Encoding(encoding))
+		}
+	}
+}
+
+keyspace_store_seed_object :: proc(db: ^Db, key: []u8) -> (object: rawptr, kind: Obj_Type, clock: u32, expires: i64, eligible: bool) {
+	l := lookup_make(key)
+	t, i := db_locate(db, &l)
+	if i < 0 {
+		return nil, .String, 0, 0, false
+	}
+	e := entry_view(db, t, i)
+	if entry_type(e) == .String || mc_meta_get(db, e.kp) != nil {
+		return nil, entry_type(e), 0, 0, false
+	}
+	kind = entry_type(e)
+	return entry_object(e, kind), kind, entry_lru(e), e.expire_at, true
+}
+
+keyspace_store_string_copy :: proc(db: ^Db, key: []u8) -> bool {
+	l := lookup_make(key)
+	t, i := db_locate(db, &l)
+	if i < 0 { return false }
+	e := entry_view(db, t, i)
+	return entry_type(e) == .String && entry_obj_encoding(e) == .Int && !entry_shared_integer(e)
+}
+
+keyspace_store_import_copy :: proc(db: ^Db, key, value: []u8, clock: u32, expires: i64, encoding: u8) {
+	e := keyspace_store_object_destination(db, key)
+	enc := Obj_Encoding(encoding)
+	entry_copy_string(e, value, enc)
+	entry_set_encoding(e, enc)
+	entry_set_expire(e, expires)
+	entry_set_lru(e, clock)
+}
+
+keyspace_store_import_metadata :: proc(db: ^Db, key: []u8, clock: u32, expires: i64) {
+	l := lookup_make(key)
+	t, i := db_locate(db, &l)
+	if i >= 0 {
+		e := entry_view(db, t, i)
+		entry_set_expire(e, expires)
+		entry_set_lru(e, clock)
+	}
+}
+
+keyspace_store_object_destination :: proc(db: ^Db, key: []u8) -> ^Entry {
+	l := lookup_make(key)
+	t, i := db_locate(db, &l)
+	if i >= 0 {
+		entry_set_expire(entry_view(db, t, i), 0)
+	}
+	saved := store_no_touch
+	store_no_touch = true
+	defer store_no_touch = saved
+	e, _ := db_upsert_in(db, key)
+	return e
+}
+
+keyspace_store_import_list :: proc(db: ^Db, key: []u8, object: rawptr, clock: u32, expires: i64) {
+	l := lookup_make(key)
+	t, i := db_locate(db, &l)
+	if i >= 0 {
+		entry_set_expire(entry_view(db, t, i), 0)
+	}
+	saved := store_no_touch
+	store_no_touch = true
+	defer store_no_touch = saved
+	e, _ := db_upsert_in(db, key)
+	list_copy_attach(e, object)
+	entry_set_expire(e, expires)
+	entry_set_lru(e, clock)
 }
 
 lua_store_reply_bound :: proc(db: ^Db, key: []u8) -> u128 {
@@ -1172,7 +1296,7 @@ db_upsert_in :: proc(db: ^Db, key: []u8) -> (^Entry, bool) #no_bounds_check {
 	}
 	t.slots[i].val = transmute(Val_Handle)(u64(lf) << LFU_SHIFT)
 	e := entry_view(db, t, i)
-	notify_in(.New, "new", key, db)
+	if !store_reconciling { notify_in(.New, "new", key, db) }
 	return e, true
 }
 
@@ -1479,7 +1603,7 @@ db_tick :: proc "contextless" () {
 			}
 		}
 	}
-	if store_rehashing > 0 {
+	if cfg.activerehashing && store_rehashing > 0 {
 		deadline := start + (REHASH_TICK_NS if idle else REHASH_BUSY_TICK_NS)
 		n := len(dbs)
 		for _ in 0 ..< n {
@@ -1571,8 +1695,12 @@ expired_key_copy :: proc(kp: ^Key_Handle, s: ^Slab) {
 	append(&expired_key_buf, ..key_bytes(kp, s))
 }
 
+expiry_deletion_paused :: #force_inline proc "contextless" () -> bool {
+	return srv.pause_end_ms > srv.now_ms
+}
+
 db_active_expire :: proc() {
-	if !active_expire_enabled {
+	if !active_expire_enabled || expiry_deletion_paused() {
 		return
 	}
 	n := len(dbs)
@@ -1627,7 +1755,7 @@ db_random_key :: proc() -> (key: string, ok: bool) #no_bounds_check {
 		}
 		if db.expires > 0 {
 			exp := i64(t.slots[i].meta.expire_at)
-			if exp != 0 && exp <= expire_now() {
+			if exp != 0 && exp <= expire_now() && !expiry_deletion_paused() {
 				expired_key_copy(&t.slots[i].key, &db.slab)
 				db_erase_expired(db, t, i)
 				key_expired_event(expired_key_buf[:], db)
@@ -1793,6 +1921,7 @@ LFU_INIT_VAL :: 5
 OBJ_SHARED_INTEGERS :: 10000
 
 store_no_touch: bool
+store_reconciling: bool
 lfu_policy: bool
 lfu_log_factor := 10
 lfu_decay_time := 1
@@ -1901,6 +2030,12 @@ entry_lfu_update :: #force_no_inline proc "contextless" (e: ^Entry) {
 	}
 	e.vp.small.lfu = u8(counter)
 	meta_clock(e.mp)^ = lfu_minutes()
+}
+
+db_find_raw_in :: proc(db: ^Db, key: []u8) -> ^Entry {
+	lookup := lookup_make(key)
+	table, index := db_locate(db, &lookup)
+	return entry_view(db, table, index) if index >= 0 else nil
 }
 
 db_find_notouch :: proc(key: []u8) -> ^Entry {

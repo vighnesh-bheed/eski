@@ -32,6 +32,7 @@ Watch_Key :: struct {
 }
 
 Tx_State :: struct {
+	metadata_accounted, watch_shared: int,
 	cmds:    [dynamic]Tx_Cmd,
 	spans:   [dynamic][2]int,
 	bytes:   [dynamic]u8,
@@ -88,6 +89,7 @@ tx_abort_buf: [dynamic]u8
 tx_state :: proc(c: ^Conn) -> ^Tx_State {
 	if c.tx == nil {
 		c.tx = new(Tx_State)
+		client_metadata_sync(c)
 	}
 	return c.tx
 }
@@ -151,6 +153,7 @@ tx_conn_closed :: proc(c: ^Conn) {
 	delete(st.bytes)
 	delete(st.argv)
 	delete(st.watched)
+	client_metadata_drop_tx(c)
 	free(st)
 	c.tx = nil
 }
@@ -224,7 +227,9 @@ tx_may_replicate :: proc(c: ^Conn) -> bool {
 	}
 	tx_fill_argv(st)
 	for q in st.cmds {
-		flags := command_flags(q.cmd, tx_args(st, q))
+		args := tx_args(st, q)
+		if lua_outer_readonly(q.cmd, args) || (q.cmd.handler == cmd_script && len(args) > 1 && eq_nocase(args[1], "load")) { continue }
+		flags := command_flags(q.cmd, args)
 		if flags & {.Write, .May_Replicate} != {} {
 			return true
 		}
@@ -268,9 +273,13 @@ reject_oom :: #force_no_inline proc(c: ^Conn, cmd: ^Command) {
 }
 
 @(private = "file")
-tx_persist_refusal :: proc(cmd: ^Command) -> (msg: string, refused: bool) {
+tx_persist_refusal :: proc(cmd: ^Command, argv: [][]u8) -> (msg: string, refused: bool) {
 	flags := persist_cmd_flags(cmd)
-	if (.Write in flags || cmd.handler == cmd_ping) && persist_writes_denied() {
+	write := .Write in flags && (cmd.handler != cmd_function || is_write_command(cmd.name, argv))
+	if lua_is_eval(cmd) {
+		write = lua_outer_persistence_write(cmd, argv)
+	}
+	if (write || cmd.handler == cmd_ping) && persist_writes_denied() {
 		return ERR_MISCONF, true
 	}
 	if pst.loading && .Loading_Ok not_in flags {
@@ -280,17 +289,18 @@ tx_persist_refusal :: proc(cmd: ^Command) -> (msg: string, refused: bool) {
 }
 
 @(cold)
-hooked_persist_gate :: #force_no_inline proc(c: ^Conn, cmd: ^Command) -> bool {
+hooked_persist_gate :: #force_no_inline proc(c: ^Conn, cmd: ^Command, argv: [][]u8) -> bool {
 	if cmd.handler == cmd_exec && .Multi in c.txf && c.tx != nil {
+		tx_fill_argv(c.tx)
 		for q in c.tx.cmds {
-			if msg, refused := tx_persist_refusal(q.cmd); refused {
+			if msg, refused := tx_persist_refusal(q.cmd, tx_args(c.tx, q)); refused {
 				tx_exec_abort(c, msg)
 				return true
 			}
 		}
 		return false
 	}
-	if persist_gate(c, cmd) {
+	if persist_gate(c, cmd, argv) {
 		tx_flag(c)
 		return true
 	}
@@ -563,8 +573,11 @@ watch_key :: proc(c: ^Conn, db: ^Db, key: []u8) {
 		return
 	}
 	exists, expired := db_key_state(db, key)
+	watch_metadata_adjust(wk, -1)
 	append(&wk.watchers, Watcher{c, len(st.watched)})
 	append(&st.watched, Watched_Key{db.id, wk.key, exists && expired, exists && !expired})
+	watch_metadata_adjust(wk, 1)
+	client_metadata_sync(c)
 	if len(st.watched) == 1 {
 		watch_clients += 1
 	}
@@ -579,12 +592,14 @@ watch_release :: proc(c: ^Conn) {
 	for w in st.watched {
 		m := &watch_dbs[w.db]
 		wk := m[w.key]
+		watch_metadata_adjust(wk, -1)
 		for x, i in wk.watchers {
 			if x.c == c {
 				unordered_remove(&wk.watchers, i)
 				break
 			}
 		}
+		watch_metadata_adjust(wk, 1)
 		if len(wk.watchers) == 0 {
 			delete_key(m, w.key)
 			delete(wk.watchers)
@@ -594,6 +609,7 @@ watch_release :: proc(c: ^Conn) {
 		}
 	}
 	clear(&st.watched)
+	client_metadata_sync(c)
 	watch_clients -= 1
 	if watch_total == 0 {
 		key_hooks_update()
@@ -621,7 +637,7 @@ watch_dirty_victims :: proc() {
 	clear(&watch_victims)
 }
 
-watch_touch :: proc(key: []u8, db: ^Db) {
+watch_touch :: proc(key: []u8, db: ^Db, known: bool = false, known_exists: bool = false) {
 	if watch_total == 0 || db.id < 0 || db.id >= len(watch_dbs) {
 		return
 	}
@@ -636,8 +652,12 @@ watch_touch :: proc(key: []u8, db: ^Db) {
 		entry := &c.tx.watched[w.idx]
 		if entry.expired {
 			if !probed {
-				exists, _ := db_key_state(db, key)
-				gone = !exists
+				if known {
+					gone = !known_exists
+				} else {
+					exists, _ := db_key_state(db, key)
+					gone = !exists
+				}
 				probed = true
 			}
 			if gone {

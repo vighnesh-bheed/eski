@@ -1,8 +1,46 @@
 package main
 
 import request_parser "request_parser"
+import "base:intrinsics"
 
 Request_Inline_Owner :: request_parser.Inline_Owner
+
+Request_Partial_Owner :: struct {
+	prefix: []u8,
+	required: int,
+}
+
+request_partial_close :: proc(c: ^Conn) {
+	owner := c.partial_owner
+	if owner == nil { return }
+	if c.fd >= 0 { conn_mem -= size_of(Request_Partial_Owner) + len(owner.prefix) }
+	mem_free(raw_data(owner.prefix))
+	free(owner)
+	c.partial_owner = nil
+}
+
+request_partial_save :: proc(c: ^Conn, prefix, required: int) {
+	owner := new(Request_Partial_Owner)
+	owner.prefix = mem_alloc(prefix)[:prefix]
+	copy(owner.prefix, c.rbuf[c.rpos:c.rpos + prefix])
+	owner.required = required
+	c.partial_owner = owner
+	if c.fd >= 0 { conn_mem += size_of(Request_Partial_Owner) + prefix }
+	remaining := c.rlen - c.rpos - prefix
+	if remaining > 0 { intrinsics.mem_copy(&c.rbuf[c.rpos], &c.rbuf[c.rpos + prefix], remaining) }
+	c.rlen -= prefix
+}
+
+request_partial_restore :: proc(c: ^Conn) {
+	owner := c.partial_owner
+	prefix := len(owner.prefix)
+	if c.rlen + prefix > c.rcap { conn_read_resize(c, c.rlen + prefix) }
+	remaining := c.rlen - c.rpos
+	if remaining > 0 { intrinsics.mem_copy(&c.rbuf[c.rpos + prefix], &c.rbuf[c.rpos], remaining) }
+	copy(c.rbuf[c.rpos:c.rpos + prefix], owner.prefix)
+	c.rlen += prefix
+	request_partial_close(c)
+}
 
 argv_init :: proc() {
 	scratch := request_parser.Scratch{args = argv_buf}
@@ -12,10 +50,11 @@ argv_init :: proc() {
 }
 
 request_inline_memory :: #force_inline proc "contextless" (c: ^Conn) -> int {
-	return request_parser.inline_charge(c.inline_owner)
+	return request_parser.inline_charge(c.inline_owner) + (size_of(Request_Partial_Owner) + len(c.partial_owner.prefix) if c.partial_owner != nil else 0)
 }
 
 request_inline_close :: proc(c: ^Conn) {
+	request_partial_close(c)
 	charge := request_parser.inline_release(&c.inline_owner)
 	if c.fd >= 0 {
 		conn_mem -= charge
@@ -24,6 +63,14 @@ request_inline_close :: proc(c: ^Conn) {
 
 parse_command :: proc(c: ^Conn) -> Parse_Result {
 	c.need = 0
+	if c.partial_owner != nil {
+		if c.rlen - c.rpos < c.partial_owner.required {
+			c.need = c.rpos + c.partial_owner.required
+			argc = 0
+			return .Incomplete
+		}
+		request_partial_restore(c)
+	}
 	input := c.rbuf[c.rpos:c.rlen]
 	if len(input) == 0 {
 		argc = 0
@@ -59,6 +106,10 @@ parse_command :: proc(c: ^Conn) -> Parse_Result {
 		return .Command
 	case .Incomplete:
 		argc = 0
+		if result.payload > 0 {
+			request_partial_save(c, result.payload, result.need - result.payload)
+			result.need -= result.payload
+		}
 		if result.need > 0 && result.need <= max(int) - c.rpos {
 			c.need = c.rpos + result.need
 		}

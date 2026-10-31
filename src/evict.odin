@@ -277,6 +277,13 @@ perform_evictions :: proc() -> Evict_Result {
 	if !over {
 		return evict_update_metrics(.Ok)
 	}
+	keyspace_fence()
+	over, tofree = memory_state_over()
+	if !over {
+		return evict_update_metrics(.Ok)
+	}
+	tracking_delivery := tracking_eviction_begin()
+	defer if tracking_delivery { tracking_eviction_end() }
 	slab_checked := false
 	if slab_zero_slabs > 0 {
 		slab_checked = true

@@ -74,9 +74,15 @@ lua_busy_dispatch_inner :: proc(client: ^Conn, argv: [][]u8) {
 	cmd := lookup_command(argv[0])
 	if cmd == nil || !arity_ok(cmd.arity, len(argv)) {
 		reply_error(client, LUA_ERR_BUSY)
+		tx_flag(client)
 		return
 	}
 	if !lua_busy_authorize(client, cmd, argv) {
+		tx_flag(client)
+		return
+	}
+	if lua_active.loading && persist_gate(client, cmd, argv) {
+		stat_reject(stat_of(cmd), argv)
 		return
 	}
 	stat_cur = &stat_of(cmd).stats
@@ -85,13 +91,25 @@ lua_busy_dispatch_inner :: proc(client: ^Conn, argv: [][]u8) {
 	switch {
 	case cmd.handler == cmd_auth || cmd.handler == cmd_hello:
 		cmd.handler(client, argv)
-	case cmd.handler == cmd_script && len(argv) == 2 && eq_nocase(argv[1], "kill"):
+	case cmd.handler == cmd_multi || cmd.handler == cmd_discard || cmd.handler == cmd_unwatch:
+		cmd.handler(client, argv)
+	case cmd.handler == cmd_exec:
+		stat_cur = nil
+		tx_exec_abort(client, LUA_ERR_BUSY)
+		stat_reject(stat_of(cmd), argv)
+		return
+	case cmd.handler == cmd_script && len(argv) == 2 && eq_nocase(argv[1], "kill") && !lua_active.function:
 		lua_script_kill(client)
+	case cmd.handler == cmd_function && len(argv) == 2 && eq_nocase(argv[1], "kill") && lua_active.function:
+		lua_function_kill(client)
+	case cmd.handler == cmd_function && len(argv) == 2 && eq_nocase(argv[1], "stats"):
+		lua_function_stats(client)
 	case cmd.handler == cmd_shutdown && len(argv) == 2 && eq_nocase(argv[1], "nosave"):
 		linux.exit_group(0)
 	case:
 		stat_cur = nil
 		reply_error(client, LUA_ERR_BUSY)
+		tx_flag(client)
 		stat_reject(stat_of(cmd), argv)
 		return
 	}
@@ -163,7 +181,7 @@ lua_busy_flush :: proc(client: ^Conn) {
 		conn_close(client)
 		return
 	}
-	n, err := linux.write(client.fd, client.wbuf[client.wpos:client.wpos+client.lua_busy_bytes])
+	n, err := conn_net_write(client, client.wbuf[client.wpos:client.wpos+client.lua_busy_bytes])
 	if err != .NONE {
 		if err != .EAGAIN && err != .EINTR {
 			conn_close(client)
@@ -196,6 +214,12 @@ lua_busy_read :: proc(run: ^Lua_Invocation, client: ^Conn, budget: ^int) {
 	if client == run.source || client.compute != nil || client.keyspace != nil || client.keyspace_ready || client.blocked != .None || client.held {
 		return
 	}
+	if !conn_protected_ready(client) {
+		if client.close_after {
+			conn_flush(client)
+		}
+		return
+	}
 	if client.wlen-client.wpos != client.lua_busy_bytes || client.lua_busy_bytes >= LUA_BUSY_BUFFER {
 		lua_busy_flush(client)
 		return
@@ -208,13 +232,13 @@ lua_busy_read :: proc(run: ^Lua_Invocation, client: ^Conn, budget: ^int) {
 		return
 	}
 	if client.rlen == client.rcap {
-		capacity := min(LUA_BUSY_BUFFER, client.rcap*2)
+		capacity := min(LUA_BUSY_BUFFER, max(4096, client.rcap*2))
 		client.rbuf = ([^]u8)(runtime.heap_resize(client.rbuf, capacity))
 		conn_mem += capacity-client.rcap
 		client.rcap = capacity
 	}
 	eof := false
-	n, err := linux.read(client.fd, client.rbuf[client.rlen:min(client.rcap, LUA_BUSY_BUFFER)])
+	n, err := conn_net_read(client, client.rbuf[client.rlen:min(client.rcap, LUA_BUSY_BUFFER)])
 	if err != .NONE && err != .EAGAIN && err != .EINTR {
 		conn_close(client)
 		return
@@ -258,12 +282,16 @@ lua_busy_read :: proc(run: ^Lua_Invocation, client: ^Conn, budget: ^int) {
 lua_busy_callback :: proc "c" (opaque: rawptr, wrote: i32, stats: ^lr.Stats) -> i32 {
 	context = runtime.default_context()
 	run := cast(^Lua_Invocation)opaque
+	if run.debug.mode != 0 {
+		return lr.CONTINUE
+	}
 	run.wrote = run.wrote || wrote != 0
 	lua_note_runtime(run, stats)
 	if run.killed || (persist_signal_pending() && !run.wrote) {
 		return lr.KILL_READONLY
 	}
 	if len(run.busy.temporary) == 0 {
+		plog(LOG_WARNING, "Slow script detected: execution exceeded the configured busy threshold.")
 		run.busy.temporary = make([]u8, LUA_BUSY_TEMP)
 		mem.arena_init(&run.busy.arena, run.busy.temporary)
 	}
@@ -285,18 +313,15 @@ lua_busy_callback :: proc "c" (opaque: rawptr, wrote: i32, stats: ^lr.Stats) -> 
 		}
 		run.busy.next_client = (run.busy.next_client+1) % len(srv.conns)
 		client := srv.conns[run.busy.next_client]
-		if client != nil && client != run.source && client.kind == .Redis && client.rlen > client.rpos {
+		if client != nil && client != run.source && client.kind == .Redis && (client.rlen > client.rpos || conn_net_pending(client)) {
 			lua_busy_read(run, client, &budget)
 		}
 	}
 	for event in ready[:int(count)] {
 		fd := linux.Fd(u32(event.data.u64))
 		if u32(event.data.u64 >> 32) == 0 {
-			for listener in srv.lfds[:srv.nlfd] {
-				if fd == listener {
-					accept_clients(fd, .Redis)
-					break
-				}
+			if transport_is_listener(fd) {
+				accept_clients(fd, .Redis)
 			}
 			continue
 		}
@@ -309,7 +334,16 @@ lua_busy_callback :: proc "c" (opaque: rawptr, wrote: i32, stats: ^lr.Stats) -> 
 		}
 		if .ERR in event.events {
 			conn_close(client)
-		} else if .IN in event.events && budget > 0 {
+			continue
+		}
+		if .IN in event.events && client.tls != nil && client.tls.write_wants_in {
+			lua_busy_flush(client)
+			if srv.conns[fd] != client {
+				continue
+			}
+		}
+		readable := .IN in event.events || (.OUT in event.events && client.tls != nil && ((!client.tls.ready && client.tls.handshake_out) || client.tls.read_wants_out))
+		if readable && budget > 0 {
 			lua_busy_read(run, client, &budget)
 		} else if .HUP in event.events {
 			conn_close(client)

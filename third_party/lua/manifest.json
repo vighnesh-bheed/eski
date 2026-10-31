@@ -1,91 +1,385 @@
 {
-  "abi_header": "include/eslua.h",
-  "callback_response_lifetime": "Until next command-callback entry or evaluation return; busy/log callbacks do not release host response ownership",
-  "component": "Eski embedded Lua runtime",
-  "first_party_origin": "Original implementation; no Redis implementation source",
-  "language_boundary": "Lua5.5 runtime, selected Redis-style API subset; not Lua5.1-equivalent",
-  "odin_binding": "include/eslua_ffi.odin",
-  "patches": [
+  "schema": 2,
+  "component": "Eski embedded Lua5.1 runtime",
+  "upstream": {
+    "name": "Lua5.1.5 as patched by Valkey8.1.0",
+    "version": "5.1.5",
+    "commit": "67c8683792fc9ab7e295f833478eca180c5e4691",
+    "tag": "8.1.0",
+    "source_url": "https://github.com/valkey-io/valkey/tree/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua",
+    "source_directory": "vendor/valkey-8.1.0-lua/src",
+    "licenses": [
+      "MIT Lua and individual helpers",
+      "BSD-3-Clause Valkey modifications"
+    ],
+    "notices": [
+      "LICENSE.lua",
+      "LICENSE.valkey"
+    ],
+    "files": [
+      {
+        "path": "COPYRIGHT",
+        "sha256": "ee5e3e82af1e1b543c4f216e399d7c8cfee797711913f349e385101c4ae60a79",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/COPYRIGHT"
+      },
+      {
+        "path": "README",
+        "sha256": "eaf56b5de891e11632aa36f302e03d27acd1614944904e2b7cf7955bb0474086",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/README"
+      },
+      {
+        "path": "src/fpconv.c",
+        "sha256": "29f80d82e6356f2110eb2721cdcaad4dd49f80463774334d747ffd882c4c05df",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/fpconv.c"
+      },
+      {
+        "path": "src/fpconv.h",
+        "sha256": "61cb0f044e1dfccfcda0908b9330da250d386454e95acda4bf78b2188fc64070",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/fpconv.h"
+      },
+      {
+        "path": "src/lapi.c",
+        "sha256": "634d878872539a279b8802f6387840a1170c4ac249f2fc447b5c225a4b797fd4",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lapi.c"
+      },
+      {
+        "path": "src/lapi.h",
+        "sha256": "4aea4c1b975d43184f4f1fd1a42c79cf11d74d2801315740cec07fe9abebb56d",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lapi.h"
+      },
+      {
+        "path": "src/lauxlib.c",
+        "sha256": "9d3c723346c27706fdc341ef0e6da85f599a224849e0ff9d165d211e8739701b",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lauxlib.c"
+      },
+      {
+        "path": "src/lauxlib.h",
+        "sha256": "c741f9c1587f29fd08a79acbe0c46884768a47f89bee4147669f774c5cf50fc0",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lauxlib.h"
+      },
+      {
+        "path": "src/lbaselib.c",
+        "sha256": "b14c49fae6fa4690662185bf842cb05d87756585d2f5bdd8495251fde83ef331",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lbaselib.c"
+      },
+      {
+        "path": "src/lcode.c",
+        "sha256": "027030bbef34115588bd4a64cf4c8c18236a56936835475a154277478767bac5",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lcode.c"
+      },
+      {
+        "path": "src/lcode.h",
+        "sha256": "97d5a37f3b1b19eda1ef39607b3358aa0f7e917568ccd27ed0f14bc6a70d4b17",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lcode.h"
+      },
+      {
+        "path": "src/ldblib.c",
+        "sha256": "eb8b056711f037e764f746d989f4e40621d8f9ff45add3336790c389849ed0ab",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/ldblib.c"
+      },
+      {
+        "path": "src/ldebug.c",
+        "sha256": "62af4ed93404345bcbf2c3fefc3677d85492d848c217ad58f53cb1ea5ae00c1c",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/ldebug.c"
+      },
+      {
+        "path": "src/ldebug.h",
+        "sha256": "d036f0dbb996bdecd48d505746f72c31b82fb2fc38f111b780568338d4ed9e9c",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/ldebug.h"
+      },
+      {
+        "path": "src/ldo.c",
+        "sha256": "63be5771e5cd19d5cb6a1904f6ae87c11d953553ee69c6962ae178901b76365f",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/ldo.c"
+      },
+      {
+        "path": "src/ldo.h",
+        "sha256": "591ad9a90098d3fbf06839da3de752d2c2585cbf5801dde4cdaffe12b23a182e",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/ldo.h"
+      },
+      {
+        "path": "src/ldump.c",
+        "sha256": "80a322fa7528be6cc7f598f5b9049b89acda206b1a54a33dc3af85f298093c93",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/ldump.c"
+      },
+      {
+        "path": "src/lfunc.c",
+        "sha256": "525681d79098958530e5c937f7cbe94a4dafa679746ffdb16258f82b7ece29ce",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lfunc.c"
+      },
+      {
+        "path": "src/lfunc.h",
+        "sha256": "3cea0071ffda94eac378adb5f1ecb467ef2ffafff4315459e4ccdf05b5119da4",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lfunc.h"
+      },
+      {
+        "path": "src/lgc.c",
+        "sha256": "35be212ad0e4d89336f50f11cd0e991c04fe59b023ec03a626bf3f98e69fd1dc",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lgc.c"
+      },
+      {
+        "path": "src/lgc.h",
+        "sha256": "fbab2b989515377729d4c029dd58b3b6242877a88a7c4cfa703ea0deeb069a1e",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lgc.h"
+      },
+      {
+        "path": "src/linit.c",
+        "sha256": "c0c97c45862f6c978620a9682cd2201f0fc29c2afbcab824ba20d26cc1745e56",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/linit.c"
+      },
+      {
+        "path": "src/liolib.c",
+        "sha256": "a40f1d2c4aed9835885264cc6caf81c3bd2d5db93af3d313cc0478db37d93169",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/liolib.c"
+      },
+      {
+        "path": "src/llex.c",
+        "sha256": "f1ade23f957e69f164ff28e133b201dff5d81726c390b060110b60907831e79b",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/llex.c"
+      },
+      {
+        "path": "src/llex.h",
+        "sha256": "0f3715d22b025727ef11debd641600a123b81718d195cd8445ac6378814458e6",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/llex.h"
+      },
+      {
+        "path": "src/llimits.h",
+        "sha256": "1910669296681d9d2814ca46c325063724bb634c0428dae4e5ff59be54e0b758",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/llimits.h"
+      },
+      {
+        "path": "src/lmathlib.c",
+        "sha256": "e2933a56332d567cdd69f0fe514d638a8f82da6878754ff259e77cf2157263c3",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lmathlib.c"
+      },
+      {
+        "path": "src/lmem.c",
+        "sha256": "e63c50cb1c75356bd4123c9ca05f77bd0cd99e05c099cf6d1bf472086761e9c5",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lmem.c"
+      },
+      {
+        "path": "src/lmem.h",
+        "sha256": "abd1258418486c69bf5a93ceea3a1b9f8af2c7497a4fa6c27b442ffec2c5bbb1",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lmem.h"
+      },
+      {
+        "path": "src/loadlib.c",
+        "sha256": "b01bc465bb2e280fb45d24aea98d5ddd9dfd0999f44422e1151aafa1d7f5385c",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/loadlib.c"
+      },
+      {
+        "path": "src/lobject.c",
+        "sha256": "d704915c79c721556cc5850d741ed3bef1611221356f0e3a2f0ee5cfd5fd3632",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lobject.c"
+      },
+      {
+        "path": "src/lobject.h",
+        "sha256": "a66ee0a558b4cb23d9c9035143b098c6fa46570afb807ee6a933314f246c4444",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lobject.h"
+      },
+      {
+        "path": "src/lopcodes.c",
+        "sha256": "63cd74edc75970092a8ce078c4ab970efa1ee18de960d00eb826d49fe98d8a76",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lopcodes.c"
+      },
+      {
+        "path": "src/lopcodes.h",
+        "sha256": "a15fe349da7c1e73b563e8c3249fe7d535eccc844cb30ec80b4e335b0699279b",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lopcodes.h"
+      },
+      {
+        "path": "src/loslib.c",
+        "sha256": "82a412e8b4cf2102e98e9c275e934d4766d590c0b047a6638ff7beae3fcaa1ba",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/loslib.c"
+      },
+      {
+        "path": "src/lparser.c",
+        "sha256": "3590f24bab5763af673182e40d33194a7de6f5eabe5432c02a548d44225d2b63",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lparser.c"
+      },
+      {
+        "path": "src/lparser.h",
+        "sha256": "84512d6540b83ab599cd8de5a1c8c4deaf71ff353f8e4fbc2e4ca135ba4e9ef0",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lparser.h"
+      },
+      {
+        "path": "src/lstate.c",
+        "sha256": "c36d6b9354aaa30b5323b4984f3172783f69e0deb3186c2ef6f16a8281c59c29",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lstate.c"
+      },
+      {
+        "path": "src/lstate.h",
+        "sha256": "dc64ea7ec74d7c1efaeaf6a9e2257f0b7856a5c988747948af2e76cf079d20fe",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lstate.h"
+      },
+      {
+        "path": "src/lstring.c",
+        "sha256": "9de85b6a9fe22418f7d6a1b2e11d3c7083a73a8695441f6f920520ca23422a19",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lstring.c"
+      },
+      {
+        "path": "src/lstring.h",
+        "sha256": "c0e8af4eb33e3357be79f906e7e1191ba53a3a790d36ca15b50471d3a339e1f0",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lstring.h"
+      },
+      {
+        "path": "src/lstrlib.c",
+        "sha256": "e8048c79ae34be0fd29aa8db1a341cd600f5e09b9133b5810910e07b855a32d5",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lstrlib.c"
+      },
+      {
+        "path": "src/ltable.c",
+        "sha256": "b4246557450a810759fadac652c716b444a3d619b7283f581915b7e0eb33f7d4",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/ltable.c"
+      },
+      {
+        "path": "src/ltable.h",
+        "sha256": "219e6ac2bf43aaa93093c6bcd571c012660325e6b87ea3d6c1b40679a0acfd64",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/ltable.h"
+      },
+      {
+        "path": "src/ltablib.c",
+        "sha256": "2a9445dbe73e8b0593432d94e2a87f1879556443aa30aae2a11beab2c8c5204a",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/ltablib.c"
+      },
+      {
+        "path": "src/ltm.c",
+        "sha256": "9759ae5d1aa3b11e1c7faa6c0f65e05c7126417f7f8f3f989d82fc170b07f891",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/ltm.c"
+      },
+      {
+        "path": "src/ltm.h",
+        "sha256": "54f4c2fa76b8ed8d48163e31807a19999f5d65b009ae862cb757e0773f2aa485",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/ltm.h"
+      },
+      {
+        "path": "src/lua.c",
+        "sha256": "eb9ad1894926f0f807934ae52147cf9767ede0fbd01e9a1044dc4847caa9b73d",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lua.c"
+      },
+      {
+        "path": "src/lua.h",
+        "sha256": "369ad9d340f09bfcbbbb7a55e0ad79dae754b816ff906d1fa9aaf4acfad3c8e3",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lua.h"
+      },
+      {
+        "path": "src/lua_bit.c",
+        "sha256": "78e10247b33d0db026cbe906d19b4bd3636840f195a63e93ce08c5dee9fb578a",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lua_bit.c"
+      },
+      {
+        "path": "src/lua_cjson.c",
+        "sha256": "b8c3fba2bfcfc3d9d7daa1e33e3d905df0b0d04df0427e400f5bab1aa529b1e5",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lua_cjson.c"
+      },
+      {
+        "path": "src/lua_cmsgpack.c",
+        "sha256": "e0173d8ae43b0c768bd118c95f4b6b679575dd82d5641d83225760411726999f",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lua_cmsgpack.c"
+      },
+      {
+        "path": "src/lua_struct.c",
+        "sha256": "57bc18e91a747a846ba76c070d9213452283c0ed9e652861ee7fabf87d590878",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lua_struct.c"
+      },
+      {
+        "path": "src/luac.c",
+        "sha256": "b22ad97edb37c2a4b117ef81489bfc6eee15d58d4476ea149abbef7aabf8773d",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/luac.c"
+      },
+      {
+        "path": "src/luaconf.h",
+        "sha256": "0410ff22f66c275ba8fcee1fa87a0749d26d7952ed30d3bc9161688b39775464",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/luaconf.h"
+      },
+      {
+        "path": "src/lualib.h",
+        "sha256": "13f880e9dd997a0f7fd0b17ccd949c98f33e95bd120f084de66084e888217413",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lualib.h"
+      },
+      {
+        "path": "src/lundump.c",
+        "sha256": "55ccb55abde44e94e6c4d0bafc94f5870d2674d1944e9a81f6537d9ac92e8ebc",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lundump.c"
+      },
+      {
+        "path": "src/lundump.h",
+        "sha256": "9f3a2924d1585620993a70eea6cf3def34acb8322b2d9c3629bcdacc037edc64",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lundump.h"
+      },
+      {
+        "path": "src/lvm.c",
+        "sha256": "0c08a5debd90217df50d85dae26fba9c96f9725949696834a048e8af88a8f23f",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lvm.c"
+      },
+      {
+        "path": "src/lvm.h",
+        "sha256": "db4b79dc7f4e7656078aa527350fbf14b2fde5d136ccf1cb4f3dc397def5fb67",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lvm.h"
+      },
+      {
+        "path": "src/lzio.c",
+        "sha256": "892bc24d898c19cbedceba419c68f910b99321c0b462be2c2c00b9d763563173",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lzio.c"
+      },
+      {
+        "path": "src/lzio.h",
+        "sha256": "0ec77d0179bf29c1ccab97028fed761944d5c21c02808e10cd7b5883b58b2ca6",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/lzio.h"
+      },
+      {
+        "path": "src/print.c",
+        "sha256": "3c3b1c1dd17896e428b9742614c90ec10776ced65813eb648f02dee649892f2f",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/print.c"
+      },
+      {
+        "path": "src/strbuf.c",
+        "sha256": "46f386f1640d436a1fe03b4150e6be5751114e9f5de007ef231774e06ac95ebd",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/strbuf.c"
+      },
+      {
+        "path": "src/strbuf.h",
+        "sha256": "830ab40b6da9ae6aa2d53452720be83b1e1ff7f02899739a1b1b288e15182362",
+        "url": "https://raw.githubusercontent.com/valkey-io/valkey/67c8683792fc9ab7e295f833478eca180c5e4691/deps/lua/src/strbuf.h"
+      }
+    ]
+  },
+  "official_lua_base": {
+    "url": "https://www.lua.org/ftp/lua-5.1.5.tar.gz",
+    "archive": "vendor/lua-5.1.5.tar.gz",
+    "sha256": "2640fc56a795f29d28ef15e13c34a47e223960b0240e8cb0a82d9b0738695333"
+  },
+  "local_patches": [
     {
-      "applied_sha256": "8316492ee2b9b684554fa6916e10cd3ece71983ba6a783988e0b044a24347d0d",
-      "applied_source_hunks": "patches/0b29f408433e92953cc72b1d3e06c7ac8139e439.source.patch",
-      "commit": "0b29f408433e92953cc72b1d3e06c7ac8139e439",
-      "original": "patches/0b29f408433e92953cc72b1d3e06c7ac8139e439.patch",
-      "original_sha256": "0d196ef065208c578e1a26ce792b8e4399a507ff446e9128e285ea2b5e9c7993",
-      "purpose": "GC parameter negative-shift undefined behavior",
-      "url": "https://github.com/lua/lua/commit/0b29f408433e92953cc72b1d3e06c7ac8139e439.patch"
+      "path": "patches/valkey-module-allocation.patch",
+      "purpose": "CJSON/module external allocation routed through protected tracked allocator; cjson buffer reuse becomes internal per-call storage while retaining API configuration; remove server portability include; CMSGPack checked allocation"
     },
     {
-      "applied_sha256": "dd4c93549af7445d6b924989a4b11cd937227a2867b9d7deda53fb570868b910",
-      "applied_source_hunks": "patches/e8533201cd2448d668c9b64758fc44205544b27f.source.patch",
-      "commit": "e8533201cd2448d668c9b64758fc44205544b27f",
-      "original": "patches/e8533201cd2448d668c9b64758fc44205544b27f.patch",
-      "original_sha256": "a535288b7a5037aaa5cedb8f75bd8fe2c1d56bb171e241de49b0a350e9ae9f69",
-      "purpose": "NaN numeric-for behavior",
-      "url": "https://github.com/lua/lua/commit/e8533201cd2448d668c9b64758fc44205544b27f.patch"
+      "path": "patches/lua-unpack-range.patch",
+      "purpose": "Validate unpack result count with widened arithmetic before stack reservation and avoid final signed index overflow"
     },
     {
-      "applied_sha256": "bb74aac22966bd0ef61e2a23a03ec8821c0c15cf950ec2f4849b82655fb11e87",
-      "applied_source_hunks": "patches/b35736b9d71182bae67492af2a387b3f6e89fd05.source.patch",
-      "commit": "b35736b9d71182bae67492af2a387b3f6e89fd05",
-      "original": "patches/b35736b9d71182bae67492af2a387b3f6e89fd05.patch",
-      "original_sha256": "45ffbc5cf56fe982bcf22b99bdc5914f2a987324d0b2864fe410a444eb0f09e3",
-      "purpose": "negative-zero subtraction optimization",
-      "url": "https://github.com/lua/lua/commit/b35736b9d71182bae67492af2a387b3f6e89fd05.patch"
-    },
-    {
-      "applied_sha256": "81c303f33c61dc84956d3ad485d6ed91d7a78500d2782f3219309022a682830e",
-      "applied_source_hunks": "patches/15b2a78106f85a3f8ef2efe5683148d9dad84b33.source.patch",
-      "commit": "15b2a78106f85a3f8ef2efe5683148d9dad84b33",
-      "original": "patches/15b2a78106f85a3f8ef2efe5683148d9dad84b33.patch",
-      "original_sha256": "a7b45fb306544a48c1d968c6c7c6872f63862e1e1f0763281ab67c935e21da20",
-      "purpose": "coroutine close after error",
-      "url": "https://github.com/lua/lua/commit/15b2a78106f85a3f8ef2efe5683148d9dad84b33.patch"
+      "path": "patches/lua-line-count-error.patch",
+      "purpose": "Report the lexer line-count boundary without consulting a token that has not been produced"
     }
   ],
-  "schema": 1,
-  "shim_sources": [
-    "runtime/runtime.c",
-    "runtime/resp.c",
-    "runtime/codecs.c",
-    "runtime/bits.c"
-  ],
-  "upstream": {
-    "archive": "vendor/lua-5.5.1.tar.gz",
-    "copyright": "Copyright (C) 1994-2026 Lua.org, PUC-Rio.",
-    "license": "MIT",
-    "name": "Lua",
-    "notice": "LICENSE.lua",
-    "sha256": "1c4b4068d67061f2a2231ad2b5422e77acea1487ea9890f6320af614f4373dce",
-    "source_directory": "vendor/lua-5.5.1/src",
-    "url": "https://www.lua.org/ftp/lua-5.5.1.tar.gz",
-    "version": "5.5.1"
+  "first_party_origin": "Original runtime/adapter implementation; no Redis server implementation source consulted",
+  "callback_response_lifetime": "Until next command, ACL or debugger-read callback entry, or invocation return; debugger-write frame borrowed only during callback",
+  "abi_header": "include/eslua.h",
+  "odin_binding": "include/eslua_ffi.odin",
+  "helpers": {
+    "lua_cjson.c": "MIT Mark Pulford2010-2012",
+    "strbuf.c": "MIT Mark Pulford2010-2012",
+    "fpconv.c": "MIT Mark Pulford2011-2012",
+    "lua_bit.c": "MIT Mike Pall2008-2012",
+    "lua_cmsgpack.c": "MIT Redis Ltd2012 (permissively licensed Lua helper acquired from Valkey8.1 snapshot)",
+    "lua_struct.c": "MIT Lua.org PUC-Rio2010-2018"
   },
-  "vm_sources": [
-    "vendor/lua-5.5.1/src/lapi.c",
-    "vendor/lua-5.5.1/src/lcode.c",
-    "vendor/lua-5.5.1/src/lctype.c",
-    "vendor/lua-5.5.1/src/ldebug.c",
-    "vendor/lua-5.5.1/src/ldo.c",
-    "vendor/lua-5.5.1/src/ldump.c",
-    "vendor/lua-5.5.1/src/lfunc.c",
-    "vendor/lua-5.5.1/src/lgc.c",
-    "vendor/lua-5.5.1/src/llex.c",
-    "vendor/lua-5.5.1/src/lmem.c",
-    "vendor/lua-5.5.1/src/lobject.c",
-    "vendor/lua-5.5.1/src/lopcodes.c",
-    "vendor/lua-5.5.1/src/lparser.c",
-    "vendor/lua-5.5.1/src/lstate.c",
-    "vendor/lua-5.5.1/src/lstring.c",
-    "vendor/lua-5.5.1/src/ltable.c",
-    "vendor/lua-5.5.1/src/ltm.c",
-    "vendor/lua-5.5.1/src/lundump.c",
-    "vendor/lua-5.5.1/src/lvm.c",
-    "vendor/lua-5.5.1/src/lzio.c",
-    "vendor/lua-5.5.1/src/lauxlib.c",
-    "vendor/lua-5.5.1/src/lbaselib.c",
-    "vendor/lua-5.5.1/src/lmathlib.c",
-    "vendor/lua-5.5.1/src/lstrlib.c",
-    "vendor/lua-5.5.1/src/ltablib.c"
+  "shim_sources": [
+    "runtime/bits.c",
+    "runtime/codecs.c",
+    "runtime/debug.c",
+    "runtime/resp.c",
+    "runtime/runtime.c"
   ]
 }

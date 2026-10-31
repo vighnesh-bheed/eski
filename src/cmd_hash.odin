@@ -3,6 +3,7 @@ package main
 import ht "hashtype"
 
 hset_generic :: proc(c: ^Conn, argv: [][]u8, name: string) {
+	pst.dirty_explicit = true
 	if len(argv) < 4 || len(argv) % 2 != 0 {
 		reply_wrong_args(c, name)
 		return
@@ -14,6 +15,7 @@ hset_generic :: proc(c: ^Conn, argv: [][]u8, name: string) {
 		return
 	}
 	created := ht.hset(h, argv[2:])
+	pst.dirty += i64((len(argv) - 2) / 2)
 	hash_done(e, h)
 	signal_key(key)
 	notify(.Hash, "hset", key)
@@ -33,6 +35,7 @@ cmd_hmset :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 cmd_hsetnx :: proc(c: ^Conn, argv: [][]u8) {
+	pst.dirty_explicit = true
 	key := argv[1]
 	e, h, wrong := hash_lookup_create(key)
 	if wrong {
@@ -55,6 +58,7 @@ cmd_hsetnx :: proc(c: ^Conn, argv: [][]u8) {
 		}
 	}
 	ht.set(h, argv[2], argv[3])
+	pst.dirty += 1
 	hash_done(e, h)
 	signal_key(key)
 	notify(.Hash, "hset", key)
@@ -72,7 +76,7 @@ cmd_hget :: proc(c: ^Conn, argv: [][]u8) {
 		reply_null(c)
 		return
 	}
-	v, res := ht.get(h, argv[2], hash_now())
+	v, res := ht.get(h, argv[2], hash_now(), !expiry_deletion_paused())
 	if res == .Ok {
 		reply_hash_value(c, v)
 	} else {
@@ -104,7 +108,7 @@ cmd_hmget :: proc(c: ^Conn, argv: [][]u8) {
 			reply_null(c)
 			continue
 		}
-		v, res := ht.get(h, field, now)
+		v, res := ht.get(h, field, now, !expiry_deletion_paused())
 		if res == .Ok {
 			reply_hash_value(c, v)
 		} else {
@@ -195,7 +199,7 @@ cmd_hexists :: proc(c: ^Conn, argv: [][]u8) {
 		reply_int(c, 0)
 		return
 	}
-	found, res := ht.exists(h, argv[2], hash_now())
+	found, res := ht.exists(h, argv[2], hash_now(), !expiry_deletion_paused())
 	reply_int(c, i64(found))
 	hash_lazy(key, e, h, res)
 }
@@ -211,12 +215,13 @@ cmd_hstrlen :: proc(c: ^Conn, argv: [][]u8) {
 		reply_int(c, 0)
 		return
 	}
-	n, res := ht.field_strlen(h, argv[2], hash_now())
+	n, res := ht.field_strlen(h, argv[2], hash_now(), !expiry_deletion_paused())
 	reply_int(c, i64(n))
 	hash_lazy(key, e, h, res)
 }
 
 cmd_hdel :: proc(c: ^Conn, argv: [][]u8) {
+	pst.dirty_explicit = true
 	key := argv[1]
 	e, h, wrong := hash_lookup(key, false)
 	if wrong {
@@ -228,6 +233,7 @@ cmd_hdel :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	n, empty := ht.hdel(h, argv[2:])
+	pst.dirty += i64(n)
 	if n > 0 {
 		hash_done(e, h)
 		if empty {
@@ -357,6 +363,11 @@ hrandfield_with_count :: proc(c: ^Conn, key: []u8, l: i64, with_values: bool) {
 			ht.random_with_repeats(h, int(batch), with_values, &hash_fields, &hash_values)
 			reply_random_pairs(c, with_values)
 			remaining -= batch
+			if !lua_capture_allow(c, 0) { break }
+			if c.fd >= 0 && obuf_normal_limited && .Subscribed not_in c.ps && obuf_class_over(c, .Normal, &c.obuf_soft) {
+				c.close_after = true
+				break
+			}
 		}
 	}
 	clear(&hash_fields)

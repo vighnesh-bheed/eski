@@ -299,3 +299,36 @@ pool_concurrent_submit_poll_cancel_and_stop_are_exactly_once :: proc(t: ^testing
 		testing.expect(t, destroy(&p))
 	}
 }
+
+callback_enter_count: u32
+callback_leave_count: u32
+callback_context_count: u32
+
+callback_assertion :: proc(prefix, message: string, location: runtime.Source_Code_Location) -> ! {
+	runtime.default_assertion_failure_proc(prefix, message, location)
+}
+
+callback_enter :: proc() {
+	intrinsics.atomic_add_explicit(&callback_enter_count, 1, .Relaxed)
+	if context.assertion_failure_proc == callback_assertion {
+		intrinsics.atomic_add_explicit(&callback_context_count, 1, .Relaxed)
+	}
+}
+
+callback_leave :: proc() {
+	intrinsics.atomic_add_explicit(&callback_leave_count, 1, .Relaxed)
+	if context.assertion_failure_proc == callback_assertion {
+		intrinsics.atomic_add_explicit(&callback_context_count, 1, .Relaxed)
+	}
+}
+
+@(test)
+pool_worker_callback_context_lifecycle :: proc(t: ^testing.T) {
+	callback_enter_count, callback_leave_count, callback_context_count = 0, 0, 0
+	p: Pool
+	testing.expect(t, init(&p, 2, callback_enter, callback_leave, callback_assertion))
+	testing.expect(t, destroy(&p))
+	testing.expect_value(t, callback_enter_count, u32(2))
+	testing.expect_value(t, callback_leave_count, u32(2))
+	testing.expect_value(t, callback_context_count, u32(4))
+}

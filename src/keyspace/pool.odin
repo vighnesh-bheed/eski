@@ -12,6 +12,7 @@ MAX_WORKERS :: 64
 Op :: enum u8 {
 	Get,
 	Set,
+	Custom,
 }
 
 Job_State :: enum u32 {
@@ -38,6 +39,15 @@ Record :: struct {
 	value:       ^Value,
 	clock:       u32,
 	changed:     bool,
+	value_changed: bool,
+	string_copy: bool,
+	expire_at:   i64,
+	encoding:    u8,
+	kind:        u8,
+	object:      rawptr,
+	hash_minimum: u64,
+	object_charge: int,
+	object_destroy: proc "contextless" (object: rawptr),
 	touched:     bool,
 	pool:        ^Pool,
 	allocation:  []u8,
@@ -54,6 +64,15 @@ Job :: struct {
 	result_found: bool,
 	elapsed_ns:   i64,
 	state:        Job_State,
+	records:      []^Record,
+	executor:     proc "contextless" (job: ^Job),
+	context_executor: proc(job: ^Job),
+	participants: int,
+	arrived:      int,
+	departed:     int,
+	executed:     bool,
+	abort:        bool,
+	cancelled:    bool,
 }
 
 @(private)
@@ -70,6 +89,9 @@ Pool :: struct {
 	quiescent:    sync.Cond,
 	shards:       [MAX_WORKERS]Shard,
 	threads:      [MAX_WORKERS]^thread.Thread,
+	worker_enter: proc(),
+	worker_leave: proc(),
+	assertion_failure: runtime.Assertion_Failure_Proc,
 	configured:   int,
 	nthreads:     int,
 	parked:       int,
@@ -79,6 +101,7 @@ Pool :: struct {
 	accepting:    bool,
 	paused:       bool,
 	stopping:     bool,
+	halted:       bool,
 	fd:           linux.Fd,
 	completed:    [CAPACITY]^Job,
 	done_head:    int,
@@ -249,12 +272,17 @@ record_free :: proc "contextless" (p: ^Pool, r: ^Record) -> bool {
 	p.records -= 1
 	sync.mutex_unlock(&p.mutex)
 	value_release(r.value)
+	record_object_clear(r)
 	region := r.allocation
 	return free(p, region)
 }
 
 @(private = "file")
-execute_job :: proc "contextless" (job: ^Job) {
+execute_job :: proc(job: ^Job) {
+	if job.op == .Custom {
+		if job.context_executor != nil { job.context_executor(job) } else { job.executor(job) }
+		return
+	}
 	r := job.record
 	switch job.op {
 	case .Get:
@@ -266,12 +294,14 @@ execute_job :: proc "contextless" (job: ^Job) {
 				r.touched = true
 			}
 		}
+	case .Custom:
 	case .Set:
 		old := r.value
 		created := !r.exists
 		r.value = value_retain(job.value)
 		r.exists = true
 		r.changed = true
+		r.value_changed = true
 		if created || job.touch {
 			r.clock = job.clock
 			r.touched = true
@@ -294,7 +324,12 @@ notify_completion :: proc "contextless" (fd: linux.Fd) {
 
 @(private = "file")
 worker_main :: proc(t: ^thread.Thread) {
+	context.allocator = runtime.heap_allocator()
+	context.temp_allocator = runtime.nil_allocator()
 	p := cast(^Pool)t.data
+	context.assertion_failure_proc = p.assertion_failure if p.assertion_failure != nil else context.assertion_failure_proc
+	if p.worker_enter != nil { p.worker_enter() }
+	defer { if p.worker_leave != nil { p.worker_leave() } }
 	shard := &p.shards[t.user_index]
 	for {
 		sync.mutex_lock(&p.mutex)
@@ -321,21 +356,39 @@ worker_main :: proc(t: ^thread.Thread) {
 		p.queued -= 1
 		p.running += 1
 		intrinsics.atomic_store_explicit(&job.state, .Running, .Release)
-		sync.mutex_unlock(&p.mutex)
-		start := clock_ns()
-		execute_job(job)
-		job.elapsed_ns = max(clock_ns() - start, 0)
-		sync.mutex_lock(&p.mutex)
-		p.completed[(p.done_head + p.done_len) % CAPACITY] = job
-		p.done_len += 1
+		job.arrived += 1
+		leader := job.arrived == job.participants
+		if leader {
+			job.cancelled = p.halted
+			sync.mutex_unlock(&p.mutex)
+			start := clock_ns()
+			if !job.cancelled { execute_job(job) }
+			job.elapsed_ns = max(clock_ns() - start, 0)
+			sync.mutex_lock(&p.mutex)
+			if job.abort { p.halted = true }
+			job.executed = true
+			sync.cond_broadcast(&p.quiescent)
+		} else {
+			for !job.executed {
+				sync.cond_wait(&p.quiescent, &p.mutex)
+			}
+		}
+		job.departed += 1
 		p.running -= 1
-		intrinsics.atomic_store_explicit(&job.state, .Completed, .Release)
+		complete := job.departed == job.participants
+		if complete {
+			p.completed[(p.done_head + p.done_len) % CAPACITY] = job
+			p.done_len += 1
+			intrinsics.atomic_store_explicit(&job.state, .Completed, .Release)
+		}
 		sync.mutex_unlock(&p.mutex)
-		notify_completion(p.fd)
+		if complete {
+			notify_completion(p.fd)
+		}
 	}
 }
 
-init :: proc(p: ^Pool, workers, max_memory: int) -> bool {
+init :: proc(p: ^Pool, workers, max_memory: int, worker_enter: proc() = nil, worker_leave: proc() = nil, assertion_failure: runtime.Assertion_Failure_Proc = nil) -> bool {
 	if p == nil || workers < 1 || workers > MAX_WORKERS || max_memory < 0 {
 		return false
 	}
@@ -352,6 +405,9 @@ init :: proc(p: ^Pool, workers, max_memory: int) -> bool {
 	p.fd = fd
 	p.configured = workers
 	p.memory_limit = max_memory
+	p.worker_enter = worker_enter
+	p.worker_leave = worker_leave
+	p.assertion_failure = assertion_failure
 	p.initialized = true
 	p.paused = true
 	p.accepting = false
@@ -380,6 +436,7 @@ resume :: proc(p: ^Pool) -> bool {
 	workers := p.configured
 	if p.nthreads != 0 {
 		p.paused = false
+		p.halted = false
 		p.accepting = true
 		sync.mutex_unlock(&p.mutex)
 		return true
@@ -402,6 +459,7 @@ resume :: proc(p: ^Pool) -> bool {
 	}
 	sync.mutex_lock(&p.mutex)
 	p.paused = false
+	p.halted = false
 	p.accepting = true
 	sync.mutex_unlock(&p.mutex)
 	return true
@@ -417,11 +475,24 @@ submit :: proc "contextless" (p: ^Pool, job: ^Job) -> bool {
 	}
 	sync.mutex_lock(&p.mutex)
 	r := job.record
-	valid := p.accepting && p.outstanding < CAPACITY && r != nil && r.pool == p && r.owner >= 0 && r.owner < p.configured && job.result == nil
+	valid := p.accepting && !p.halted && p.outstanding < CAPACITY && r != nil && r.pool == p && r.owner >= 0 && r.owner < p.configured && job.result == nil
+	owners: [MAX_WORKERS]bool
+	if valid {
+		owners[r.owner] = true
+	}
 	if job.op == .Set {
 		valid = valid && job.value != nil && job.value.pool == p
 	} else if job.op == .Get {
 		valid = valid && job.value == nil
+	} else if job.op == .Custom {
+		valid = valid && (job.executor != nil || job.context_executor != nil) && len(job.records) > 0 && job.value == nil
+		for record in job.records {
+			if record == nil || record.pool != p || record.owner < 0 || record.owner >= p.configured {
+				valid = false
+				break
+			}
+			owners[record.owner] = true
+		}
 	} else {
 		valid = false
 	}
@@ -432,13 +503,25 @@ submit :: proc "contextless" (p: ^Pool, job: ^Job) -> bool {
 	}
 	job.result_found = false
 	job.elapsed_ns = 0
-	shard := &p.shards[r.owner]
-	shard.queued[(shard.head + shard.len) % CAPACITY] = job
-	shard.len += 1
-	p.queued += 1
+	job.participants = 0
+	job.arrived = 0
+	job.departed = 0
+	job.executed = false
+	job.abort = false
+	job.cancelled = false
+	for owned, owner in owners[:p.configured] {
+		if !owned {
+			continue
+		}
+		shard := &p.shards[owner]
+		shard.queued[(shard.head + shard.len) % CAPACITY] = job
+		shard.len += 1
+		p.queued += 1
+		job.participants += 1
+		sync.cond_signal(&shard.ready)
+	}
 	p.outstanding += 1
 	intrinsics.atomic_store_explicit(&job.state, .Queued, .Release)
-	sync.cond_signal(&shard.ready)
 	sync.mutex_unlock(&p.mutex)
 	return true
 }
@@ -563,4 +646,34 @@ pending :: proc "contextless" (p: ^Pool) -> int {
 	n := p.outstanding
 	sync.mutex_unlock(&p.mutex)
 	return n
+}
+
+reserve_external :: proc "contextless" (p: ^Pool, bytes: int) -> bool {
+	if p == nil || bytes < 0 { return false }
+	sync.mutex_lock(&p.mutex)
+	limit := p.memory_limit
+	initialized := p.initialized
+	sync.mutex_unlock(&p.mutex)
+	if !initialized || bytes > limit { return false }
+	used := intrinsics.atomic_load_explicit(&p.memory_bytes, .Relaxed)
+	for {
+		if used > limit - bytes { return false }
+		previous, ok := intrinsics.atomic_compare_exchange_weak_explicit(&p.memory_bytes, used, used + bytes, .Acq_Rel, .Relaxed)
+		if ok { return true }
+		used = previous
+	}
+}
+
+release_external :: proc "contextless" (p: ^Pool, bytes: int) {
+	if bytes > 0 { intrinsics.atomic_sub_explicit(&p.memory_bytes, bytes, .Release) }
+}
+
+record_object_clear :: proc "contextless" (r: ^Record) {
+	r.hash_minimum = 0
+	if r.object != nil {
+		r.object_destroy(r.object)
+		r.object = nil
+	}
+	release_external(r.pool, r.object_charge)
+	r.object_charge = 0
 }

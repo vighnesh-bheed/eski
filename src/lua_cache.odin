@@ -23,10 +23,11 @@ lua_retired_head, lua_retired_tail: ^Lua_Source
 lua_cache_bytes, lua_retired_bytes: int
 lua_cache_count, lua_eval_count: int
 lua_cache_evictions: i64
-lua_max_memory: i64 = 64 * 1024 * 1024
-lua_max_output: i64 = 16 * 1024 * 1024
-lua_max_bridge_memory: i64 = 32 * 1024 * 1024
-lua_max_cache_memory: i64 = 32 * 1024 * 1024
+lua_enable_deprecated_api: bool
+lua_max_memory: i64 = max(i64)
+lua_max_output: i64 = 512 * 1024 * 1024
+lua_max_bridge_memory: i64 = max(i64)
+lua_max_cache_memory: i64 = max(i64)
 
 lua_digest :: proc(body: []u8) -> [40]u8 {
 	ctx: sha1.Context
@@ -132,6 +133,8 @@ lua_cache_remove :: proc(entry: ^Lua_Source) {
 }
 
 lua_cache_reap :: proc(limit: int) {
+	lua_debug_reap()
+	lua_library_reap(max(limit, 64))
 	for _ in 0 ..< limit {
 		entry := lua_retired_head
 		if entry == nil {

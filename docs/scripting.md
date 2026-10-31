@@ -1,23 +1,21 @@
-# Lua scripting
+# Lua scripts and Functions
 
-Eski implements EVAL-style scripting with an embedded Lua 5.5.1 C runtime and an Odin command adapter. This is a supported API subset, with language and library differences from the reference server's Lua 5.1 environment. Executable FUNCTION libraries and FCALL remain outside the scope. The Lua runtime retains its MIT terms in [third-party notices](../THIRD_PARTY_NOTICES.md#lua-551); Eski's own code remains Apache-2.0.
+Eski embeds Lua 5.1.5 with permissively licensed libraries from the pinned Valkey Lua distribution. EVAL scripts, executable Function libraries and interactive debugging run on the coordinator. The Odin host supplies command dispatch, ACL, persistence and connection handling through a protected C ABI; all allocation-capable Lua API calls and error unwinding stay in C. Eski remains Apache-2.0, with component terms in [third-party notices](../THIRD_PARTY_NOTICES.md#lua515).
 
-## Execute and cache source
+The commands below are implemented and covered by native, whole-node and managed upstream checks. The [verification record](build-run-test.md#verification) separates those results from the external-server conformance snapshot and documents the remaining resource limit.
+
+## Evaluate and cache scripts
 
 | Command | Behavior |
 | --- | --- |
-| `EVAL source numkeys key ... arg ...` | Execute text source with binary-safe `KEYS` and `ARGV`. |
+| `EVAL source numkeys key ... arg ...` | Execute text with binary-safe `KEYS` and `ARGV`. |
 | `EVALSHA sha1 numkeys key ... arg ...` | Execute cached source; a missing digest returns `NOSCRIPT`. |
-| `EVAL_RO` / `EVALSHA_RO` | Execute through the same paths while rejecting write/effect commands. |
-| `SCRIPT LOAD source` | Compile without running the body, pin the source in cache and return its SHA1. |
+| `EVAL_RO` / `EVALSHA_RO` | Execute while rejecting write/effect commands. |
+| `SCRIPT LOAD source` | Compile without running the body, pin the source and return its SHA1. |
 | `SCRIPT EXISTS sha1 ...` | Return ordered integer cache-presence results. |
-| `SCRIPT FLUSH [SYNC\|ASYNC]` | Detach all cached source; reclaim immediately or through bounded coordinator cleanup. |
-| `SCRIPT KILL` | Request cancellation before a running script has performed a write/effect. |
-| `SCRIPT HELP` | Describe implemented subcommands. |
-
-`SCRIPT DEBUG` appears in command metadata but is unsupported; no interactive script debugger is provided.
-
-For example:
+| `SCRIPT FLUSH [SYNC\|ASYNC]` | Detach cached scripts and reset the EVAL engine. |
+| `SCRIPT KILL` | Request cancellation before the script becomes unkillable through writes/effects. |
+| `SCRIPT DEBUG YES\|SYNC\|NO` | Select forked, synchronous or disabled interactive debugging for subsequent EVAL. |
 
 ```sh
 redis-cli -p 6399 EVAL \
@@ -26,69 +24,80 @@ redis-cli -p 6399 EVAL \
 redis-cli -p 6399 EVAL_RO 'return redis.call("GET",KEYS[1])' 1 demo:counter
 ```
 
-`numkeys` must be nonnegative and cannot exceed the remaining arguments. It partitions those arguments into `KEYS` and `ARGV`, with at most 4096 combined key/argument entries per invocation. Each inner `redis.call`/`redis.pcall` also accepts at most 4096 arguments, including its command name. These are Eski admission boundaries. Ordinary EVAL can access undeclared keys, subject to the caller's actual command/key/channel ACL on every inner operation. Declare accessed keys for client portability; this single-node implementation supplies no cluster routing guarantee.
+`numkeys` partitions the remaining arguments into `KEYS` and `ARGV`. Each actual inner operation uses the caller's command/key/channel ACL, including undeclared keys. Declare keys for client portability; this engine provides no cluster routing.
 
-Each invocation creates a fresh VM and recompiles its source. Library-table changes and globals cannot persist into another invocation. New or undefined globals are rejected, so use local variables. Loading binary bytecode is rejected. A `#!lua` header and `#!lua flags=no-writes` are accepted; other languages and flags are rejected. SHA1 includes the original source bytes, including the header, and source line numbers are preserved.
+EVAL retains one VM between calls. Builtin tables and globals are read-only, while user-owned tables support ordinary Lua metatables and raw access. Library configuration, such as cjson precision, persists until SCRIPT FLUSH; it is separate from the Functions engine. The source cache owns original bytes and SHA1 metadata. LOAD entries remain pinned until flush; EVAL-created entries have a 500-entry LRU limit and share the configured byte budget. Script source/cache state is absent from RDB/AOF and disappears on restart, so applications must handle NOSCRIPT.
 
-The cache contains source, not persistent compiled programs. Explicit LOAD entries are pinned until flush; sources introduced through EVAL have an LRU limit of 500 entries and share the byte budget. A valid source can remain cached even if execution fails. If pinned entries exhaust the budget, growth fails instead of evicting them. The cache disappears on restart and is absent from RDB/AOF. Handle `NOSCRIPT` by loading or evaluating source again. The default FLUSH mode follows `lazyfree-lazy-user-flush`; asynchronous cleanup does not transfer a Lua VM to a worker.
+Text loaders and `string.dump` are available, but loading binary bytecode is rejected. Headers accept `#!lua` and the flags `no-writes`, `allow-oom`, `allow-stale`, `no-cluster` and `allow-cross-slot-keys`. Single-node support for a flag does not provide replication or cluster services. SHA1 includes the original header and source bytes.
 
-## Command execution and effects
+## Executable Function libraries
 
-Scripts run on the coordinator without interleaving ordinary commands from other clients. Keyspace workers reconcile before entry, and supported inner commands, including LCS, execute synchronously. Expiry checks and PTTL use frozen command time throughout execution, including an outer EXEC; TIME still reports wall-clock time. Notifications, watched keys, tracking and blocked consumers observe the actual inner operations; blocked consumers resume after the script completes. Tracking uses the real caller and keys actually read, including undeclared keys.
+FUNCTION LOAD stages a library atomically; REPLACE replaces its previous definition only after successful validation. Libraries register named callbacks with `redis.register_function`, using either positional arguments or a table containing `function_name`, `callback`, optional `description` and `flags`.
 
-`redis.call` raises command errors while retaining host error classes such as WRONGTYPE, OOM and ERR. `redis.pcall` returns ordinary command errors as an `err` table so source can handle them; the global Lua `pcall` catches a raised command error as a string. Inner ACL failures use `ERR ACL failure in script`, while ordinary outer permission denials remain NOPERM. An ordinary Lua `error('ERR plain',0)` still receives the outer ERR wrapper, yielding `ERR ERR plain`; it is distinct from a host-origin command error. Exact Lua 5.1 stack/context wording is not reproduced.
+```sh
+redis-cli -p 6399 FUNCTION LOAD '#!lua name=demo
+redis.register_function("greeting", function(keys, args)
+  return "hello " .. args[1]
+end)'
+redis-cli -p 6399 FCALL greeting 0 world
+redis-cli -p 6399 FUNCTION LIST WITHCODE
+```
 
-Returning or throwing a table with a string `err` field preserves that tagged error text. The helper `redis.error_reply('')` supplies `ERR `, while directly returning `{err=''}` produces an empty error reply. CR/LF bytes are replaced by spaces so they cannot create additional protocol frames. Eski preserves embedded NUL bytes and their suffix in error text; the stock reference truncates this text at NUL. Runtime, memory, output, bridge and cancellation failures terminate the invocation; supplied `pcall`/`xpcall` cannot swallow these terminal failures indefinitely. Earlier successful writes remain applied after an error. There is no rollback.
+FCALL and FCALL_RO partition keys/arguments like EVAL and pass them to the callback. FCALL_RO requires a function registered with `no-writes`; ordinary FCALL applies the function's declared policy. Function names are case-insensitive; library names retain their own identity and spelling. LIST supports library-pattern filtering and WITHCODE. DELETE, FLUSH, STATS, KILL, DUMP and RESTORE provide library lifecycle and control.
 
-AOF stores translated command effects rather than EVALSHA or source-cache dependencies. Effects are grouped, including successful writes before a later runtime error; a script inside MULTI joins the surrounding transaction group. Relative expiry is propagated as its absolute deadline. Durability still depends on [AOF synchronization](persistence.md), and resource errors do not undo previous effects.
+All libraries share one persistent Functions VM. Their closures and upvalues survive calls, and cjson module configuration is shared between libraries. EVAL has a separate module configuration. Deleting a library releases its callbacks; FUNCTION FLUSH resets the Functions engine. RDB and AOF persist library definitions, which rebuild their closure state from source on restart. Store durable application state in keys. DUMP/RESTORE preserve library definitions with the selected APPEND, REPLACE or FLUSH policy.
 
-Inner execution admits selected synchronous data-type commands and harmless inspection such as PING, ECHO, TIME and DBSIZE. It rejects administrative, blocking, reentrant and arbitrary-key handlers, commands with incomplete key specifications, and selected indirect operations. Examples rejected inside scripts include EVAL/SCRIPT/FUNCTION, MULTI/EXEC/WATCH, AUTH/HELLO/CLIENT, CONFIG/ACL/DEBUG, persistence and shutdown commands, SELECT/FLUSH/SWAPDB, MIGRATE, SORT/SORT_RO, KEYS/SCAN/RANDOMKEY, DUMP and HLL debugging. A command working directly does not guarantee it is admitted through `redis.call`.
+## Commands, atomicity and replies
 
-Read-only variants and the no-writes header reject writes before invoking the handler. PUBLISH, SPUBLISH and PFCOUNT also count as write/effect commands for this policy and cancellation, even when they do not change a stored value. `SCRIPT KILL` returns `NOTBUSY` when idle and `UNKILLABLE` after an effect has occurred.
+Workers reconcile before a script or Function begins. Inner commands execute synchronously and ordinary commands from other clients do not interleave with the invocation. Supported blocking data commands return without waiting. Commands marked NOSCRIPT are rejected; SELECT affects the invocation's database without changing the caller's selected database. Expiry and TIME use cached command time during execution. Notifications, WATCH, tracking and blocked consumers observe the completed operation sequence.
 
-## Lua API and replies
+`redis.call` raises an ordinary command error; `redis.pcall` returns its error table for source-level handling. The Lua `pcall` and `xpcall` functions catch ordinary Lua errors. Host memory/output/bridge failures and requested cancellation remain terminal. Successful writes survive a later error: an invocation is atomic with respect to other clients, but it does not roll back earlier effects.
 
-The environment exposes selected base, string, table and math functions, `KEYS`, `ARGV`, and these helper subsets:
+AOF records translated command effects rather than source-cache dependencies, including successful writes before a later error. Relative expiry becomes an absolute deadline. A script or Function inside MULTI joins the enclosing AOF group. `redis.set_repl` can select local AOF propagation through its standard mask constants; replica mask constants do not create a replication service. See [persistence](persistence.md).
 
-| API | Scope |
-| --- | --- |
-| `redis` | `call`, `pcall`, `status_reply`, `error_reply`, `sha1hex`, `log` with log constants, and `setresp(2\|3)`. |
-| `redis.replicate_commands()` | Returns true; this engine already propagates command effects locally. `set_repl` is unsupported. |
-| `cjson` | `encode`, `decode`, `null`; no tuning/new-instance API. Requires valid UTF-8, finite numbers and string object keys. Empty tables encode as objects. |
-| `cmsgpack` | `pack`, `unpack` for standard scalars, strings/binary, arrays and maps; no extension types. Concatenated values and empty streams are accepted. Empty tables encode as arrays. |
-| `bit` | Signed 32-bit operations, shifts, rotations, byte swap, `tobit` and `tohex`. There is no unsigned Lua 5.2 `bit32` API. |
+Strings and arrays are binary-safe; ordinary array replies stop at the first nil. Status/error tables and RESP3 map/set/double/big-number/verbatim forms preserve their protocol meaning. The script's `redis.setresp(2|3)` is independent of the client's HELLO protocol. Ordinary Lua numeric replies become integers; use a tagged double for a floating-point reply. Numeric command arguments retain double precision, while explicit strings retain their bytes. Error/status lines replace CR/LF with spaces and truncate at NUL, preserving following protocol frames.
 
-The environment excludes file/process/network loaders, package/require, io/os/debug, coroutine, collectgarbage, metatable mutation, raw get/set and string.dump. User finalizers cannot be installed. `struct` and the full reference library surface are absent. Lua 5.5 integers, arithmetic/coercion, formatting and iteration can differ from Lua 5.1; test application scripts instead of assuming language equivalence. Object/map order is unspecified.
+## Libraries and environment
 
-Unseeded invocations receive fresh default random seeds. An explicit `math.randomseed` gives repeatable sequences within this runtime; sequence values need not match Lua 5.1, and `math.random` is not a cryptographic API. Numeric command arguments such as `2.0` become `2`, and numeric zero of either sign becomes `0` at the command boundary; the Lua math value itself is unchanged. Explicit strings such as `'2.0'` and `'-0.0'` retain their bytes. This lets numeric `2.0` work with INCRBY while the string `'2.0'` remains invalid. Other floating-point precision/formatting differences remain subject to the Lua version boundary.
+The environment provides the Lua 5.1 base, string, table, math and coroutine APIs, garbage-collection controls, user-table metatables/raw access, text loaders and `os.clock`. Helper modules include full cjson configuration and `cjson.new`, cmsgpack, struct and BitOp. The Redis helper table supplies command calls, replies, logging, SHA1, protocol selection, ACL checks, propagation controls and version/constants.
 
-Strings and nested arrays are binary-safe. Array replies stop at the first nil. Tagged status/error/map/set/double/big-number/verbatim replies follow their RESP forms. The script's `redis.setresp` choice is separate from the connection's HELLO protocol. Default script RESP2 maps false to null and true to integer 1 for either client protocol. With script RESP3, booleans remain booleans for RESP3 clients and become integer 0/1 for RESP2 clients. Lua nil remains null. Non-integral ordinary Lua number replies are truncated to integers; use a tagged double when a floating-point reply is required.
+Filesystem/process/package APIs such as io, require, package, loadfile and dofile are unavailable. The standard debug library is unavailable. The immutable startup option `lua-enable-deprecated-api yes` enables legacy getfenv, setfenv and newproxy behavior for applications that require those APIs; its default is no.
 
-## Resource and cancellation controls
+The math.random stream is shared by EVAL and Functions on the coordinator. Explicit math.randomseed affects that stream, which survives SCRIPT/FUNCTION FLUSH. It is not a cryptographic random API. Object/map iteration order remains unspecified.
 
-These dynamic Eski controls are inspected by exact name, including uppercase spelling, and remain hidden from wildcard CONFIG discovery:
+## Debugging and cancellation
+
+SCRIPT DEBUG YES forks an isolated debugging child; writes made in that child are discarded. SYNC executes in the server and retains writes. The interactive protocol supports stepping, source listing, breakpoints, tracing, printing locals/upvalues, evaluating expressions and issuing Redis commands. Debugger EVAL uses its own evaluation frame, so a local visible through PRINT is not automatically a global available to EVAL. A completed session sends its end marker, ordinary invocation result and connection close.
+
+`busy-reply-threshold`, also named `lua-time-limit`, defaults to 5,000 milliseconds. It enables restricted BUSY service rather than automatically terminating the invocation. Authorized clients can authenticate and use the appropriate SCRIPT/FUNCTION KILL or SHUTDOWN NOSAVE control. KILL reports UNKILLABLE after writes/effects. Read-only script cancellation and client activity handling preserve the invocation's frozen expiry time.
+
+SIGTERM/SIGINT requests normal shutdown after permitted cancellation/completion. A repeated SIGINT forces exit status 1. SHUTDOWN NOSAVE and forced interruption can discard unflushed changes. Hooks are cooperative: C library work runs between hooks, so the threshold is not a preemptive wall-clock deadline.
+
+## Optional resource controls
+
+These dynamic Eski settings are available by exact name and hidden from wildcard CONFIG discovery:
 
 | Setting | Default | Bound |
 | --- | ---: | --- |
-| `lua-max-memory` | 64 MiB | VM and runtime conversion allocations; source/KEYS/ARGV payload admission is also bounded. |
-| `lua-max-output` | 16 MiB | Serialized script output and captured inner reply size. |
-| `lua-max-bridge-memory` | 32 MiB | Host argument/capture ownership across the C boundary. |
-| `lua-max-cache-memory` | 32 MiB | Owned cache source/metadata, including retired entries awaiting cleanup. |
+| `lua-max-memory` | Host signed-integer maximum | VM and runtime conversion allocations. |
+| `lua-max-output` | 512 MiB | Serialized output and captured inner reply size. |
+| `lua-max-bridge-memory` | Host signed-integer maximum | Host argument/capture ownership. |
+| `lua-max-cache-memory` | Host signed-integer maximum | Owned cache source/metadata, including retired entries. |
 
-All four accept memory-size values and have a minimum of 4096 bytes. A cache limit cannot be reduced below currently owned cache memory. These are requested-allocation limits, not process RSS limits. The decoder/serializer also bounds nesting to 64 and rejects cycles. A reply budget can reject an inner mutation before execution when its possible result cannot fit safely. Memory, output and bridge failures stop later inner calls while retaining earlier successful effects.
-
-Database `maxmemory` has a separate inner-command policy: while over the limit, allocation-requiring commands marked deny-OOM are rejected before the script has performed an effect. A successful effect, such as deleting an existing key, allows later inner writes to complete the effect sequence even if the database remains over that limit. The Lua allocation/output/bridge caps continue to apply. This policy does not make a rejected command succeed or roll back earlier work.
-
-`busy-reply-threshold` defaults to 5000 milliseconds and has the alias `lua-time-limit`. It starts restricted BUSY service; it does not automatically terminate the script. Other clients receive BUSY for ordinary commands. Newly accepted clients can authenticate, and authorized clients can request SCRIPT KILL or exact SHUTDOWN NOSAVE. Client reply suppression still applies. Socket activity uses real time while expiry checks retain frozen command time.
-
-A pending first SIGTERM/SIGINT cancels a script with no effects at a serviced hook, then normal coordinator shutdown runs. After writes, the first signal waits for completion; SCRIPT KILL remains forbidden. Authorized SHUTDOWN NOSAVE immediately exits without normal save/cleanup, and another SIGINT while a shutdown signal is pending forces exit status 1. Both escape paths can lose unflushed changes.
-
-Setting the threshold to zero disables BUSY/KILL service and hook-based signal cancellation. Normal shutdown then waits for script completion; another SIGINT remains a forced escape. Hooks are cooperative: C library work runs between hooks, so neither the threshold nor these budgets provide a preemptive wall-clock deadline.
+The host maximum is 2^63−1 bytes on the supported 64-bit target. Explicit controls accept memory-size values with a 4,096-byte minimum. A cache limit cannot be reduced below its current ownership. These requested-allocation bounds are separate from process RSS and database maxmemory. Allocation, output or bridge failure stops later commands while preserving prior successful effects.
 
 ## Verification
 
-Run `python3 -I test/scripting/run.py --server /path/to/eski` against a prepared executable. `--case 'Class.method*'` selects cases; `--reference-port PORT` runs the portable subset against an explicitly isolated localhost reference and clears its database/cache. The package runner includes the driver once. Native FFI lifecycle, sanitizer, persistence, smoke and conformance gates provide additional boundaries described in [build and test](build-run-test.md#verification).
+Run the following against a prepared executable; none starts a performance benchmark:
 
-The runtime passed 51 dedicated scripting cases in release, ASan and TSan builds, 12 native FFI lifecycle tests in debug, ASan and TSan, strict checks for 52 packages and 19 portable cases against stock Redis 7.4.12. An additional diagnostic copy of the native suite invoked LeakSanitizer explicitly after freeing each result: all 212 checks passed. The container executable passed the same 51 scripting cases, and script effects survived three container replacements. The full package gate passed all 94 runs. Both default and enabled-worker configurations passed all 2,428 smoke checks and preserved all 1,504 conformance baseline passes with zero regressions. The expanded 43-unit run retains 16 failures and 151 skips; see [conformance](conformance.md). These are bounded correctness results; no Lua benchmark or full scripting-compatibility claim is made. The earlier threading checkpoint `78eb2f1` remains separate evidence.
+```sh
+python3 -I test/scripting/run.py --server /path/to/eski
+python3 -I test/functions/run.py --server /path/to/eski
+python3 -I test/scripting/debugger.py --server /path/to/eski
+python3 -I test/compatibility/lua_edges.py --server /path/to/eski
+ESKI_TEST_BIN=/path/to/eski bash test/run_packages.sh
+```
 
-Separate exploratory upstream scripting runs are not green. The unmodified unit includes unsupported FUNCTION libraries; an EVAL-only branch selection also exposes API, sandbox, error-message and suite-execution differences. Those runs are not the baseline regression gate or a completed scripting-compatibility gate. The dedicated results validate the documented subset and do not establish Lua 5.1 parity.
+Portable reference cases require an explicitly disposable reference instance; those drivers clear its data and library/cache state. Native ABI, address/thread sanitizer and explicit leak checks cover protected allocation, error conversion, codecs, persistent engines and debugging. Managed upstream scripting/Functions tests add process, configuration and lifecycle coverage. See the [verification record](build-run-test.md#verification) for counts, fixture modes and exclusions.
+
+The two original upstream JSON string-encoding cases over 2 GB, one for each engine, remain unqualified: an isolated 14 GiB memory limit ended in a kernel OOM kill on the qualification machine. Four separate upstream large escape-sequence/newline cases passed; they do not establish the JSON cases. Run those JSON cases on a machine with sufficient available memory before claiming that boundary. Expanded worker/Lua performance benchmarking is deferred.

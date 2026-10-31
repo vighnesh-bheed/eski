@@ -19,19 +19,19 @@ lua_root=third_party/lua
 test -f "$lua_root/SHA256SUMS" || { printf 'vendored Lua checksum manifest is missing\n' >&2; exit 1; }
 (cd "$lua_root" && sha256sum --check --strict --quiet SHA256SUMS)
 
-core=(lapi lcode lctype ldebug ldo ldump lfunc lgc llex lmem lobject lopcodes lparser lstate lstring ltable ltm lundump lvm lzio)
-libraries=(lauxlib lbaselib lmathlib lstrlib ltablib)
+core=(lapi lcode ldebug ldo ldump lfunc lgc llex lmem lobject lopcodes lparser lstate lstring ltable ltm lundump lvm lzio)
+libraries=(lauxlib lbaselib lmathlib lstrlib ltablib lua_cjson lua_cmsgpack lua_struct lua_bit strbuf fpconv)
 sources=()
 for source in "${core[@]}" "${libraries[@]}"; do
-	sources+=("$lua_root/vendor/lua-5.5.1/src/$source.c")
+	sources+=("$lua_root/vendor/valkey-8.1.0-lua/src/$source.c")
 done
 shopt -s nullglob
 runtime_sources=("$lua_root"/runtime/*.c)
 test "${#runtime_sources[@]}" -gt 0 || { printf 'Lua protection shim sources are missing\n' >&2; exit 1; }
 sources+=("${runtime_sources[@]}")
-common=(-std=c11 -fPIC -fvisibility=hidden -D_POSIX_C_SOURCE=200809L -DLUA_USE_POSIX -Wall -Wextra
+common=(-std=c11 -fPIC -fvisibility=hidden -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -DLUA_USE_POSIX -Wall -Wextra
         "-ffile-prefix-map=$PWD=." "-fdebug-prefix-map=$PWD=."
-        "-I$lua_root/include" "-I$lua_root/runtime" "-I$lua_root/vendor/lua-5.5.1/src")
+        "-I$lua_root/include" "-I$lua_root/runtime" "-I$lua_root/vendor/valkey-8.1.0-lua/src")
 mkdir -p .build/lua
 exec 9>.build/lua/.lock
 flock 9

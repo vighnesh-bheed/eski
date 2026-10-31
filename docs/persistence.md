@@ -1,6 +1,6 @@
 # Persistence
 
-Eski offers local RDB snapshots and append-only files (AOF). Neither is enabled as an automatic durability policy in a fresh configuration: there are no default scheduled snapshot points and `appendonly` is off. Choose a writable existing `dir`; the default snapshot name is `dump.rdb`. A matching persistence file can be loaded at startup even when no automatic snapshot schedule is configured.
+Eski offers local RDB snapshots and append-only files (AOF). The default snapshot rules are 3,600 seconds with one change, 300 seconds with 100 changes, and 60 seconds with 10,000 changes. `appendonly` is off by default. Set `save ""` to disable scheduled snapshots. Choose a writable existing `dir`; the default snapshot name is `dump.rdb`. A matching persistence file can be loaded at startup even when no automatic snapshot schedule is configured.
 
 ## Snapshots
 
@@ -25,6 +25,8 @@ From another terminal, write a value, request `BGSAVE`, wait for `INFO persisten
 `BGREWRITEAOF` compacts the log with a background rewrite; related rewrite thresholds and incremental-fsync options tune scheduling/I/O. Startup validates manifests and payloads and applies the configured truncated-tail policy. Inspect logs and `INFO persistence` when a load/rewrite fails. `WAITAOF` can request local AOF synchronization, but reports zero replica acknowledgements; a local request fails if AOF is disabled. `WAIT` likewise reports no replicas. No network replication exists.
 
 [Lua evaluation](scripting.md) records translated command effects, including successful writes before a later script error, rather than EVALSHA or cached source. Script effects form an AOF group and join an enclosing MULTI group; relative expiry keeps its absolute deadline on replay. The source cache is ephemeral and absent from RDB/AOF, so a restart can return NOSCRIPT even when the script's stored data was restored.
+
+Function library definitions are saved in RDB snapshots and AOF base files. Their Lua closure/upvalue state is rebuilt from source on restart; application data that must survive restart belongs in stored values. Plain worker SET commands retain SET records. Worker hash commands retain canonical translated effects, including individual HDEL records for actual field expiry and absolute field deadlines. HINCRBYFLOAT journals the new value together with any retained field deadline. Other eligible worker commands can produce atomic RESTORE postimages with absolute expiry in AOF, which replay through the same public payload format.
 
 ## Payload transfer and shutdown
 

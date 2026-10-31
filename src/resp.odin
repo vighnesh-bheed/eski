@@ -27,8 +27,13 @@ wbuf_grow :: proc(c: ^Conn, n: int) {
 			return
 		}
 	}
-	floor := 256 if lua_effect_owner(c) else WBUF_INIT
+	floor := 256 if lua_effect_owner(c) else 1024
 	newcap := max(c.wcap * 2, c.wlen + n, floor)
+	class := Obuf_Class.Pubsub if .Subscribed in c.ps else Obuf_Class.Normal
+	if c.fd >= 0 && c.wlen + n <= 16 * WBUF_INIT && (obuf_limits[class].hard != 0 || obuf_limits[class].soft != 0) {
+		wanted := max(c.wlen + n, floor)
+		newcap = wanted + (WBUF_INIT - wanted % WBUF_INIT) % WBUF_INIT
+	}
 	newcap = min(newcap, lua_capture_capacity(c))
 	stat_reply_buffer_expands += 1
 	c.wbuf = ([^]u8)(runtime.heap_resize(c.wbuf, newcap))
@@ -71,6 +76,9 @@ reply_str :: #force_inline proc(c: ^Conn, s: string) {
 @(private = "file")
 reply_line :: proc(c: ^Conn, prefix: u8, s: []u8) #no_bounds_check {
 	n := len(s)
+	for byte, i in s {
+		if byte == 0 { n = i; break }
+	}
 	if !lua_capture_allow(c, n+3) {
 		return
 	}
@@ -78,6 +86,9 @@ reply_line :: proc(c: ^Conn, prefix: u8, s: []u8) #no_bounds_check {
 	p[0] = prefix
 	if n > 0 {
 		intrinsics.mem_copy_non_overlapping(&p[1], raw_data(s), n)
+		for i in 1..=n {
+			if p[i] == '\r' || p[i] == '\n' { p[i] = ' ' }
+		}
 	}
 	p[n + 1] = '\r'
 	p[n + 2] = '\n'
@@ -132,9 +143,13 @@ reply_error_parts :: proc(c: ^Conn, parts: ..string) #no_bounds_check {
 			o += len(s)
 		}
 	}
+	for i in 1..<o {
+		if p[i] == 0 { o = i; break }
+		if p[i] == '\r' || p[i] == '\n' { p[i] = ' ' }
+	}
 	p[o] = '\r'
 	p[o + 1] = '\n'
-	c.wlen += n
+	c.wlen += o + 2
 	stat_error_reply(c, p[1:o])
 }
 

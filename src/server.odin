@@ -18,6 +18,12 @@ LISTEN_BACKLOG :: 1024
 
 Conn :: struct {
 	fd:          linux.Fd,
+	transport: Transport_Kind,
+	tls: ^TLS_Connection,
+	local_peer: bool,
+	protected_check: bool,
+	lua_debug_mode: u8,
+	lua_debug_detached: bool,
 	id:          i64,
 	rbuf:        [^]u8,
 	rcap:        int,
@@ -26,6 +32,9 @@ Conn :: struct {
 	need:        int,
 	wbuf:        [^]u8,
 	wcap:        int,
+	wpeak:       int,
+	wpeak_reset_ms: i64,
+	eviction_delivery_epoch: u64,
 	wlen:        int,
 	wpos:        int,
 	want_write:  bool,
@@ -42,15 +51,16 @@ Conn :: struct {
 	authed:      bool,
 	ever_authed: bool,
 	name:        []u8,
-	addr:        [24]u8,
+	addr:        [128]u8,
 	addr_len:    int,
-	laddr:       [24]u8,
+	laddr:       [128]u8,
 	laddr_len:   int,
 	ctime_ms:    i64,
 	atime_ms:    i64,
 	last_cmd:    string,
 	db:          ^Db,
 	rpeak:       int,
+	rwindow_peak: int,
 	lib_name:    []u8,
 	lib_ver:     []u8,
 	bstate:      ^Block_State,
@@ -63,6 +73,7 @@ Conn :: struct {
 	user:        ^Acl_User,
 	mbulk_max:   int,
 	inline_owner: ^Request_Inline_Owner,
+	partial_owner: ^Request_Partial_Owner,
 	compute:     ^Lcs_Task,
 	compute_token: u64,
 	read_eof:    bool,
@@ -83,6 +94,7 @@ Server :: struct {
 	nconns:              int,
 	next_id:             i64,
 	now_ms:              i64,
+	now_us:              i64,
 	start_ms:            i64,
 	next_cron_ms:        i64,
 	pid:                 i64,
@@ -108,6 +120,7 @@ update_clock :: #force_inline proc() {
 		return
 	}
 	ts, _ := linux.clock_gettime(.REALTIME)
+	srv.now_us = i64(ts.time_sec) * 1_000_000 + i64(ts.time_nsec / 1000)
 	srv.now_ms = i64(ts.time_sec) * 1000 + i64(ts.time_nsec / 1_000_000)
 	lru_now = u32(srv.now_ms / 1000) & LRU_CLOCK_MAX
 }
@@ -132,6 +145,7 @@ listen_addr :: proc(ip: [4]u8, port: int) -> (linux.Fd, linux.Errno) {
 	if err != .NONE {
 		return fd, err
 	}
+	runtime_socket_mark(fd)
 	one: i32 = 1
 	linux.setsockopt(fd, linux.SOL_SOCKET, linux.Socket_Option.REUSEADDR, &one)
 	addr := linux.Sock_Addr_In {
@@ -187,10 +201,16 @@ server_open_listeners :: proc(port: int, fds: ^[CONFIG_BIND_MAX]linux.Fd) -> (co
 				}
 			}
 			if is_v6 {
-				if optional {
-					continue
+				ip6, parsed := transport_ipv6(name)
+				if !parsed { return listen_fail(fds[:count], name, port, "Name or service not known") }
+				fd, err := transport_listen_v6(ip6, port)
+				if err != .NONE {
+					if optional && (err == .EADDRNOTAVAIL || err == .EAFNOSUPPORT || err == .EPROTONOSUPPORT) { continue }
+					return listen_fail(fds[:count], name, port, errno_text(err))
 				}
-				return listen_fail(fds[:count], name, port, "IPv6 listening is not supported")
+				fds[count] = fd
+				count += 1
+				continue
 			}
 			parsed, good := inet_aton(name)
 			if !good {
@@ -293,10 +313,10 @@ inet_aton :: proc(s: string) -> (addr: [4]u8, ok: bool) {
 }
 
 server_close_listeners :: proc() {
-	for i in 0 ..< srv.nlfd {
-		linux.close(srv.lfds[i])
-	}
+	for i in 0 ..< srv.nlfd { linux.close(srv.lfds[i]) }
 	srv.nlfd = 0
+	for fd in tls_fds[:tls_fd_count] { linux.close(fd) }
+	tls_fd_count = 0
 }
 
 server_primary_bind :: proc() {
@@ -307,6 +327,13 @@ server_primary_bind :: proc() {
 		if name == "*" {
 			return
 		}
+		if _, ok := transport_ipv6(name); ok && srv.bind_str == "0.0.0.0" {
+			text := "::" if name == "::*" else name
+			transport_primary_name[0] = '['
+			copy(transport_primary_name[1:], text)
+			transport_primary_name[len(text) + 1] = ']'
+			srv.bind_str = string(transport_primary_name[:len(text) + 2])
+		}
 		if ip, ok := parse_ipv4(name); ok {
 			srv.bind = ip
 			srv.bind_str = name
@@ -316,6 +343,7 @@ server_primary_bind :: proc() {
 }
 
 server_relisten :: proc() -> bool {
+	if !tls_configure() { return false }
 	server_close_listeners()
 	fds: [CONFIG_BIND_MAX]linux.Fd
 	n, ok := server_open_listeners(srv.port, &fds)
@@ -332,6 +360,12 @@ server_relisten :: proc() -> bool {
 	}
 	srv.lfds = fds
 	srv.nlfd = n
+	tls_count, tls_ok := server_open_listeners(int(cfg.tls_port), &tls_fds)
+	if !tls_ok { return false }
+	tls_fd_count = tls_count
+	for fd in tls_fds[:tls_fd_count] {
+		if epoll_set(fd, .ADD, false, 0) != .NONE { return false }
+	}
 	server_primary_bind()
 	return true
 }
@@ -342,8 +376,9 @@ epoll_set :: proc(fd: linux.Fd, op: linux.EPoll_Ctl_Opcode, want_out: bool, id: 
 		data = {u64 = u64(u32(fd)) | u64(u32(id)) << 32},
 	}
 	if id != 0 && int(fd) >= 0 && int(fd) < len(srv.conns) {
-		if c := srv.conns[fd]; c != nil && c.id == id && c.read_eof {
-			ev.events -= {.IN}
+		if c := srv.conns[fd]; c != nil && c.id == id {
+			if c.read_eof { ev.events -= {.IN} }
+			ev.events = transport_epoll(c, ev.events)
 		}
 	}
 	return linux.epoll_ctl(srv.epfd, op, fd, &ev)
@@ -352,8 +387,8 @@ epoll_set :: proc(fd: linux.Fd, op: linux.EPoll_Ctl_Opcode, want_out: bool, id: 
 conn_laddr :: proc(c: ^Conn) -> []u8 {
 	if c.laddr_len == 0 {
 		local: linux.Sock_Addr_Any
-		if linux.getsockname(c.fd, &local) == .NONE && local.family == .INET {
-			c.laddr_len = format_addr(c.laddr[:], local.ipv4.sin_addr, int(local.ipv4.sin_port))
+		if linux.getsockname(c.fd, &local) == .NONE {
+			c.laddr_len = transport_format(c.laddr[:], &local)
 		}
 	}
 	return c.laddr[:c.laddr_len]
@@ -388,10 +423,16 @@ set_keepalive :: #force_no_inline proc(fd: linux.Fd, interval: i64) {
 	linux.setsockopt(fd, linux.SOL_TCP, linux.Socket_TCP_Option.KEEPCNT, &cnt)
 }
 
+PROTECTED_MODE_REPLY: string : "-DENIED Redis is running in protected mode because protected mode is enabled and no password is set for the default user. In this mode connections are only accepted from the loopback interface. If you want to connect from external computers to Redis you may adopt one of the following solutions: 1) Just disable protected mode sending the command 'CONFIG SET protected-mode no' from the loopback interface by connecting to Redis from the same host the server is running, however MAKE SURE Redis is not publicly accessible from internet if you do so. Use CONFIG REWRITE to make this change permanent. 2) Alternatively you can just disable the protected mode by editing the Redis configuration file, and setting the protected mode option to 'no', and then restarting the server. 3) If you started the server manually just for testing, restart it with the '--protected-mode no' option. 4) Set up an authentication password for the default user. NOTE: You only need to do one of the above things in order for the server to start accepting connections from the outside.\r\n"
+
+protected_peer_denied :: proc(local: bool) -> bool {
+	return cfg.protected_mode && !local && acl_default != nil && .Nopass in acl_default.flags
+}
+
 accept_clients :: proc(lfd: linux.Fd, kind: Conn_Kind) {
-	budget := 1024 if kind == .Memcached else int(cfg.max_new_connections_per_cycle)
+	budget := 1024 if kind == .Memcached else int(cfg.max_new_tls_connections_per_cycle) if transport_tls_listener(lfd) else int(cfg.max_new_connections_per_cycle)
 	for _ in 0 ..< budget {
-		peer: linux.Sock_Addr_In
+		peer: linux.Sock_Addr_Any
 		fd, err := linux.accept(lfd, &peer, {.NONBLOCK, .CLOEXEC})
 		if err == .EINTR {
 			continue
@@ -400,13 +441,21 @@ accept_clients :: proc(lfd: linux.Fd, kind: Conn_Kind) {
 			break
 		}
 		if i64(srv.nconns) >= cfg.maxclients {
+			if transport_tls_listener(lfd) { linux.close(fd); srv.stat_rejected_conns += 1; continue }
 			reject_client(fd)
 			continue
 		}
+		protected := kind == .Redis && protected_peer_denied(transport_peer_local(&peer))
+		if protected && !transport_tls_listener(lfd) {
+			linux.write(fd, transmute([]u8)PROTECTED_MODE_REPLY)
+			linux.close(fd)
+			srv.stat_rejected_conns += 1
+			continue
+		}
 		one: i32 = 1
-		linux.setsockopt(fd, linux.SOL_TCP, linux.Socket_TCP_Option.NODELAY, &one)
-		if cfg.tcp_keepalive > 0 {
-			set_keepalive(fd, cfg.tcp_keepalive)
+		if peer.family != .UNIX {
+			linux.setsockopt(fd, linux.SOL_TCP, linux.Socket_TCP_Option.NODELAY, &one)
+			if cfg.tcp_keepalive > 0 { set_keepalive(fd, cfg.tcp_keepalive) }
 		}
 		if epoll_set(fd, .ADD, false, srv.next_id + 1) != .NONE {
 			linux.close(fd)
@@ -430,14 +479,23 @@ accept_clients :: proc(lfd: linux.Fd, kind: Conn_Kind) {
 		if kind == .Memcached {
 			mc_stats.total_conns += 1
 		}
-		c.addr_len = format_addr(c.addr[:], peer.sin_addr, int(peer.sin_port))
+		c.addr_len = transport_format(c.addr[:], &peer)
+		c.transport = transport_listener_kind(lfd)
+		c.local_peer = transport_peer_local(&peer)
+		c.protected_check = kind == .Redis && c.transport == .Tls && !c.local_peer
+		if !transport_connection_init(c) {
+			linux.close(fd)
+			conn_mem -= size_of(Conn) + RBUF_INIT + WBUF_INIT
+			mem_free(c.rbuf); mem_free(c.wbuf); free(c)
+			continue
+		}
 		acl_conn_init(c)
 		if int(fd) >= len(srv.conns) {
 			resize(&srv.conns, max(int(fd) + 1, len(srv.conns) * 2))
 		}
 		srv.conns[fd] = c
 		srv.nconns += 1
-		srv.stat_conns += 1
+		if !c.protected_check { srv.stat_conns += 1 }
 	}
 }
 
@@ -478,6 +536,7 @@ conn_close :: proc(c: ^Conn) {
 	if c.tx != nil {
 		tx_conn_closed(c)
 	}
+	transport_connection_close(c)
 	linux.close(c.fd)
 	if int(c.fd) < len(srv.conns) {
 		srv.conns[c.fd] = nil
@@ -486,7 +545,7 @@ conn_close :: proc(c: ^Conn) {
 		srv.held_count -= 1
 	}
 	request_inline_close(c)
-	conn_mem -= size_of(Conn) + c.rcap + c.wcap
+	conn_mem -= size_of(Conn) + c.rcap + c.wcap + len(c.name) + len(c.lib_name) + len(c.lib_ver)
 	mem_free(c.rbuf)
 	mem_free(c.wbuf)
 	mem_free(raw_data(c.name))
@@ -498,12 +557,14 @@ conn_close :: proc(c: ^Conn) {
 
 conn_kill :: proc(c: ^Conn) {
 	if c.wlen > c.wpos {
-		linux.write(c.fd, c.wbuf[c.wpos:c.wlen])
+		conn_net_write(c, c.wbuf[c.wpos:c.wlen])
 	}
 	conn_close(c)
 }
 
 conn_flush :: proc(c: ^Conn) -> bool {
+	if c.tls != nil && !c.tls.ready { return true }
+	c.wpeak = max(c.wpeak, c.wlen - c.wpos)
 	if len(aof.buf) > 0 {
 		aof_flush_for_reply()
 	}
@@ -517,7 +578,7 @@ conn_flush :: proc(c: ^Conn) -> bool {
 		return false
 	}
 	for c.wpos < c.wlen {
-		n, err := linux.write(c.fd, c.wbuf[c.wpos:c.wlen])
+		n, err := conn_net_write(c, c.wbuf[c.wpos:c.wlen])
 		if err == .EINTR {
 			continue
 		}
@@ -548,12 +609,8 @@ conn_flush :: proc(c: ^Conn) -> bool {
 			epoll_set(c.fd, .MOD, false, c.id)
 			c.want_write = false
 		}
-		if c.wcap > BUF_SHRINK_SIZE && reply_buffer_resizing {
-			stat_reply_buffer_shrinks += 1
-			conn_mem -= c.wcap - WBUF_INIT
-			mem_free(c.wbuf)
-			c.wbuf = mem_alloc(WBUF_INIT)
-			c.wcap = WBUF_INIT
+		if c.wcap > WBUF_INIT && reply_buffer_resizing {
+			conn_write_resize(c, WBUF_INIT)
 		}
 	} else {
 		if obuf_normal_limited && c.kind == .Redis && .Subscribed not_in c.ps && obuf_normal_over(c) {
@@ -623,6 +680,7 @@ execute_guarded :: proc(c: ^Conn, argv: [][]u8) -> bool {
 	pending := c.wlen - c.wpos
 	tx_reply_managed = false
 	execute(c, argv)
+	if c.lua_debug_detached { return true }
 	if tx_reply_managed {
 		tx_reply_managed = false
 	} else if c.reply & {.Off, .Skip} != {} {
@@ -697,22 +755,83 @@ process_input :: proc(c: ^Conn) {
 	if c.close_after || c.rpos >= c.rlen {
 		c.rpos = 0
 		c.rlen = 0
+		if c.kind == .Redis && c.rcap > RBUF_INIT && c.blocked == .None && c.compute == nil && c.keyspace == nil && !c.keyspace_ready && !c.held && .Multi in c.txf {
+			conn_read_resize(c, RBUF_INIT)
+		}
 	} else if c.rpos > 0 {
 		rem := c.rlen - c.rpos
 		intrinsics.mem_copy(c.rbuf, &c.rbuf[c.rpos], rem)
 		c.rlen = rem
+		c.need = max(0, c.need - c.rpos)
 		c.rpos = 0
 	}
-	if c.rlen == 0 && c.rcap > BUF_SHRINK_SIZE {
-		conn_mem -= c.rcap - RBUF_INIT
-		mem_free(c.rbuf)
-		c.rbuf = mem_alloc(RBUF_INIT)
-		c.rcap = RBUF_INIT
-		c.need = 0
-		c.rpeak = 0
+	if c.need > c.rcap && !c.close_after {
+		conn_read_reserve(c, c.need)
 	}
 	if c.read_eof && c.compute == nil && c.keyspace == nil && !c.keyspace_ready && !c.held {
 		c.close_after = true
+	}
+}
+
+conn_read_resize :: proc(c: ^Conn, capacity: int) {
+	if capacity == c.rcap {
+		return
+	}
+	if capacity == 0 {
+		mem_free(c.rbuf)
+		c.rbuf = nil
+	} else {
+		c.rbuf = ([^]u8)(runtime.heap_resize(c.rbuf, capacity))
+	}
+	conn_mem += capacity - c.rcap
+	c.rcap = capacity
+}
+
+conn_read_reserve :: proc(c: ^Conn, needed: int) {
+	if needed > c.rcap {
+		conn_read_resize(c, max(RBUF_INIT, needed) if needed >= 32768 else max(needed, max(RBUF_INIT, c.rcap * 2)))
+	}
+}
+
+conn_write_resize :: proc(c: ^Conn, capacity: int) {
+	if capacity >= c.wcap || c.wlen != 0 {
+		return
+	}
+	c.wbuf = ([^]u8)(runtime.heap_resize(c.wbuf, capacity))
+	conn_mem += capacity - c.wcap
+	c.wcap = capacity
+	stat_reply_buffer_shrinks += 1
+}
+
+clients_replybuf_cron :: proc() {
+	for c in srv.conns {
+		if c == nil || c.kind != .Redis {
+			continue
+		}
+		if reply_buffer_peak_reset_ms >= 0 && srv.now_ms - c.wpeak_reset_ms >= reply_buffer_peak_reset_ms {
+			c.wpeak = c.wlen - c.wpos
+			c.wpeak_reset_ms = srv.now_ms
+		}
+		if reply_buffer_resizing && c.wlen == 0 {
+			conn_write_resize(c, max(1024, min(WBUF_INIT, c.wpeak)))
+		}
+	}
+}
+
+clients_querybuf_cron :: proc() {
+	for c in srv.conns {
+		if c == nil || c.kind != .Redis || c.compute != nil || c.keyspace != nil || c.keyspace_ready || c.blocked != .None || c.held {
+			continue
+		}
+		idle := srv.now_ms - c.atime_ms
+		if idle >= 2000 {
+			if c.rcap > c.rlen {
+				conn_read_resize(c, c.rlen)
+			}
+		} else if c.rcap > 32768 && c.rcap / 2 > max(c.rwindow_peak, max(c.need, c.rlen)) {
+			conn_read_resize(c, max(RBUF_INIT, max(c.rwindow_peak, max(c.need, c.rlen))))
+		}
+		c.rwindow_peak = c.rlen
 	}
 }
 
@@ -721,14 +840,10 @@ conn_read :: proc(c: ^Conn) {
 	c.atime_ms = max(c.atime_ms, lua_connection_clock())
 	for {
 		want := max(c.rlen + READ_MIN_FREE, c.need)
-		if want > c.rcap {
-			newcap := max(want, c.rcap * 2)
-			c.rbuf = ([^]u8)(runtime.heap_resize(c.rbuf, newcap))
-			conn_mem += newcap - c.rcap
-			c.rcap = newcap
-		}
+		if c.kind == .Redis && c.need > c.rlen { want = c.need }
+		conn_read_reserve(c, want)
 		space := c.rcap - c.rlen
-		n, err := linux.read(c.fd, c.rbuf[c.rlen:c.rcap])
+		n, err := conn_net_read(c, c.rbuf[c.rlen:c.rcap])
 		if err == .EINTR {
 			continue
 		}
@@ -746,13 +861,13 @@ conn_read :: proc(c: ^Conn) {
 		}
 		c.rlen += n
 		stat_net_input_bytes += i64(n)
-		if n < space {
-			break
-		}
+		if c.kind == .Redis && c.need == 0 && c.rlen >= RBUF_INIT { break }
+		if n < space && !conn_net_pending(c) { break }
 		if c.rlen >= READ_BATCH_MAX && c.rlen >= c.need {
 			break
 		}
 	}
+	c.rwindow_peak = max(c.rwindow_peak, c.rlen)
 	if c.rlen > c.rpeak {
 		c.rpeak = c.rlen
 	}
@@ -779,7 +894,7 @@ conn_read :: proc(c: ^Conn) {
 			aof_flush_for_reply()
 		}
 		if c.wlen > c.wpos {
-			linux.write(c.fd, c.wbuf[c.wpos:c.wlen])
+			conn_net_write(c, c.wbuf[c.wpos:c.wlen])
 		}
 		conn_close(c)
 		return
@@ -791,10 +906,38 @@ conn_read :: proc(c: ^Conn) {
 	conn_flush(c)
 }
 
+conn_protected_ready :: proc(c: ^Conn) -> bool {
+	if !c.protected_check { return true }
+	if c.tls != nil && !c.tls.ready && !transport_handshake(c) { return false }
+	c.protected_check = false
+	if protected_peer_denied(c.local_peer) {
+		output := wb_reserve(c, len(PROTECTED_MODE_REPLY))
+		intrinsics.mem_copy_non_overlapping(output, raw_data(transmute([]u8)PROTECTED_MODE_REPLY), len(PROTECTED_MODE_REPLY))
+		c.wlen += len(PROTECTED_MODE_REPLY)
+		c.close_after = true
+		srv.stat_rejected_conns += 1
+		return false
+	}
+	srv.stat_conns += 1
+	return true
+}
+
 handle_event :: proc(c: ^Conn, evs: linux.EPoll_Event_Set) {
 	if .ERR in evs {
 		conn_close(c)
 		return
+	}
+	if c.tls != nil {
+		if !transport_handshake(c) { if c.close_after { conn_close(c) }; return }
+		if !conn_protected_ready(c) {
+			if c.close_after { conn_flush(c) }
+			return
+		}
+		if c.tls.read_wants_out && .OUT in evs { conn_read(c); return }
+		if c.tls.write_length != 0 {
+			if !conn_flush(c) { return }
+			if c.tls.write_length != 0 { return }
+		}
 	}
 	if .IN in evs {
 		conn_read(c)
@@ -810,6 +953,8 @@ handle_event :: proc(c: ^Conn, evs: linux.EPoll_Event_Set) {
 }
 
 server_cron :: proc() {
+	clients_querybuf_cron()
+	clients_replybuf_cron()
 	lua_cache_reap(16)
 	mem_cron()
 	persist_cron()
@@ -832,6 +977,8 @@ ignore_sigpipe :: proc() {
 
 server_run :: proc() -> bool {
 	ignore_sigpipe()
+	diagnostics_work_begin()
+	defer diagnostics_work_end()
 	update_clock()
 	srv.start_ms = srv.now_ms
 	srv.next_cron_ms = srv.now_ms + cron_interval_ms()
@@ -854,6 +1001,12 @@ server_run :: proc() -> bool {
 		return false
 	}
 	srv.nlfd = nlfd
+	if !tls_configure() { return false }
+	tls_count, tls_ok := server_open_listeners(int(cfg.tls_port), &tls_fds)
+	if !tls_ok { return false }
+	tls_fd_count = tls_count
+	if !transport_listen_unix() { return false }
+	if srv.nlfd == 0 && transport_unix_fd < 0 && cfg.tls_port == 0 { return false }
 	if !mc_listen() {
 		return false
 	}
@@ -869,6 +1022,10 @@ server_run :: proc() -> bool {
 			return false
 		}
 	}
+	for fd in tls_fds[:tls_fd_count] {
+		if epoll_set(fd, .ADD, false, 0) != .NONE { return false }
+	}
+	if transport_unix_fd >= 0 && epoll_set(transport_unix_fd, .ADD, false, 0) != .NONE { return false }
 	if mc_lfd >= 0 && epoll_set(mc_lfd, .ADD, false, 0) != .NONE {
 		write_fd(2, "eski: epoll_ctl on listener failed\n")
 		return false
@@ -880,6 +1037,9 @@ server_run :: proc() -> bool {
 	defer keyspace_shutdown()
 	log_startup()
 	maxmemory_startup_warning()
+	diagnostics_work_end()
+	runtime_supervised_ready()
+	diagnostics_work_begin()
 	el_after_sleep()
 	for {
 		runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
@@ -902,7 +1062,6 @@ server_run :: proc() -> bool {
 			tracking_before_sleep()
 		}
 		if cfg.maxmemory_clients != 0 {
-			keyspace_fence()
 			evict_clients(nil)
 		}
 		if len(acl_doomed) > 0 {
@@ -912,7 +1071,10 @@ server_run :: proc() -> bool {
 			timeout = 0
 		}
 		el_before_sleep()
+		if transport_pending_input() { timeout = 0 }
+		diagnostics_work_end()
 		n, werr := linux.epoll_wait(srv.epfd, &events[0], MAX_EVENTS, timeout)
+		diagnostics_work_begin()
 		update_clock()
 		el_after_sleep()
 		if werr != .NONE {
@@ -967,6 +1129,9 @@ server_run :: proc() -> bool {
 			keyspace_fence()
 			evict_timer_step()
 		}
+		if keyspace_timed {
+			keyspace_fence()
+		}
 		db_tick()
 		if srv.next_cron_ms - srv.now_ms > interval {
 			srv.next_cron_ms = srv.now_ms + interval
@@ -983,23 +1148,24 @@ server_run :: proc() -> bool {
 }
 
 log_startup :: proc() {
-	b: [dynamic]u8
-	defer delete(b)
-	sb_str(&b, "eski ")
-	sb_str(&b, VERSION)
-	sb_str(&b, " listening on ")
-	sb_str(&b, srv.bind_str)
-	sb_byte(&b, ':')
-	sb_int(&b, i64(srv.port))
-	sb_str(&b, " pid ")
-	sb_int(&b, srv.pid)
-	sb_byte(&b, '\n')
+	runtime_logo()
+	l: Log_Line
+	ll_begin(&l, LOG_NOTICE)
+	ll_str(&l, "eski ")
+	ll_str(&l, VERSION)
+	ll_str(&l, " listening on ")
+	ll_str(&l, srv.bind_str)
+	ll_str(&l, ":")
+	ll_int(&l, i64(srv.port))
+	ll_str(&l, " pid ")
+	ll_int(&l, srv.pid)
+	ll_end(&l)
 	if mc_lfd >= 0 {
-		sb_str(&b, "eski memcached text protocol listening on ")
-		sb_str(&b, srv.bind_str)
-		sb_byte(&b, ':')
-		sb_int(&b, i64(mc_port))
-		sb_byte(&b, '\n')
+		ll_begin(&l, LOG_NOTICE)
+		ll_str(&l, "eski memcached text protocol listening on ")
+		ll_str(&l, srv.bind_str)
+		ll_str(&l, ":")
+		ll_int(&l, i64(mc_port))
+		ll_end(&l)
 	}
-	write_fd(1, string(b[:]))
 }

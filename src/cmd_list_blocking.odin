@@ -4,6 +4,7 @@ import lt "listtype"
 
 @(private)
 blocking_pop_generic :: proc(c: ^Conn, keys: [][]u8, where_: lt.Where, timeout: []u8, count: int) {
+	pst.dirty_explicit = true
 	deadline, ok := block_parse_timeout(c, timeout)
 	if !ok {
 		return
@@ -47,6 +48,7 @@ cmd_blmpop :: proc(c: ^Conn, argv: [][]u8) {
 
 @(private)
 blmove_generic :: proc(c: ^Conn, argv: [][]u8, wherefrom: lt.Where, whereto: lt.Where, timeout: []u8) {
+	pst.dirty_explicit = true
 	deadline, ok := block_parse_timeout(c, timeout)
 	if !ok {
 		return

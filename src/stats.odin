@@ -1,6 +1,7 @@
 package main
 
 import "core:slice"
+import "base:runtime"
 import "hdr"
 
 foreign import libc_stats "system:c"
@@ -63,6 +64,7 @@ stat_el_cmd_sum: i64
 
 @(private = "file")
 stat_errors: map[string]i64
+stat_errors_disabled: bool
 @(private = "file")
 stat_sub_pool: [dynamic]Sub_Stats
 @(private = "file")
@@ -417,21 +419,57 @@ stat_error_prefix :: proc(msg: []u8) -> []u8 {
 	return transmute([]u8)string("ERR")
 }
 
+stat_error_memory :: proc "contextless" () -> int {
+	n := int(runtime.map_total_allocation_size_from_value(stat_errors)) if cap(stat_errors) > 0 else 0
+	for key in stat_errors { n += len(key) }
+	return n
+}
+
+stat_error_release :: proc "contextless" (payload: rawptr) {
+	context = runtime.default_context()
+	values := cast(^map[string]i64)payload
+	for key in values^ { mem_free(raw_data(key)) }
+	delete(values^)
+	runtime.heap_free(values)
+}
+
+stat_error_disable :: proc() {
+	plog(LOG_WARNING, "Errorstats stopped adding new errors after reaching 128 distinct codes")
+	codes := make([dynamic]u8, 0, 4096, context.temp_allocator)
+	for code in stat_errors {
+		if len(codes) > 0 { sb_str(&codes, ", ") }
+		sb_str(&codes, code)
+	}
+	plog(LOG_WARNING, "Current errors code list: ", string(codes[:]))
+	count := len(stat_errors)
+	bytes := stat_error_memory() + size_of(map[string]i64)
+	detached := cast(^map[string]i64)runtime.heap_alloc(size_of(map[string]i64), false)
+	if detached == nil { store_fatal("out of memory") }
+	detached^ = stat_errors
+	stat_errors = nil
+	stat_errors_disabled = true
+	stat_errors[clone_key(transmute([]u8)string("ERRORSTATS_DISABLED"))] = 1
+	lazyfree_submit(Lazy_Job{release = stat_error_release, payload = detached, count = count, bytes = bytes})
+}
+
 @(cold)
-stat_error_reply :: #force_no_inline proc(c: ^Conn, msg: []u8) {
-	stat_total_error_replies += 1
+stat_error_reply :: #force_no_inline proc(c: ^Conn, msg: []u8, count_global: bool = true) {
 	if st := stat_cur; st != nil {
 		st.failed += 1
 		stat_cur = nil
 	}
+	if !count_global { return }
+	stat_total_error_replies += 1
 	if c.fd < 0 && c == aof.fake {
 		stat_unexpected_error_replies += 1
 	}
+	if stat_errors_disabled { return }
 	prefix := stat_error_prefix(msg)
 	if p, ok := &stat_errors[string(prefix)]; ok {
 		p^ += 1
 		return
 	}
+	if len(stat_errors) >= 128 { stat_error_disable(); return }
 	stat_errors[clone_key(prefix)] = 1
 }
 
@@ -480,6 +518,7 @@ stats_reset :: proc() {
 		mem_free(raw_data(k))
 	}
 	clear(&stat_errors)
+	stat_errors_disabled = false
 	stat_total_error_replies = 0
 	stat_unexpected_error_replies = 0
 	stat_el_cmd_sum = 0

@@ -125,6 +125,15 @@ info_absolute_path :: proc(filename: string) -> string {
 	return string(abs[:])
 }
 
+info_preserve_executable :: proc(start, end: uintptr) {
+	address := uintptr(raw_data(info_executable))
+	if address >= start && address < end {
+		owned := make([]u8, len(info_executable))
+		copy(owned, info_executable)
+		info_executable = string(owned)
+	}
+}
+
 info_startup :: proc(argv0: string) {
 	info_executable = info_absolute_path(argv0)
 }
@@ -283,7 +292,7 @@ info_server :: proc(b: ^[dynamic]u8) {
 	sec, usec := now_realtime()
 	uptime := (srv.now_ms - srv.start_ms) / 1000
 	info_section_header(b, "Server")
-	info_line_str(b, "redis_version", "7.0.0")
+	info_line_str(b, "redis_version", REDIS_COMPAT_VERSION)
 	info_line_str(b, "eski_version", VERSION)
 	info_line_str(b, "redis_git_sha1", "00000000")
 	info_line_str(b, "redis_git_dirty", "0")
@@ -302,11 +311,11 @@ info_server :: proc(b: ^[dynamic]u8) {
 	info_line_str(b, "atomicvar_api", "c11-builtin")
 	info_line_str(b, "gcc_version", "0.0.0")
 	info_line_int(b, "process_id", srv.pid)
-	info_line_str(b, "process_supervised", "no")
+	info_line_str(b, "process_supervised", runtime_supervised_name())
 	sb_str(b, "run_id:")
 	sb_bytes(b, srv.run_id[:])
 	sb_str(b, "\r\n")
-	info_line_int(b, "tcp_port", i64(srv.port))
+	info_line_int(b, "tcp_port", i64(srv.port) if srv.port != 0 else cfg.tls_port)
 	info_line_int(b, "server_time_usec", sec * 1_000_000 + usec)
 	info_line_int(b, "uptime_in_seconds", uptime)
 	info_line_int(b, "uptime_in_days", uptime / 86400)

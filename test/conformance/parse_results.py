@@ -684,6 +684,8 @@ def cmd_summarize(args):
         "sha256": args.suite_sha256,
         "url": args.suite_url,
         "external_skip_lifted": args.external_skip_lifted,
+        "fixture_mode": args.fixture_mode,
+        "fixture_receipt": relative(args.fixture_receipt, args.root) if args.fixture_receipt else "",
         "tags": args.tags,
         "server": args.server,
         "tcl": args.tcl,
@@ -724,6 +726,8 @@ def main(argv=None):
     p_sum.add_argument("--suite-sha256", default="")
     p_sum.add_argument("--suite-url", default="")
     p_sum.add_argument("--external-skip-lifted", default="")
+    p_sum.add_argument("--fixture-mode", choices=("external", "managed"), default="external")
+    p_sum.add_argument("--fixture-receipt", default="")
     p_sum.add_argument("--tags", default="")
     p_sum.add_argument("--server", default="")
     p_sum.add_argument("--tcl", default="")

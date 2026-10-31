@@ -59,6 +59,10 @@ class Inputs(FixtureInputs, unittest.TestCase):
         value['suite']['sha256'] = 'another suite'
         with self.assertRaisesRegex(ValueError, 'different suites'):
             tables.preserved_tests(self.baseline, value)
+        value = copy.deepcopy(self.observed)
+        value['suite']['tags'] += ' -cluster'
+        with self.assertRaisesRegex(ValueError, 'different tag filters'):
+            tables.preserved_tests(self.baseline, value)
         for field, replacement in (('failing_tests', [None]), ('units', {'broken': None})):
             value = copy.deepcopy(self.observed)
             value[field] = replacement
@@ -170,9 +174,66 @@ class Inputs(FixtureInputs, unittest.TestCase):
         self.assertEqual(tables.table_code('  spaced  '), '`   spaced   `')
         debug_row = next(line for line in rendered.splitlines() if line.startswith('| `SCRIPT DEBUG` |'))
         load_row = next(line for line in rendered.splitlines() if line.startswith('| `SCRIPT LOAD` |'))
-        self.assertIn('Unsupported subcommand', debug_row)
+        self.assertNotIn('Unsupported subcommand', debug_row)
         self.assertNotIn('Unsupported', load_row)
         self.assertNotIn('Compatibility entry', load_row)
+
+
+    def clean_observed(self):
+        observed = copy.deepcopy(self.observed)
+        for unit in observed['units'].values():
+            unit['failed'] = 0
+            unit['errored'] = 0
+            unit['failures'] = []
+        observed['totals']['failed'] = 0
+        observed['totals']['errored'] = 0
+        observed['failing_tests'] = []
+        return tables.validate_conformance(observed, 'clean control')
+
+    def test_readme_table_uses_observed_units_and_keeps_historical_baseline_labelled(self):
+        commands = {'ping': {'group': 'connection', 'summary': 'Pings.'}}
+        outputs = tables.render_outputs(commands, self.baseline, self.observed, self.dataset, skeleton())
+        added_unit = sorted(set(self.observed['units']) - set(self.baseline['units']))[0]
+        unit = self.observed['units'][added_unit]
+        row = '| %s | %d | %d | %d | %d |' % (added_unit, unit['passed'], unit['failed'], unit['skipped'], unit['errored'])
+        self.assertIn(row, outputs['README.md'])
+        self.assertIn('## Protected historical baseline', outputs['docs/conformance.md'])
+        self.assertIn('| **Total** | **1504** | **6** | **120** | **0** |', outputs['docs/conformance.md'])
+
+    def test_clean_snapshot_does_not_claim_remaining_failures(self):
+        commands = {'ping': {'group': 'connection', 'summary': 'Pings.'}}
+        outputs = tables.render_outputs(commands, self.baseline, self.clean_observed(), self.dataset, skeleton())
+        self.assertIn('No test failures or unit errors were recorded', outputs['README.md'])
+        self.assertNotIn('remaining failures', outputs['README.md'])
+        self.assertNotIn('compatibility gaps listed below', outputs['docs/conformance.md'])
+        self.assertIn('No test failures were recorded.', outputs['docs/conformance.md'])
+        self.assertIn('--tags "-needs:repl"', outputs['docs/conformance.md'])
+
+    def test_unit_errors_prevent_a_clean_result_even_without_test_failures(self):
+        commands = {'ping': {'group': 'connection', 'summary': 'Pings.'}}
+        observed = self.clean_observed()
+        next(iter(observed['units'].values()))['errored'] = 1
+        observed['totals']['errored'] = 1
+        tables.validate_conformance(observed, 'unit error control')
+        outputs = tables.render_outputs(commands, self.baseline, observed, self.dataset, skeleton())
+        self.assertIn('**1 unit errors**', outputs['README.md'])
+        self.assertNotIn('No test failures or unit errors were recorded', outputs['README.md'])
+        self.assertNotIn('No test failures or unit errors were recorded', outputs['docs/conformance.md'])
+        self.assertIn('Unit errors remain visible', outputs['docs/conformance.md'])
+
+    def test_additional_compared_passes_do_not_replace_the_protected_baseline(self):
+        commands = {'ping': {'group': 'connection', 'summary': 'Pings.'}}
+        baseline_before = copy.deepcopy(self.baseline)
+        observed = tables.compact_summary(copy.deepcopy(self.baseline), self.baseline)
+        next(iter(observed['units'].values()))['passed'] += 24
+        observed['totals']['passed'] += 24
+        tables.validate_conformance(observed, 'additional pass control')
+        outputs = tables.render_outputs(commands, self.baseline, observed, self.dataset, skeleton())
+        self.assertIn('**1504 / 1504 baseline passes**', outputs['README.md'])
+        self.assertIn('**1528 passes in the 28 compared units**', outputs['README.md'])
+        self.assertIn('**24 additional passes**', outputs['README.md'])
+        self.assertNotIn('1528 / 1528 baseline passes', outputs['README.md'])
+        self.assertEqual(self.baseline, baseline_before)
 
 
 @unittest.skipUnless(BINARY.is_file(), 'build bin/eski for live documentation tests')

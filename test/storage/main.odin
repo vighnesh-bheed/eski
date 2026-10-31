@@ -79,7 +79,12 @@ audit :: proc() {
 	check(m.slab_empty == m.slab_dirty + m.slab_clean, "dirty and clean pools partition empty runs")
 	check(m.dead_payload == 0 && m.lazy_payload == 0 && m.lazy_slab_live == 0, "pending payload ownership drained")
 	check(m.table_retired == 0 && m.slab_retired == 0, "retired mappings drained")
-	check(mem_used() == mem_startup + db_used_memory + tables + metadata + ps_memory + conn_mem + tx_mem_total + mem_aof_buffer(), "allocated memory recount includes only owned metadata")
+	error_owned := storage_test_error_memory()
+	expected_owned := mem_startup + db_used_memory + tables + metadata + client_metadata_total + client_registry_memory() + conn_mem + tx_mem_total + mem_aof_buffer() + error_owned
+	if mem_used() != expected_owned {
+		fmt.printf("memory recount actual=%d expected=%d hash/set/zset retired=%d/%d/%d dead=%d lazy=%d compute=%d keyspace=%d lua=%d errors=%d\n", mem_used(), expected_owned, ht.maintenance_metadata(), st.maintenance_metadata(), zt.maintenance_metadata(), storage_dead_payload, lazyfree_pending_bytes(), compute_reserved, keyspace_memory_used(), lua_memory_used(), stat_error_memory())
+	}
+	check(mem_used() == expected_owned, "allocated memory recount includes only owned metadata")
 }
 
 put :: proc(key, value: string) {
@@ -1284,7 +1289,7 @@ set_spop_pending :: proc() {
 	check(st.size(newset) == 6 && newset.acct == st.memory_usage(newset) && db_cur.heap_bytes == newset.acct, "SPOP replacement owns only its six copied survivors")
 	mapped, retired, metadata := st.maintenance_memory()
 	check(mapped == 24576 && retired == 8192 && metadata > 0, "old SPOP source remains separately retired while remaining target is pending")
-	check(mem_used() == mem_startup + newset.acct + remaining + metadata + storage_table_allocated(), "new payload, pending old payload and retired record are charged exactly once")
+	check(mem_used() == mem_startup + newset.acct + remaining + metadata + storage_table_allocated() + storage_test_error_memory(), "new payload, pending old payload and retired record are charged exactly once")
 	intrinsics.atomic_store_explicit(&storage_test_worker_pause, 0, .Release)
 	settle()
 	check(lazyfree_pending_bytes() == 0 && db_cur.heap_bytes == newset.acct, "SPOP worker cleanup leaves only the new live Set")

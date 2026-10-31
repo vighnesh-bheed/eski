@@ -78,6 +78,7 @@ cmd_unlink :: proc(c: ^Conn, argv: [][]u8) {
 
 @(private = "file")
 del_generic :: proc(c: ^Conn, argv: [][]u8, lazy: bool) {
+	pst.dirty_explicit = true
 	saved := lazy_set(lazy)
 	defer lazy_mode = saved
 	count: i64 = 0
@@ -94,6 +95,7 @@ del_generic :: proc(c: ^Conn, argv: [][]u8, lazy: bool) {
 			}
 		}
 	}
+	pst.dirty += count
 	reply_int(c, count)
 }
 
@@ -147,6 +149,7 @@ expire_parse_flags :: proc(c: ^Conn, argv: [][]u8) -> (nx, xx, gt, lt: bool, ok:
 }
 
 expire_generic :: proc(c: ^Conn, argv: [][]u8, unit: Expire_Unit, name: string) {
+	pst.dirty_explicit = true
 	nx, xx, gt, lt, flags_ok := expire_parse_flags(c, argv)
 	if !flags_ok {
 		return
@@ -194,6 +197,7 @@ expire_generic :: proc(c: ^Conn, argv: [][]u8, unit: Expire_Unit, name: string) 
 		reply_int(c, 0)
 		return
 	}
+	pst.dirty += 1
 	if when_ms <= expire_now() {
 		db_remove(argv[1])
 		signal_key(argv[1])
@@ -261,11 +265,13 @@ cmd_pexpiretime :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 cmd_persist :: proc(c: ^Conn, argv: [][]u8) {
+	pst.dirty_explicit = true
 	e := db_find(argv[1])
 	if e == nil || e.expire_at == 0 {
 		reply_int(c, 0)
 		return
 	}
+	pst.dirty += 1
 	entry_set_expire(e, 0)
 	signal_key(argv[1])
 	notify(.Generic, "persist", argv[1])
@@ -284,6 +290,7 @@ cmd_touch :: proc(c: ^Conn, argv: [][]u8) {
 
 @(private = "file")
 rename_generic :: proc(c: ^Conn, argv: [][]u8, nx: bool) {
+	pst.dirty_explicit = true
 	same := bytes_eq(argv[1], argv[2])
 	if db_find(argv[1]) == nil {
 		reply_error(c, ERR_NO_KEY)
@@ -305,6 +312,7 @@ rename_generic :: proc(c: ^Conn, argv: [][]u8, nx: bool) {
 		db_remove(argv[2])
 	}
 	db_rename(argv[1], argv[2])
+	pst.dirty += 1
 	hash_rename(argv[2])
 	block_note_removed()
 	if e := db_find_notouch(argv[2]); e != nil {
@@ -372,6 +380,7 @@ fresh_access_clock :: proc(db: ^Db, key: []u8) {
 }
 
 cmd_move :: proc(c: ^Conn, argv: [][]u8) {
+	pst.dirty_explicit = true
 	id, ok := parse_db_index(c, argv[2], "")
 	if !ok {
 		return
@@ -389,6 +398,7 @@ cmd_move :: proc(c: ^Conn, argv: [][]u8) {
 		reply_int(c, 0)
 		return
 	}
+	pst.dirty += 1
 	fresh_access_clock(dst, argv[1])
 	block_signal_existing(dst, argv[1])
 	block_note_removed()

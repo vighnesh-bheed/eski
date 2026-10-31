@@ -1,13 +1,14 @@
 package rdb
 
 import "base:intrinsics"
+import "core:sync"
 
 CRC64_POLY :: u64(0xad93d23594c935a9)
 
 @(private)
 crc64_table: [8][256]u64
 @(private)
-crc64_ready: bool
+crc64_once: sync.Once
 
 @(private)
 crc64_reflect :: proc "contextless" (data: u64, data_len: int) -> u64 {
@@ -40,9 +41,11 @@ crc64_bitwise :: proc "contextless" (start: u64, data: []u8) -> u64 {
 }
 
 crc64_init :: proc "contextless" () {
-	if crc64_ready {
-		return
-	}
+	sync.once_do(&crc64_once, crc64_populate)
+}
+
+@(private)
+crc64_populate :: proc "contextless" () {
 	for n in 0 ..< 256 {
 		v := [1]u8{u8(n)}
 		crc64_table[0][n] = crc64_bitwise(0, v[:])
@@ -54,13 +57,10 @@ crc64_init :: proc "contextless" () {
 			crc64_table[k][n] = crc
 		}
 	}
-	crc64_ready = true
 }
 
 crc64 :: proc "contextless" (start: u64, data: []u8) -> u64 #no_bounds_check {
-	if !crc64_ready {
-		crc64_init()
-	}
+	crc64_init()
 	crc := start
 	p := raw_data(data)
 	n := len(data)

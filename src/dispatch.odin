@@ -192,6 +192,8 @@ rename_command :: proc(from: []u8, to: []u8) -> string {
 execute :: proc(c: ^Conn, argv: [][]u8) {
 	slot := lookup_entry(argv[0])
 	resolved := slot.cmd if slot != nil else nil
+	diagnostics_command_begin(resolved.name if resolved != nil else "unknown", argv)
+	defer diagnostics_command_end()
 	if !keyspace_candidate(resolved, argv) {
 		keyspace_fence()
 	}
@@ -217,7 +219,6 @@ execute :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	if cmd_hooks {
-		keyspace_fence()
 		execute_hooked(c, cmd, st, argv)
 		return
 	}
@@ -256,7 +257,7 @@ execute :: proc(c: ^Conn, argv: [][]u8) {
 @(cold)
 execute_gate :: #force_no_inline proc(c: ^Conn, cmd: ^Command, st: ^Cmd_Hot, argv: [][]u8) -> bool {
 	stat_cur = nil
-	if persist_gate(c, cmd) {
+	if persist_gate(c, cmd, argv) {
 		stat_reject(st, argv)
 		return true
 	}
@@ -291,7 +292,7 @@ execute_hooked :: #force_no_inline proc(c: ^Conn, cmd: ^Command, st: ^Cmd_Hot, a
 		}
 		return
 	}
-	if pst.gate_active && hooked_persist_gate(c, cmd) {
+	if pst.gate_active && hooked_persist_gate(c, cmd, argv) {
 		stat_reject(st, argv)
 		if ps_exec != nil {
 			pubsub_after(c, nil, nil)
@@ -315,6 +316,10 @@ execute_hooked :: #force_no_inline proc(c: ^Conn, cmd: ^Command, st: ^Cmd_Hot, a
 		}
 		return
 	}
+	if keyspace_candidate(cmd, argv) && keyspace_try(c, cmd, st, argv) {
+		ps_exec = nil
+		return
+	}
 	db_cur = c.db
 	store_no_touch = .No_Touch in c.flags && cmd.handler != cmd_touch
 	pending := c.wlen - c.wpos
@@ -326,6 +331,9 @@ execute_hooked :: #force_no_inline proc(c: ^Conn, cmd: ^Command, st: ^Cmd_Hot, a
 	ps_hooked = true
 	stat_cur = &st.stats
 	t0 := mono_now()
+	if len(monitors) > 0 && lua_is_eval(cmd) {
+		monitor_feed_raw(c, argv)
+	}
 	cmd.handler(c, argv)
 	ticks := mono_now() - t0
 	ps_hooked = false
@@ -342,7 +350,7 @@ execute_hooked :: #force_no_inline proc(c: ^Conn, cmd: ^Command, st: ^Cmd_Hot, a
 	if ps_exec != nil {
 		pubsub_after(c, cmd, argv)
 	}
-	if len(monitors) > 0 {
+	if len(monitors) > 0 && !lua_is_eval(cmd) {
 		monitor_feed(c, cmd, argv)
 	}
 	if client_buckets_on {

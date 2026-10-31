@@ -200,7 +200,7 @@ field_programs_match_reference :: proc(t: ^testing.T) {
 			}
 			if !outcome.null {
 				mask := (u64(1) << u64(c.bits)) - 1 if c.bits < 64 else max(u64)
-				if c.opcode == .Incrby || grown || (u64(old) ~ u64(outcome.stored)) & mask != 0 {
+				if grown || (u64(old) ~ u64(outcome.stored)) & mask != 0 {
 					want_changes += 1
 				}
 				ref_set_field(model[:], c.offset, c.bits, u64(outcome.stored))
@@ -427,15 +427,15 @@ bitfield_counts_only_changed_fields :: proc(t: ^testing.T) {
 		{"GET u8 0 GET i64 100", 0, 0},
 		{"OVERFLOW FAIL SET u8 100 300", 0, 14},
 		{"SET u8 0 0", 0, 14},
-		{"INCRBY u8 0 0", 1, 14},
+		{"INCRBY u8 0 0", 0, 14},
 		{"OVERFLOW FAIL INCRBY u8 0 255", 1, 14},
 		{"SET u8 0 255", 0, 14},
-		{"OVERFLOW SAT INCRBY u8 0 9", 1, 14},
+		{"OVERFLOW SAT INCRBY u8 0 9", 0, 14},
 		{"OVERFLOW FAIL INCRBY u8 0 1", 0, 14},
-		{"INCRBY u8 0 256", 1, 14},
+		{"INCRBY u8 0 256", 0, 14},
 		{"INCRBY u8 0 1", 1, 14},
 		{"SET i8 8 -1 SET i8 8 -1 SET u8 8 255", 1, 14},
-		{"SET i4 16 -8 SET u4 16 8 INCRBY u4 16 16", 2, 14},
+		{"SET i4 16 -8 SET u4 16 8 INCRBY u4 16 16", 1, 14},
 		{"OVERFLOW SAT SET i8 24 -9223372036854775808", 1, 14},
 		{"OVERFLOW SAT SET i8 24 1000", 0, 14},
 		{"SET u8 0 7 SET u8 8 7 GET u8 0", 2, 14},
@@ -443,7 +443,7 @@ bitfield_counts_only_changed_fields :: proc(t: ^testing.T) {
 		{"SET u8 112 0", 0, 15},
 		{"SET u8 112 0 SET u8 0 7", 0, 15},
 		{"OVERFLOW FAIL SET u8 200 300", 0, 26},
-		{"OVERFLOW FAIL INCRBY u8 0 255 INCRBY u8 8 0", 1, 26},
+		{"OVERFLOW FAIL INCRBY u8 0 255 INCRBY u8 8 0", 0, 26},
 	}
 	for c in cases {
 		testing.expect_value(t, parse_words(&prog, c.text), bm.Error.None)
@@ -476,8 +476,8 @@ bitfield_change_counting_sequence :: proc(t: ^testing.T) {
 	dirty_step(t, &prog, &buf, &capacity, "SET i5 0 0", false)
 	dirty_step(t, &prog, &buf, &capacity, "SET i5 0 1", true)
 	dirty_step(t, &prog, &buf, &capacity, "SET i5 0 1", false)
-	dirty_step(t, &prog, &buf, &capacity, "INCRBY i5 0 0", true)
-	dirty_step(t, &prog, &buf, &capacity, "INCRBY i5 0 32", true)
+	dirty_step(t, &prog, &buf, &capacity, "INCRBY i5 0 0", false)
+	dirty_step(t, &prog, &buf, &capacity, "INCRBY i5 0 32", false)
 	testing.expect_value(t, prog.replies[0].value, 1)
 	dirty_step(t, &prog, &buf, &capacity, "OVERFLOW FAIL INCRBY i5 0 100", false)
 	testing.expect_value(t, prog.replies[0].null, true)

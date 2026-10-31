@@ -244,6 +244,7 @@ reply_bitfield :: proc(c: ^Conn, prog: ^bm.Bitfield_Program) {
 
 @(private = "file")
 bitfield_generic :: proc(c: ^Conn, argv: [][]u8, read_only_command: bool) {
+	pst.dirty_explicit = true
 	limit := bitmap_bulk_limit()
 	err := bm.bitfield_parse(&bitfield_prog, argv[2:], read_only_command, limit)
 	if err != .None {
@@ -289,6 +290,7 @@ bitfield_generic :: proc(c: ^Conn, argv: [][]u8, read_only_command: bool) {
 		bitmap_write_failed(c, key, created, err)
 		return
 	}
+	pst.dirty += i64(changes)
 	if changes > 0 {
 		signal_key(key)
 		notify(.String, "setbit", key)

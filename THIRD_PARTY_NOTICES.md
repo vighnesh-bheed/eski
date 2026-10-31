@@ -30,7 +30,7 @@ DEALINGS IN THE SOFTWARE.
 
 src/hdr/hdr.odin, the hdr package, is a port to Odin of HdrHistogram_c by Gil Tene, Michael Barker and Matt Warren, as bundled with Valkey under deps/hdr_histogram. Its authors released it to the public domain under the Creative Commons CC0 1.0 Universal dedication, http://creativecommons.org/publicdomain/zero/1.0/, and also offer it under the BSD 2-Clause License; Eski uses it under the public domain dedication. The ported functions are hdr_calculate_bucket_config, hdr_init and hdr_init_preallocated as calculate_bucket_config and init, hdr_close, hdr_reset, hdr_get_memory_size as memory_size, hdr_record_value and hdr_record_values with counts_inc_normalised and update_min_max, counts_index_for with bucket_index_of from get_bucket_index, sub_bucket_index_of from get_sub_bucket_index, counts_index and value_from_index, count_leading_zeros_64 as count_leading_zeros, hdr_value_at_index, hdr_size_of_equivalent_value_range, size_of_equivalent_value_range_given_bucket_indices as size_of_range_given_indices, lowest_equivalent_value, hdr_next_non_equivalent_value, highest_equivalent_value, buckets_needed_to_cover_value, hdr_max as max_value, hdr_min as min_value, hdr_value_at_percentile with get_value_from_idx_up_to_count, hdr_count_at_index, hdr_iter_init, move_next, next_value_greater_than_reporting_level_upper_bound, hdr_iter_log_init, log_iter_next and hdr_iter_next, from deps/hdr_histogram/hdr_histogram.c.
 
-src/rdb/lzf.odin is a port to Odin of liblzf by Marc Alexander Lehmann, API version 1.5, as Valkey 8.1 bundles it in src/lzf_c.c, src/lzf_d.c and src/lzfP.h. lzf_compress comes from lzf_compress in src/lzf_c.c in the configuration src/lzfP.h selects, with HLOG 16 and VERY_FAST, and Eski keeps one hash table between calls and invalidates its slots through a base offset instead of clearing it; lzf_decompress comes from lzf_decompress in src/lzf_d.c with input checking and without errno. src/lzf_c.c and src/lzf_d.c carry the notice below and src/lzfP.h the same notice dated 2000-2007. The files may alternatively be used under the GNU General Public License version 2 or later; Eski uses them under the following terms.
+src/rdb/lzf.odin is a port to Odin of liblzf by Marc Alexander Lehmann, API version 1.5, as Valkey 8.1 bundles it in src/lzf_c.c, src/lzf_d.c and src/lzfP.h. lzf_compress_with_context comes from lzf_compress in src/lzf_c.c in the configuration src/lzfP.h selects, with HLOG 16 and VERY_FAST. Each Writer owns and reuses one compression context, invalidating its hash slots through a base offset instead of clearing them; the lzf_compress convenience wrapper owns and frees a private context per call; lzf_decompress comes from lzf_decompress in src/lzf_d.c with input checking and without errno. src/lzf_c.c and src/lzf_d.c carry the notice below and src/lzfP.h the same notice dated 2000-2007. The files may alternatively be used under the GNU General Public License version 2 or later; Eski uses them under the following terms.
 
 Copyright (c) 2000-2010 Marc Alexander Lehmann <schmorp@schmorp.de>
 
@@ -742,9 +742,9 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
-## Lua 5.5.1
+## Lua 5.5.1 from the preceding implementation
 
-Eski embeds upstream Lua 5.5.1 from https://www.lua.org/ftp/lua-5.5.1.tar.gz, SHA-256 `1c4b4068d67061f2a2231ad2b5422e77acea1487ea9890f6320af614f4373dce`, with the official fixes recorded in `third_party/lua/manifest.json`. The vendored source, original archive, official patch material and source checksums are retained under `third_party/lua`. The original C protection shim, RESP bridge and helper implementations are Eski code; no Redis implementation code is included. The following notice is reproduced from this release's `src/lua.h`.
+The preceding Eski implementation embedded upstream Lua 5.5.1 from https://www.lua.org/ftp/lua-5.5.1.tar.gz, SHA-256 `1c4b4068d67061f2a2231ad2b5422e77acea1487ea9890f6320af614f4373dce`, with the official fixes retained in that implementation's history. The current runtime is the Lua 5.1 distribution documented below; this notice is retained for the preceding implementation. The original C protection shim, RESP bridge and helper implementations are Eski code; no Redis implementation code is included. The following notice is reproduced from this release's `src/lua.h`.
 
 ```text
 Copyright (C) 1994-2026 Lua.org, PUC-Rio.
@@ -768,3 +768,573 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
 TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
+
+## Lua5.1.5
+
+Lua License
+-----------
+
+Lua is licensed under the terms of the MIT license reproduced below.
+This means that Lua is free software and can be used for both academic
+and commercial purposes at absolutely no cost.
+
+For details and rationale, see http://www.lua.org/license.html .
+
+===============================================================================
+
+Copyright (C) 1994-2012 Lua.org, PUC-Rio.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+===============================================================================
+
+(end of COPYRIGHT)
+
+## Valkey8.1 modifications
+
+# License 1
+
+SPDX-License-Identifier: BSD-3-Clause
+
+BSD 3-Clause License
+
+Copyright (c) 2024-present, Valkey contributors
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+
+    * Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+    * Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+# License 2
+
+BSD 3-Clause License
+
+Copyright (c) 2006-2020, Redis Ltd.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+
+    * Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+    * Neither the name of Redis nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+## lua_cjson.c
+
+/* Lua CJSON - JSON support for Lua
+ *
+ * Copyright (c) 2010-2012  Mark Pulford <mark@kyne.com.au>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be
+ * included in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+## fpconv.c
+
+/* fpconv - Floating point conversion routines
+ *
+ * Copyright (c) 2011-2012  Mark Pulford <mark@kyne.com.au>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be
+ * included in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+## lua_bit.c
+
+/*
+** Lua BitOp -- a bit operations library for Lua 5.1/5.2.
+** http://bitop.luajit.org/
+**
+** Copyright (C) 2008-2012 Mike Pall. All rights reserved.
+**
+** Permission is hereby granted, free of charge, to any person obtaining
+** a copy of this software and associated documentation files (the
+** "Software"), to deal in the Software without restriction, including
+** without limitation the rights to use, copy, modify, merge, publish,
+** distribute, sublicense, and/or sell copies of the Software, and to
+** permit persons to whom the Software is furnished to do so, subject to
+** the following conditions:
+**
+** The above copyright notice and this permission notice shall be
+** included in all copies or substantial portions of the Software.
+**
+** THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+** EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+** MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+** IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+** CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+** TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+** SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+**
+** [ MIT license: http://www.opensource.org/licenses/mit-license.php ]
+*/
+
+## lua_cmsgpack.c
+
+/******************************************************************************
+* Copyright (C) 2012 Redis Ltd.  All rights reserved.
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+******************************************************************************/
+
+## lua_struct.c
+
+/******************************************************************************
+* Copyright (C) 2010-2018 Lua.org, PUC-Rio.  All rights reserved.
+*
+* Permission is hereby granted, free of charge, to any person obtaining
+* a copy of this software and associated documentation files (the
+* "Software"), to deal in the Software without restriction, including
+* without limitation the rights to use, copy, modify, merge, publish,
+* distribute, sublicense, and/or sell copies of the Software, and to
+* permit persons to whom the Software is furnished to do so, subject to
+* the following conditions:
+*
+* The above copyright notice and this permission notice shall be
+* included in all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+******************************************************************************/
+
+
+## LOLWUT art and canvas routines
+
+`src/cmd_lolwut.odin` adapts Valkey 8.1.10 (BSD-3-Clause), tag `8.1.10`, files `src/lolwut.c`, `src/lolwut5.c` and `src/lolwut6.c` from https://github.com/valkey-io/valkey/tree/8.1.10/src. The consulted file hashes (SHA-256) are respectively `b018789147fdfe6bca9753a9a892cc5b756c98c4ba0f10372876eccb3583ace0`, `57c610e25b0a47ab87fc9b4640f13448411070ebd808e462b4b339567cd1253d`, and `f1e36975afc0d60bc6cf8c8a3b9f4cdd23f3d9bbcece92679ee2627031a1b228`.
+
+The adapted functions are: lolwut_canvas/lolwut_pixel/lolwut_get/lolwut_line/lolwut_square from lwCreateCanvas/lwDrawPixel/lwGetPixel/lwDrawLine/lwDrawSquare; lolwut_schotter/lolwut_braille from lwDrawSchotter/lwTranslatePixelsGroup/renderCanvas; lolwut_building/lolwut_skyline/lolwut_gray from generateSkyscraper/generateSkyline/renderCanvas; and cmd_lolwut from lolwutCommand/lolwutUnstableCommand/lolwut5Command/lolwut6Command. The Odin port uses Eski allocation/reply helpers and its RNG.
+
+The 2019 skyline original thanks Michele Hiki Falcone for the Plaguemon image and the Shhh computer art collective for artistic tuning.
+
+```text
+Copyright (c) 2018, Redis Ltd.
+Copyright (c) 2019, Redis Ltd.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+  * Redistributions of source code must retain the above copyright notice,
+    this list of conditions and the following disclaimer.
+  * Redistributions in binary form must reproduce the above copyright
+    notice, this list of conditions and the following disclaimer in the
+    documentation and/or other materials provided with the distribution.
+  * Neither the name of Redis nor the names of its contributors may be used
+    to endorse or promote products derived from this software without
+    specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+```
+
+## OpenSSL 3 transport
+
+The original Odin adapter in `src/transport_tls.odin` dynamically links OpenSSL 3 `libssl` and `libcrypto` through their published C APIs. No OpenSSL implementation source is incorporated in this adapter. Project: https://www.openssl.org/ . OpenSSL 3 is licensed under the Apache License 2.0. Native development used the system OpenSSL 3.5.5; the pinned Ubuntu 24.04 container uses package `libssl3t64` version `3.0.13-0ubuntu3.16`, with its shared libraries and complete distribution copyright file copied from the build stage. API references: https://docs.openssl.org/3.5/man3/SSL_accept/ , https://docs.openssl.org/3.5/man3/SSL_read/ and https://docs.openssl.org/3.5/man3/SSL_write/ .
+
+Copyright (c) The OpenSSL Project Authors. All Rights Reserved. The complete package copyright and contributor notices are distributed as `/usr/share/doc/eski/OPENSSL-COPYRIGHT` in the container. The Apache License 2.0 text follows.
+
+```text
+
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
+
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
+
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, "submitted"
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as "Not a Contribution."
+
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
+
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
+
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
+
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
+
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
+
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
+
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
+
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
+
+   END OF TERMS AND CONDITIONS
+
+   APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets "[]"
+      replaced with your own identifying information. (Don't include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same "printed page" as the copyright notice for easier
+      identification within third-party archives.
+
+   Copyright [yyyy] [name of copyright owner]
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+
+```
+
+## Native diagnostic unwinding
+
+The original diagnostic adapter uses the published local, signal-frame API of libunwind, https://www.nongnu.org/libunwind/ . The implementation source of libunwind is not vendored. Native builds dynamically link the installed system library. The pinned Ubuntu container uses libunwind8 1.6.2-3build1.1 under the Expat (MIT) license, with complete package notices at `/usr/share/doc/eski/LIBUNWIND-COPYRIGHT`. That library also links the container's liblzma5 5.6.1+really5.4.5-1ubuntu0.3. Its distribution copyright identifies the upstream liblzma code as public domain; the complete, file-specific package terms are retained at `/usr/share/doc/eski/LIBLZMA-COPYRIGHT`. Other installed versions can carry different notices. Distribution packaging and other base-image programs retain their own licenses.
+
+The libunwind package copyright notice follows, including its separate packaging terms.
+
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: libunwind
+Upstream-Contact: David Mosberger <davidm@hpl.hp.com>
+Source: http://www.nongnu.org/libunwind
+
+Files: *
+Copyright: 2001-2005 Hewlett-Packard Co.
+           2007 David Mosberger-Tang
+License: Expat
+
+Files: src/arm/*
+Copyright: 2008 CodeSourcery
+License: Expat
+
+Files: src/mi/strerror.c
+Copyright: 2004 BEA Systems
+License: Expat
+
+Files: src/mips/*
+Copyright: 2008 CodeSourcery
+License: Expat
+
+Files: src/os-freebsd.c src/x86/*-freebsd.*
+Copyright: 2010 Konstantin Belousov <kib@freebsd.org>
+License: Expat
+
+Files: src/ppc*/*
+Copyright: 2006-2007 IBM
+License: Expat
+
+Files: src/ptrace/_UPT_access_*
+Copyright: 2003-2005 Hewlett-Packard Co
+           2010 Konstantin Belousov <kib@freebsd.org>
+License: Expat
+
+Files: src/unwind/GetIPInfo.c
+Copyright: 2009 Red Hat
+License: Expat
+
+Files: src/x86/getcontext-linux.S
+Copyright: 2009 Google, Inc
+License: Expat
+
+Files: src/x86_64/Gstash_frame.c src/x86_64/Gtrace.c
+Copyright: 2010, 2011 by FERMI NATIONAL ACCELERATOR LABORATORY
+License: Expat
+
+Files: src/x86_64/*context.S
+Copyright: 2008 Google, Inc
+           2010 Konstantin Belousov <kib@freebsd.org>
+License: Expat
+
+Files: tests/Gtest-nocalloc.c tests/Gtest-nomalloc.c
+Copyright: 2009, 2011 Google, Inc
+License: Expat
+
+Files: tests/Gtest-trace.c
+Copyright: 2010, 2011 by FERMI NATIONAL ACCELERATOR LABORATORY
+License: Expat
+
+Files: tests/Ltest-cxx-exceptions.cxx
+Copyright: 2010 stefan.demharter@gmx.net
+           2010 arun.sharma@google.com
+License: Expat
+
+Files: debian/*
+Copyright: Copyright 2003 Matthieu Delahaye <matthieu@debian.org>
+           Copyright 2012 Daigo Moriwaki <daigo@debian.org>
+License: GPL-2+
+ This program is free software; you can redistribute it
+ and/or modify it under the terms of the GNU General Public
+ License as published by the Free Software Foundation; either
+ version 2 of the License, or (at your option) any later
+ version.
+ .
+ This program is distributed in the hope that it will be
+ useful, but WITHOUT ANY WARRANTY; without even the implied
+ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+ PURPOSE.  See the GNU General Public License for more
+ details.
+ .
+ You should have received a copy of the GNU General Public
+ License along with this package; if not, write to the Free
+ Software Foundation, Inc., 51 Franklin St, Fifth Floor,
+ Boston, MA  02110-1301 USA
+ .
+ On Debian systems, the full text of the GNU General Public
+ License version 2 can be found in the file
+ `/usr/share/common-licenses/GPL-2'.
+
+License: Expat
+ Permission is hereby granted, free of charge, to any person obtaining
+ a copy of this software and associated documentation files (the
+ "Software"), to deal in the Software without restriction, including
+ without limitation the rights to use, copy, modify, merge, publish,
+ distribute, sublicense, and/or sell copies of the Software, and to
+ permit persons to whom the Software is furnished to do so, subject to
+ the following conditions:
+ .
+ The above copyright notice and this permission notice shall be
+ included in all copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+ LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

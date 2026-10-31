@@ -47,7 +47,7 @@ manifest_parse_and_write_round_trip :: proc(t: ^testing.T) {
 @(test)
 manifest_grammar_variants :: proc(t: ^testing.T) {
 	context.allocator = runtime.heap_allocator()
-	loose := "# comment line\r\n\n  type i   seq 2  file appendonly.aof.2.incr.aof\r\nfile \"spaced name.aof\" seq 5 type b\n"
+	loose := "# comment line\r\n  type i   seq 2  file appendonly.aof.2.incr.aof\r\nfile \"spaced name.aof\" seq 5 type b\n"
 	m: j.Aof_Manifest
 	ok, reason := j.aof_manifest_parse(transmute([]u8)loose, &m)
 	testing.expect(t, ok, reason)
@@ -69,6 +69,8 @@ manifest_grammar_variants :: proc(t: ^testing.T) {
 		reason: string,
 	}
 	bads := []Bad {
+		{"\n", "Invalid AOF manifest file format"},
+		{"file a seq 1 type i\n \t\n", "Invalid AOF manifest file format"},
 		{"file a seq 1 type b\nfile b seq 2 type b\n", "Found duplicate base file information"},
 		{"file a seq 2 type i\nfile b seq 2 type i\n", "Found a non-monotonic sequence number"},
 		{"file a seq 1 type x\n", "Unknown AOF file type"},

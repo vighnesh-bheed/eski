@@ -1,6 +1,7 @@
 package main
 
 import "core:slice"
+import "core:sys/linux"
 
 Track_Flag :: enum u8 {
 	On,
@@ -15,6 +16,45 @@ Track_Flag :: enum u8 {
 Track_Flags :: bit_set[Track_Flag;u8]
 
 tracking_on: bool
+
+Tracking_Eviction_Target :: struct {
+    fd: linux.Fd,
+    id: i64,
+    priorcap: int,
+}
+
+tracking_eviction_targets: [dynamic]Tracking_Eviction_Target
+tracking_eviction_epoch: u64
+tracking_eviction_active: bool
+
+tracking_eviction_begin :: proc() -> bool {
+    if !tracking_on || tracking_eviction_active || lua_active != nil || tx_exec_conn != nil || aof.loading { return false }
+    tracking_eviction_epoch += 1
+    tracking_eviction_active = true
+    return true
+}
+
+tracking_eviction_capture :: proc(t: ^Conn) {
+    if !tracking_eviction_active || t == ps_exec || t.fd < 0 || t.eviction_delivery_epoch == tracking_eviction_epoch { return }
+    t.eviction_delivery_epoch = tracking_eviction_epoch
+    append(&tracking_eviction_targets, Tracking_Eviction_Target{t.fd, t.id, max(1024, t.wcap)})
+}
+
+tracking_eviction_end :: proc() {
+    tracking_eviction_active = false
+    for target in tracking_eviction_targets {
+        if int(target.fd) >= len(srv.conns) { continue }
+        t := srv.conns[target.fd]
+        if t == nil || t.id != target.id || t == ps_exec || t.lua_debug_detached || .Close_Asap in t.ps { continue }
+        if !conn_flush(t) { continue }
+        t = srv.conns[target.fd]
+        if t == nil || t.id != target.id { continue }
+        if reply_buffer_resizing && t.wlen == 0 { conn_write_resize(t, target.priorcap) }
+    }
+    delete(tracking_eviction_targets)
+    tracking_eviction_targets = nil
+}
+
 
 tracking_clients: int
 
@@ -95,6 +135,7 @@ Trk_Batch_Key :: struct {
 
 @(private = "file")
 Trk_Prefix :: struct {
+	batch_bytes: int,
 	prefix:  []u8,
 	clients: [dynamic]^Conn,
 	seen:    map[string]int,
@@ -129,6 +170,9 @@ trk_bcast_index: map[string]^Trk_Prefix
 
 @(private = "file")
 trk_bcast_lens: [dynamic]int
+
+trk_bcast_lens_count: map[int]int
+trk_entry_bytes: int
 
 @(private = "file")
 trk_bcast_dirty: bool
@@ -222,6 +266,7 @@ trk_update :: proc() {
 	tracking_on = tracking_clients > 0
 	if !tracking_on {
 		trk_table_reset()
+		tracking_release_idle()
 	}
 	key_hooks_update()
 	hooks_update()
@@ -229,6 +274,7 @@ trk_update :: proc() {
 
 @(private = "file")
 trk_free_entry :: proc(e: ^Trk_Entry) {
+	trk_entry_bytes -= size_of(Trk_Entry) + len(e.key) + cap(e.ids) * size_of(i64)
 	delete(e.key)
 	delete(e.ids)
 	free(e)
@@ -260,6 +306,7 @@ trk_remember :: proc(id: i64, key: []u8) {
 	if !found {
 		e = new(Trk_Entry)
 		e.key = trk_clone(key)
+		trk_entry_bytes += size_of(Trk_Entry) + len(e.key)
 		e.slot = len(trk_dense)
 		append(&trk_dense, e)
 		trk_table[string(e.key)] = e
@@ -276,7 +323,9 @@ trk_remember :: proc(id: i64, key: []u8) {
 	if lo < len(e.ids) && e.ids[lo] == id {
 		return
 	}
+	old_capacity := cap(e.ids)
 	inject_at(&e.ids, lo, id)
+	trk_entry_bytes += (cap(e.ids) - old_capacity) * size_of(i64)
 	trk_items += 1
 }
 
@@ -322,6 +371,7 @@ trk_drain_deferred :: proc(final: bool, keep: ^Conn = nil) {
 
 @(private = "file")
 trk_write :: proc(t: ^Conn, frame: []u8, hold := false) {
+	tracking_eviction_capture(t)
 	if t == ps_exec || (ps_exec == nil && t.ps & {.Subscribed, .Tracking} == {}) {
 		off := len(trk_deferred_bytes)
 		append(&trk_deferred_bytes, ..frame)
@@ -394,28 +444,24 @@ trk_find_bcast :: proc(p: []u8) -> (idx: int, found: bool) {
 }
 
 @(private = "file")
-trk_rebuild_lens :: proc() {
-	clear(&trk_bcast_lens)
-	for bs in trk_prefixes {
-		n := len(bs.prefix)
-		i := 0
-		for i < len(trk_bcast_lens) && trk_bcast_lens[i] < n {
-			i += 1
-		}
-		if i < len(trk_bcast_lens) && trk_bcast_lens[i] == n {
-			continue
-		}
-		inject_at(&trk_bcast_lens, i, n)
-	}
+trk_lens_change :: proc(n, change: int) {
+	count := trk_bcast_lens_count[n] + change
+	if count == 0 { delete_key(&trk_bcast_lens_count, n) } else { trk_bcast_lens_count[n] = count }
+	at := 0
+	for at < len(trk_bcast_lens) && trk_bcast_lens[at] < n { at += 1 }
+	if count == 0 { ordered_remove(&trk_bcast_lens, at) } else if count == change { inject_at(&trk_bcast_lens, at, n) }
 }
 
 @(private = "file")
 trk_batch_reset :: proc(bs: ^Trk_Prefix) {
+	trk_metadata_adjust(bs, -1)
 	for k in bs.batch {
 		delete(k.key)
 	}
 	clear(&bs.batch)
 	clear(&bs.seen)
+	bs.batch_bytes = 0
+	trk_metadata_adjust(bs, 1)
 }
 
 @(private = "file")
@@ -427,9 +473,9 @@ trk_free_bcast :: proc(idx: int) {
 	delete(bs.batch)
 	delete(bs.seen)
 	delete(bs.clients)
+	trk_lens_change(len(bs.prefix), -1)
 	delete(bs.prefix)
 	free(bs)
-	trk_rebuild_lens()
 }
 
 @(private = "file")
@@ -443,19 +489,19 @@ trk_enable_prefix :: proc(c: ^Conn, st: ^Ps_State, p: []u8) {
 		bs.prefix = trk_clone(p)
 		inject_at(&trk_prefixes, idx, bs)
 		trk_bcast_index[string(bs.prefix)] = bs
-		trk_rebuild_lens()
+		trk_lens_change(len(p), 1)
 	}
 	for x in bs.clients {
 		if x == c {
 			return
 		}
 	}
+	trk_metadata_adjust(bs, -1)
 	append(&bs.clients, c)
-	at := 0
-	for at < len(st.trk_prefixes) && string(st.trk_prefixes[at]) < string(bs.prefix) {
-		at += 1
-	}
+	at := trk_client_prefix_at(st, bs.prefix)
 	inject_at(&st.trk_prefixes, at, bs.prefix)
+	trk_metadata_adjust(bs, 1)
+	client_metadata_sync(c)
 }
 
 @(private = "file")
@@ -478,9 +524,12 @@ trk_remember_broadcast :: proc(key: []u8, by: ^Conn) {
 			}
 			continue
 		}
+		trk_metadata_adjust(bs, -1)
 		k := string(trk_clone(key))
 		bs.seen[k] = len(bs.batch)
 		append(&bs.batch, Trk_Batch_Key{k, by_id})
+		bs.batch_bytes += len(k)
+		trk_metadata_adjust(bs, 1)
 		trk_bcast_dirty = true
 	}
 }
@@ -572,17 +621,20 @@ tracking_disable :: proc(c: ^Conn) {
 			continue
 		}
 		bs := trk_prefixes[idx]
+		trk_metadata_adjust(bs, -1)
 		for x, i in bs.clients {
 			if x == c {
 				ordered_remove(&bs.clients, i)
 				break
 			}
 		}
+		trk_metadata_adjust(bs, 1)
 		if len(bs.clients) == 0 {
 			trk_free_bcast(idx)
 		}
 	}
 	clear(&st.trk_prefixes)
+	client_metadata_sync(c)
 	st.trk = {}
 	st.trk_redirect = 0
 	c.ps -= {.Tracking}
@@ -616,11 +668,14 @@ trk_check_overlaps :: proc(c: ^Conn, prefixes: [][]u8) -> bool {
 	st := c.pubsub
 	for p, i in prefixes {
 		if st != nil {
-			for q in st.trk_prefixes {
-				if trk_prefix_overlap(p, q) {
-					trk_reply_overlap(c, p, q, true)
-					return false
-				}
+			if len(st.trk_prefixes) > 0 && len(st.trk_prefixes[0]) == 0 {
+				trk_reply_overlap(c, p, st.trk_prefixes[0], true)
+				return false
+			}
+			at := trk_client_prefix_at(st, p)
+			for index in max(0, at - 1)..<min(len(st.trk_prefixes), at + 1) {
+				q := st.trk_prefixes[index]
+				if trk_prefix_overlap(p, q) { trk_reply_overlap(c, p, q, true); return false }
 			}
 		}
 		for k in i + 1 ..< len(prefixes) {
@@ -965,4 +1020,33 @@ tracking_info_stats :: proc(b: ^[dynamic]u8) {
 	info_line_int(b, "tracking_total_keys", i64(len(trk_table)))
 	info_line_int(b, "tracking_total_items", i64(trk_items))
 	info_line_int(b, "tracking_total_prefixes", i64(len(trk_prefixes)))
+}
+
+tracking_registry_memory :: proc "contextless" () -> int {
+	return cap(tracking_eviction_targets) * size_of(Tracking_Eviction_Target) + trk_entry_bytes + client_map_memory(trk_table) + client_map_memory(trk_conns) + client_map_memory(trk_bcast_index) + client_map_memory(trk_bcast_lens_count) + client_map_memory(trk_redirects) + cap(trk_dense) * size_of(^Trk_Entry) + cap(trk_prefixes) * size_of(^Trk_Prefix) + cap(trk_bcast_lens) * size_of(int) + cap(trk_deferred) * size_of(Trk_Deferred) + cap(trk_deferred_bytes) + cap(trk_keys) * size_of(int) + cap(trk_payload) + cap(trk_payload_own) + cap(trk_frame) + cap(trk_parsed) * size_of([]u8) + cap(trk_targets) * size_of(^Conn) + cap(trk_error)
+}
+
+trk_client_prefix_at :: proc(st: ^Ps_State, p: []u8) -> int {
+	lo, hi := 0, len(st.trk_prefixes)
+	for lo < hi { mid := (lo + hi) / 2; if string(st.trk_prefixes[mid]) < string(p) { lo = mid + 1 } else { hi = mid } }
+	return lo
+}
+
+trk_metadata_adjust :: proc(bs: ^Trk_Prefix, sign: int) {
+	if len(bs.clients) == 0 { return }
+	c := bs.clients[0]
+	c.pubsub.metadata_shared += sign * (size_of(Trk_Prefix) + len(bs.prefix) + cap(bs.clients) * size_of(^Conn) + cap(bs.batch) * size_of(Trk_Batch_Key) + bs.batch_bytes + client_map_memory(bs.seen))
+	client_metadata_sync(c)
+}
+
+tracking_release_idle :: proc() {
+	if tracking_clients != 0 || len(trk_prefixes) != 0 { return }
+	delete(trk_table); trk_table = nil
+	delete(trk_dense); trk_dense = nil
+	delete(trk_conns); trk_conns = nil
+	delete(trk_prefixes); trk_prefixes = nil
+	delete(trk_bcast_index); trk_bcast_index = nil
+	delete(trk_bcast_lens); trk_bcast_lens = nil
+	delete(trk_bcast_lens_count); trk_bcast_lens_count = nil
+	delete(trk_parsed); trk_parsed = nil
 }

@@ -35,28 +35,11 @@
       "type/zset"
     ]
   },
-  "failing_tests": [
-    "expire::RANDOMKEY: Lazy-expire should not be wrapped in MULTI/EXEC",
-    "expire::SCAN: Lazy-expire should not be wrapped in MULTI/EXEC",
-    "info::memory: database and pubsub overhead and rehashing dict count",
-    "introspection-2::COMMAND LIST FILTERBY PATTERN - list all commands/subcommands",
-    "other::Coverage: HELP commands",
-    "pause::Test RO scripts are not blocked by pause RO",
-    "pause::Test both active and passive expires are skipped during client pause",
-    "pause::Test may-replicate commands are rejected in RO scripts",
-    "pause::Test the randomkey command will not cause the server to get into an infinite loop during the client pause write",
-    "querybuf::query buffer resized correctly",
-    "querybuf::query buffer resized correctly when not idle",
-    "querybuf::query buffer resized correctly with fat argv",
-    "sort::SORT sorted set BY nosort works as expected from scripts",
-    "type/list::BLPOP/BLMOVE should increase dirty",
-    "type/list::MULTI + LPUSH + EXPIRE + DEBUG SLEEP on blocked client, key already expired",
-    "type/list::SWAPDB wants to wake blocked client, but the key already expired"
-  ],
-  "generated_at": "2026-10-30T21:11:48Z",
+  "failing_tests": [],
+  "generated_at": "2026-10-31T05:00:39Z",
   "schema": "eski-docs-conformance-v1",
   "source_mode": "baseline",
-  "source_summary_sha256": "759182ac6d1882772ad9ec1b02201ee41a24cbb88f1473f67df30b1b4e946720",
+  "source_summary_sha256": "0245d2a9a33330a50b50f52251e20ba9b28f3da45ed278467c30c7212c320e64",
   "suite": {
     "external_skip_lifted": "tests/unit/type/hash-field-expire.tcl:59,886,998 tests/unit/maxmemory.tcl:1,146,430,593 tests/unit/memefficiency.tcl:27 tests/unit/info.tcl:26,503 tests/unit/acl.tcl:1 tests/unit/acl-v2.tcl:1 tests/unit/auth.tcl:1,13",
     "name": "redis",
@@ -67,9 +50,9 @@
   },
   "totals": {
     "errored": 0,
-    "failed": 16,
-    "passed": 2051,
-    "skipped": 151,
+    "failed": 0,
+    "passed": 2082,
+    "skipped": 137,
     "units_run": 43
   },
   "units": {
@@ -77,8 +60,8 @@
       "errored": 0,
       "failed": 0,
       "failures": [],
-      "passed": 85,
-      "skipped": 9
+      "passed": 87,
+      "skipped": 7
     },
     "acl-v2": {
       "errored": 0,
@@ -91,8 +74,8 @@
       "errored": 0,
       "failed": 0,
       "failures": [],
-      "passed": 7,
-      "skipped": 2
+      "passed": 8,
+      "skipped": 1
     },
     "bitfield": {
       "errored": 0,
@@ -117,21 +100,10 @@
     },
     "expire": {
       "errored": 0,
-      "failed": 2,
-      "failures": [
-        {
-          "category": "excluded feature",
-          "reason": "The test observes a replication stream; replication is outside the single-node scope.",
-          "test": "SCAN: Lazy-expire should not be wrapped in MULTI/EXEC"
-        },
-        {
-          "category": "excluded feature",
-          "reason": "The test observes a replication stream; replication is outside the single-node scope.",
-          "test": "RANDOMKEY: Lazy-expire should not be wrapped in MULTI/EXEC"
-        }
-      ],
+      "failed": 0,
+      "failures": [],
       "passed": 62,
-      "skipped": 6
+      "skipped": 8
     },
     "geo": {
       "errored": 0,
@@ -149,16 +121,10 @@
     },
     "info": {
       "errored": 0,
-      "failed": 1,
-      "failures": [
-        {
-          "category": "compatibility gap",
-          "reason": "The test assumes reference hash-table allocation sizes; Eski uses a different keyspace representation.",
-          "test": "memory: database and pubsub overhead and rehashing dict count"
-        }
-      ],
-      "passed": 21,
-      "skipped": 4
+      "failed": 0,
+      "failures": [],
+      "passed": 24,
+      "skipped": 2
     },
     "info-command": {
       "errored": 0,
@@ -171,21 +137,15 @@
       "errored": 0,
       "failed": 0,
       "failures": [],
-      "passed": 34,
-      "skipped": 18
+      "passed": 36,
+      "skipped": 16
     },
     "introspection-2": {
       "errored": 0,
-      "failed": 1,
-      "failures": [
-        {
-          "category": "compatibility gap",
-          "reason": "The recorded command inventory differs; inspect the named assertion and the remaining function/cluster exclusions.",
-          "test": "COMMAND LIST FILTERBY PATTERN - list all commands/subcommands"
-        }
-      ],
-      "passed": 41,
-      "skipped": 5
+      "failed": 0,
+      "failures": [],
+      "passed": 46,
+      "skipped": 1
     },
     "keyspace": {
       "errored": 0,
@@ -198,8 +158,8 @@
       "errored": 0,
       "failed": 0,
       "failures": [],
-      "passed": 14,
-      "skipped": 1
+      "passed": 16,
+      "skipped": 0
     },
     "lazyfree": {
       "errored": 0,
@@ -233,8 +193,8 @@
       "errored": 0,
       "failed": 0,
       "failures": [],
-      "passed": 42,
-      "skipped": 21
+      "passed": 46,
+      "skipped": 17
     },
     "networking": {
       "errored": 0,
@@ -245,43 +205,16 @@
     },
     "other": {
       "errored": 0,
-      "failed": 1,
-      "failures": [
-        {
-          "category": "excluded feature",
-          "reason": "The test asks for HELP on an excluded module command.",
-          "test": "Coverage: HELP commands"
-        }
-      ],
+      "failed": 0,
+      "failures": [],
       "passed": 24,
-      "skipped": 5
+      "skipped": 6
     },
     "pause": {
       "errored": 0,
-      "failed": 4,
-      "failures": [
-        {
-          "category": "excluded feature",
-          "reason": "The test requires executable function libraries, which are excluded.",
-          "test": "Test RO scripts are not blocked by pause RO"
-        },
-        {
-          "category": "compatibility gap",
-          "reason": "The test exercises Lua scripting; this recorded assertion remains a compatibility gap.",
-          "test": "Test may-replicate commands are rejected in RO scripts"
-        },
-        {
-          "category": "compatibility gap",
-          "reason": "The recorded pause/expiry behavior differs; this remains a compatibility gap.",
-          "test": "Test both active and passive expires are skipped during client pause"
-        },
-        {
-          "category": "compatibility gap",
-          "reason": "The recorded pause/expiry behavior differs; this remains a compatibility gap.",
-          "test": "Test the randomkey command will not cause the server to get into an infinite loop during the client pause write"
-        }
-      ],
-      "passed": 14,
+      "failed": 0,
+      "failures": [],
+      "passed": 18,
       "skipped": 1
     },
     "protocol": {
@@ -295,8 +228,8 @@
       "errored": 0,
       "failed": 0,
       "failures": [],
-      "passed": 46,
-      "skipped": 1
+      "passed": 47,
+      "skipped": 0
     },
     "pubsubshard": {
       "errored": 0,
@@ -307,25 +240,9 @@
     },
     "querybuf": {
       "errored": 0,
-      "failed": 3,
-      "failures": [
-        {
-          "category": "compatibility gap",
-          "reason": "The test assumes reference query-buffer allocation and resize behavior; Eski uses its own buffer policy.",
-          "test": "query buffer resized correctly"
-        },
-        {
-          "category": "compatibility gap",
-          "reason": "The test assumes reference query-buffer allocation and resize behavior; Eski uses its own buffer policy.",
-          "test": "query buffer resized correctly when not idle"
-        },
-        {
-          "category": "compatibility gap",
-          "reason": "The test assumes reference query-buffer allocation and resize behavior; Eski uses its own buffer policy.",
-          "test": "query buffer resized correctly with fat argv"
-        }
-      ],
-      "passed": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 3,
       "skipped": 0
     },
     "quit": {
@@ -351,23 +268,17 @@
     },
     "sort": {
       "errored": 0,
-      "failed": 1,
-      "failures": [
-        {
-          "category": "compatibility gap",
-          "reason": "The test exercises Lua scripting; this recorded assertion remains a compatibility gap.",
-          "test": "SORT sorted set BY nosort works as expected from scripts"
-        }
-      ],
-      "passed": 53,
+      "failed": 0,
+      "failures": [],
+      "passed": 54,
       "skipped": 1
     },
     "tracking": {
       "errored": 0,
       "failed": 0,
       "failures": [],
-      "passed": 56,
-      "skipped": 2
+      "passed": 58,
+      "skipped": 0
     },
     "type/hash": {
       "errored": 0,
@@ -392,26 +303,10 @@
     },
     "type/list": {
       "errored": 0,
-      "failed": 3,
-      "failures": [
-        {
-          "category": "excluded feature",
-          "reason": "The test observes a replication stream; replication is outside the single-node scope.",
-          "test": "SWAPDB wants to wake blocked client, but the key already expired"
-        },
-        {
-          "category": "excluded feature",
-          "reason": "The test observes a replication stream; replication is outside the single-node scope.",
-          "test": "MULTI + LPUSH + EXPIRE + DEBUG SLEEP on blocked client, key already expired"
-        },
-        {
-          "category": "compatibility gap",
-          "reason": "The blocking list operation increased the dirty counter by 3 instead of the expected 2; this remains a compatibility gap.",
-          "test": "BLPOP/BLMOVE should increase dirty"
-        }
-      ],
-      "passed": 280,
-      "skipped": 12
+      "failed": 0,
+      "failures": [],
+      "passed": 281,
+      "skipped": 14
     },
     "type/list-2": {
       "errored": 0,
