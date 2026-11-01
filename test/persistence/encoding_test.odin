@@ -70,7 +70,7 @@ length_encoding_rejections :: proc(t: ^testing.T) {
 		testing.expect_value(t, v, rdb.LENERR)
 		testing.expect_value(t, r.status, rdb.Status.Corrupt)
 		if b == 0x9B {
-			testing.expect_value(t, rdb.reader_reason(&r), "Unknown length encoding 155 in rdbLoadLen()")
+			testing.expect_value(t, rdb.reader_reason(&r), "Unknown length encoding 155 while reading a length")
 		}
 		rdb.reader_destroy(&r)
 		testing.expect(t, write_file(path, data))
@@ -80,7 +80,7 @@ length_encoding_rejections :: proc(t: ^testing.T) {
 		testing.expect_value(t, rdb.get_len(&r), rdb.LENERR)
 		testing.expect_value(t, r.status, rdb.Status.Corrupt)
 		if b == 0x82 {
-			testing.expect_value(t, rdb.reader_reason(&r), "Unknown length encoding 130 in rdbLoadLen()")
+			testing.expect_value(t, rdb.reader_reason(&r), "Unknown length encoding 130 while reading a length")
 		}
 		rdb.reader_destroy(&r)
 		linux.close(fd)

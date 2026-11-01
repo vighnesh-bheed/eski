@@ -1983,7 +1983,7 @@ acl_startup :: proc() {
 	acl_init()
 	acl_update_default_password(cfg.requirepass)
 	if cfg.aclfile != "" && len(acl_to_load) != 0 {
-		plog(LOG_WARNING, "Configuring Redis with users defined in redis.conf and at the same setting an ACL file path is invalid. This setup is very likely to lead to configuration errors and security holes, please define either an ACL file or declare users directly in your redis.conf, but not both.")
+		plog(LOG_WARNING, "Configuring Eski with users defined in the configuration file and at the same time an ACL file path is invalid. This setup is very likely to lead to configuration errors and security holes, please define either an ACL file or declare users directly in your configuration file, but not both.")
 		linux.exit_group(1)
 	}
 	for def in acl_to_load {
@@ -2014,7 +2014,7 @@ acl_startup :: proc() {
 	}
 	if cfg.aclfile != "" {
 		if errors := acl_load_file(nil); errors != "" {
-			plog(LOG_WARNING, "Aborting Redis startup because of ACL errors: ", errors)
+			plog(LOG_WARNING, "Aborting Eski startup because of ACL errors: ", errors)
 			linux.exit_group(1)
 		}
 	}

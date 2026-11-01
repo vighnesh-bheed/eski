@@ -28,9 +28,9 @@ FOR ANY DAMAGES OR OTHER LIABILITY, WHETHER IN CONTRACT, TORT OR OTHERWISE,
 ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
-src/hdr/hdr.odin, the hdr package, is a port to Odin of HdrHistogram_c by Gil Tene, Michael Barker and Matt Warren, as bundled with Valkey under deps/hdr_histogram. Its authors released it to the public domain under the Creative Commons CC0 1.0 Universal dedication, http://creativecommons.org/publicdomain/zero/1.0/, and also offer it under the BSD 2-Clause License; Eski uses it under the public domain dedication. The ported functions are hdr_calculate_bucket_config, hdr_init and hdr_init_preallocated as calculate_bucket_config and init, hdr_close, hdr_reset, hdr_get_memory_size as memory_size, hdr_record_value and hdr_record_values with counts_inc_normalised and update_min_max, counts_index_for with bucket_index_of from get_bucket_index, sub_bucket_index_of from get_sub_bucket_index, counts_index and value_from_index, count_leading_zeros_64 as count_leading_zeros, hdr_value_at_index, hdr_size_of_equivalent_value_range, size_of_equivalent_value_range_given_bucket_indices as size_of_range_given_indices, lowest_equivalent_value, hdr_next_non_equivalent_value, highest_equivalent_value, buckets_needed_to_cover_value, hdr_max as max_value, hdr_min as min_value, hdr_value_at_percentile with get_value_from_idx_up_to_count, hdr_count_at_index, hdr_iter_init, move_next, next_value_greater_than_reporting_level_upper_bound, hdr_iter_log_init, log_iter_next and hdr_iter_next, from deps/hdr_histogram/hdr_histogram.c.
+src/hdr/hdr.odin, the hdr package, is a port to Odin of HdrHistogram_c by Gil Tene, Michael Barker and Matt Warren, as bundled with Valkey under deps/hdr_histogram. Its authors released it to the public domain under the Creative Commons CC0 1.0 Universal dedication, http://creativecommons.org/publicdomain/zero/1.0/, and also offer it under the BSD 2-Clause License; Eski uses it under the public domain dedication. The ported functions come from deps/hdr_histogram/hdr_histogram.c. Each Eski procedure is named with the C function it comes from: calculate_bucket_config from hdr_calculate_bucket_config, init from hdr_init and hdr_init_preallocated, close from hdr_close, reset from hdr_reset, memory_size from hdr_get_memory_size, record_value from hdr_record_value, record_values from hdr_record_values with counts_inc_normalised and update_min_max, counts_index_for from counts_index_for, bucket_index_of from get_bucket_index, sub_bucket_index_of from get_sub_bucket_index, counts_index from counts_index, value_from_index from value_from_index, count_leading_zeros from count_leading_zeros_64, value_at_index from hdr_value_at_index, size_of_equivalent_value_range from hdr_size_of_equivalent_value_range, size_of_range_given_indices from size_of_equivalent_value_range_given_bucket_indices, lowest_equivalent_value from lowest_equivalent_value, next_non_equivalent_value from hdr_next_non_equivalent_value, highest_equivalent_value from highest_equivalent_value, buckets_needed_to_cover_value from buckets_needed_to_cover_value, max_value from hdr_max, min_value from hdr_min, value_from_idx_up_to_count from get_value_from_idx_up_to_count, value_at_percentile from hdr_value_at_percentile, count_at_index from hdr_count_at_index, iter_init from hdr_iter_init, move_next from move_next, next_value_greater_than_reporting_level_upper_bound from next_value_greater_than_reporting_level_upper_bound, iter_log_init from hdr_iter_log_init, log_iter_next from log_iter_next, and iter_next from hdr_iter_next.
 
-src/rdb/lzf.odin is a port to Odin of liblzf by Marc Alexander Lehmann, API version 1.5, as Valkey 8.1 bundles it in src/lzf_c.c, src/lzf_d.c and src/lzfP.h. lzf_compress_with_context comes from lzf_compress in src/lzf_c.c in the configuration src/lzfP.h selects, with HLOG 16 and VERY_FAST. Each Writer owns and reuses one compression context, invalidating its hash slots through a base offset instead of clearing them; the lzf_compress convenience wrapper owns and frees a private context per call; lzf_decompress comes from lzf_decompress in src/lzf_d.c with input checking and without errno. src/lzf_c.c and src/lzf_d.c carry the notice below and src/lzfP.h the same notice dated 2000-2007. The files may alternatively be used under the GNU General Public License version 2 or later; Eski uses them under the following terms.
+src/rdb/lzf.odin is a port to Odin of liblzf by Marc Alexander Lehmann, API version 1.5, as Valkey 8.1 bundles it in src/lzf_c.c, src/lzf_d.c and src/lzfP.h. lzf_compress_with_context comes from lzf_compress in src/lzf_c.c in the configuration src/lzfP.h selects, with HLOG 16 and VERY_FAST. Each Writer owns and reuses one compression context, invalidating its hash slots through a base offset instead of clearing them; the lzf_compress convenience wrapper owns and frees a private context per call; lzf_decompress comes from lzf_decompress in src/lzf_d.c with input checking and without errno. lzf_idx comes from the IDX hash macro of src/lzf_c.c in its VERY_FAST form. The Lzf_Context type and the procedures lzf_context_init, lzf_context_destroy and lzf_table are Eski's own helpers for that context, which holds the hash table that lzf_compress keeps as its LZF_STATE: they allocate, clear and free the table and advance the base offset, clearing the table only when the offset would overflow. src/lzf_c.c and src/lzf_d.c carry the notice below and src/lzfP.h the same notice dated 2000-2007. The files may alternatively be used under the GNU General Public License version 2 or later; Eski uses them under the following terms.
 
 Copyright (c) 2000-2010 Marc Alexander Lehmann <schmorp@schmorp.de>
 
@@ -140,13 +140,15 @@ src/store.odin: lru_idle_ms_of from estimateObjectIdleTime and lfu_value_of from
 
 src/config.odin: config_apply_maxmemory from updateMaxmemory and config_apply_maxmemory_clients from applyClientMaxMemoryUsage in src/config.c, and maxmemory_startup_warning from the maxmemory warning in main in src/server.c.
 
+src/config.odin: oom_score_read and oom_score_apply from setOOMScoreAdj in src/server.c, config_oom_child_apply from setOOMScoreAdj for the background child class as serverFork calls it in src/server.c, config_apply_oom_score from updateOOMScoreAdj in src/config.c, daemonize from daemonize in src/server.c, create_pid_file from createPidFile in src/server.c, remove_pid_file from the pid file removal of finishShutdown in src/server.c, and path_is_base_name from pathIsBaseName in src/util.c, which Eski changes to accept backslashes and to reject the names . and .. as well.
+
 src/config_table.odin: the parameter table of config_table_init, including the order of its entries, from static_configs, and the enumeration tables from the configEnum tables, in src/config.c, with names, aliases, defaults, bounds and flags adjusted to the reference by black box comparison.
 
 src/cmd_command.odin: reply_info and reply_info_flags from addReplyCommandInfo, addReplyFlagsForCommand and addReplyCommandFlags, reply_key_specs and reply_key_flags from addReplyCommandKeySpecs and addReplyFlagsForKeyArgs, reply_args from addReplyCommandArgList and addReplyFlagsForArg, reply_docs from addReplyCommandDocs, addReplyCommandHistory, addReplyDocFlagsForCommand and addReplyCommandSubCommands, spec_movable from populateCommandLegacyRangeSpec, lookup_by_name and lookup_by_argv from lookupCommandBySdsLogic, lookupCommandLogic and lookupSubcommand, command_list, list_walk and list_match from commandListCommand, commandListWithFilter, commandListWithoutFilter and shouldFilterFromCommandList, reply_all_info, command_info, command_docs, command_count and command_help_lines from commandCommand, commandInfoCommand, commandDocsCommand, commandCountCommand and commandHelpCommand, and the unknown subcommand path from processCommand in src/server.c; acl_names, the category replies and acl_cat_by_name from ACLDefaultCommandCategories, addReplyCommandCategories and ACLGetCommandCategoryFlagByName in src/acl.c; getkeys_reply from getKeysSubcommandImpl in src/server.c; find_keys, spec_has_keys, keys_from_specs, keys_generic and keys_from_proc from getKeysFromCommandWithSpecs, doesCommandHaveKeys, getKeysUsingKeySpecs, genericGetKeys and the key procedures of SINTERCARD, ZUNION, ZINTER, ZDIFF and their STORE forms, EVAL, FCALL, LMPOP, BLMPOP, ZMPOP, BZMPOP, SORT, SORT_RO, MIGRATE, GEORADIUS, XREAD, SET and BITFIELD in src/db.c.
 
 src/keyspec.odin: the arity, flags, legacy key range and key specifications of every command from the command definitions in src/commands/*.json, checked entry by entry against the reference's COMMAND INFO replies by black box comparison, and generic_get_keys and command_keys from genericGetKeys, getKeysUsingLegacyRangeSpec and the key procedures of SINTERCARD, ZUNION, ZINTER, ZDIFF and their STORE forms, EVAL, FCALL, LMPOP, BLMPOP, ZMPOP, SORT, SORT_RO, MIGRATE, GEORADIUS, XREAD, SET and BITFIELD in src/db.c.
 
-src/command_docs.odin: generated from the command definitions in src/commands/*.json following the conventions of utils/generate-command-code.py, with the group names of its COMMAND_GROUP_STR, then adjusted entry by entry to the reference's replies by black box comparison; the hash field expiration commands, which Valkey lacks, come from that comparison alone.
+src/command_docs.odin: generated from the command definitions in src/commands/*.json following the conventions of utils/generate-command-code.py, with the group names of its COMMAND_GROUP_STR, then adjusted entry by entry to the reference's replies by black box comparison. The summaries of 27 entries are not Valkey text but the reference server's observable COMMAND DOCS output, captured black box from the reference container, server version 7.4.11, because the smoke test compares COMMAND DOCS replies byte for byte. Eighteen of them, cluster, cluster|failover, cluster|replicas, cluster|replicate, cluster|slaves, hello, lolwut, migrate, object|encoding, object|freq, object|idletime, readonly, readwrite, replicaof, shutdown, slaveof, swapdb and waitaof, have Valkey counterparts worded differently; the other nine, hexpire, hexpireat, hexpiretime, hpersist, hpexpire, hpexpireat, hpexpiretime, hpttl and httl, are hash field expiration commands that Valkey lacks, and their whole entries come from that comparison alone. The complexity texts of append, command, command|list, dump, restore and restore-asking and the history lists of bgsave, bitcount, client|kill, client|list, cluster|setslot, hello, set and zscan are likewise the reference's COMMAND DOCS output. The summaries of the remaining 352 entries are the Valkey 8.1.10 text.
 
 src/monitor.odin: monitor_emit from replicationFeedMonitors in src/replication.c, cmd_monitor from monitorCommand, monitor_skips and the feed placement from call and monitor_rejects from the replica check of processCommand in src/server.c, monitor_remove from the monitor branch of clearClientConnectionState in src/networking.c, and command_redactions from the redaction in authCommand in src/acl.c, helloCommand in src/networking.c, migrateCommand in src/cluster.c and configSetCommand in src/config.c. src/cmd_connection.odin: the O flag from catClientInfoString in src/networking.c.
 
@@ -423,6 +425,75 @@ Developed at SunPro, a Sun Microsystems, Inc. business.
 Permission to use, copy, modify, and distribute this
 software is freely granted, provided that this notice
 is preserved.
+
+Odin rounding implementation
+
+The round_f32 and round_f64 implementations in core/math/math.odin, which src/cmd_lolwut.odin reaches through math.round, come from src/math/floor.go of the Go project and carry the notice below. They are present in every build.
+
+Copyright (c) 2009 The Go Authors. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * Neither the name of Google Inc. nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Odin xxHash implementation
+
+The core:hash/xxhash package, whose XXH3_64_with_seed src/hashtype/table.odin, src/settype/table.odin and src/zsettype/skiplist.odin call, is present in every build. Its source files state "Copyright 2021 Jeroen van Rijn <nom@duclavier.com>. Made available under Odin's license, based on the original C code." That original code is Yann Collet's xxHash, https://github.com/Cyan4973/xxHash , version 0.8.1 by the package's version constants. The notice of xxhash.h at tag v0.8.1 follows.
+
+xxHash - Extremely Fast Hash algorithm
+Header File
+Copyright (C) 2012-2020 Yann Collet
+
+BSD 2-Clause License (https://www.opensource.org/licenses/bsd-license.php)
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+     notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+     copyright notice, this list of conditions and the following disclaimer
+     in the documentation and/or other materials provided with the
+     distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+You can contact the author at:
+  - xxHash homepage: https://www.xxhash.com
+  - xxHash source repository: https://github.com/Cyan4973/xxHash
 
 Odin compiler-rt conversion helpers
 
@@ -742,33 +813,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
-## Lua 5.5.1 from the preceding implementation
-
-The preceding Eski implementation embedded upstream Lua 5.5.1 from https://www.lua.org/ftp/lua-5.5.1.tar.gz, SHA-256 `1c4b4068d67061f2a2231ad2b5422e77acea1487ea9890f6320af614f4373dce`, with the official fixes retained in that implementation's history. The current runtime is the Lua 5.1 distribution documented below; this notice is retained for the preceding implementation. The original C protection shim, RESP bridge and helper implementations are Eski code; no Redis implementation code is included. The following notice is reproduced from this release's `src/lua.h`.
-
-```text
-Copyright (C) 1994-2026 Lua.org, PUC-Rio.
-
-Permission is hereby granted, free of charge, to any person obtaining
-a copy of this software and associated documentation files (the
-"Software"), to deal in the Software without restriction, including
-without limitation the rights to use, copy, modify, merge, publish,
-distribute, sublicense, and/or sell copies of the Software, and to
-permit persons to whom the Software is furnished to do so, subject to
-the following conditions:
-
-The above copyright notice and this permission notice shall be
-included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
-TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
-SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-```
-
 ## Lua5.1.5
 
 Lua License
@@ -840,7 +884,9 @@ Redistribution and use in source and binary forms, with or without modification,
 
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-## lua_cjson.c
+## lua_cjson.c, strbuf.c and strbuf.h
+
+The notice below is the header of lua_cjson.c. strbuf.c and strbuf.h, the string buffer routines that lua_cjson.c uses, carry the same notice from the same author and years under the title "strbuf - String buffer routines".
 
 /* Lua CJSON - JSON support for Lua
  *
@@ -1225,7 +1271,7 @@ Copyright (c) The OpenSSL Project Authors. All Rights Reserved. The complete pac
 
 ## Native diagnostic unwinding
 
-The original diagnostic adapter uses the published local, signal-frame API of libunwind, https://www.nongnu.org/libunwind/ . The implementation source of libunwind is not vendored. Native builds dynamically link the installed system library. The pinned Ubuntu container uses libunwind8 1.6.2-3build1.1 under the Expat (MIT) license, with complete package notices at `/usr/share/doc/eski/LIBUNWIND-COPYRIGHT`. That library also links the container's liblzma5 5.6.1+really5.4.5-1ubuntu0.3. Its distribution copyright identifies the upstream liblzma code as public domain; the complete, file-specific package terms are retained at `/usr/share/doc/eski/LIBLZMA-COPYRIGHT`. Other installed versions can carry different notices. Distribution packaging and other base-image programs retain their own licenses.
+The original diagnostic adapter uses the published local, signal-frame API of libunwind, https://www.nongnu.org/libunwind/ . The implementation source of libunwind is not vendored. Native builds dynamically link the installed system library. The pinned Ubuntu container uses libunwind8 1.6.2-3build1.1 under the Expat (MIT) license, with complete package notices at `/usr/share/doc/eski/LIBUNWIND-COPYRIGHT`. That library also links the container's liblzma5 5.6.1+really5.4.5-1ubuntu0.3. Its distribution copyright identifies the upstream liblzma code as public domain; the complete, file-specific package terms are retained at `/usr/share/doc/eski/LIBLZMA-COPYRIGHT`, and the liblzma section below reproduces the terms that cover the library. Other installed versions can carry different notices. Distribution packaging and other base-image programs retain their own licenses.
 
 The libunwind package copyright notice follows, including its separate packaging terms.
 
@@ -1338,3 +1384,30 @@ License: Expat
  LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
  OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
  WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+## liblzma
+
+The container's libunwind library links liblzma from XZ Utils, https://tukaani.org/xz/ . The pinned Ubuntu container copies `liblzma.so.5` of package liblzma5 version 5.6.1+really5.4.5-1ubuntu0.3 into `/usr/lib/x86_64-linux-gnu/` and keeps that package's complete copyright file at `/usr/share/doc/eski/LIBLZMA-COPYRIGHT`. Native builds use the system library that the installed libunwind requires. No liblzma source is incorporated in Eski. The package copyright file states that liblzma is in the public domain, and its general file entry, which covers the library sources, reads as follows.
+
+Files: *
+Copyright: 2006-2018, Lasse Collin
+           1999-2008, Igor Pavlov
+           2006, Ville Koskinen
+           1998, Steve Reid
+           2000, Wei Dai
+           2003, Kevin Springle
+           2009, Jonathan Nieder
+           2010, Anders F Björklund
+License: PD
+ This file has been put in the public domain.
+ You can do whatever you want with this file.
+
+The summary in the same file adds the following.
+
+You can do whatever you want with the files that have been put into
+the public domain. If you find public domain legally problematic,
+take the previous sentence as a license grant. If you still find
+the lack of copyright legally problematic, you have too many
+lawyers.
+
+As usual, this software is provided "as is", without any warranty.
