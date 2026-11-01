@@ -162,7 +162,7 @@ walk_value :: proc(w: ^Walk, r: ^rdb.Reader, t: int) -> bool {
 			}
 		}
 		return true
-	case rdb.TYPE_HASH_METADATA:
+	case rdb.TYPE_HASH_TABLE_EX:
 		if _, mgood := rdb.get_ms(r); !mgood {
 			return false
 		}

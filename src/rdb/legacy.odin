@@ -427,7 +427,7 @@ lp_dup_cb :: proc(p: [^]u8, head_count: u32, userdata: rawptr) -> bool {
 		if !lp.lp_get_integer_value(p, &ttl) {
 			return false
 		}
-		if ttl < 0 || u64(ttl) > EB_EXPIRE_TIME_MAX {
+		if ttl < 0 || u64(ttl) > FIELD_DEADLINE_MAX {
 			return false
 		}
 		if ttl == 0 {

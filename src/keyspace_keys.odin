@@ -92,7 +92,7 @@ keyspace_record_payload :: proc(task: ^Keyspace_Task, r: ^ks.Record) -> ^ks.Valu
 	if r.kind == u8(Obj_Type.Hash) {
 		hash = cast(ht.Hash)r.object
 		minimum := keyspace_hash_binding_minimum(hash, r.hash_minimum)
-		if minimum != ht.EB_EXPIRE_TIME_INVALID { ht.registry_add(&registry, hash, minimum) }
+		if minimum != ht.NO_FIELD_DEADLINE { ht.registry_add(&registry, hash, minimum) }
 	}
 	defer { if hash != nil { keyspace_hash_detach(hash) } }
 	writer: rdb.Writer
@@ -163,7 +163,7 @@ keyspace_restore_execute :: proc(task: ^Keyspace_Task) {
 		object = st.rdb_load(&reader, kind, true); object_kind = .Set
 	case rdb.TYPE_ZSET, rdb.TYPE_ZSET_2, rdb.TYPE_ZSET_ZIPLIST, rdb.TYPE_ZSET_LISTPACK:
 		object = zt.rdb_load(&reader, kind, true); object_kind = .Zset
-	case rdb.TYPE_HASH, rdb.TYPE_HASH_ZIPMAP, rdb.TYPE_HASH_ZIPLIST, rdb.TYPE_HASH_LISTPACK, rdb.TYPE_HASH_METADATA_PRE_GA, rdb.TYPE_HASH_LISTPACK_EX_PRE_GA, rdb.TYPE_HASH_METADATA, rdb.TYPE_HASH_LISTPACK_EX:
+	case rdb.TYPE_HASH, rdb.TYPE_HASH_ZIPMAP, rdb.TYPE_HASH_ZIPLIST, rdb.TYPE_HASH_LISTPACK, rdb.TYPE_HASH_TABLE_EX_RC, rdb.TYPE_HASH_LISTPACK_EX_RC, rdb.TYPE_HASH_TABLE_EX, rdb.TYPE_HASH_LISTPACK_EX:
 		object = ht.rdb_load(&reader, kind, true); object_kind = .Hash
 	case rdb.TYPE_STREAM_LISTPACKS, rdb.TYPE_STREAM_LISTPACKS_2, rdb.TYPE_STREAM_LISTPACKS_3:
 		object = sm.rdb_load(&reader, kind, true); object_kind = .Stream
@@ -191,7 +191,7 @@ keyspace_restore_execute :: proc(task: ^Keyspace_Task) {
 		work := Keyspace_Object_Work{kind = object_kind, object = object, charge = reservation}; object = nil; reservation = 0
 		if object_kind == .Hash {
 			minimum := ht.min_expire(cast(ht.Hash)work.object, true)
-			if minimum != ht.EB_EXPIRE_TIME_INVALID { work.hash_minimum = minimum }
+			if minimum != ht.NO_FIELD_DEADLINE { work.hash_minimum = minimum }
 		}
 		defer keyspace_object_discard(&work)
 		if !keyspace_object_commit(task, r, &work, true) { return }

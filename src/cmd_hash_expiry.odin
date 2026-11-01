@@ -7,9 +7,6 @@ hash_registry_flush :: proc "contextless" (db: ^Db) {
 	if db.hreg != nil {
 		ht.registry_destroy(db.hreg)
 	}
-	if hash_db_next >= 0 && hash_db_next < len(dbs) && db == &dbs[hash_db_next] {
-		hash_active_seq = 0
-	}
 }
 
 hash_rename :: proc(key: []u8) {
@@ -26,7 +23,7 @@ hash_move_registry :: proc "contextless" (h: ht.Hash, from: ^Db, to: ^Db) {
 	hash_key_ref_move(ht.key_ref(h), to.hreg)
 	ht.maintenance_bind(h, to.hreg)
 	minimum := ht.registered_expire(h)
-	if minimum == ht.EB_EXPIRE_TIME_INVALID || from.hreg == to.hreg {
+	if minimum == ht.NO_FIELD_DEADLINE || from.hreg == to.hreg {
 		return
 	}
 	ht.registry_remove(h)
@@ -128,7 +125,7 @@ hexpire_generic :: proc(c: ^Conn, argv: [][]u8, name: string, unit_seconds: bool
 		return
 	}
 	if h == nil {
-		reply_ints_repeat(c, ht.HSETEX_NO_FIELD, len(args.fields))
+		reply_ints_repeat(c, ht.EXPIRE_NO_FIELD, len(args.fields))
 		return
 	}
 	ref := ht.key_ref(h)
@@ -139,9 +136,9 @@ hexpire_generic :: proc(c: ^Conn, argv: [][]u8, name: string, unit_seconds: bool
 	empty := ht.expire_fields(e.db.hreg, ref, h, args.fields, args.expire_at, args.cond, now, &hash_ints)
 	deleted, updated: int
 	for result in hash_ints {
-		if result == ht.HSETEX_DELETED {
+		if result == ht.EXPIRE_DELETED {
 			deleted += 1
-		} else if result == ht.HSETEX_OK {
+		} else if result == ht.EXPIRE_SET {
 			updated += 1
 		}
 	}
@@ -199,7 +196,7 @@ httl_generic :: proc(c: ^Conn, argv: [][]u8, kind: ht.Ttl_Kind) {
 		return
 	}
 	if h == nil {
-		reply_ints_repeat(c, ht.HFE_GET_NO_FIELD, len(fields))
+		reply_ints_repeat(c, ht.TTL_NO_FIELD, len(fields))
 		return
 	}
 	clear(&hash_ints)
@@ -236,7 +233,7 @@ cmd_hpersist :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	if h == nil {
-		reply_ints_repeat(c, ht.HFE_PERSIST_NO_FIELD, len(fields))
+		reply_ints_repeat(c, ht.PERSIST_NO_FIELD, len(fields))
 		return
 	}
 	clear(&hash_ints)
@@ -273,24 +270,20 @@ hash_tick :: proc "contextless" () {
 	if !active_expire_enabled || expiry_deletion_paused() || len(dbs) == 0 {
 		return
 	}
-	deadline := now_ns() + EXPIRE_TICK_NS
+	effort := cfg.active_expire_effort - 1
+	deadline := now_ns() + EXPIRE_TICK_NS * (25 + 2 * effort) / 25
 	now := hash_now()
-	visited := 0
-	for visited < len(dbs) && now_ns() < deadline {
-		visited += 1
+	quiet := 0
+	for quiet < len(dbs) && now_ns() < deadline {
 		hash_db_next %= len(dbs)
 		db := &dbs[hash_db_next]
+		hash_db_next = (hash_db_next + 1) % len(dbs)
 		if ht.registry_len(db.hreg) == 0 || ht.registry_next_expire(db.hreg) > now {
-			hash_active_seq = 0
-			hash_db_next = (hash_db_next + 1) % len(dbs)
+			quiet += 1
 			continue
 		}
-		budget := HASH_ACTIVE_BUDGET
-		if hash_active_seq > HASH_ACTIVE_SEQ_THRESHOLD {
-			budget *= int(min(hash_active_seq / HASH_ACTIVE_SEQ_THRESHOLD, 32))
-		}
 		clear(&hash_expired)
-		expired := ht.active_expire(db.hreg, now, budget, &hash_expired)
+		expired := ht.active_expire(db.hreg, now, FIELD_SWEEP_BATCH, &hash_expired)
 		stat_expired_subkeys += i64(expired)
 		for item in hash_expired {
 			if item.emptied {
@@ -302,11 +295,6 @@ hash_tick :: proc "contextless" () {
 				signal_key_expired(key, db)
 			}
 		}
-		if expired == budget {
-			hash_active_seq += u64(budget)
-		} else {
-			hash_active_seq = 0
-			hash_db_next = (hash_db_next + 1) % len(dbs)
-		}
+		quiet = 0 if expired == FIELD_SWEEP_BATCH else quiet + 1
 	}
 }

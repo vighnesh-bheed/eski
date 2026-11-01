@@ -34,7 +34,7 @@ proof_hash_state :: proc(h: ht.Hash, live: bool = false) {
 			if status != .Ok { continue }
 		}
 		vb: [21]u8
-		if deadline == ht.EB_EXPIRE_TIME_INVALID { deadline = 0 }
+		if deadline == ht.NO_FIELD_DEADLINE { deadline = 0 }
 		fmt.printf("%d=%s@%d,", f, ht.value_bytes(v, &vb), deadline)
 	}
 }

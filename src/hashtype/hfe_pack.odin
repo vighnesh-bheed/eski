@@ -44,19 +44,19 @@ lpex_locate :: proc(h: Hash, field: []u8) -> (fptr, vptr: [^]u8, ttl: i64, ok: b
 lpex_min_expire :: proc(zl: [^]u8) -> u64 {
 	field := pack_first(zl)
 	if field == nil {
-		return EB_EXPIRE_TIME_INVALID
+		return NO_FIELD_DEADLINE
 	}
 	value := pack_next(field)
 	if value == nil {
-		return EB_EXPIRE_TIME_INVALID
+		return NO_FIELD_DEADLINE
 	}
 	t := pack_next(value)
 	if t == nil {
-		return EB_EXPIRE_TIME_INVALID
+		return NO_FIELD_DEADLINE
 	}
 	deadline := value_from_lp(t).ival
 	if deadline <= 0 {
-		return EB_EXPIRE_TIME_INVALID
+		return NO_FIELD_DEADLINE
 	}
 	return u64(deadline)
 }
@@ -65,7 +65,7 @@ fields_with_expire :: proc(h: Hash) -> bool {
 	if h.encoding == .Hashtable {
 		return h.table.vol_len > 0
 	}
-	return h.encoding == .Listpack_Ex && lpex_min_expire(h.lp) != EB_EXPIRE_TIME_INVALID
+	return h.encoding == .Listpack_Ex && lpex_min_expire(h.lp) != NO_FIELD_DEADLINE
 }
 
 min_expire :: proc(h: Hash, accurate: bool) -> u64 {
@@ -78,7 +78,7 @@ min_expire :: proc(h: Hash, accurate: bool) -> u64 {
 	case .Listpack_Ex:
 		return lpex_min_expire(h.lp)
 	case .Listpack:
-		return EB_EXPIRE_TIME_INVALID
+		return NO_FIELD_DEADLINE
 	}
 	unreachable()
 }
@@ -87,11 +87,11 @@ dump_min_expire :: proc "contextless" (h: Hash) -> u64 {
 	if h.encoding == .Hashtable {
 		return vol_min(h.table)
 	}
-	deadline := EB_EXPIRE_TIME_INVALID
+	deadline := NO_FIELD_DEADLINE
 	if h.encoding == .Listpack_Ex {
 		deadline = registered_expire(h)
 	}
-	if deadline == EB_EXPIRE_TIME_INVALID {
+	if deadline == NO_FIELD_DEADLINE {
 		return 0
 	}
 	return deadline

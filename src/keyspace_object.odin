@@ -40,12 +40,12 @@ keyspace_object_length :: proc(kind: Obj_Type, object: rawptr) -> int {
 
 keyspace_hash_registered_minimum :: proc "contextless" (h: ht.Hash) -> u64 {
 	minimum := ht.registered_expire(h)
-	return 0 if minimum == ht.EB_EXPIRE_TIME_INVALID else minimum
+	return 0 if minimum == ht.NO_FIELD_DEADLINE else minimum
 }
 
 keyspace_hash_binding_minimum :: proc(h: ht.Hash, minimum: u64) -> u64 {
 	if minimum != 0 { return minimum }
-	return ht.EB_EXPIRE_TIME_INVALID if h == nil else ht.min_expire(h, true)
+	return ht.NO_FIELD_DEADLINE if h == nil else ht.min_expire(h, true)
 }
 
 keyspace_object_duplicate :: proc(kind: Obj_Type, object: rawptr) -> rawptr {

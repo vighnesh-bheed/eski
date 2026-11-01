@@ -5,7 +5,7 @@ MASKED_AUX = {b"ctime", b"used-mem"}
 TYPE_NAMES = {
     0: "string", 1: "list", 2: "set", 3: "zset", 4: "hash", 5: "zset2", 9: "hash-zipmap", 10: "list-ziplist",
     11: "set-intset", 12: "zset-ziplist", 13: "hash-ziplist", 14: "list-quicklist", 15: "stream", 16: "hash-listpack",
-    17: "zset-listpack", 18: "list-quicklist2", 19: "stream-listpacks2", 20: "set-listpack", 21: "stream-listpacks3", 24: "hash-metadata",
+    17: "zset-listpack", 18: "list-quicklist2", 19: "stream-listpacks2", 20: "set-listpack", 21: "stream-listpacks3", 24: "hash-table-ex",
     25: "hash-listpack-ex",
 }
 

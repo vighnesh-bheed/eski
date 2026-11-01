@@ -688,7 +688,7 @@ persist_load_object :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> (v: Loa
 			v.type = .Zset
 			v.obj = z
 		}
-	case rdb.TYPE_HASH, rdb.TYPE_HASH_ZIPMAP, rdb.TYPE_HASH_ZIPLIST, rdb.TYPE_HASH_LISTPACK, rdb.TYPE_HASH_METADATA_PRE_GA, rdb.TYPE_HASH_LISTPACK_EX_PRE_GA, rdb.TYPE_HASH_METADATA, rdb.TYPE_HASH_LISTPACK_EX:
+	case rdb.TYPE_HASH, rdb.TYPE_HASH_ZIPMAP, rdb.TYPE_HASH_ZIPLIST, rdb.TYPE_HASH_LISTPACK, rdb.TYPE_HASH_TABLE_EX_RC, rdb.TYPE_HASH_LISTPACK_EX_RC, rdb.TYPE_HASH_TABLE_EX, rdb.TYPE_HASH_LISTPACK_EX:
 		h := ht.rdb_load(r, rdbtype, deep)
 		if h != nil {
 			v.type = .Hash
@@ -784,9 +784,7 @@ persist_corrupt_phrases := [?]Corrupt_Phrase {
 	{"Zset with NAN score", "has a score that is not a number"},
 	{"Duplicate hash fields", "has duplicate fields"},
 	{"Hash with dup elements", "has duplicate fields"},
-	{"Hash failed loading minExpire", "has an invalid field expiry"},
-	{"Hash read invalid minExpire", "has an invalid field expiry"},
-	{"invalid expireAt time", "has an invalid field expiry"},
+	{"has an invalid field expiry", "has an invalid field expiry"},
 	{"Invalid set length", "has an invalid length"},
 	{"Invalid sorted set length", "has an invalid length"},
 	{"Invalid set type", "has an unknown encoding"},
@@ -826,7 +824,7 @@ persist_type_word :: proc "contextless" (rdbtype: int) -> string {
 		return "set"
 	case rdb.TYPE_ZSET, rdb.TYPE_ZSET_2, rdb.TYPE_ZSET_ZIPLIST, rdb.TYPE_ZSET_LISTPACK:
 		return "sorted set"
-	case rdb.TYPE_HASH, rdb.TYPE_HASH_ZIPMAP, rdb.TYPE_HASH_ZIPLIST, rdb.TYPE_HASH_LISTPACK, rdb.TYPE_HASH_METADATA_PRE_GA, rdb.TYPE_HASH_LISTPACK_EX_PRE_GA, rdb.TYPE_HASH_METADATA, rdb.TYPE_HASH_LISTPACK_EX:
+	case rdb.TYPE_HASH, rdb.TYPE_HASH_ZIPMAP, rdb.TYPE_HASH_ZIPLIST, rdb.TYPE_HASH_LISTPACK, rdb.TYPE_HASH_TABLE_EX_RC, rdb.TYPE_HASH_LISTPACK_EX_RC, rdb.TYPE_HASH_TABLE_EX, rdb.TYPE_HASH_LISTPACK_EX:
 		return "hash"
 	case rdb.TYPE_STREAM_LISTPACKS, rdb.TYPE_STREAM_LISTPACKS_2, rdb.TYPE_STREAM_LISTPACKS_3:
 		return "stream"
@@ -1703,7 +1701,7 @@ digest_value :: proc(v: Slot_Value, d: ^[20]u8) {
 			fbuf, vbuf: [24]u8
 			digest_mix(&elem, ht.value_bytes(ht.current_field(&it), cast(^[21]u8)&fbuf))
 			digest_mix(&elem, ht.value_bytes(ht.current_value(&it), cast(^[21]u8)&vbuf))
-			if ht.current_expire(&it) != rdb.EB_EXPIRE_TIME_INVALID && ht.current_expire(&it) != 0 {
+			if ht.current_expire(&it) != ht.NO_FIELD_DEADLINE && ht.current_expire(&it) != 0 {
 				ttl := ht.current_expire(&it)
 				tb: [8]u8
 				for i in 0 ..< 8 {

@@ -36,12 +36,12 @@ parse_expire_args :: proc "contextless" (argv: [][]u8, unit_seconds: bool, baset
 	}
 	duration := u64(value)
 	if unit_seconds {
-		if duration > HFE_MAX_ABS_TIME_MSEC / 1000 {
+		if duration > FIELD_DEADLINE_COMMAND_MAX / 1000 {
 			return r, .Invalid_Expire_Time
 		}
 		duration *= 1000
 	}
-	if duration > HFE_MAX_ABS_TIME_MSEC || basetime > HFE_MAX_ABS_TIME_MSEC - duration {
+	if duration > FIELD_DEADLINE_COMMAND_MAX || basetime > FIELD_DEADLINE_COMMAND_MAX - duration {
 		return r, .Invalid_Expire_Time
 	}
 	r.expire_at = basetime + duration

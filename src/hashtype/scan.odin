@@ -212,7 +212,7 @@ scan_callback :: proc(user: rawptr, b: ^Blob) {
 	c := cast(^Scan_Ctx)user
 	c.sampled += 1
 	expiry := table_field_expire(c.t, b)
-	if expiry != EB_EXPIRE_TIME_INVALID && expiry < c.now {
+	if expiry != NO_FIELD_DEADLINE && expiry < c.now {
 		return
 	}
 	f := blob_field(b)

@@ -46,7 +46,7 @@ next :: proc "contextless" (it: ^Iterator) -> bool {
 		return false
 	}
 	for {
-		it.expire = EB_EXPIRE_TIME_INVALID
+		it.expire = NO_FIELD_DEADLINE
 		if it.h.encoding == .Hashtable {
 			for {
 				slots, cap := table_bank(it.h.table, it.bank)
@@ -94,7 +94,7 @@ next :: proc "contextless" (it: ^Iterator) -> bool {
 				}
 			}
 		}
-		if !it.skip_expired || it.expire == EB_EXPIRE_TIME_INVALID || it.expire >= it.now {
+		if !it.skip_expired || it.expire == NO_FIELD_DEADLINE || it.expire >= it.now {
 			return true
 		}
 	}

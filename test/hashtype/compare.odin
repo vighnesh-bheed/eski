@@ -298,10 +298,10 @@ compare_dump :: proc(cs: ^Compare_State, idx: int, args: [][]u8, rr: Reply) {
 			it := ht.iterator(h)
 			for ht.next(&it) {
 				e := ht.current_expire(&it)
-				append(&want, Item{value_string(ht.current_field(&it)), value_string(ht.current_value(&it)), i64(e) if e != ht.EB_EXPIRE_TIME_INVALID else -1})
+				append(&want, Item{value_string(ht.current_field(&it)), value_string(ht.current_value(&it)), i64(e) if e != ht.NO_FIELD_DEADLINE else -1})
 			}
 		}
-		ok = ok && with_ttl == (mmin != ht.EB_EXPIRE_TIME_INVALID)
+		ok = ok && with_ttl == (mmin != ht.NO_FIELD_DEADLINE)
 		if with_ttl {
 			ok = ok && near(i64(rmin), i64(mmin), TOLERANCE_MS)
 		}

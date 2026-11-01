@@ -13,7 +13,7 @@ rdb_type :: proc "contextless" (h: Hash) -> u8 {
 		return rdb.TYPE_HASH_LISTPACK_EX
 	case .Hashtable:
 		if h.table.vol_len > 0 {
-			return rdb.TYPE_HASH_METADATA
+			return rdb.TYPE_HASH_TABLE_EX
 		}
 		return rdb.TYPE_HASH
 	}
@@ -22,8 +22,8 @@ rdb_type :: proc "contextless" (h: Hash) -> u8 {
 
 rdb_save :: proc "contextless" (w: ^rdb.Writer, h: Hash) {
 	type := rdb_type(h)
-	minimum := EB_EXPIRE_TIME_INVALID
-	if type == rdb.TYPE_HASH_METADATA || type == rdb.TYPE_HASH_LISTPACK_EX {
+	minimum := NO_FIELD_DEADLINE
+	if type == rdb.TYPE_HASH_TABLE_EX || type == rdb.TYPE_HASH_LISTPACK_EX {
 		minimum = dump_min_expire(h)
 		rdb.put_ms(w, i64(minimum))
 	}
@@ -34,10 +34,10 @@ rdb_save :: proc "contextless" (w: ^rdb.Writer, h: Hash) {
 	rdb.put_len(w, u64(h.table.count))
 	it := iterator(h)
 	for next(&it) {
-		if type == rdb.TYPE_HASH_METADATA {
+		if type == rdb.TYPE_HASH_TABLE_EX {
 			expiry := current_expire(&it)
 			delta := u64(0)
-			if expiry != EB_EXPIRE_TIME_INVALID {
+			if expiry != NO_FIELD_DEADLINE {
 				delta = expiry - minimum + 1
 			}
 			rdb.put_len(w, delta)
@@ -120,7 +120,7 @@ rdb_repack_loaded :: proc(h: Hash) -> bool {
 }
 
 rdb_load_blob :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> Hash {
-	ex := rdbtype == rdb.TYPE_HASH_LISTPACK_EX || rdbtype == rdb.TYPE_HASH_LISTPACK_EX_PRE_GA
+	ex := rdbtype == rdb.TYPE_HASH_LISTPACK_EX || rdbtype == rdb.TYPE_HASH_LISTPACK_EX_RC
 	if rdbtype == rdb.TYPE_HASH_LISTPACK_EX {
 		_, ok := rdb.get_ms(r)
 		if !ok {
@@ -223,9 +223,9 @@ rdb_load :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> Hash {
 	switch rdbtype {
 	case rdb.TYPE_HASH:
 		return rdb_load_plain(r, deep)
-	case rdb.TYPE_HASH_METADATA, rdb.TYPE_HASH_METADATA_PRE_GA:
+	case rdb.TYPE_HASH_TABLE_EX, rdb.TYPE_HASH_TABLE_EX_RC:
 		return rdb_load_meta(r, rdbtype, deep)
-	case rdb.TYPE_HASH_LISTPACK, rdb.TYPE_HASH_LISTPACK_EX, rdb.TYPE_HASH_LISTPACK_EX_PRE_GA:
+	case rdb.TYPE_HASH_LISTPACK, rdb.TYPE_HASH_LISTPACK_EX, rdb.TYPE_HASH_LISTPACK_EX_RC:
 		return rdb_load_blob(r, rdbtype, deep)
 	case rdb.TYPE_HASH_ZIPLIST:
 		return rdb_load_ziplist(r)
