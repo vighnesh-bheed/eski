@@ -1,0 +1,57 @@
+import Storage.Ledger
+import Storage.Reachability
+import Storage.Table
+
+#print axioms Storage.admission_arithmetic
+#print axioms Storage.reserve_failed_preserves
+#print axioms Storage.reserve_refines
+#print axioms Storage.remove_conserves
+#print axioms Storage.release_refines_sum
+#print axioms Storage.release_preserves_budget
+#print axioms Storage.release_missing_preserves
+#print axioms Storage.reserve_release_inverse
+#print axioms Storage.removal_preserves_ownership
+#print axioms Storage.release_refines
+#print axioms Storage.heap_failure_rolls_back
+#print axioms Storage.acquire_refines
+#print axioms Storage.zero_reservation_preserves_balance
+#print axioms Storage.machine_charge_bounds
+#print axioms Storage.put_other
+#print axioms Storage.replacement_creates_no_empty
+#print axioms Storage.clear_preserved
+#print axioms Storage.clear_prevents_stop
+#print axioms Storage.lookup_reachable
+#print axioms Storage.lookup_sound
+#print axioms Storage.existing_key_reachability_preserved
+#print axioms Storage.first_claim_clears_prior_groups
+#print axioms Storage.free_slot_preserves_existing_lookup
+#print axioms Storage.insertion_reachable
+#print axioms Storage.tombstone_preserves_other_lookup
+#print axioms Storage.empty_live_has_no_entries
+#print axioms Storage.move_preserves_consistent_counters
+#print axioms Storage.migrateAt_preserves_consistent_counters
+#print axioms Storage.migrateSlots_preserves_consistent_counters
+#print axioms Storage.migrateGroup_preserves_consistent_counters
+#print axioms Storage.consistent_zero_live_swap
+#print axioms Storage.final_batch_swap_preserves
+#print axioms Storage.put_weight
+#print axioms Storage.put_length
+#print axioms Storage.put_selected
+#print axioms Storage.claim_is_free
+#print axioms Storage.claim_first_reachable
+#print axioms Storage.move_preserves_logical
+#print axioms Storage.move_preserves_unique_keys
+#print axioms Storage.move_source_tombstone
+#print axioms Storage.move_accounting
+#print axioms Storage.migration_machine_bounds
+#print axioms Storage.migrateAt_preserves_logical
+#print axioms Storage.repeated_migration_preserves
+#print axioms Storage.migrateSlots_preserves
+#print axioms Storage.migrateGroup_preserves
+#print axioms Storage.group_done_exact
+#print axioms Storage.migrateSlots_stopped
+#print axioms Storage.zero_budget_preserves
+#print axioms Storage.partial_group_retains_cursor
+#print axioms Storage.completed_group_advances_cursor
+#print axioms Storage.swap_preserves
+#print axioms Storage.positive_budget_progress

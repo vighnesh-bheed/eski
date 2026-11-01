@@ -20,7 +20,7 @@ For an unpacked local toolchain:
 LEAN_BIN_DIR=/absolute/path/lean-4.35.0-linux/bin python3 proofs/bitfield/verify.py
 ```
 
-The verifier builds the Lean library and executable, prints and checks every theorem's axiom dependencies, builds the actual Odin bridge with vet and strict style, checks source fingerprints, runs the deterministic corpus, and requires rejection of controlled bad dirty counts, bytes, and replies. It uses nice level 10, one allowed CPU on Linux, one Lean runtime thread, and Odin's `-thread-count:2`. It starts no server, changes no installed executable, and runs no performance benchmark or full server suite.
+The verifier builds the Lean library and executable, checks the named theorem manifest and every project-origin kernel declaration's axiom dependencies, builds the actual Odin bridge with vet and strict style, checks source fingerprints, runs the deterministic corpus, and requires rejection of controlled bad dirty counts, bytes, and replies. It uses nice level 10, one allowed CPU on Linux, one Lean runtime thread, and Odin's `-thread-count:2`. It starts no server, changes no installed executable, and runs no performance benchmark or full server suite.
 
 Builds, generated traces, axiom output, actual results and `receipt.json` stay in ignored `.lake/` and `.build/` directories beneath this package. An alternative receipt/output directory can be selected with `--output /absolute/path`.
 
@@ -36,7 +36,7 @@ The official [release](https://github.com/leanprover/lean4/releases/tag/v4.35.0)
 
 ## Definitions and checked properties
 
-[Arithmetic.lean](Bitfield/Arithmetic.lean) separates 64-bit word addition, truncation and signed interpretation from mathematical remainder, overflow direction and clamp specifications. [State.lean](Bitfield/State.lean) models big-endian byte windows, field reads/writes, overflow handling, replies, initial buffer growth and sequential execution. [Bitfield.lean](Bitfield.lean) contains the complete axiom audit manifest.
+[Arithmetic.lean](Bitfield/Arithmetic.lean) separates 64-bit word addition, truncation and signed interpretation from mathematical remainder, overflow direction and clamp specifications. [State.lean](Bitfield/State.lean) models big-endian byte windows, field reads/writes, overflow handling, replies, initial buffer growth and sequential execution. [Bitfield.lean](Bitfield.lean) lists the named contract theorems; the shared [kernel audit](../README.md#audit-coverage) separately inventories every project-origin declaration.
 
 | Odin behavior | Lean definitions and theorem families | Domain and limits |
 | --- | --- | --- |

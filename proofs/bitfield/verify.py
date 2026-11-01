@@ -1,4 +1,5 @@
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -6,7 +7,11 @@ import random
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from kernel_audit import audit as audit_kernel
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = Path(__file__).resolve().parent
@@ -155,35 +160,7 @@ def check_fingerprints():
 
 
 def check_axioms(lake, output, env):
-    expected = []
-    for path in sorted((PACKAGE / 'Bitfield').glob('*.lean')):
-        expected.extend('Bitfield.' + name for name in re.findall(r'^theorem\s+(\w+)', path.read_text(), re.M))
-    manifest = re.findall(r'^#print axioms (\S+)', (PACKAGE / 'Bitfield.lean').read_text(), re.M)
-    if sorted(expected) != sorted(manifest) or len(set(manifest)) != len(manifest):
-        raise AssertionError('axiom manifest must list every theorem exactly once')
-    result = subprocess.run([str(lake), 'env', 'lean', '-j1', 'Bitfield.lean'], cwd=PACKAGE,
-                            env=env, text=True, capture_output=True, check=True)
-    (output / 'axioms.txt').write_text(result.stdout + result.stderr)
-    found = {}
-    pattern = r"'([^']+)' (?:depends on axioms:\s*\[([^\]]*)\]|does not depend on any axioms)"
-    cursor = 0
-    for match in re.finditer(pattern, result.stdout):
-        if result.stdout[cursor:match.start()].strip():
-            raise AssertionError('unrecognized axiom audit output')
-        name, entries = match.groups()
-        if name in found:
-            raise AssertionError(f'duplicate axiom result: {name}')
-        found[name] = [s.strip() for s in entries.split(',') if s.strip()] if entries else []
-        cursor = match.end()
-    if result.stdout[cursor:].strip():
-        raise AssertionError('unrecognized trailing axiom audit output')
-    if set(found) != set(manifest) or result.stderr:
-        raise AssertionError('incomplete or noisy axiom audit')
-    allowed = {'propext', 'Classical.choice', 'Quot.sound'}
-    for name, axioms in found.items():
-        if set(axioms) - allowed:
-            raise AssertionError(f'{name}: unapproved axioms {axioms}')
-    return found
+    return audit_kernel(lake, PACKAGE, output, env, "Bitfield")
 
 
 def build(output, lean_bin):
@@ -202,17 +179,21 @@ def build(output, lean_bin):
     commands = [([lake, 'build'], PACKAGE),
                 ([odin, 'build', str(PACKAGE / 'bridge.odin'), '-file',
                   '-out:' + str(output / 'odin_bridge'), '-thread-count:2', '-vet', '-strict-style'], ROOT)]
-    logs = []
-    for command, cwd in commands:
-        result = subprocess.run(command, cwd=cwd, env=env, text=True, capture_output=True)
-        logs.append(result.stdout + result.stderr)
-        (output / 'build.txt').write_text('\n'.join(logs))
-        if result.returncode:
-            raise AssertionError(f'build failed; see {output / "build.txt"}\n{logs[-1]}')
-    audit = check_axioms(Path(lake), output, env)
+    lock_path = ROOT / '.build/proofs/compiler.lock'
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        logs = []
+        for command, cwd in commands:
+            result = subprocess.run(command, cwd=cwd, env=env, text=True, capture_output=True)
+            logs.append(result.stdout + result.stderr)
+            (output / 'build.txt').write_text('\n'.join(logs))
+            if result.returncode:
+                raise AssertionError(f'build failed; see {output / "build.txt"}\n{logs[-1]}')
+        audit, kernel = check_axioms(Path(lake), output, env)
     odin_version = subprocess.run([odin, 'version'], env=env, text=True, capture_output=True, check=True).stdout
     versions = {'lean': version.strip(), 'odin': odin_version.strip()}
-    return PACKAGE / '.lake/build/bin/bitfield_model', output / 'odin_bridge', audit, versions
+    return PACKAGE / '.lake/build/bin/bitfield_model', output / 'odin_bridge', audit, versions, kernel
 
 
 def run():
@@ -228,7 +209,7 @@ def run():
     if hasattr(os, 'nice'):
         os.nice(10)
     fingerprints = check_fingerprints()
-    lean_model, odin_model, audit, versions = build(args.output, args.lean_bin)
+    lean_model, odin_model, audit, versions, kernel = build(args.output, args.lean_bin)
     trace, expected, stats = corpus()
     path = args.output / 'traces.txt'
     path.write_text(trace)
@@ -255,7 +236,9 @@ def run():
     stats['controlled_mutants_rejected'] = rejected
     receipt = {**stats, 'seed': '0xE5A1B17', 'toolchain': (PACKAGE / 'lean-toolchain').read_text().strip(),
                'source_sha256': fingerprints, 'trace_sha256': hashlib.sha256(trace.encode()).hexdigest(),
-               'results_sha256': outputs, 'checked_theorem_axioms': audit, 'versions': versions,
+               'results_sha256': outputs, 'checked_theorem_axioms': audit,
+               'kernel_inventory_sha256': hashlib.sha256((args.output / 'kernel-inventory.json').read_bytes()).hexdigest(),
+               'kernel_checked_theorems': len(kernel['theorem_axioms']), 'versions': versions,
                'executable_sha256': {name: hashlib.sha256(binary.read_bytes()).hexdigest()
                                      for name, binary in (('lean', lean_model), ('odin', odin_model))}}
     (args.output / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')

@@ -119,17 +119,17 @@ Run conformance before smoke on a fresh clone so smoke can use the downloaded co
 
 Native comparison harnesses include `bash test/listtype/compare.sh`, `bash test/hashtype/compare.sh`, `bash test/settype/compare.sh`, `bash test/zsettype/compare.sh`, `bash test/bitmap/compare.sh`, `bash test/hll/compare.sh`, `bash test/geo/compare.sh` and `bash test/streamtype/compare.sh`. They build their drivers, start reference containers and compare generated operation sequences. Persistence-specific commands include `bash test/rdb/roundtrip.sh` and `bash test/aof/roundtrip.sh`. The group pages link the most relevant checks.
 
-## Optional bitfield proofs
+## Optional formal verification
 
-The standalone [bitfield proof pilot](../proofs/bitfield/README.md) uses a pinned Lean toolchain to check arithmetic and mutation-accounting properties of an executable model. Its comparison harness runs the model and the actual Odin bitmap package against an independent integer and bit-by-bit reference. The proof project is separate from the server build and introduces no server runtime dependency.
+The optional [formal verification projects](../proofs/README.md) group hash-table migration and memory accounting, worker rollback and expiry-aware persistence, request parsing and packed codecs, and bitfield arithmetic. Each project uses the pinned Lean toolchain to check properties of an executable model and compares selected behavior against actual Odin code with independent expectations. These projects are separate from the server build and introduce no server runtime dependency.
 
 With the pinned Lean toolchain and Odin on PATH:
 
 ```sh
-python3 proofs/bitfield/verify.py
+python3 -I proofs/verify.py
 ```
 
-The project documents its theorem domains, compatibility edge cases and implementation boundary. Model proofs and finite implementation comparisons provide different evidence; they do not establish formal verification of the compiled Odin server. Follow the project instructions to run its focused verification separately from the ordinary package and conformance suites.
+Each project documents its theorem domains, compatibility edge cases and implementation boundary. The aggregate runner verifies projects sequentially and records evidence for each covered area. Model proofs and finite implementation comparisons provide different evidence; they do not establish formal verification of the compiled Odin server. Follow the project instructions to run focused verification separately from the ordinary package and conformance suites.
 
 ## Generate the published tables
 

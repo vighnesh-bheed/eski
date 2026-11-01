@@ -1,0 +1,11 @@
+name = "eski-effects"
+version = "0.1.0"
+defaultTargets = ["Effects", "effects_model"]
+moreLeanArgs = ["-j1"]
+
+[[lean_lib]]
+name = "Effects"
+
+[[lean_exe]]
+name = "effects_model"
+root = "Main"
