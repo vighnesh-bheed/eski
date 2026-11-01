@@ -235,7 +235,7 @@ damage() {
 	esac
 }
 loglines() {
-	sed -n 's/^[0-9]*:[A-Z] [0-9]* [A-Za-z]* [0-9]* [0-9:.]* \([*#] .*\)$/\1/p' "$1" | grep -E 'AOF|append only|aof|Truncating|short read|MULTI|Unknown command|Bad file format|Unexpected end' | grep -v 'Opening AOF incr\|Creating AOF' | sed -E 's/[0-9]+\.[0-9]+ seconds/N seconds/' || true
+	sed -n 's/^[0-9]*:[A-Z] [0-9]* [A-Za-z]* [0-9]* [0-9:.]* \([*#] .*\)$/\1/p' "$1" | grep -E 'AOF|append only|aof|Truncating|short read|MULTI|Unknown command|Bad file format|Unexpected end' | grep -v 'Opening AOF incr\|Creating AOF' | sed -E -e 's/[0-9]+\.[0-9]+ seconds/N seconds/' -e 's/^([*#] (Bad file format|Unexpected end of file) reading the append only file [^ :]*[.:]).*$/\1/' || true
 }
 for case_ in truncated truncated-strict garbage unknown multi annotated; do
 	extra=()

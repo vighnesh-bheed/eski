@@ -334,7 +334,7 @@ get_len_enc :: proc "contextless" (r: ^Reader) -> (v: u64, encoded: bool, good: 
 	} else if first == LEN_64BIT {
 		width = 8
 	} else {
-		corrupt(r, "Unknown length encoding ", u64(first), true, " in rdbLoadLen()")
+		corrupt(r, "Unknown length encoding ", u64(first), true, " while reading a length")
 		return LENERR, false, false
 	}
 	bytes, more := take(r, width)

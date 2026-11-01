@@ -1082,7 +1082,7 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 			if id >= u64(len(dbs)) {
 				tmp: [24]u8
 				n := format_i64(&tmp[0], i64(len(dbs)))
-				plog(LOG_WARNING, "FATAL: Data file was created with a Redis server configured to handle more than ", string(tmp[:n]), " databases. Exiting")
+				plog(LOG_WARNING, "FATAL: Data file was created with a server configured to handle more than ", string(tmp[:n]), " databases. Exiting")
 				linux.exit_group(1)
 			}
 			db = &dbs[id]

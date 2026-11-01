@@ -63,7 +63,8 @@ state leaks between units; an --external server is shared by all units.
 By default every unit runs in the suite's external server mode, which ignores blocks
 tagged external:skip. Redis $REDIS_TAG tags every block of
 type/hash-field-expire that way, along with the top-level blocks of a few
-other units, so after extracting the suite the runner removes the tag from the
+other units, so after extracting the suite's tests directory, the only part of
+the archive it keeps, the runner removes the tag from the
 top-level start_server lines at
 $REDIS_LIFTS, leaving the nested blocks that need
 servers of their own skipped. External fixture adapters map an explicitly supplied actual stdout path and
@@ -178,6 +179,7 @@ TREE_NAME="$suite-$SUITE_TAG"
 TREE="$CACHE_DIR/$TREE_NAME"
 STAMP_VALUE="$SUITE_SHA256${SUITE_LIFTS:+ lifted $SUITE_LIFTS}"
 if [ "$suite" = redis ]; then STAMP_VALUE+=" external-log-v2"; fi
+STAMP_VALUE+=" tests-only-v1"
 if [ "$suite" = "redis" ]; then
 	STUB_DIR="$TREE/src"
 else
@@ -345,11 +347,29 @@ if suite == "redis":
 PYLIFT
 }
 
+tree_holds_only_tests() {
+	local entry
+	for entry in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+		if [ ! -e "$entry" ] && [ ! -L "$entry" ]; then
+			continue
+		fi
+		case "${entry#"$1"/}" in
+			tests|external-log-adapter.json) ;;
+			src)
+				[ "$STUB_DIR" = "$1/src" ] || return 1
+				[ -z "$(find "$entry" -mindepth 1 ! -name "$STUB_NAME" -print -quit)" ] || return 1
+				;;
+			*) return 1 ;;
+		esac
+	done
+	return 0
+}
+
 fetch_suite() {
 	local stamp="$CACHE_DIR/$TREE_NAME.sha256"
 	local tarball="$CACHE_DIR/$TREE_NAME.tar.gz"
 	local got listing entry staging
-	if [ -f "$TREE/tests/test_helper.tcl" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$STAMP_VALUE" ]; then
+	if [ -f "$TREE/tests/test_helper.tcl" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$STAMP_VALUE" ] && tree_holds_only_tests "$TREE"; then
 		return 0
 	fi
 	mkdir -p "$CACHE_DIR" || die "could not create $CACHE_DIR"
@@ -377,10 +397,24 @@ fetch_suite() {
 			*../*|*/..) die "unexpected path $entry in $tarball" ;;
 		esac
 	done <<<"$listing"
+	rm -rf "$CACHE_DIR"/extract.*
 	staging="$(mktemp -d "$CACHE_DIR/extract.XXXXXX")" || die "could not create a staging directory"
-	if ! tar -xzf "$tarball" -C "$staging" --no-same-owner; then
+	if ! tar -xzf "$tarball" -C "$staging" --no-same-owner "$TREE_NAME/tests"; then
 		rm -rf "$staging"
-		die "could not extract $tarball"
+		die "could not extract the tests of $tarball"
+	fi
+	for entry in "$staging"/* "$staging"/.[!.]* "$staging"/..?* "$staging/$TREE_NAME"/* "$staging/$TREE_NAME"/.[!.]* "$staging/$TREE_NAME"/..?*; do
+		if [ ! -e "$entry" ] && [ ! -L "$entry" ]; then
+			continue
+		fi
+		case "$entry" in
+			"$staging/$TREE_NAME"|"$staging/$TREE_NAME/tests") ;;
+			*) rm -rf "$entry" ;;
+		esac
+	done
+	if [ ! -f "$staging/$TREE_NAME/tests/test_helper.tcl" ]; then
+		rm -rf "$staging"
+		die "$tarball has no tests/test_helper.tcl"
 	fi
 	if ! lift_external_skip "$staging/$TREE_NAME"; then
 		rm -rf "$staging"

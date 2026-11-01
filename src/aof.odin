@@ -1081,7 +1081,7 @@ aof_bio_collect :: proc() {
 		if aof.write_err && aof_err_from_fsync {
 			aof.write_err = false
 			aof_err_from_fsync = false
-			plog(LOG_NOTICE, "AOF fsync error looks solved, Redis can write again.")
+			plog(LOG_NOTICE, "AOF fsync error looks solved, Eski can write again.")
 			persist_update_gate()
 		}
 	}
@@ -1363,7 +1363,7 @@ aof_write_buffer :: proc() -> bool {
 		aof_shrink_buf()
 		if aof.write_err && !aof_err_from_fsync {
 			aof.write_err = false
-			plog(LOG_WARNING, "AOF write error looks solved, Redis can write again.")
+			plog(LOG_WARNING, "AOF write error looks solved, Eski can write again.")
 			persist_update_gate()
 		}
 		return true
@@ -3862,7 +3862,7 @@ aof_rewrite_commands :: proc(w: ^rdb.Writer) -> bool {
 aof_write_base_to :: proc(path: cstring, preamble: bool) -> bool {
 	fd, err := linux.open(path, {.WRONLY, .CREAT, .TRUNC, .CLOEXEC}, aof_mode_file())
 	if err != .NONE {
-		plog(LOG_WARNING, "Opening the temp file for AOF rewrite in rewriteAppendOnlyFile(): ", errno_text(err))
+		plog(LOG_WARNING, "Opening the temp file for the AOF rewrite failed: ", errno_text(err))
 		return false
 	}
 	w: rdb.Writer
@@ -4327,7 +4327,7 @@ aof_start :: proc() -> bool {
 			aof_close_fd()
 			aof_remove_temp_incr()
 			aof.state = .Off
-			plog(LOG_WARNING, "Redis needs to enable the AOF but can't trigger a background AOF rewrite operation. Check the above logs for more info about the error.")
+			plog(LOG_WARNING, "Eski needs to enable the AOF but can't trigger a background AOF rewrite operation. Check the above logs for more info about the error.")
 			aof_feed_refresh()
 			persist_update_gate()
 			return false
@@ -4904,7 +4904,7 @@ aof_load_truncated :: proc(name: string, valid: i64, is_last: bool) -> Aof_Load_
 		return .Failed
 	}
 	if !aof.load_truncated {
-		plog(LOG_WARNING, "Unexpected end of file reading the append only file ", name, ". You can: 1) Make a backup of your AOF file, then use ./redis-check-aof --fix <filename.manifest>. 2) Alternatively you can set the 'aof-load-truncated' configuration option to yes and restart the server.")
+		plog(LOG_WARNING, "Unexpected end of file reading the append only file ", name, ". Eski has no AOF repair tool. You can: 1) Make a backup of your AOF file, then remove the incomplete command at its end by hand. 2) Alternatively you can set the 'aof-load-truncated' configuration option to yes and restart the server.")
 		return .Failed
 	}
 	plog(LOG_WARNING, "!!! Warning: short read while loading the AOF file ", name, "!!!")
@@ -4952,7 +4952,7 @@ aof_load_commands :: proc(r: ^Aof_Reader, name: string, is_last: bool, done_befo
 			}
 			return aof_load_truncated(name, before_multi if in_multi else valid, is_last)
 		case .Bad:
-			plog(LOG_WARNING, "Bad file format reading the append only file ", name, ": make a backup of your AOF file, then use ./redis-check-aof --fix <filename.manifest>")
+			plog(LOG_WARNING, "Bad file format reading the append only file ", name, ": make a backup of your AOF file, then repair it by hand. Eski has no AOF repair tool.")
 			return .Failed
 		case .Ok:
 		}
@@ -5026,7 +5026,7 @@ aof_load_one :: proc(f: ^Aof_File, is_last: bool, done_before: i64) -> Aof_Load_
 	got, _ := linux.pread(fd, magic[:], 0)
 	if got == 5 && string(magic[:]) == "REDIS" {
 		if f.kind != .Base {
-			plog(LOG_WARNING, "Bad file format reading the append only file ", name, ": make a backup of your AOF file, then use ./redis-check-aof --fix <filename.manifest>")
+			plog(LOG_WARNING, "Bad file format reading the append only file ", name, ": make a backup of your AOF file, then repair it by hand. Eski has no AOF repair tool.")
 			return .Failed
 		}
 		plog(LOG_NOTICE, "Reading RDB base file on AOF loading...")

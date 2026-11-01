@@ -3886,6 +3886,11 @@ acl_log_tail() {
 	tail -n "$1" | sed 's/^[0-9]*:[A-Z] [^#*]* [#*] //'
 }
 
+acl_eski_wording() {
+	sed -e 's/^Aborting Redis startup because of ACL errors: /Aborting Eski startup because of ACL errors: /' \
+		-e 's/^Configuring Redis with users defined in redis\.conf and at the same setting an ACL file path is invalid\. This setup is very likely to lead to configuration errors and security holes, please define either an ACL file or declare users directly in your redis\.conf, but not both\.$/Configuring Eski with users defined in the configuration file and at the same time an ACL file path is invalid. This setup is very likely to lead to configuration errors and security holes, please define either an ACL file or declare users directly in your configuration file, but not both./'
+}
+
 expect_acl_files() {
 	local jport="$((REF_PORT + 4))" rport="$((REF_PORT + 5))" adir="$PERSIST_DIR/acl" jpid name="$ACL_REF_CONTAINER" hash feed got want content args startup launched
 	mkdir -p "$adir/eski" "$adir/ref"
@@ -3943,7 +3948,7 @@ expect_acl_files() {
 	cp "$adir/eski/bad.acl" "$adir/ref/bad.acl"
 	for args in "3|--user foo on badrule" "3|--user foo on --user foo off" "3|--user default on --user default off" "3|--user foo (on" "3|--user" "2|--user foo on +nocmd" "1|--aclfile bad.acl" "1|--aclfile bad.acl --user foo on" "1|--aclfile nofile.acl"; do
 		got="$(timeout 5 "$BINARY" --port "$jport" --dir "$adir/eski" ${args#*|} 2>&1 | acl_log_tail "${args%%|*}")"
-		want="$(timeout 20 docker run --rm --network=none --user "$(id -u):$(id -g)" -v "$adir/ref:/data" "$IMAGE" redis-server --port 0 --dir /data ${args#*|} 2>&1 | grep -v 'Configured to not listen anywhere' | acl_log_tail "${args%%|*}")"
+		want="$(timeout 20 docker run --rm --network=none --user "$(id -u):$(id -g)" -v "$adir/ref:/data" "$IMAGE" redis-server --port 0 --dir /data ${args#*|} 2>&1 | grep -v 'Configured to not listen anywhere' | acl_log_tail "${args%%|*}" | acl_eski_wording)"
 		acl_same "startup with ${args#*|}" "$want" "$got"
 	done
 }

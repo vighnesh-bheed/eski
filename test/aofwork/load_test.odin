@@ -69,7 +69,7 @@ load_truncated_and_corrupt :: proc(t: ^testing.T) {
 	res = load_manifest_dir(dir)
 	testing.expect_value(t, res, j.Aof_Load_Result.Failed)
 	testing.expect_value(t, file_size(path_join({dir, "appendonly.aof.1.incr.aof"})), i64(len(cut)))
-	testing.expect(t, strings.contains(log_text(), "Unexpected end of file reading the append only file appendonly.aof.1.incr.aof. You can: 1) Make a backup of your AOF file, then use ./redis-check-aof --fix <filename.manifest>. 2) Alternatively you can set the 'aof-load-truncated' configuration option to yes and restart the server."))
+	testing.expect(t, strings.contains(log_text(), "Unexpected end of file reading the append only file appendonly.aof.1.incr.aof. Eski has no AOF repair tool. You can: 1) Make a backup of your AOF file, then remove the incomplete command at its end by hand. 2) Alternatively you can set the 'aof-load-truncated' configuration option to yes and restart the server."))
 	j.aof.load_truncated = true
 
 	multi := INCR_OK + "*1\r\n$5\r\nMULTI\r\n*3\r\n$3\r\nSET\r\n$1\r\nc\r\n$1\r\n3\r\n"
@@ -91,7 +91,7 @@ load_truncated_and_corrupt :: proc(t: ^testing.T) {
 	dir = write_incr_dir("corrupt", bad)
 	res = load_manifest_dir(dir)
 	testing.expect_value(t, res, j.Aof_Load_Result.Failed)
-	testing.expect(t, strings.contains(log_text(), "Bad file format reading the append only file appendonly.aof.1.incr.aof: make a backup of your AOF file, then use ./redis-check-aof --fix <filename.manifest>"))
+	testing.expect(t, strings.contains(log_text(), "Bad file format reading the append only file appendonly.aof.1.incr.aof: make a backup of your AOF file, then repair it by hand. Eski has no AOF repair tool."))
 
 	bad_len := INCR_OK + "*1\r\n$3\r\nSETX\r\n"
 	dir = write_incr_dir("corrupt-len", bad_len)
