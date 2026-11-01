@@ -116,7 +116,7 @@ Keyspace_Op :: enum u8 {
 	Key,
 }
 
-keyspace_operation :: proc(cmd: ^Command) -> (Keyspace_Op, bool) {
+keyspace_operation :: proc "contextless" (cmd: ^Command) -> (Keyspace_Op, bool) {
 	if cmd == nil {
 		return {}, false
 	}
@@ -291,9 +291,12 @@ keyspace_operation :: proc(cmd: ^Command) -> (Keyspace_Op, bool) {
 	return {}, false
 }
 
-keyspace_candidate :: proc(cmd: ^Command, argv: [][]u8) -> bool {
-	op, ok := keyspace_operation(cmd)
-	return ok && len(argv) >= 2 && (op != .Stream || keyspace_stream_admission(cmd.name, argv))
+keyspace_candidate :: #force_inline proc(slot: ^Cmd_Slot, argv: [][]u8) -> bool {
+	if keyspace_threads == 0 || slot == nil {
+		return false
+	}
+	op, ok := slot.keyspace.?
+	return ok && len(argv) >= 2 && (op != .Stream || keyspace_stream_admission(slot.cmd.name, argv))
 }
 
 keyspace_eligible :: proc(c: ^Conn) -> bool {
@@ -554,8 +557,8 @@ keyspace_record :: proc(c: ^Conn, key: []u8) -> ^ks.Record {
 	return r
 }
 
-keyspace_try :: proc(c: ^Conn, cmd: ^Command, stats: ^Cmd_Hot, argv: [][]u8) -> bool {
-	if !keyspace_candidate(cmd, argv) || !keyspace_eligible(c) {
+keyspace_try :: proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8) -> bool {
+	if !keyspace_candidate(slot, argv) || !keyspace_eligible(c) {
 		keyspace_fence()
 		return false
 	}
@@ -565,8 +568,12 @@ keyspace_try :: proc(c: ^Conn, cmd: ^Command, stats: ^Cmd_Hot, argv: [][]u8) -> 
 		keyspace_fence()
 		return false
 	}
-	op, _ := keyspace_operation(cmd)
-	if (op >= .Hset && op <= .Hpersist) || op == .Key && cmd.name == "restore" { keyspace_timed = true }
+	cmd := slot.cmd
+	stats := slot.stats
+	op, _ := slot.keyspace.?
+	restore := op == .Key && cmd.name == "restore"
+	relocate := op == .Key && (cmd.name == "copy" || cmd.name == "move")
+	if (op >= .Hset && op <= .Hpersist) || restore { keyspace_timed = true }
 	if op == .Setex || op == .Psetex || op == .Getex || op == .Expire || op == .Pexpire || op == .Expireat || op == .Pexpireat || (op == .Set && len(argv) > 3) { keyspace_timed = true }
 	if (op == .Mset || op == .Msetnx) && len(argv) % 2 == 0 { keyspace_fence(); return false }
 	spec := cmd_spec_lookup(cmd, argv)
@@ -575,7 +582,7 @@ keyspace_try :: proc(c: ^Conn, cmd: ^Command, stats: ^Cmd_Hot, argv: [][]u8) -> 
 	defer delete(indices)
 	command_keys(spec, argv, &indices)
 	target_db := c.db.id
-	if op == .Key && (cmd.name == "copy" || cmd.name == "move") {
+	if relocate {
 		id, _, ok := keyspace_key_target(cmd.name, argv, c.db.id)
 		if !ok { keyspace_fence(); return false }
 		target_db = id
@@ -586,7 +593,7 @@ keyspace_try :: proc(c: ^Conn, cmd: ^Command, stats: ^Cmd_Hot, argv: [][]u8) -> 
 	for index in indices { if index < 1 || index >= len(argv) { keyspace_fence(); return false } }
 	for index, i in indices {
 		db := c.db.id
-		if op == .Key && (cmd.name == "copy" || cmd.name == "move") && i == 1 { db = target_db }
+		if relocate && i == 1 { db = target_db }
 		if keyspace_features_blocked(db, argv[index]) || !mc_worker_key_admissible(&dbs[db], argv[index]) || expiry_deletion_paused() && !keyspace_store_pause_admissible(&dbs[db], argv[index]) { keyspace_fence(); return false }
 	}
 
@@ -627,13 +634,13 @@ keyspace_try :: proc(c: ^Conn, cmd: ^Command, stats: ^Cmd_Hot, argv: [][]u8) -> 
 	}
 	for i in 0 ..< count {
 		route := c^
-		if op == .Key && (cmd.name == "copy" || cmd.name == "move") && i == 1 { route.db = &dbs[target_db] }
+		if relocate && i == 1 { route.db = &dbs[target_db] }
 		task.records[i] = keyspace_record(&route, argv[indices[i]])
 		if task.records[i] == nil { keyspace_task_free(task); keyspace_fallbacks += 1; keyspace_fence(); return false }
 	}
-	if op == .Key && cmd.name == "restore" { task.restore_deep = persist_deep_sanitize(true) && !(pst.sanitize == .Clients && acl_skips_sanitize(c)) }
+	if restore { task.restore_deep = persist_deep_sanitize(true) && !(pst.sanitize == .Clients && acl_skips_sanitize(c)) }
 	task.client = Conn{fd = -1, id = c.id, addr = c.addr, addr_len = c.addr_len, db = c.db, kind = c.kind, flags = c.flags, resp = c.resp}
-	if op == .Key && cmd.name == "restore" && c.user != nil {
+	if restore && c.user != nil {
 		task.restore_user.flags = c.user.flags
 		task.client.user = &task.restore_user
 	}
