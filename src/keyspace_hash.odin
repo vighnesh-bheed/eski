@@ -46,7 +46,7 @@ keyspace_hash_execute :: proc(job: ^ks.Job) {
 	defer keyspace_hash_trace_finish(task, &trace)
 	if task.failed { return }
 	minimum := keyspace_hash_binding_minimum(h, work.hash_minimum)
-	if minimum != ht.EB_EXPIRE_TIME_INVALID { ht.registry_add(&registry, h, minimum) }
+	if minimum != ht.NO_FIELD_DEADLINE { ht.registry_add(&registry, h, minimum) }
 	changed := false
 	reset_ttl := false
 	b := keyspace_object_builder(task, .Hash, h, len(argv) * 64)
@@ -113,7 +113,7 @@ keyspace_hash_execute :: proc(job: ^ks.Job) {
 			if err != .None { task.failed = true; return }
 			_, expires, found := ht.get_raw(h, argv[2])
 			task.hash_expire_at = 0
-			if found && expires != ht.EB_EXPIRE_TIME_INVALID { task.hash_expire_at = i64(expires) }
+			if found && expires != ht.NO_FIELD_DEADLINE { task.hash_expire_at = i64(expires) }
 			keyspace_builder_bulk(&b, value); if !keyspace_builder_finish(task, &b) { return }
 		}
 		task.dirty = 1; changed = true
@@ -233,8 +233,8 @@ keyspace_hash_expiry :: proc(task: ^Keyspace_Task, h: ht.Hash, registry: ^ht.Reg
 	} else {
 		ht.expire_fields(registry, nil, h, fields, args.expire_at, args.cond, u64(task.now), &values)
 		for value in values {
-			if value == ht.HSETEX_DELETED { task.subexpired += 1 }
-			if value == ht.HSETEX_DELETED || value == ht.HSETEX_OK { changed = true; task.dirty += 1 }
+			if value == ht.EXPIRE_DELETED { task.subexpired += 1 }
+			if value == ht.EXPIRE_DELETED || value == ht.EXPIRE_SET { changed = true; task.dirty += 1 }
 		}
 	}
 	keyspace_builder_integer(b, i64(len(values)), '*')
@@ -272,6 +272,6 @@ keyspace_hash_detach :: proc "contextless" (h: ht.Hash) {
 	if h.hfe != nil {
 		h.hfe.reg = nil
 		h.hfe.reg_index = -1
-		h.hfe.reg_expire = ht.EB_EXPIRE_TIME_INVALID
+		h.hfe.reg_expire = ht.NO_FIELD_DEADLINE
 	}
 }

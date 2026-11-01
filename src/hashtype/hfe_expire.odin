@@ -6,7 +6,7 @@ expire_due_fields :: proc(h: Hash, now: u64, quota: int) -> int {
 	expired := 0
 	for expired < quota {
 		deadline := min_expire(h, true)
-		if deadline == EB_EXPIRE_TIME_INVALID || deadline > now {
+		if deadline == NO_FIELD_DEADLINE || deadline > now {
 			break
 		}
 		field: []u8
@@ -39,7 +39,7 @@ hash_type_expire :: proc(h: Hash, now: u64, quota: ^int, update_registry: bool) 
 	}
 	if update_registry && expired > 0 {
 		registry_remove(h)
-		if reg != nil && next != 0 && next != EB_EXPIRE_TIME_INVALID {
+		if reg != nil && next != 0 && next != NO_FIELD_DEADLINE {
 			registry_add(reg, h, next)
 		}
 	}
@@ -48,7 +48,7 @@ hash_type_expire :: proc(h: Hash, now: u64, quota: ^int, update_registry: bool) 
 
 expire_if_needed :: proc(h: Hash, now: u64) -> (emptied: bool) {
 	minimum := min_expire(h, true)
-	if minimum == EB_EXPIRE_TIME_INVALID || minimum >= now {
+	if minimum == NO_FIELD_DEADLINE || minimum >= now {
 		return false
 	}
 	quota := max(int)
@@ -69,7 +69,7 @@ active_expire :: proc(reg: ^Registry, now: u64, max_fields: int, out: ^[dynamic]
 			append(out, Expired_Hash{h = h, key = key, fields = removed, emptied = next == 0})
 			fields_expired += removed
 		}
-		if next != 0 && next != EB_EXPIRE_TIME_INVALID {
+		if next != 0 && next != NO_FIELD_DEADLINE {
 			append(&pending, Reg_Item{expire = next, h = h})
 		}
 	}

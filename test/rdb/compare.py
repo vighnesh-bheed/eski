@@ -58,7 +58,7 @@ def main():
                 pass
             elif x["encoding"] not in ORDER_FREE and x["dump"] != y["dump"]:
                 if loaded and loaded_equal("dump", x, y):
-                    normalised.append("%s dump: listpackex minExpire header %s on the live side, 0 after the load" % (k, x["dump"][2:18]))
+                    normalised.append("%s dump: listpackex minimum deadline header %s on the live side, 0 after the load" % (k, x["dump"][2:18]))
                 else:
                     bad.append("dump payload differs")
         if bad:

@@ -8,11 +8,7 @@ import lp "listpack"
 
 ERR_WRONGTYPE :: ht.WRONGTYPE_ERROR
 
-HASH_ACTIVE_BUDGET :: ht.HFE_DB_BASE_ACTIVE_EXPIRE_FIELDS_PER_SEC / (1000 / CRON_INTERVAL_MS)
-
-HASH_ACTIVE_SEQ_THRESHOLD :: 1_000_000
-
-hash_active_seq: u64
+FIELD_SWEEP_BATCH :: 1000
 
 hash_db_next: int
 
@@ -143,7 +139,7 @@ hash_sort_field :: proc(key: []u8, e: ^Entry, field: []u8) -> (val: []u8, ok: bo
 hash_copy_dup :: proc(src: ^Entry) -> (obj: rawptr, min_expire: u64, ok: bool) {
 	h := ht.Hash(entry_object(src, .Hash))
 	if h == nil {
-		return nil, ht.EB_EXPIRE_TIME_INVALID, false
+		return nil, ht.NO_FIELD_DEADLINE, false
 	}
 	d, at := ht.duplicate(h)
 	d.acct = ht.memory_usage(d)
@@ -154,7 +150,7 @@ hash_copy_attach :: proc(dst: ^Entry, key: []u8, obj: rawptr, min_expire: u64) {
 	h := ht.Hash(obj)
 	entry_object_attach(dst, h, .Hash, hash_obj_encoding(h), h.acct)
 	ht.maintenance_bind(h, dst.db.hreg)
-	if min_expire != ht.EB_EXPIRE_TIME_INVALID {
+	if min_expire != ht.NO_FIELD_DEADLINE {
 		ht.set_key_ref(h, hash_key_ref_new(key, dst.db.hreg))
 		ht.registry_add(dst.db.hreg, h, min_expire)
 	}

@@ -5,16 +5,16 @@ import rdb "../rdb"
 
 rdb_load_meta :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> Hash {
 	minimum := u64(0)
-	if rdbtype == rdb.TYPE_HASH_METADATA {
+	if rdbtype == rdb.TYPE_HASH_TABLE_EX {
 		header, ok := rdb.get_ms(r)
 		if !ok {
 			r.status = .Ok
-			rdb.corrupt(r, "Hash failed loading minExpire")
+			rdb.corrupt(r, "has an invalid field expiry: the minimum deadline is truncated")
 			return nil
 		}
 		minimum = u64(header)
-		if minimum > EB_EXPIRE_TIME_INVALID {
-			rdb.corrupt(r, "Hash read invalid minExpire value")
+		if minimum > NO_FIELD_DEADLINE {
+			rdb.corrupt(r, "has an invalid field expiry: the minimum deadline is out of range")
 			return nil
 		}
 	}
@@ -40,16 +40,16 @@ rdb_load_meta :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> Hash {
 			return rdb_fail(r, h, "")
 		}
 		deadline := encoded
-		if rdbtype == rdb.TYPE_HASH_METADATA && encoded != 0 {
+		if rdbtype == rdb.TYPE_HASH_TABLE_EX && encoded != 0 {
 			absolute := u128(minimum) + u128(encoded) - 1
-			if absolute > u128(EB_EXPIRE_TIME_MAX) {
-				rdb.corrupt(r, "invalid expireAt time: ", u64(min(absolute, u128(max(u64)))), true)
+			if absolute > u128(FIELD_DEADLINE_MAX) {
+				rdb.corrupt(r, "has an invalid field expiry: deadline out of range ", u64(min(absolute, u128(max(u64)))), true)
 				return rdb_fail(r, h, "")
 			}
 			deadline = u64(absolute)
 		}
-		if deadline > EB_EXPIRE_TIME_MAX {
-			rdb.corrupt(r, "invalid expireAt time: ", deadline, true)
+		if deadline > FIELD_DEADLINE_MAX {
+			rdb.corrupt(r, "has an invalid field expiry: deadline out of range ", deadline, true)
 			return rdb_fail(r, h, "")
 		}
 		field, field_ok := rdb.get_string(r, 0)

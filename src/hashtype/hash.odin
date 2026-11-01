@@ -187,7 +187,7 @@ convert :: proc(h: Hash, presize: int = 0) {
 		fb, vb: [lp.LP_INTBUF_SIZE]u8
 		b := table_add_new(t, value_bytes(current_field(&it), &fb), value_bytes(current_value(&it), &vb))
 		expiry := current_expire(&it)
-		if expiry != EB_EXPIRE_TIME_INVALID {
+		if expiry != NO_FIELD_DEADLINE {
 			vol_set(t, b, expiry)
 		}
 	}
@@ -230,7 +230,7 @@ get_raw :: proc(h: Hash, field: []u8) -> (v: Value, expire: u64, found: bool) {
 	} else if h.encoding == .Listpack_Ex {
 		_, vp, ttl, ok := lpex_locate(h, field)
 		if ok {
-			exp := EB_EXPIRE_TIME_INVALID
+			exp := NO_FIELD_DEADLINE
 			if ttl != 0 {
 				exp = u64(ttl)
 			}
@@ -238,10 +238,10 @@ get_raw :: proc(h: Hash, field: []u8) -> (v: Value, expire: u64, found: bool) {
 		}
 	} else {
 		if p := lp_find_field(h.lp, field, 1); p != nil {
-			return value_from_lp(pack_next(p)), EB_EXPIRE_TIME_INVALID, true
+			return value_from_lp(pack_next(p)), NO_FIELD_DEADLINE, true
 		}
 	}
-	return {}, EB_EXPIRE_TIME_INVALID, false
+	return {}, NO_FIELD_DEADLINE, false
 }
 
 get :: proc(h: Hash, field: []u8, now: u64, delete_expired := true) -> (v: Value, res: Get_Result) {
@@ -249,7 +249,7 @@ get :: proc(h: Hash, field: []u8, now: u64, delete_expired := true) -> (v: Value
 	if !found {
 		return {}, .Not_Found
 	}
-	if expiry != EB_EXPIRE_TIME_INVALID && expiry < now {
+	if expiry != NO_FIELD_DEADLINE && expiry < now {
 		if !delete_expired {
 			return {}, .Not_Found
 		}
@@ -354,7 +354,7 @@ hdel :: proc(h: Hash, fields: [][]u8) -> (deleted: int, emptied: bool) {
 	for field in fields {
 		if !volatile && is_registered(h) {
 			_, expiry, found := get_raw(h, field)
-			volatile = found && expiry != EB_EXPIRE_TIME_INVALID
+			volatile = found && expiry != NO_FIELD_DEADLINE
 		}
 		if delete_field(h, field) {
 			deleted += 1
@@ -387,7 +387,7 @@ duplicate :: proc(h: Hash) -> (d: Hash, min_expire: u64) {
 	for next(&it) {
 		b := table_add_new(d.table, current_field(&it).str, current_value(&it).str)
 		expiry := current_expire(&it)
-		if expiry != EB_EXPIRE_TIME_INVALID {
+		if expiry != NO_FIELD_DEADLINE {
 			vol_set(d.table, b, expiry)
 		}
 	}

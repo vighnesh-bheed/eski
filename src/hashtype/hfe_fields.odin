@@ -3,9 +3,9 @@ package hashtype
 set_ex_field :: proc(h: Hash, field: []u8, expire_at: u64, cond: Expire_Condition, now: u64, min_fields: ^u64, deleted, updated: ^int) -> i64 {
 	_, old, found := get_raw(h, field)
 	if !found {
-		return HSETEX_NO_FIELD
+		return EXPIRE_NO_FIELD
 	}
-	volatile := old != EB_EXPIRE_TIME_INVALID
+	volatile := old != NO_FIELD_DEADLINE
 	allowed := true
 	switch cond {
 	case .None:
@@ -19,14 +19,14 @@ set_ex_field :: proc(h: Hash, field: []u8, expire_at: u64, cond: Expire_Conditio
 		allowed = !volatile || expire_at < old
 	}
 	if !allowed {
-		return HSETEX_NO_CONDITION_MET
+		return EXPIRE_CONDITION_UNMET
 	}
 	min_fields^ = min(min_fields^, old)
 	if expire_at <= now {
 		if delete_field(h, field) {
 			deleted^ += 1
 		}
-		return HSETEX_DELETED
+		return EXPIRE_DELETED
 	}
 	min_fields^ = min(min_fields^, expire_at)
 	if h.encoding == .Hashtable {
@@ -41,7 +41,7 @@ set_ex_field :: proc(h: Hash, field: []u8, expire_at: u64, cond: Expire_Conditio
 		lpex_update_expiry(h, field, fp, vp, expire_at)
 	}
 	updated^ += 1
-	return HSETEX_OK
+	return EXPIRE_SET
 }
 
 expire_fields :: proc(reg: ^Registry, key: rawptr, h: Hash, fields: [][]u8, expire_at: u64, cond: Expire_Condition, now: u64, out: ^[dynamic]i64) -> (emptied: bool) {
@@ -50,7 +50,7 @@ expire_fields :: proc(reg: ^Registry, key: rawptr, h: Hash, fields: [][]u8, expi
 		set_key_ref(h, key)
 	}
 	old := registered_expire(h)
-	touched := EB_EXPIRE_TIME_INVALID
+	touched := NO_FIELD_DEADLINE
 	deleted, updated: int
 	for field in fields {
 		append(out, set_ex_field(h, field, expire_at, cond, now, &touched, &deleted, &updated))
@@ -69,17 +69,14 @@ expire_fields :: proc(reg: ^Registry, key: rawptr, h: Hash, fields: [][]u8, expi
 	if actual == old {
 		return false
 	}
-	reschedule := actual == EB_EXPIRE_TIME_INVALID || old == EB_EXPIRE_TIME_INVALID
+	reschedule := actual == NO_FIELD_DEADLINE || old == NO_FIELD_DEADLINE
 	if !reschedule {
-		if actual > old {
-			reschedule = actual - old >= HASH_NEW_EXPIRE_DIFF_THRESHOLD
-		} else {
-			reschedule = old - actual >= HASH_NEW_EXPIRE_DIFF_THRESHOLD
-		}
+		shift := actual - old if actual > old else old - actual
+		reschedule = shift >= SCHEDULE_SLACK_MS
 	}
 	if reschedule {
 		registry_remove(h)
-		if actual != EB_EXPIRE_TIME_INVALID {
+		if actual != NO_FIELD_DEADLINE {
 			registry_add(reg, h, actual)
 		}
 	}
@@ -89,10 +86,10 @@ expire_fields :: proc(reg: ^Registry, key: rawptr, h: Hash, fields: [][]u8, expi
 ttl_fields :: proc(h: Hash, fields: [][]u8, kind: Ttl_Kind, now: u64, out: ^[dynamic]i64) {
 	for field in fields {
 		_, deadline, found := get_raw(h, field)
-		result := i64(HFE_GET_NO_FIELD)
+		result := i64(TTL_NO_FIELD)
 		if found {
-			if deadline == EB_EXPIRE_TIME_INVALID {
-				result = HFE_GET_NO_TTL
+			if deadline == NO_FIELD_DEADLINE {
+				result = TTL_NO_DEADLINE
 			} else {
 				elapsed := deadline < now || (h.encoding == .Listpack_Ex && deadline == now)
 				if !elapsed {
@@ -115,10 +112,10 @@ ttl_fields :: proc(h: Hash, fields: [][]u8, kind: Ttl_Kind, now: u64, out: ^[dyn
 persist_fields :: proc(h: Hash, fields: [][]u8, now: u64, out: ^[dynamic]i64) -> (changed: bool) {
 	for field in fields {
 		_, deadline, found := get_raw(h, field)
-		result := i64(HFE_PERSIST_NO_FIELD)
+		result := i64(PERSIST_NO_FIELD)
 		if found {
-			if deadline == EB_EXPIRE_TIME_INVALID {
-				result = HFE_PERSIST_NO_TTL
+			if deadline == NO_FIELD_DEADLINE {
+				result = PERSIST_NO_DEADLINE
 			} else if deadline >= now {
 				if h.encoding == .Hashtable {
 					s := table_find(h.table, field, hash_field(field))
@@ -131,7 +128,7 @@ persist_fields :: proc(h: Hash, fields: [][]u8, now: u64, out: ^[dynamic]i64) ->
 					lpex_update_expiry(h, field, fp, vp, 0)
 				}
 				changed = true
-				result = HFE_PERSIST_OK
+				result = PERSIST_REMOVED
 			}
 		}
 		append(out, result)

@@ -19,10 +19,10 @@ expiry_make :: proc(table: bool) -> Hash {
 }
 
 expiry_set :: proc(t: ^testing.T, h: Hash, field: []u8, deadline: u64) {
-	minimum := EB_EXPIRE_TIME_INVALID
+	minimum := NO_FIELD_DEADLINE
 	deleted, updated: int
 	result := set_ex_field(h, field, deadline, .None, 0, &minimum, &deleted, &updated)
-	testing.expect_value(t, result, i64(HSETEX_OK))
+	testing.expect_value(t, result, i64(EXPIRE_SET))
 }
 
 expiry_check_registry :: proc(t: ^testing.T, reg: ^Registry) {
@@ -257,7 +257,7 @@ expiry_large_borrowed_pack_values_and_reordering :: proc(t: ^testing.T) {
 	seen_zero := false
 	for next(&last) {
 		d := current_expire(&last)
-		if d == EB_EXPIRE_TIME_INVALID {
+		if d == NO_FIELD_DEADLINE {
 			seen_zero = true
 		} else {
 			testing.expect(t, !seen_zero && d >= last_deadline)
@@ -285,7 +285,7 @@ expiry_pack_value_updates_keep_position :: proc(t: ^testing.T) {
 	}
 	expiry_set(t, h, ordinary_bytes("b"), 300)
 	expiry_set(t, h, ordinary_bytes("d"), 300)
-	none := EB_EXPIRE_TIME_INVALID
+	none := NO_FIELD_DEADLINE
 	expiry_pack_order(t, h, {"d", "b", "a", "c"}, {300, 300, none, none})
 	testing.expect(t, set(h, ordinary_bytes("a"), ordinary_bytes("plain")))
 	expiry_pack_order(t, h, {"d", "b", "a", "c"}, {300, 300, none, none})
@@ -368,24 +368,24 @@ expiry_parser_checked_units_and_numfields :: proc(t: ^testing.T) {
 	testing.expect_value(t, err, Error.Numfields_Positive)
 	boundary := [][]u8{ordinary_bytes("HEXPIREAT"), ordinary_bytes("h"), nil, ordinary_bytes("FIELDS"), ordinary_bytes("1"), ordinary_bytes("a")}
 	buf: [21]u8
-	boundary[2] = ordinary_key(int(HFE_MAX_ABS_TIME_MSEC / 1000), &buf)
+	boundary[2] = ordinary_key(int(FIELD_DEADLINE_COMMAND_MAX / 1000), &buf)
 	_, err = parse_expire_args(boundary, true, 0)
 	testing.expect_value(t, err, Error.None)
-	boundary[2] = ordinary_key(int(HFE_MAX_ABS_TIME_MSEC / 1000 + 1), &buf)
+	boundary[2] = ordinary_key(int(FIELD_DEADLINE_COMMAND_MAX / 1000 + 1), &buf)
 	_, err = parse_expire_args(boundary, true, 0)
 	testing.expect_value(t, err, Error.Invalid_Expire_Time)
 	boundary[2] = ordinary_bytes("1")
-	_, err = parse_expire_args(boundary, false, HFE_MAX_ABS_TIME_MSEC)
+	_, err = parse_expire_args(boundary, false, FIELD_DEADLINE_COMMAND_MAX)
 	testing.expect_value(t, err, Error.Invalid_Expire_Time)
 }
 
 expiry_fixture :: proc(w: ^rdb.Writer, type: int, duplicate := false) {
-	if type == rdb.TYPE_HASH_METADATA {
+	if type == rdb.TYPE_HASH_TABLE_EX {
 		rdb.put_ms(w, 100)
 	}
 	rdb.put_len(w, 2)
 	deadline := u64(200)
-	if type == rdb.TYPE_HASH_METADATA {
+	if type == rdb.TYPE_HASH_TABLE_EX {
 		deadline = 101
 	}
 	rdb.put_len(w, deadline)
@@ -405,7 +405,7 @@ expiry_metadata_codecs_truncation_and_duplicates :: proc(t: ^testing.T) {
 	old_limit := hash_max_listpack_entries
 	defer hash_max_listpack_entries = old_limit
 	defer ordinary_cleanup()
-	for type in ([2]int{rdb.TYPE_HASH_METADATA, rdb.TYPE_HASH_METADATA_PRE_GA}) {
+	for type in ([2]int{rdb.TYPE_HASH_TABLE_EX, rdb.TYPE_HASH_TABLE_EX_RC}) {
 		for limit in ([2]int{1, 512}) {
 			hash_max_listpack_entries = limit
 			w: rdb.Writer
@@ -420,8 +420,8 @@ expiry_metadata_codecs_truncation_and_duplicates :: proc(t: ^testing.T) {
 					testing.expect(t, h != nil && r.status == .Ok)
 					if h != nil {
 						testing.expect(t, h.hfe != nil && !is_registered(h))
-						testing.expect(t, h.hfe.reg_index == -1 && h.hfe.reg_expire == EB_EXPIRE_TIME_INVALID && key_ref(h) == nil)
-						testing.expect_value(t, min_expire(h, false), EB_EXPIRE_TIME_INVALID)
+						testing.expect(t, h.hfe.reg_index == -1 && h.hfe.reg_expire == NO_FIELD_DEADLINE && key_ref(h) == nil)
+						testing.expect_value(t, min_expire(h, false), NO_FIELD_DEADLINE)
 						testing.expect_value(t, min_expire(h, true), u64(200))
 						v, deadline, found := get_raw(h, ordinary_bytes("a\x00field"))
 						testing.expect(t, found && deadline == 200 && value_eq(v, ordinary_bytes("one\x00value")))
@@ -429,8 +429,8 @@ expiry_metadata_codecs_truncation_and_duplicates :: proc(t: ^testing.T) {
 					}
 				} else {
 					testing.expect(t, h == nil && r.status != .Ok)
-					if type == rdb.TYPE_HASH_METADATA && size < 8 {
-						testing.expect_value(t, rdb.reader_reason(&r), "Hash failed loading minExpire")
+					if type == rdb.TYPE_HASH_TABLE_EX && size < 8 {
+						testing.expect_value(t, rdb.reader_reason(&r), "has an invalid field expiry: the minimum deadline is truncated")
 					}
 				}
 				destroy(h)
@@ -459,22 +459,22 @@ expiry_metadata_codecs_truncation_and_duplicates :: proc(t: ^testing.T) {
 expiry_invalid_metadata_boundaries :: proc(t: ^testing.T) {
 	w: rdb.Writer
 	rdb.writer_init_mem(&w, false, false)
-	rdb.put_ms(&w, i64(EB_EXPIRE_TIME_INVALID + 1))
+	rdb.put_ms(&w, i64(NO_FIELD_DEADLINE + 1))
 	r: rdb.Reader
 	rdb.reader_init_mem(&r, rdb.writer_bytes(&w), false)
-	h := rdb_load_meta(&r, rdb.TYPE_HASH_METADATA, true)
+	h := rdb_load_meta(&r, rdb.TYPE_HASH_TABLE_EX, true)
 	testing.expect(t, h == nil && r.status == .Corrupt)
-	testing.expect_value(t, rdb.reader_reason(&r), "Hash read invalid minExpire value")
+	testing.expect_value(t, rdb.reader_reason(&r), "has an invalid field expiry: the minimum deadline is out of range")
 	destroy(h)
 	rdb.reader_destroy(&r)
 	rdb.writer_destroy(&w)
 	rdb.writer_init_mem(&w, false, false)
 	rdb.put_len(&w, 1)
-	rdb.put_len(&w, EB_EXPIRE_TIME_INVALID)
+	rdb.put_len(&w, NO_FIELD_DEADLINE)
 	rdb.reader_init_mem(&r, rdb.writer_bytes(&w), false)
-	h = rdb_load_meta(&r, rdb.TYPE_HASH_METADATA_PRE_GA, true)
+	h = rdb_load_meta(&r, rdb.TYPE_HASH_TABLE_EX_RC, true)
 	testing.expect(t, h == nil && r.status == .Corrupt)
-	testing.expect_value(t, rdb.reader_reason(&r), "invalid expireAt time: 281474976710656")
+	testing.expect_value(t, rdb.reader_reason(&r), "has an invalid field expiry: deadline out of range 281474976710656")
 	destroy(h)
 	rdb.reader_destroy(&r)
 	rdb.writer_destroy(&w)
@@ -493,7 +493,7 @@ expiry_condition_matrix_checks_before_immediate_delete :: proc(t: ^testing.T) {
 						expiry_set(t, h, ordinary_bytes("f"), 100)
 					}
 					allowed := condition == .None || (condition == .NX && !volatile) || (condition == .XX && volatile) || (condition == .GT && volatile && deadline > 100) || (condition == .LT && (!volatile || deadline < 100))
-					minimum := EB_EXPIRE_TIME_INVALID
+					minimum := NO_FIELD_DEADLINE
 					deleted, updated: int
 					result := set_ex_field(h, ordinary_bytes("f"), deadline, condition, 10, &minimum, &deleted, &updated)
 					_, actual, found := get_raw(h, ordinary_bytes("f"))
@@ -502,7 +502,7 @@ expiry_condition_matrix_checks_before_immediate_delete :: proc(t: ^testing.T) {
 						if volatile {
 							testing.expect_value(t, actual, u64(100))
 						} else {
-							testing.expect_value(t, actual, EB_EXPIRE_TIME_INVALID)
+							testing.expect_value(t, actual, NO_FIELD_DEADLINE)
 						}
 					} else if deadline <= 10 {
 						testing.expect(t, result == 2 && deleted == 1 && updated == 0 && !found)
@@ -569,7 +569,7 @@ expiry_elapsed_physical_records_obey_conditions :: proc(t: ^testing.T) {
 				deadline = 50
 				expected = 2
 			}
-			minimum := EB_EXPIRE_TIME_INVALID
+			minimum := NO_FIELD_DEADLINE
 			deleted, updated: int
 			result := set_ex_field(h, ordinary_bytes("f"), deadline, condition, 150, &minimum, &deleted, &updated)
 			testing.expect_value(t, result, expected)
@@ -623,7 +623,7 @@ expiry_zero_removal_preserves_cached_registry_membership :: proc(t: ^testing.T) 
 		testing.expect(t, next_deadline == 200 && removed == 0 && quota == 5)
 		testing.expect_value(t, registered_expire(h), u64(100))
 		next_deadline, removed = hash_type_expire(h, 200, &quota, true)
-		testing.expect(t, next_deadline == EB_EXPIRE_TIME_INVALID && removed == 1 && quota == 4)
+		testing.expect(t, next_deadline == NO_FIELD_DEADLINE && removed == 1 && quota == 4)
 		testing.expect(t, !is_registered(h))
 		testing.expect_value(t, length(h), 1)
 	}
@@ -637,7 +637,7 @@ expiry_invalid_registration_preserves_membership_and_storage :: proc(t: ^testing
 	h := expiry_make(false)
 	defer destroy(h)
 	registry_add(&source, h, 100)
-	for invalid in ([3]u64{EB_EXPIRE_TIME_INVALID, EB_EXPIRE_TIME_INVALID + 1, max(u64)}) {
+	for invalid in ([3]u64{NO_FIELD_DEADLINE, NO_FIELD_DEADLINE + 1, max(u64)}) {
 		meta := h.hfe
 		index := meta.reg_index
 		registry_add(&destination, h, invalid)
@@ -653,8 +653,8 @@ expiry_invalid_registration_preserves_membership_and_storage :: proc(t: ^testing
 	registry_add(&destination, unregistered, max(u64))
 	testing.expect(t, unregistered.hfe == nil)
 	testing.expect(t, destination.items == nil && destination.cap == 0)
-	registry_add(&destination, unregistered, EB_EXPIRE_TIME_MAX)
-	testing.expect_value(t, registered_expire(unregistered), EB_EXPIRE_TIME_MAX)
+	registry_add(&destination, unregistered, FIELD_DEADLINE_MAX)
+	testing.expect_value(t, registered_expire(unregistered), FIELD_DEADLINE_MAX)
 	expiry_check_registry(t, &source)
 	expiry_check_registry(t, &destination)
 }
@@ -667,13 +667,13 @@ expiry_dump_minimum_preserves_table_sentinel :: proc(t: ^testing.T) {
 	h := expiry_make(true)
 	defer destroy(h)
 	set(h, ordinary_bytes("f"), ordinary_bytes("v"))
-	testing.expect_value(t, dump_min_expire(h), EB_EXPIRE_TIME_INVALID)
+	testing.expect_value(t, dump_min_expire(h), NO_FIELD_DEADLINE)
 	expiry_set(t, h, ordinary_bytes("f"), 200)
 	registry_add(&reg, h, 100)
 	testing.expect_value(t, dump_min_expire(h), u64(200))
 	testing.expect_value(t, registered_expire(h), u64(100))
 	set(h, ordinary_bytes("f"), ordinary_bytes("noTTL"))
-	testing.expect_value(t, dump_min_expire(h), EB_EXPIRE_TIME_INVALID)
+	testing.expect_value(t, dump_min_expire(h), NO_FIELD_DEADLINE)
 	testing.expect_value(t, registered_expire(h), u64(100))
 	packed := create()
 	defer destroy(packed)

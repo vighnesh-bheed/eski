@@ -6,7 +6,7 @@ ensure_meta :: proc "contextless" (h: Hash) -> ^Hfe_Meta {
 	if h.hfe == nil {
 		h.hfe = cast(^Hfe_Meta)mem_alloc(size_of(Hfe_Meta))
 		h.hfe.reg_index = -1
-		h.hfe.reg_expire = EB_EXPIRE_TIME_INVALID
+		h.hfe.reg_expire = NO_FIELD_DEADLINE
 	}
 	return h.hfe
 }
@@ -17,7 +17,7 @@ is_registered :: proc "contextless" (h: Hash) -> bool {
 
 registered_expire :: proc "contextless" (h: Hash) -> u64 {
 	if !is_registered(h) {
-		return EB_EXPIRE_TIME_INVALID
+		return NO_FIELD_DEADLINE
 	}
 	return h.hfe.reg_expire
 }
@@ -44,7 +44,7 @@ registry_len :: proc "contextless" (reg: ^Registry) -> int {
 
 registry_next_expire :: proc "contextless" (reg: ^Registry) -> u64 {
 	if registry_len(reg) == 0 {
-		return EB_EXPIRE_TIME_INVALID
+		return NO_FIELD_DEADLINE
 	}
 	return reg.items[0].expire
 }
@@ -107,11 +107,11 @@ registry_remove :: proc "contextless" (h: Hash) {
 	}
 	reg.items[reg.len] = {}
 	m.reg_index = -1
-	m.reg_expire = EB_EXPIRE_TIME_INVALID
+	m.reg_expire = NO_FIELD_DEADLINE
 }
 
 registry_add :: proc "contextless" (reg: ^Registry, h: Hash, expire: u64) {
-	if expire > EB_EXPIRE_TIME_MAX {
+	if expire > FIELD_DEADLINE_MAX {
 		return
 	}
 	resize_require(reg != nil)
@@ -141,7 +141,7 @@ registry_destroy :: proc "contextless" (reg: ^Registry) {
 	for i in 0 ..< reg.len {
 		m := reg.items[i].h.hfe
 		m.reg_index = -1
-		m.reg_expire = EB_EXPIRE_TIME_INVALID
+		m.reg_expire = NO_FIELD_DEADLINE
 		m.reg = nil
 	}
 	mem_free(reg.items)
@@ -209,7 +209,7 @@ vol_remove :: proc "contextless" (t: ^Table, b: ^Blob) {
 }
 
 vol_set :: proc "contextless" (t: ^Table, b: ^Blob, expire: u64) {
-	if expire == 0 || expire == EB_EXPIRE_TIME_INVALID {
+	if expire == 0 || expire == NO_FIELD_DEADLINE {
 		vol_remove(t, b)
 		return
 	}
@@ -241,7 +241,7 @@ vol_set :: proc "contextless" (t: ^Table, b: ^Blob, expire: u64) {
 
 vol_min :: proc "contextless" (t: ^Table) -> u64 {
 	if t.vol_len == 0 {
-		return EB_EXPIRE_TIME_INVALID
+		return NO_FIELD_DEADLINE
 	}
 	return t.vol[0].expire
 }
@@ -258,7 +258,7 @@ vol_count_before :: proc "contextless" (t: ^Table, now: u64) -> int {
 
 table_field_expire :: proc "contextless" (t: ^Table, b: ^Blob) -> u64 {
 	if b.hidx == 0 {
-		return EB_EXPIRE_TIME_INVALID
+		return NO_FIELD_DEADLINE
 	}
 	return t.vol[b.hidx - 1].expire
 }
