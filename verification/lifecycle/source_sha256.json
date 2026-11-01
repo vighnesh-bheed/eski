@@ -1,0 +1,19 @@
+{
+  "src/runtime_fork.odin": "f6de3d9af30d28d8e00fb66aa9f6750fdf751e7de3b8f9ce3691bfe62fc646d3",
+  "src/runtime_operations.odin": "3a3a4f294ff8a7e87d20cf54136d477003bbdb64fcc2b91dd765468b19632931",
+  "src/runtime_tuning.odin": "a519b1c0634894c4540dea8e9c52f4584b281c123bae8e8849f1088c875a5845",
+  "src/compute_integration.odin": "f1d2fe2b6fb48f049dd1141f48e4e19514a4471821087007f89bb17e72849f6c",
+  "src/keyspace_integration.odin": "c3eb219de55afe79c8434f5882b46d8624723ed741455d5fada798fd0c2da9dc",
+  "src/keyspace/pool.odin": "2edacd20c3ca833613855c3c49dc7d3a14bbadeb7b49cfd25719f32917703871",
+  "src/compute/pool.odin": "e4725f225fb5c4f1eaf36ea40f46d63d91d6017857bd44ef37d7427c8a09d16f",
+  "src/lazyfree.odin": "488c9b1cb877c0f6b3706c00d49d10f71ac4c840a61a3bd77facb4ff5fdb2dfd",
+  "src/aof.odin": "ce6f58a40ffa04d985a66962cdb1cce4c96e593975c3c50251ed9cec1271e8f9",
+  "src/diagnostics.odin": "7e7b44be86d2f3df80a9742e2ca8c02710badad790120d9c642e15356e884359",
+  "src/diagnostics_native/diagnostics.c": "3179b7be0596db8c4993fdc5ae5803db568297e7ad100fd02a6b124f122db51d",
+  "src/cmd_persist.odin": "bed5ec4ad744d7fa8df1a3c827cae30c29f0ffc061210576f9418b8956dda8e2",
+  "src/config.odin": "e036d6f7c65a65a55d91efef72263fce437802c2097884c1b8c0777a0a67b71b",
+  "src/lua_debug.odin": "4db676664184cede06766eb1113df5b7c95cd58e6b088115777fdc7da8fa1129",
+  "src/main.odin": "c0a89a8a9fb8bc0a5c5cd6b2e4dcb3cb354b6d5e87a353d72318a7ba23d78866",
+  "test/compatibility/runtime_operations_shim.c": "27a57d86e73199e691739000f50f4148fbde89944df71eed46bbccacf367ecb6",
+  "tools/source_digest.sh": "311be65fa928a82c5249d50036ecd69d88b09efd5656b3e3b54bbd0f076f08e7"
+}

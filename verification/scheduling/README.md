@@ -1,0 +1,55 @@
+# Bounded worker scheduling verification
+
+Area 7 explores every reachable state and transition of six finite, source-informed scheduling models, then runs original Odin functions and narrow live server probes. This is bounded verification of the declared models plus implementation tests. It does not prove the executable, weak-memory behavior, or scheduling at arbitrary scale.
+
+Run from the repository root with the installed Python standard library, Odin and clang:
+
+```sh
+python3 -I verification/scheduling/verify.py --output "$PWD/verification/scheduling/.build"
+```
+
+`--server /absolute/path/to/eski` defaults to `bin/eski`. The server must match the qualified release identity in [binary-identities.json](binary-identities.json), and the complete runtime source inventory must match [source-sha256.json](source-sha256.json). An optional `--tsan-server /absolute/path/to/qualified-eski-tsan` repeats the same socket probes against the qualified instrumented server. The default run always freshly builds and runs the original-source harness with ThreadSanitizer and demonstrates instrumentation with a deliberately racy control. Missing compilers, native link inputs, instrumentation or qualified identities fail the run; they cannot become passing skips. `ODIN` or `ODIN_BIN` selects the installed Odin executable, and `CC` selects clang for recorded tool identity.
+
+The runner clears stale success before any gate. It uses one allowed CPU, nice 10, Odin two compilation threads, a shared verification lock for all real workloads, and the shared compiler lock inside it. Only owned loopback nodes, sockets, temporary directories and subprocesses are created. There are no benchmarks or dependency downloads.
+
+The model has two workers, at most three records and three offered jobs, pool capacity one or three, at most one internal retry per accepted job, one optional disconnect, and one optional pause/resume cycle. Each offered job is considered once. Rejection consumes the offered request without assigning an accepted sequence. Abort sets the pool halt flag; affected later jobs may be cancelled internally and replayed once by the coordinator. Client disconnect changes delivery eligibility while preserving accepted mutation work.
+
+| Scenario | Records and jobs | Reachable states | Edges | Terminals |
+| --- | --- | ---: | ---: | ---: |
+| Opposite owners and aliases | Write one record, reversed multi-record write with duplicate aliases, aliased read | 183 | 577 | 1 |
+| Independent completion order | Independent writes, then a read spanning a shared-owner record | 785 | 2,483 | 5 |
+| Abort, retry and disconnect | Partial aliased mutation, rollback, dependent write/read, optional delivery loss | 509 | 1,494 | 12 |
+| Independent abort | One owner aborts while another may finish independent work | 689 | 1,885 | 14 |
+| Rejected admission | Invalid request and capacity-one admission contention | 33 | 75 | 2 |
+| Pause, resume and disconnect | Admission interleavings with drain, resume and aliased ownership | 1,260 | 4,665 | 10 |
+| Total declared models | Six separate initial states | 3,459 | 11,179 | 44 |
+
+Counts include enabled environment-yield self-loops on nonterminal states. Productive edges advance a finite protocol; the runner checks the complete graph after removing those loops is acyclic. A state with unfinished work and no productive transition is a product deadlock and fails. Infinite yield-only executions represent environment starvation, not a discovered product deadlock. Eventual completion therefore assumes eventual worker and coordinator scheduling, internal wakeup delivery, and environment resume. No unbounded liveness or weak-memory result follows.
+
+The operational model uses per-owner FIFO queues and separate worker arrival, mutation, commit/abort, departure, completion, coordinator polling, ordered publication, fence and retry transitions. Multi-owner jobs rendezvous on the distinct owners; duplicate record arguments remain visible to command execution. A job can mutate one argument at a time, making overlap and partial rollback observable. Admission assigns its position in the accepted history only on success. The accepted history is independently interpreted to derive expected per-argument reads, final records and publication order; it is not reconstructed from queue counters.
+
+| Original source | Model transitions | Invariants and real checks |
+| --- | --- | --- |
+| [Pool submit](../../src/keyspace/pool.odin), `submit` | `admit_assign_sequence`, `reject`, distinct owner queues | Rejection preserves accepted sequence, queues, data and outstanding resources; real paused/invalid and duplicate admissions |
+| [Pool worker](../../src/keyspace/pool.odin), `worker_main` | `worker_arrive`, `worker_begin_mutation`, per-record mutation, commit, departure and completion | No overlapping mutable owner or record; per-record accepted history; real atomic gate forces independent completion before an earlier held job, reversed owners and duplicate aliases preserve observed clocks |
+| [Integration](../../src/keyspace_integration.odin), `keyspace_try`, `keyspace_collect`, `keyspace_publish_completions` | Accepted sequence assignment, polling, staging, ordered publication | Effects are the exact accepted prefix without holes or duplicate publication; real missing-head completion buffer and failed-head block tests, plus live pipelined SET/GET/APPEND/MSET/MGET/RENAME |
+| [Snapshot rollback](../../src/keyspace_snapshot.odin), `keyspace_capture_execute` | Per-argument tentative mutation, rollback, abort/halt | Logical records restored and unpublished effects discarded; real memory-budget failure after aliased MSET mutation restores both original values, clocks and flags |
+| [Fence and retry](../../src/keyspace_integration.odin), `keyspace_fence`, `keyspace_retry_all`, `keyspace_retry_execute` | Import fence, ordered coordinator retry, fence completion and resume | Cancelled/aborted jobs publish once, terminal states require recovery flags cleared; real abort cancels an already accepted dependent pool job before mutation and resume admits new work; real ordered retries invoke original INCR exactly once per key |
+| [Connection closure](../../src/keyspace_integration.odin), `keyspace_conn_closed`, completion validity checks | `disconnect_delivery_only`, reply/drop selection | Accepted writes survive disconnect; real detached completion uses copied client state, a reused connection identity receives no reply, and four live socket disconnects retain their worker writes |
+| [Pause and resume](../../src/keyspace/pool.odin), `pause`, `resume` | Close admission, drain, quiescence, resume | No unfinished-state deadlocks within bounds; real pool draining and abort recovery |
+
+The model's `values` is a single logical record state spanning worker shadows and the reconciled coordinator store. The import fence abstracts the original `keyspace_fence` directory traversal and store import as identity on these logical values. That reconciliation implementation, physical ownership transfer and datastore representation are not proved by this model. The real fixtures exercise selected boundaries separately. Record payloads use a small deterministic update algebra to expose ordering and duplicate arguments; they do not implement every Redis datatype or every command failure mode.
+
+[harness.odin](harness.odin) is a test adapter. The verifier copies the entire original source tree, omits only the application entry point and top-level test files, and adds this adapter. Every retained original file is checked byte for byte and inventoried before compiling. Original pool, coordinator, snapshot and command functions execute unchanged. The coordinator fixture injects bounded completion records to make missing-head and retry order deterministic; its ordering adapter then calls original INCR, and original GET independently observes each result. This fixture is separate from the socket probes. The snapshot fixture is a real allocation-budget failure with original rollback. The pool fixture's abort callback restores its own temporary clock write before signalling abort; it is not presented as a replacement for the separately tested snapshot function.
+
+Each fresh normal and ThreadSanitizer harness run requires all 19 named checks: ten pool checks, five coordinator checks and four snapshot checks. The deliberate [race control](race_control.odin) must exit 66 with an actual ThreadSanitizer report naming the shared test variable; the production harness must then exit zero without a report under the same toolchain and sanitizer settings. There are no suppressions. The default release server runs ten targeted checks, with at least twelve observed worker admissions. The optional qualified ThreadSanitizer server repeats them. Live socket disconnect tests establish accepted worker writes and final records for four owned connections; they do not enumerate all operating-system socket schedules. These checks establish no blanket race-freedom claim.
+
+The explorer emits complete compressed state/edge graphs, exact terminal inventories, transition coverage and hashes. A second relation audit checks every saved state's enabled successors, exact edge equality and reachability from the root. State caps and deadlines fail rather than produce `exhausted: true`. A separately checkable four-bit exploration control has exactly 16 states, 32 edges and one terminal, and its full edge set is compared against an independent integer enumeration. A deliberately too-small exploration cap must fail.
+
+The same explorer and invariants must reject three real transition mutants: bypassed multi-owner ownership, out-of-order publication, and dropping an accepted disconnected write. Each counterexample includes every state and transition from the initial state, its violated invariant, scenario and mutant name. Every normal verification run replays all witnesses through the same operational relation. To replay one preserved witness independently:
+
+```sh
+python3 -I verification/scheduling/verify.py --replay /absolute/path/to/bypass_ownership-witness.json
+```
+
+The final receipt records model bounds, exact explored counts, invariant and transition coverage, graph audits, rejected mutants, witness hashes, actual check results, compiler versions, native input hashes, executable identities, the complete runtime source inventory and verification asset hashes. Generated files stay in the selected output directory. The declared finite scenarios, tests and explicit environmental assumptions are the scope of the result.

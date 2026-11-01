@@ -131,6 +131,14 @@ python3 -I proofs/verify.py
 
 Each project documents its theorem domains, compatibility edge cases and implementation boundary. The aggregate runner verifies projects sequentially and records evidence for each covered area. Model proofs and finite implementation comparisons provide different evidence; they do not establish formal verification of the compiled Odin server. Follow the project instructions to run focused verification separately from the ordinary package and conformance suites.
 
+Worker scheduling and fork/shutdown have separate [bounded state-space and runtime checks](../verification/README.md):
+
+```sh
+python3 -I verification/verify.py --server /absolute/path/to/qualified/eski
+```
+
+Add `--tsan-server /absolute/path/to/qualified/eski-tsan` for the targeted instrumented server checks. The scheduling harness also builds its own ThreadSanitizer control and requires the deliberate race to be detected. Supplied binaries must match the projects' pinned qualified checkpoint. These checks cover the documented finite scenarios, source-informed models and targeted real paths; they do not establish unbounded concurrency or universal race freedom. The runners start and clean up their own small local fixtures and perform no benchmarks.
+
 ## Generate the published tables
 
 ```sh

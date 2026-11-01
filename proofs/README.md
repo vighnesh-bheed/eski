@@ -9,7 +9,7 @@ The first phase groups correctness work for areas 1–6 and 9. Each project pair
 | Encoding | 4. Request parsing; 5. Packed data codecs | [Encoding](encoding/README.md) |
 | Arithmetic | 9. Bit and integer operations | [Bitfields](bitfield/README.md) |
 
-Areas 7 and 8, worker scheduling and fork/shutdown, form a later concurrency and lifecycle verification phase. Area 10 covers performance analysis and measurement; benchmarks remain deferred.
+Areas 7 and 8, worker scheduling and fork/shutdown, have separate [bounded concurrency and lifecycle checks](../verification/README.md). Area 10 covers performance analysis and measurement; benchmarks remain deferred.
 
 ## Recorded coverage
 
