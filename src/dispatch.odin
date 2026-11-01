@@ -20,9 +20,10 @@ CMD_TABLE_MASK :: CMD_TABLE_SIZE - 1
 CMD_NAME_MAX :: 32
 
 Cmd_Slot :: struct {
-	key:   string,
-	cmd:   ^Command,
-	stats: ^Cmd_Hot,
+	key:      string,
+	cmd:      ^Command,
+	stats:    ^Cmd_Hot,
+	keyspace: Maybe(Keyspace_Op),
 }
 
 cmd_table: [CMD_TABLE_SIZE]Cmd_Slot
@@ -55,7 +56,10 @@ register_fail :: proc "contextless" (reason: string, name: string) -> ! {
 
 @(private = "file")
 table_insert :: proc "contextless" (key: string, cmd: ^Command) #no_bounds_check {
-	cur := Cmd_Slot{key, cmd, nil}
+	cur := Cmd_Slot{key = key, cmd = cmd}
+	if op, ok := keyspace_operation(cmd); ok {
+		cur.keyspace = op
+	}
 	h := cmd_home(cur.key)
 	dist := 0
 	for {
@@ -194,7 +198,7 @@ execute :: proc(c: ^Conn, argv: [][]u8) {
 	resolved := slot.cmd if slot != nil else nil
 	diagnostics_command_begin(resolved.name if resolved != nil else "unknown", argv)
 	defer diagnostics_command_end()
-	if !keyspace_candidate(resolved, argv) {
+	if !keyspace_candidate(slot, argv) {
 		keyspace_fence()
 	}
 	if slot == nil {
@@ -219,7 +223,7 @@ execute :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	if cmd_hooks {
-		execute_hooked(c, cmd, st, argv)
+		execute_hooked(c, slot, argv)
 		return
 	}
 	if pst.gate_active {
@@ -228,7 +232,7 @@ execute :: proc(c: ^Conn, argv: [][]u8) {
 			return
 		}
 	}
-	if keyspace_candidate(cmd, argv) && keyspace_try(c, cmd, st, argv) {
+	if keyspace_candidate(slot, argv) && keyspace_try(c, slot, argv) {
 		return
 	}
 	db_cur = c.db
@@ -265,7 +269,9 @@ execute_gate :: #force_no_inline proc(c: ^Conn, cmd: ^Command, st: ^Cmd_Hot, arg
 }
 
 @(cold)
-execute_hooked :: #force_no_inline proc(c: ^Conn, cmd: ^Command, st: ^Cmd_Hot, argv: [][]u8) {
+execute_hooked :: #force_no_inline proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8) {
+	cmd := slot.cmd
+	st := slot.stats
 	stat_cur = nil
 	if cmd.handler == cmd_debug && !debug_allowed(c) {
 		reply_error(c, ERR_DEBUG_NOT_ALLOWED)
@@ -316,7 +322,7 @@ execute_hooked :: #force_no_inline proc(c: ^Conn, cmd: ^Command, st: ^Cmd_Hot, a
 		}
 		return
 	}
-	if keyspace_candidate(cmd, argv) && keyspace_try(c, cmd, st, argv) {
+	if keyspace_candidate(slot, argv) && keyspace_try(c, slot, argv) {
 		ps_exec = nil
 		return
 	}
