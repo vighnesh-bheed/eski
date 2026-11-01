@@ -29,3 +29,5 @@ redis-cli -p 6399 PFMERGE demo:visitors:all demo:visitors
 HLL values use an encoded string with sparse/dense representations and cached cardinality information. Arbitrary string writes can corrupt that encoding; HLL commands validate the payload and can reject it. `PFDEBUG` and `PFSELFTEST` provide implementation diagnostics rather than application data operations.
 
 Verify with `bash test/bitmap/compare.sh`, `bash test/hll/compare.sh`, `bash test/run_packages.sh` and `./test/conformance/run.sh --suite redis --units bitops,bitfield,hyperloglog`. The [command reference](commands.md) lists accepted forms; the [conformance report](conformance.md) qualifies the tested scope.
+
+The optional [bitfield proof pilot](../proofs/bitfield/README.md) checks wrapping, saturation, overflow rejection and mutation counting in an executable Lean model, then compares that model with the actual Odin bitmap functions and an independent reference. Its documented domains and limits apply separately from command conformance and HyperLogLog coverage.
