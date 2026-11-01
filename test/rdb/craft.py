@@ -128,7 +128,7 @@ def main():
     bad_crc = bytearray(base)
     bad_crc[-1] ^= 0xFF
     write(os.path.join(out, "crc.rdb"), bytes(bad_crc))
-    cases.append(("crc", "a checksum mismatch", "1", FAILED + "CRC mismatch", "1", "RDB CRC error"))
+    cases.append(("crc", "a checksum mismatch", "1", FAILED + "CRC error: CRC mismatch, the file stores checksum [0-9a-f]{16} but its contents hash to [0-9a-f]{16}", "1", "RDB CRC error"))
     body = header() + b"\xfe\x00\xfb\x01\x00" + b"\x00" + string("k") + string("v" * 100)
     write(os.path.join(out, "trunc.rdb"), body[: len(body) - 40])
     cases.append(("trunc", "an unexpected end of file", "1", FAILED + "unexpected end of file, the string at key 'k' is truncated", "1", "Unexpected EOF reading RDB file"))
@@ -146,7 +146,7 @@ def main():
     lib = "#!none name=eskilib\nredis.register_function('eskifn', function() return 1 end)\n"
     body = header() + b"\xf5" + string(lib) + b"\xfe\x00\xfb\x01\x00" + b"\x00" + string("k") + string("v")
     write(os.path.join(out, "function.rdb"), finish(body))
-    cases.append(("function", "a function library that cannot be loaded", "1", FAILED + "the file carries a function library", "0", "Failed loading library"))
+    cases.append(("function", "a function library that cannot be loaded", "1", FAILED + "function library compilation failed", "0", "Failed loading library"))
     body = header() + b"\xfe\x00\xfb\x01\x00" + bytes([30]) + string("u") + string("v")
     write(os.path.join(out, "unknown.rdb"), finish(body))
     cases.append(("unknown", "an unknown encoding type", "1", FAILED + "key 'u' has unknown encoding type 30", "1", "Unknown RDB encoding type 30"))
