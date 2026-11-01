@@ -251,7 +251,7 @@ feed_transactions_wrap :: proc(t: ^testing.T) {
 	run(c, "SET", "m1", "1")
 	run(c, "SET", "m2", "2")
 	j.aof_tx_end()
-	expect_records(t, {"SELECT 0", "MULTI", "SET m1 1", "SET m2 2", "EXEC"})
+	expect_records(t, {"MULTI", "SELECT 0", "SET m1 1", "SET m2 2", "EXEC"})
 	j.aof_tx_begin(c, exec_cmd, {transmute([]u8)string("EXEC")})
 	run(c, "SET", "m3", "3")
 	run(c, "GET", "m3")

@@ -162,6 +162,7 @@ list_range_reply :: proc(c: ^Conn, l: lt.List, start: int, end: int, reverse: bo
 }
 
 push_generic :: proc(c: ^Conn, argv: [][]u8, where_: lt.Where, xx: bool) {
+	pst.dirty_explicit = true
 	key := argv[1]
 	e, l, wrong := list_lookup(key, false)
 	if wrong {
@@ -175,6 +176,7 @@ push_generic :: proc(c: ^Conn, argv: [][]u8, where_: lt.Where, xx: bool) {
 		}
 		e, l = list_create(key)
 	}
+	pst.dirty += i64(len(argv) - 2)
 	lt.try_conversion_append_values(l, argv[2:])
 	for v in argv[2:] {
 		lt.push(l, v, where_)
@@ -203,6 +205,7 @@ cmd_rpushx :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 cmd_linsert :: proc(c: ^Conn, argv: [][]u8) {
+	pst.dirty_explicit = true
 	after, err := lt.parse_linsert_where(argv[2])
 	if err != .None {
 		reply_list_error(c, err)
@@ -222,6 +225,7 @@ cmd_linsert :: proc(c: ^Conn, argv: [][]u8) {
 		reply_int(c, -1)
 		return
 	}
+	pst.dirty += 1
 	list_done(e, l)
 	signal_key(argv[1])
 	notify(.List, "linsert", argv[1])
@@ -262,6 +266,7 @@ cmd_lindex :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 cmd_lset :: proc(c: ^Conn, argv: [][]u8) {
+	pst.dirty_explicit = true
 	e, l, wrong := list_lookup(argv[1], false)
 	if wrong {
 		reply_wrongtype(c)
@@ -281,6 +286,7 @@ cmd_lset :: proc(c: ^Conn, argv: [][]u8) {
 		reply_list_error(c, .Index_Out_Of_Range)
 		return
 	}
+	pst.dirty += 1
 	list_done(e, l)
 	signal_key(argv[1])
 	notify(.List, "lset", argv[1])
@@ -288,6 +294,7 @@ cmd_lset :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 pop_generic :: proc(c: ^Conn, argv: [][]u8, where_: lt.Where, name: string) {
+	pst.dirty_explicit = true
 	if len(argv) > 3 {
 		reply_wrong_args(c, name)
 		return
@@ -336,6 +343,7 @@ pop_generic :: proc(c: ^Conn, argv: [][]u8, where_: lt.Where, name: string) {
 		}
 		reply_list_value(c, lt.entry_value(&it, &entry))
 	}
+	pst.dirty += i64(count)
 	start, n := lt.pop_range_bounds(l, where_, count)
 	lt.delete_range(l, start, n)
 	lt.try_conversion(l, .Shrinking)
@@ -372,6 +380,8 @@ list_pop_with_key :: proc(c: ^Conn, key: []u8, e: ^Entry, l: lt.List, where_: lt
 		}
 		reply_list_value(c, lt.entry_value(&it, &entry))
 	}
+	pst.dirty_explicit = true
+	pst.dirty += i64(n)
 	start, actual := lt.pop_range_bounds(l, where_, n)
 	lt.delete_range(l, start, actual)
 	lt.try_conversion(l, .Shrinking)
@@ -379,6 +389,7 @@ list_pop_with_key :: proc(c: ^Conn, key: []u8, e: ^Entry, l: lt.List, where_: lt
 }
 
 cmd_lmpop :: proc(c: ^Conn, argv: [][]u8) {
+	pst.dirty_explicit = true
 	a, err := lt.parse_mpop_args(argv, 1)
 	if err != .None {
 		reply_list_error(c, err)
@@ -422,6 +433,7 @@ cmd_lrange :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 cmd_ltrim :: proc(c: ^Conn, argv: [][]u8) {
+	pst.dirty_explicit = true
 	start, err := lt.parse_index(argv[2])
 	if err != .None {
 		reply_list_error(c, err)
@@ -438,7 +450,9 @@ cmd_ltrim :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	if l != nil {
+		before := lt.length(l)
 		lt.ltrim(l, start, end)
+		pst.dirty += i64(before - lt.length(l))
 		list_after_remove(argv[1], e, l, "ltrim")
 	}
 	reply_ok(c)
@@ -480,6 +494,7 @@ cmd_lpos :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 cmd_lrem :: proc(c: ^Conn, argv: [][]u8) {
+	pst.dirty_explicit = true
 	n, err := lt.parse_lrem_count(argv[2])
 	if err != .None {
 		reply_list_error(c, err)
@@ -493,6 +508,7 @@ cmd_lrem :: proc(c: ^Conn, argv: [][]u8) {
 	removed := 0
 	if l != nil {
 		removed = lt.lrem(l, n, argv[3])
+		pst.dirty += i64(removed)
 		if removed != 0 {
 			list_after_remove(argv[1], e, l, "lrem")
 		}
@@ -501,6 +517,7 @@ cmd_lrem :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 lmove_generic :: proc(c: ^Conn, argv: [][]u8, wherefrom: lt.Where, whereto: lt.Where) {
+	pst.dirty_explicit = true
 	source := argv[1]
 	destination := argv[2]
 	se, src, wrong := list_lookup(source, false)
@@ -542,6 +559,7 @@ lmove_generic :: proc(c: ^Conn, argv: [][]u8, wherefrom: lt.Where, whereto: lt.W
 	}
 	se, _, _ = list_lookup(source, false)
 	list_after_remove(source, se, src, pop_event(wherefrom))
+	pst.dirty += 1
 	reply_bulk(c, owned)
 }
 

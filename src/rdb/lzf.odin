@@ -10,10 +10,27 @@ LZF_MAX_OFF :: 1 << 13
 LZF_MAX_REF :: (1 << 8) + (1 << 3)
 LZF_MAX_INPUT :: 1 << 31
 
-@(private)
-lzf_htab: [^]u32
-@(private)
-lzf_base: u32
+LZF_CONTEXT_BYTES :: LZF_HSIZE * size_of(u32)
+
+Lzf_Context :: struct {
+	table: [^]u32,
+	base: u32,
+}
+
+lzf_context_init :: proc "contextless" (ctx: ^Lzf_Context) {
+	if ctx.table == nil {
+		ctx.table = ([^]u32)(runtime.heap_alloc(LZF_CONTEXT_BYTES, true))
+		if ctx.table == nil { runtime.panic_contextless("rdb: out of memory") }
+	} else {
+		intrinsics.mem_zero(ctx.table, LZF_CONTEXT_BYTES)
+	}
+	ctx.base = 0
+}
+
+lzf_context_destroy :: proc "contextless" (ctx: ^Lzf_Context) {
+	if ctx.table != nil { runtime.heap_free(ctx.table) }
+	ctx^ = {}
+}
 
 @(private)
 lzf_idx :: #force_inline proc "contextless" (h: u32) -> u32 {
@@ -21,30 +38,30 @@ lzf_idx :: #force_inline proc "contextless" (h: u32) -> u32 {
 }
 
 @(private)
-lzf_table :: proc "contextless" (in_len: int) -> (htab: [^]u32, base: u32) {
-	if lzf_htab == nil {
-		lzf_htab = ([^]u32)(runtime.heap_alloc(LZF_HSIZE * size_of(u32), true))
-		if lzf_htab == nil {
-			runtime.panic_contextless("rdb: out of memory")
-		}
-		lzf_base = 0
+lzf_table :: proc "contextless" (ctx: ^Lzf_Context, in_len: int) -> (htab: [^]u32, base: u32) {
+	if ctx.table == nil { lzf_context_init(ctx) }
+	if u64(ctx.base) + u64(in_len) + 1 >= 1 << 32 {
+		intrinsics.mem_zero(ctx.table, LZF_CONTEXT_BYTES)
+		ctx.base = 0
 	}
-	if u64(lzf_base) + u64(in_len) + 1 >= 1 << 32 {
-		intrinsics.mem_zero(lzf_htab, LZF_HSIZE * size_of(u32))
-		lzf_base = 0
-	}
-	base = lzf_base
-	lzf_base += u32(in_len)
-	return lzf_htab, base
+	base = ctx.base
+	ctx.base += u32(in_len)
+	return ctx.table, base
 }
 
-lzf_compress :: proc "contextless" (input: []u8, output: []u8) -> int #no_bounds_check {
+lzf_compress :: proc "contextless" (input: []u8, output: []u8) -> int {
+	ctx: Lzf_Context
+	defer lzf_context_destroy(&ctx)
+	return lzf_compress_with_context(&ctx, input, output)
+}
+
+lzf_compress_with_context :: proc "contextless" (ctx: ^Lzf_Context, input: []u8, output: []u8) -> int #no_bounds_check {
 	in_len := len(input)
 	out_len := len(output)
 	if in_len == 0 || out_len == 0 || in_len < 3 || in_len >= LZF_MAX_INPUT {
 		return 0
 	}
-	htab, base := lzf_table(in_len)
+	htab, base := lzf_table(ctx, in_len)
 	src := raw_data(input)
 	dst := raw_data(output)
 	ip := 0

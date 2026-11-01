@@ -1,9 +1,5 @@
 package main
 
-PS_ENTRY_OVERHEAD :: 192
-
-PS_SUB_OVERHEAD :: 24
-
 PS_REJECT_TAIL :: "': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"
 
 @(private = "file")
@@ -12,8 +8,6 @@ PS_FRAME_KEEP :: 1 << 20
 ps_maps: [Ps_Kind]map[string]^Ps_Entry
 
 ps_patterns: [dynamic]^Ps_Entry
-
-ps_memory: int
 
 @(private = "file")
 ps_frame: [dynamic]u8
@@ -73,7 +67,6 @@ ps_new_entry :: proc(kind: Ps_Kind, name: []u8) -> ^Ps_Entry {
 	if kind == .Pattern {
 		append(&ps_patterns, e)
 	}
-	ps_memory += PS_ENTRY_OVERHEAD + len(name)
 	return e
 }
 
@@ -88,7 +81,6 @@ ps_free_entry :: proc(e: ^Ps_Entry) {
 			}
 		}
 	}
-	ps_memory -= PS_ENTRY_OVERHEAD + len(e.name)
 	delete(e.subs)
 	delete(e.name)
 	free(e)
@@ -96,13 +88,15 @@ ps_free_entry :: proc(e: ^Ps_Entry) {
 
 @(private = "file")
 ps_detach :: proc(c: ^Conn, e: ^Ps_Entry) {
+	ps_metadata_adjust(e, -1)
 	for s, i in e.subs {
 		if s == c {
 			ordered_remove(&e.subs, i)
 			break
 		}
 	}
-	ps_memory -= PS_SUB_OVERHEAD
+	ps_metadata_adjust(e, 1)
+	client_metadata_sync(c)
 	if len(e.subs) == 0 {
 		ps_free_entry(e)
 	}
@@ -135,9 +129,11 @@ ps_subscribe :: proc(c: ^Conn, kind: Ps_Kind, name: []u8) -> bool {
 	} else if ps_holds(st, c, e) {
 		return false
 	}
+	ps_metadata_adjust(e, -1)
 	append(&e.subs, c)
 	append(&st.lists[kind], e)
-	ps_memory += PS_SUB_OVERHEAD
+	ps_metadata_adjust(e, 1)
+	client_metadata_sync(c)
 	return true
 }
 
@@ -345,4 +341,8 @@ ps_leave_if_idle :: proc(c: ^Conn) {
 	if ps_idle(c) {
 		ps_unmark(c)
 	}
+}
+
+pubsub_registry_memory :: proc "contextless" () -> int {
+	return cap(ps_frame)
 }

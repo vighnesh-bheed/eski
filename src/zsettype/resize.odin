@@ -4,6 +4,7 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:mem/virtual"
 import "core:sys/linux"
+import "core:sync"
 
 RESIZE_WRITE_SCANS :: 64
 RESIZE_WRITE_MOVES :: 4
@@ -44,6 +45,8 @@ resize_jobs: int
 resize_retired_head: ^Resize_State
 resize_retired_tail: ^Resize_State
 resize_retired_heap: int
+resize_retired_count: int
+resize_retired_mutex: sync.Mutex
 resize_mapped: int
 resize_retired_mapped: int
 
@@ -118,7 +121,7 @@ resize_unlink :: proc "contextless" (r: ^Resize_State) {
 			reg.resize_tail = r.prev
 		}
 		reg.resize_count -= 1
-		resize_jobs -= 1
+		intrinsics.atomic_sub_explicit(&resize_jobs, 1, .Relaxed)
 	}
 	r.reg = nil
 	r.owner = nil
@@ -147,7 +150,7 @@ maintenance_bind :: proc "contextless" (h: Zset, reg: ^Context) {
 	}
 	reg.resize_tail = r
 	reg.resize_count += 1
-	resize_jobs += 1
+	intrinsics.atomic_add_explicit(&resize_jobs, 1, .Relaxed)
 }
 
 maintenance_cancel :: proc "contextless" (h: Zset) {
@@ -160,7 +163,7 @@ maintenance_clear :: proc "contextless" (reg: ^Context) {
 	epoch := intrinsics.atomic_load_explicit(&reg.resize_epoch, .Relaxed)
 	resize_require(epoch != max(u64))
 	intrinsics.atomic_store_explicit(&reg.resize_epoch, epoch + 1, .Release)
-	resize_jobs -= reg.resize_count
+	intrinsics.atomic_sub_explicit(&resize_jobs, reg.resize_count, .Relaxed)
 	reg.resize_head = nil
 	reg.resize_tail = nil
 	reg.resize_count = 0
@@ -176,14 +179,17 @@ resize_retire :: proc "contextless" (r: ^Resize_State) {
 	}
 	r.target = nil
 	r.release_remaining = r.old_cap * size_of(^Node)
-	resize_retired_heap += mem_usable_size(r)
+	intrinsics.atomic_add_explicit(&resize_retired_heap, mem_usable_size(r), .Relaxed)
 	intrinsics.atomic_add_explicit(&resize_retired_mapped, r.release_remaining, .Relaxed)
+	sync.mutex_lock(&resize_retired_mutex)
 	if resize_retired_tail != nil {
 		resize_retired_tail.next = r
 	} else {
 		resize_retired_head = r
 	}
 	resize_retired_tail = r
+	intrinsics.atomic_add_explicit(&resize_retired_count, 1, .Release)
+	sync.mutex_unlock(&resize_retired_mutex)
 }
 
 dict_empty :: proc "contextless" (t: ^Skiplist) {
@@ -230,7 +236,7 @@ dict_step :: proc "contextless" (t: ^Skiplist, scan_budget, move_budget: int) ->
 }
 
 maintenance_pending :: #force_inline proc "contextless" () -> bool {
-	return resize_jobs > 0 || resize_retired_head != nil
+	return intrinsics.atomic_load_explicit(&resize_jobs, .Relaxed) > 0 || intrinsics.atomic_load_explicit(&resize_retired_count, .Acquire) > 0
 }
 
 maintenance_step :: proc "contextless" (reg: ^Context, scans, moves: int) -> (h: Zset, work: Resize_Work) {
@@ -253,15 +259,23 @@ maintenance_step :: proc "contextless" (reg: ^Context, scans, moves: int) -> (h:
 maintenance_release :: proc "contextless" (budget: int = RESIZE_RELEASE_BYTES, deadline_ns: i64 = 0, call_budget: int = RESIZE_RELEASE_CALLS) -> (released: int) {
 	resize_require(budget >= 0 && budget <= RESIZE_RELEASE_BYTES && budget % 4096 == 0 && call_budget >= 0 && call_budget <= RESIZE_RELEASE_CALLS)
 	calls := 0
-	for resize_retired_head != nil && released < budget && calls < call_budget {
+	for released < budget && calls < call_budget {
 		if calls > 0 && deadline_ns != 0 {
 			ts, _ := linux.clock_gettime(.MONOTONIC)
 			if i64(ts.time_sec) * 1_000_000_000 + i64(ts.time_nsec) >= deadline_ns {
 				break
 			}
 		}
-		calls += 1
+		sync.mutex_lock(&resize_retired_mutex)
 		r := resize_retired_head
+		if r != nil {
+			resize_retired_head = r.next
+			if r.next == nil { resize_retired_tail = nil }
+			r.next = nil
+		}
+		sync.mutex_unlock(&resize_retired_mutex)
+		if r == nil { break }
+		calls += 1
 		n := min(r.release_remaining, budget - released)
 		offset := r.old_cap * size_of(^Node) - r.release_remaining
 		p := rawptr(uintptr(r.old_slots) + uintptr(offset))
@@ -271,23 +285,26 @@ maintenance_release :: proc "contextless" (budget: int = RESIZE_RELEASE_BYTES, d
 		r.release_remaining -= n
 		released += n
 		if r.release_remaining == 0 {
-			resize_retired_head = r.next
-			if r.next == nil {
-				resize_retired_tail = nil
-			}
-			resize_retired_heap -= mem_usable_size(r)
+			intrinsics.atomic_sub_explicit(&resize_retired_heap, mem_usable_size(r), .Relaxed)
 			mem_free(r)
+			intrinsics.atomic_sub_explicit(&resize_retired_count, 1, .Release)
+		} else {
+			sync.mutex_lock(&resize_retired_mutex)
+			r.next = resize_retired_head
+			resize_retired_head = r
+			if resize_retired_tail == nil { resize_retired_tail = r }
+			sync.mutex_unlock(&resize_retired_mutex)
 		}
 	}
 	return
 }
 
 maintenance_metadata :: #force_inline proc "contextless" () -> int {
-	return resize_retired_heap
+	return intrinsics.atomic_load_explicit(&resize_retired_heap, .Relaxed)
 }
 
 maintenance_memory :: proc "contextless" () -> (mapped, retired, metadata: int) {
-	return intrinsics.atomic_load_explicit(&resize_mapped, .Relaxed), intrinsics.atomic_load_explicit(&resize_retired_mapped, .Relaxed), resize_retired_heap
+	return intrinsics.atomic_load_explicit(&resize_mapped, .Relaxed), intrinsics.atomic_load_explicit(&resize_retired_mapped, .Relaxed), intrinsics.atomic_load_explicit(&resize_retired_heap, .Relaxed)
 }
 
 maintenance_effort :: proc "contextless" (h: Zset) -> int {

@@ -27,6 +27,10 @@ port=""
 server="$ROOT/bin/eski"
 server_given=0
 external=""
+managed=0
+managed_tls=0
+client_binary=""
+aof_checker=""
 extra_summary=""
 baseline=""
 known_file="$CONF_DIR/known-failures.txt"
@@ -43,6 +47,7 @@ TCL_CONTAINER=""
 TCL_MODE=""
 TCLSH=""
 TCL_DESC=""
+CURRENT_FIXTURE_SNAPSHOT=""
 
 usage() {
 	cat <<EOF
@@ -55,15 +60,23 @@ $REDIS_TAG, the release eski targets; the valkey suite is the one from Valkey
 $VALKEY_TAG. A server started by this script is restarted for every unit, so no
 state leaks between units; an --external server is shared by all units.
 
-Every unit runs in the suite's external server mode, which ignores blocks
+By default every unit runs in the suite's external server mode, which ignores blocks
 tagged external:skip. Redis $REDIS_TAG tags every block of
 type/hash-field-expire that way, along with the top-level blocks of a few
 other units, so after extracting the suite the runner removes the tag from the
 top-level start_server lines at
 $REDIS_LIFTS, leaving the nested blocks that need
-servers of their own skipped. The lifted blocks pass against a stock Redis
-$REDIS_TAG in external mode, except one auth test that needs a client opened
-after requirepass is set, and the summary records the change.
+servers of their own skipped. External fixture adapters map an explicitly supplied actual stdout path and
+open a fresh unauthenticated body client after nonempty requirepass overrides.
+Cleanup restores the original privileged control even after body errors;
+original assertions and managed fixtures are unchanged. Source hashes are recorded.
+
+With --managed, pristine upstream test files run against isolated processes owned
+by the harness. Assertions and external:skip tags are unchanged. Only the harness
+readiness procedure is adapted to actual TCP PING instead of a Redis log format;
+per-file original hashes and the adapted support hash are recorded with results.
+The runner kills its fixture process group after every unit. Managed mode requires
+a native Tcl interpreter; --tls also generates real CA/server/client certificates.
 
   --suite redis|valkey    which release's suite to run (default: redis)
   --units a,b,c           units to run (default: the curated in-scope list of the suite)
@@ -72,6 +85,10 @@ after requirepass is set, and the summary records the change.
   --port N                port for the server this script starts (default: a free port)
   --server PATH           server binary to start (default: bin/eski, built when missing)
   --external HOST:PORT    test an already running server instead of starting one
+  --managed              upstream owns isolated Eski processes, configs and restart/kill fixtures
+  --tls                  TLS managed fixtures (requires native Tcl tls package and fixture certificates)
+  --client PATH          redis-cli compatible client for managed networking assertions
+  --aof-checker PATH     optional test-only checker wrapper for managed AOF utility assertions
   --summary PATH          also write the JSON summary to PATH
   --baseline PATH         compare with a recorded summary of the same suite; fail only on regressions
   --known-failures PATH   out of scope units and tests (default: test/conformance/known-failures.txt)
@@ -116,6 +133,10 @@ while [ $# -gt 0 ]; do
 		--port) need_value "$@"; port="$2"; shift 2 ;;
 		--server) need_value "$@"; server="$(abspath "$2")"; server_given=1; shift 2 ;;
 		--external) need_value "$@"; external="$2"; shift 2 ;;
+		--managed) managed=1; shift ;;
+		--tls) managed_tls=1; shift ;;
+		--client) need_value "$@"; client_binary="$(abspath "$2")"; shift 2 ;;
+		--aof-checker) need_value "$@"; aof_checker="$(abspath "$2")"; shift 2 ;;
 		--summary) need_value "$@"; extra_summary="$(abspath "$2")"; shift 2 ;;
 		--baseline) need_value "$@"; baseline="$(abspath "$2")"; shift 2 ;;
 		--known-failures) need_value "$@"; known_file="$(abspath "$2")"; shift 2 ;;
@@ -126,6 +147,10 @@ while [ $# -gt 0 ]; do
 		*) echo "conformance: unknown option $1" >&2; usage >&2; exit 2 ;;
 	esac
 done
+
+[ "$managed" = 0 ] || [ -z "$external" ] || die "--managed cannot use a shared --external server"
+[ "$managed_tls" = 0 ] || [ "$managed" = 1 ] || die "--tls requires --managed"
+[ -z "$aof_checker" ] || [ "$managed" = 1 ] || die "--aof-checker requires --managed"
 
 case "$suite" in
 	redis)
@@ -152,6 +177,7 @@ CACHE_DIR="$CONF_DIR/.$suite"
 TREE_NAME="$suite-$SUITE_TAG"
 TREE="$CACHE_DIR/$TREE_NAME"
 STAMP_VALUE="$SUITE_SHA256${SUITE_LIFTS:+ lifted $SUITE_LIFTS}"
+if [ "$suite" = redis ]; then STAMP_VALUE+=" external-log-v2"; fi
 if [ "$suite" = "redis" ]; then
 	STUB_DIR="$TREE/src"
 else
@@ -210,10 +236,12 @@ sha256_of() {
 
 lift_external_skip() {
 	[ -n "$SUITE_LIFTS" ] || return 0
-	python3 -I - "$1" "$SUITE_LIFTS" <<'PYLIFT'
+	python3 -I - "$1" "$SUITE_LIFTS" "$suite" <<'PYLIFT'
+import hashlib
+import json
 import os
 import sys
-tree, spec = sys.argv[1], sys.argv[2]
+tree, spec, suite = sys.argv[1:]
 for item in spec.split():
     name, numbers = item.rsplit(":", 1)
     path = os.path.join(tree, name)
@@ -227,6 +255,93 @@ for item in spec.split():
         lines[index] = line.replace("external:skip ", "").replace(" external:skip", "").replace("external:skip", "")
     with open(path, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines))
+if suite == "redis":
+    path = os.path.join(tree, "tests/support/server.tcl")
+    with open(path, "rb") as handle:
+        original = handle.read()
+    needle = b'proc run_external_server_test {code overrides} {\n    set srv {}\n    dict set srv "host" $::host\n    dict set srv "port" $::port\n'
+    if original.count(needle) != 1:
+        sys.exit("unexpected external server fixture dictionary")
+    addition = b'    if {[info exists ::env(ESKI_CONFORMANCE_SERVER_STDOUT)] && [file readable $::env(ESKI_CONFORMANCE_SERVER_STDOUT)]} {\n        dict set srv "stdout" $::env(ESKI_CONFORMANCE_SERVER_STDOUT)\n    }\n'
+    adapted = original.replace(needle, needle + addition, 1)
+    if hashlib.sha256(original).hexdigest() != "e412686245be3a0f74592d8d5fe4f52c14c0790fb647c736a8a5e2cac13b72bb":
+        sys.exit("unexpected pinned external server fixture input")
+    auth_start_marker = b"    # apply overrides\n"
+    auth_end_marker = b"\n}\n\nproc start_server {options {code undefined}} {\n"
+    proc_start = adapted.index(needle)
+    if adapted.count(auth_end_marker) != 1:
+        sys.exit("unexpected external server fixture procedure boundary")
+    auth_end = adapted.index(auth_end_marker, proc_start)
+    if adapted[proc_start:auth_end].count(auth_start_marker) != 1:
+        sys.exit("unexpected external server fixture override boundary")
+    auth_start = adapted.index(auth_start_marker, proc_start, auth_end)
+    auth_body = br'''    set external_stack_index [expr {[llength $::servers] - 1}]
+    set external_original_config [dict get [lindex $::servers $external_stack_index] config]
+    set external_body_client ""
+    try {
+        set external_requirepass ""
+        foreach {param val} $overrides {
+            r config set $param $val
+            if {[string equal -nocase $param "requirepass"]} {
+                set external_requirepass $val
+            }
+            if {$param == "appendonly" && $val == "yes"} {
+                waitForBgrewriteaof r
+            }
+        }
+        if {$external_requirepass ne ""} {
+            set external_body_client [redis $::host $::port 0 $::tls]
+            set external_body_srv [lindex $::servers $external_stack_index]
+            dict set external_body_srv client $external_body_client
+            dict set external_body_srv config requirepass $external_requirepass
+            lset ::servers $external_stack_index $external_body_srv
+        }
+        if {[catch {set retval [uplevel 2 $code]} error]} {
+            if {$::durable} {
+                set msg [string range $error 10 end]
+                lappend details $msg
+                lappend details $::errorInfo
+                lappend ::tests_failed $details
+                incr ::num_failed
+                send_data_packet $::test_server_fd err [join $details "\n"]
+            } else {
+                error $error $::errorInfo
+            }
+        }
+    } finally {
+        set external_current_client ""
+        if {$external_stack_index < [llength $::servers]} {
+            set external_cleanup_srv [lindex $::servers $external_stack_index]
+            if {[dict exists $external_cleanup_srv client]} {
+                set external_current_client [dict get $external_cleanup_srv client]
+            }
+            dict set external_cleanup_srv client $client
+            dict set external_cleanup_srv config $external_original_config
+            lset ::servers $external_stack_index $external_cleanup_srv
+        }
+        if {$external_body_client ne ""} {
+            if {$external_current_client ne "" && $external_current_client ne $client} {
+                catch {$external_current_client close}
+            }
+            if {$external_body_client ne $external_current_client} {
+                catch {$external_body_client close}
+            }
+        }
+        dict for {param val} $saved_config {
+            catch {$client config set $param $val}
+        }
+        set ::servers [lreplace $::servers $external_stack_index $external_stack_index]
+        catch {$client close}
+    }'''
+    adapted = adapted[:auth_start] + auth_body + adapted[auth_end:]
+    with open(path, "wb") as handle:
+        handle.write(adapted)
+    receipt = {"path": "tests/support/server.tcl", "original_sha256": hashlib.sha256(original).hexdigest(),
+               "adapted_sha256": hashlib.sha256(adapted).hexdigest(), "assertions_modified": False,
+               "reason": "External fixtures read explicitly supplied real stdout and create a fresh unauthenticated body client after nonempty requirepass overrides; original privileged control restores configurations in finally. Managed fixtures and test assertions are unchanged."}
+    with open(os.path.join(tree, "external-log-adapter.json"), "w", encoding="utf-8") as handle:
+        json.dump(receipt, handle, indent=2)
+        handle.write("\n")
 PYLIFT
 }
 
@@ -401,6 +516,10 @@ stop_server() {
 stop_unit() {
 	if [ -n "$UNIT_PID" ]; then
 		kill -TERM -- "-$UNIT_PID" 2>/dev/null || kill -TERM "$UNIT_PID" 2>/dev/null
+		if [ "$managed" = 1 ]; then
+			sleep 0.1
+			kill -KILL -- "-$UNIT_PID" 2>/dev/null
+		fi
 		wait "$UNIT_PID" 2>/dev/null
 		UNIT_PID=""
 	fi
@@ -416,9 +535,18 @@ stop_unit() {
 	return 0
 }
 
+snapshot_current_fixture() {
+	if [ "$managed" = 0 ] || [ -z "$CURRENT_FIXTURE_SNAPSHOT" ]; then return 0; fi
+	if [ ! -e "$CURRENT_FIXTURE_SNAPSHOT" ]; then
+		python3 -I "$CONF_DIR/snapshot_fixtures.py" --tree "$TREE" --output "$CURRENT_FIXTURE_SNAPSHOT" || return 1
+	fi
+	CURRENT_FIXTURE_SNAPSHOT=""
+}
+
 cleanup() {
 	stop_unit
 	stop_server
+	snapshot_current_fixture
 }
 
 on_signal() {
@@ -435,6 +563,11 @@ trap cleanup EXIT
 fetch_suite
 prepare_stub
 resolve_tcl
+if [ "$managed" = 1 ]; then
+	[ "$TCL_MODE" = native ] || die "--managed currently requires native Tcl for owned process cleanup"
+	command -v setsid >/dev/null 2>&1 || die "--managed requires setsid"
+	[ -x "$server" ] || die "--managed requires an existing executable --server"
+fi
 
 plan_output="$(python3 -I "$PARSER" plan --tree "$TREE" --known "$known_file" --units "$units" "--suite=$suite")" || die "invalid unit selection or known failures file"
 
@@ -471,7 +604,31 @@ mkdir -p "$LOG_DIR" || die "could not create $LOG_DIR"
 META="$LOG_DIR/units.tsv"
 : >"$META"
 
-if [ -n "$external" ]; then
+fixture_mode="external"
+fixture_receipt=""
+if [ "$managed" = 1 ]; then
+	fixture_mode="managed"
+	managed_tree="$(mktemp -d "${TMPDIR:-/tmp}/eski-cf.XXXXXX")" || die "could not reserve short managed fixture path"
+	rmdir "$managed_tree" || die "could not prepare managed fixture directory"
+	managed_args=(--archive "$CACHE_DIR/$TREE_NAME.tar.gz" --destination "$managed_tree"
+		--prefix "$TREE_NAME" --server "$server" --sha256 "$SUITE_SHA256")
+	if [ -n "$client_binary" ]; then managed_args+=(--client "$client_binary"); fi
+	if [ -n "$aof_checker" ]; then managed_args+=(--aof-checker "$aof_checker"); fi
+	python3 -I "$CONF_DIR/managed_fixture.py" "${managed_args[@]}" || die "managed fixture preparation failed"
+	ln -s "$managed_tree" "$LOG_DIR/managed-suite" || die "could not record managed fixture artifact path"
+	TREE="$managed_tree"
+	fixture_receipt="$LOG_DIR/managed-suite/fixture-receipt.json"
+	SUITE_LIFTS=""
+	if [ "$suite" = valkey ]; then die "--managed currently supports pinned Redis test harness only"; fi
+	if [ "$managed_tls" = 1 ]; then
+		printf 'if {[catch {package require tls} problem]} {puts stderr $problem; exit 1}\n' | "$TCLSH" >"$LOG_DIR/tcl-tls.log" 2>&1 || die "native Tcl tls package required"
+		python3 -I "$CONF_DIR/managed_tls.py" --destination "$TREE/tests/tls" >"$LOG_DIR/fixture-pki.log" 2>&1 || die "managed TLS certificate generation failed"
+	fi
+fi
+
+if [ "$managed" = 1 ]; then
+	server_desc="managed ${server#"$ROOT"/}, upstream owns isolated processes"
+elif [ -n "$external" ]; then
 	ping_server "$host" "$target_port" || die "no server answers PING at $host:$target_port"
 	server_desc="external $host:$target_port"
 else
@@ -491,6 +648,12 @@ suite_baseport="$(pick_baseport)" || die "could not find a free port range for t
 
 suite_env=(TERM=dumb)
 docker_mounts=(-v "$TREE:/suite:z")
+if [ "$suite" = redis ] && [ "$managed" = 0 ] && [ -z "$external" ]; then
+	suite_env+=("ESKI_CONFORMANCE_SERVER_STDOUT=$SERVER_LOG")
+	docker_mounts+=(-v "$LOG_DIR:/eski-conformance-logs:ro" -e ESKI_CONFORMANCE_SERVER_STDOUT=/eski-conformance-logs/server.log)
+	cp "$TREE/external-log-adapter.json" "$LOG_DIR/external-fixture.json" || die "could not record external fixture adapter"
+	fixture_receipt="$LOG_DIR/external-fixture.json"
+fi
 if [ "$suite" = "valkey" ]; then
 	suite_env+=("VALKEY_BIN_DIR=$STUB_DIR")
 	docker_mounts+=(-v "$STUB_DIR:/stub:z" -e VALKEY_BIN_DIR=/stub)
@@ -510,8 +673,15 @@ for index in "${!run_canonical[@]}"; do
 		continue
 	fi
 	log="$LOG_DIR/${display//\//_}.log"
-	args=(tests/test_helper.tcl --host "$host" --port "$target_port" --baseport "$suite_baseport"
+	if [ "$managed" = 1 ]; then CURRENT_FIXTURE_SNAPSHOT="$LOG_DIR/${display//\//_}-fixtures"; fi
+	args=(tests/test_helper.tcl --baseport "$suite_baseport"
 		--single "$canonical" --durable --timeout "$stall_timeout")
+	if [ "$managed" = 1 ]; then
+		args+=(--clients 1 --config compute-threads 0 --dont-clean)
+		if [ "$managed_tls" = 1 ]; then args+=(--tls); fi
+	else
+		args+=(--host "$host" --port "$target_port")
+	fi
 	if [ -n "$tags" ]; then
 		args+=(--tags "$tags")
 	fi
@@ -529,7 +699,7 @@ for index in "${!run_canonical[@]}"; do
 	if [ "$verbose" = 1 ]; then
 		echo
 	fi
-	if [ -z "$external" ]; then
+	if [ -z "$external" ] && [ "$managed" = 0 ]; then
 		printf '=== %s\n' "$display" >>"$SERVER_LOG"
 		start_server
 	fi
@@ -542,7 +712,9 @@ for index in "${!run_canonical[@]}"; do
 		UNIT_PID=$!
 	else
 		cd "$TREE" || die "could not enter $TREE"
-		env "${suite_env[@]}" timeout -k 10 "$unit_timeout" "$TCLSH" "${args[@]}" >"$log" 2>&1 </dev/null &
+		launch_prefix=()
+		if [ "$managed" = 1 ]; then launch_prefix=(setsid); fi
+		"${launch_prefix[@]}" env "${suite_env[@]}" timeout -k 10 "$unit_timeout" "$TCLSH" "${args[@]}" >"$log" 2>&1 </dev/null &
 		UNIT_PID=$!
 		cd "$ROOT" || die "could not return to $ROOT"
 	fi
@@ -553,6 +725,10 @@ for index in "${!run_canonical[@]}"; do
 	wait "$UNIT_PID"
 	rc=$?
 	kill -TERM -- "-$UNIT_PID" 2>/dev/null
+	if [ "$managed" = 1 ]; then
+		sleep 0.1
+		kill -KILL -- "-$UNIT_PID" 2>/dev/null
+	fi
 	UNIT_PID=""
 	if [ -n "$TAIL_PID" ]; then
 		wait "$TAIL_PID" 2>/dev/null
@@ -562,13 +738,16 @@ for index in "${!run_canonical[@]}"; do
 		docker rm -f "$TCL_CONTAINER" >/dev/null 2>&1
 		TCL_CONTAINER=""
 	fi
+	snapshot_current_fixture || die "could not preserve managed server logs/configs"
 	seconds=$(($(date +%s) - started))
 	killed=0
 	if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
 		killed=1
 	fi
 	crashed=0
-	if [ -n "$external" ]; then
+	if [ "$managed" = 1 ]; then
+		crashed=0
+	elif [ -n "$external" ]; then
 		if ! ping_server "$host" "$target_port"; then
 			crashed=1
 		fi
@@ -602,7 +781,8 @@ summary_args=(summarize --meta "$META" --known "$known_file" --root "$ROOT"
 	--extra "$RESULTS_DIR/latest.json"
 	"--suite-name=$suite" "--suite-tag=$SUITE_TAG" "--suite-sha256=$SUITE_SHA256" "--suite-url=$SUITE_URL"
 	"--external-skip-lifted=$SUITE_LIFTS"
-	"--tags=$tags" "--server=$server_desc" "--tcl=$TCL_DESC")
+	"--tags=$tags" "--server=$server_desc" "--tcl=$TCL_DESC"
+	"--fixture-mode=$fixture_mode" "--fixture-receipt=$fixture_receipt")
 if [ -n "$extra_summary" ]; then
 	summary_args+=(--extra "$extra_summary")
 fi

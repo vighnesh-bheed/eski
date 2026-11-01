@@ -7,6 +7,7 @@ import "core:sync"
 import "core:sys/linux"
 import "core:thread"
 import ht "hashtype"
+import ks "keyspace"
 import lt "listtype"
 import "rdb"
 import rx "rax"
@@ -174,6 +175,9 @@ aof_bio_tail: int
 
 aof_bio_pending_fsync: i32
 
+@(private = "file")
+aof_bio_jobs_pending: i32
+
 aof_bio_thread: ^thread.Thread
 
 @(private = "file")
@@ -208,6 +212,7 @@ aof_rewrite_incr_seq: i64
 
 @(private = "file")
 aof_retry_at: i64
+aof_retry_reported: bool
 
 @(private = "file")
 aof_last_err_log: i64
@@ -254,6 +259,9 @@ aof_load_argv: [dynamic][]u8
 expire_now :: #force_inline proc "contextless" () -> i64 {
 	if aof.loading {
 		return 0
+	}
+	if lua_active != nil {
+		return lua_active.frozen_ms
 	}
 	return srv.now_ms
 }
@@ -698,9 +706,11 @@ aof_manifest_parse :: proc(text: []u8, m: ^Aof_Manifest) -> (ok: bool, reason: s
 		for first < len(line) && (line[first] == ' ' || line[first] == '\t') {
 			first += 1
 		}
-		if first == len(line) || line[first] == '#' {
-			continue
+		if first == len(line) {
+			aof_manifest_free(m)
+			return false, "Invalid AOF manifest file format"
 		}
+		if line[first] == '#' { continue }
 		have_name, have_seq, have_type := false, false, false
 		seq: i64 = 0
 		kind := Aof_File_Kind.Base
@@ -934,6 +944,10 @@ aof_bio_run :: proc "contextless" (job: ^Aof_Job) {
 }
 
 aof_bio_main :: proc() {
+	context.assertion_failure_proc = diagnostics_assertion_failure if intrinsics.atomic_load_explicit(&diagnostic_initialized, .Acquire) != 0 else context.assertion_failure_proc
+	diagnostics_thread_enter()
+	defer diagnostics_thread_leave()
+	runtime_tuning_enter(.Bio)
 	for {
 		sync.sema_wait(&aof_bio_sema)
 		sync.mutex_lock(&aof_bio_mutex)
@@ -952,7 +966,25 @@ aof_bio_main :: proc() {
 			aof_bio_note_synced(gen, size)
 			intrinsics.atomic_sub(&aof_bio_pending_fsync, 1)
 		}
+		intrinsics.atomic_sub_explicit(&aof_bio_jobs_pending, 1, .Release)
 	}
+}
+
+aof_bio_before_fork :: proc() {
+	for intrinsics.atomic_load_explicit(&aof_bio_jobs_pending, .Acquire) != 0 {
+		ts := linux.Time_Spec{time_nsec = 100_000}
+		linux.nanosleep(&ts, nil)
+	}
+}
+
+aof_bio_after_fork :: proc() {
+	aof_bio_thread = nil
+	aof_bio_head = 0
+	aof_bio_tail = 0
+	aof_bio_mutex = {}
+	aof_bio_sema = {}
+	aof_bio_pending_fsync = 0
+	aof_bio_jobs_pending = 0
 }
 
 @(private = "file")
@@ -969,12 +1001,22 @@ aof_bio_note_synced :: proc "contextless" (gen: i64, size: i64) {
 
 @(private = "file")
 aof_bio_push :: proc(job: Aof_Job, size: i64) {
+	if pst.in_child {
+		local := job
+		aof_bio_run(&local)
+		if job.kind == .Fsync {
+			gen := aof_sync_gen & (i64(1) << (63 - AOF_SYNC_SIZE_BITS) - 1)
+			aof_bio_note_synced(gen, size)
+		}
+		return
+	}
 	if aof_bio_thread == nil {
 		aof_bio_thread = thread.create_and_start(aof_bio_main)
 	}
 	if job.kind == .Fsync {
 		intrinsics.atomic_add(&aof_bio_pending_fsync, 1)
 	}
+	intrinsics.atomic_add_explicit(&aof_bio_jobs_pending, 1, .Relaxed)
 	sync.mutex_lock(&aof_bio_mutex)
 	gen := aof_sync_gen & (i64(1) << (63 - AOF_SYNC_SIZE_BITS) - 1)
 	if aof_bio_tail - aof_bio_head >= AOF_JOBS {
@@ -985,6 +1027,7 @@ aof_bio_push :: proc(job: Aof_Job, size: i64) {
 			aof_bio_note_synced(gen, size)
 			intrinsics.atomic_sub(&aof_bio_pending_fsync, 1)
 		}
+		intrinsics.atomic_sub_explicit(&aof_bio_jobs_pending, 1, .Release)
 		return
 	}
 	slot := aof_bio_tail % AOF_JOBS
@@ -1167,11 +1210,11 @@ aof_stage_commit :: proc(wrap: bool) {
 		return
 	}
 	aof_emit_timestamp()
-	if aof.selected_db != aof.stage_first_db {
-		aof_select_into(&aof.buf, aof.stage_first_db)
-	}
 	if wrap {
 		append(&aof.buf, "*1\r\n$5\r\nMULTI\r\n")
+	}
+	if aof.selected_db != aof.stage_first_db {
+		aof_select_into(&aof.buf, aof.stage_first_db)
 	}
 	append(&aof.buf, ..aof.stage[:])
 	if wrap {
@@ -1258,6 +1301,18 @@ aof_mc_command :: proc(args: ..[]u8) {
 		return
 	}
 	aof_write_argv(db.id, args)
+}
+
+aof_hash_field_expired :: proc(h: ht.Hash, field: []u8) {
+	ref := ht.key_ref(h)
+	if ref == nil { return }
+	registry := hash_key_ref_registry(ref)
+	if registry == nil || registry.owner == nil || !aof.feed { return }
+	db := cast(^Db)registry.owner
+	b := aof_sink(db.id, 3)
+	aof_put_str(b, "HDEL")
+	aof_put_arg(b, hash_key_ref_bytes(ref))
+	aof_put_arg(b, field)
 }
 
 aof_propagate_del :: proc(db: ^Db, key: []u8, lazy: bool) {
@@ -1964,16 +2019,7 @@ aof_precheck_field :: proc(c: ^Conn, argv: [][]u8) {
 	if !exists || v.obj == nil || v.type != .Hash {
 		return
 	}
-	_, res := ht.get(cast(ht.Hash)v.obj, argv[2], hash_now())
-	#partial switch res {
-	case .Expired:
-		b := aof_sink(db.id, 3)
-		aof_put_str(b, "HDEL")
-		aof_put_arg(b, argv[1])
-		aof_put_arg(b, argv[2])
-	case .Expired_Hash:
-		aof_emit_del(db, argv[1])
-	}
+	_, _ = ht.get(cast(ht.Hash)v.obj, argv[2], hash_now())
 }
 
 Aof_Xrg :: struct {
@@ -2168,7 +2214,7 @@ aof_cmd_begin :: proc(c: ^Conn, cmd: ^Command, argv: [][]u8) {
 		return
 	}
 	if aof.in_tx {
-		if c == aof_tx_conn && (tx_exec_conn != nil || (c != nil && .Multi in c.txf)) {
+		if lua_effect_owner(c) || (c == aof_tx_conn && (tx_exec_conn != nil || (c != nil && .Multi in c.txf))) {
 			aof_cmd_prepare(c, cmd, argv)
 			return
 		}
@@ -2380,29 +2426,48 @@ aof_tr_incrbyfloat :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 @(private = "file")
-aof_tr_hincrbyfloat :: proc(c: ^Conn, argv: [][]u8, reply: []u8) {
-	if len(argv) < 4 {
-		return
-	}
+aof_tr_hincrbyfloat :: proc(c: ^Conn, argv: [][]u8, reply: []u8, field_deadline: i64 = -1) {
+	if len(argv) < 4 { return }
 	db := aof_db_of(c)
+	if db == nil { return }
 	val, ok := aof_reply_bulk(reply)
+	h: ht.Hash
+	if !ok || field_deadline < 0 {
+		t, i := persist_raw_locate(db, argv[1])
+		if i >= 0 {
+			v := persist_slot_value(db, &t.slots[i].key, &t.slots[i].val)
+			if v.obj != nil && v.type == .Hash { h = cast(ht.Hash)v.obj }
+		}
+	}
 	vbuf: [24]u8
 	if !ok {
-		exists, _, v := aof_key_state(db, argv[1])
-		if !exists || v.obj == nil || v.type != .Hash {
-			return
-		}
-		hv, res := ht.get(cast(ht.Hash)v.obj, argv[2], hash_now())
-		if res != .Ok {
-			return
-		}
+		if h == nil { return }
+		hv, _, found := ht.get_raw(h, argv[2])
+		if !found { return }
 		val = ht.value_bytes(hv, cast(^[21]u8)&vbuf)
+	}
+	deadline := field_deadline
+	if deadline < 0 {
+		deadline = 0
+		if h != nil {
+			_, expires, found := ht.get_raw(h, argv[2])
+			if found && expires != ht.EB_EXPIRE_TIME_INVALID { deadline = i64(expires) }
+		}
 	}
 	b := aof_sink(db.id, 4)
 	aof_put_str(b, "HSET")
 	aof_put_arg(b, argv[1])
 	aof_put_arg(b, argv[2])
 	aof_put_arg(b, val)
+	if deadline > 0 {
+		b = aof_sink(db.id, 6)
+		aof_put_str(b, "HPEXPIREAT")
+		aof_put_arg(b, argv[1])
+		aof_put_int(b, deadline)
+		aof_put_str(b, "FIELDS")
+		aof_put_int(b, 1)
+		aof_put_arg(b, argv[2])
+	}
 }
 
 aof_tr_spop :: proc(c: ^Conn, argv: [][]u8, reply: []u8) {
@@ -2988,7 +3053,7 @@ aof_tr_geoadd :: proc(c: ^Conn, argv: [][]u8, reply: []u8) {
 	aof_propagate_as_is(c, argv)
 }
 
-aof_tr_hexpire :: proc(c: ^Conn, name: string, argv: [][]u8, reply: []u8) {
+aof_tr_hexpire :: proc(c: ^Conn, name: string, argv: [][]u8, reply: []u8, deadline: i64 = -1) {
 	if len(argv) < 6 {
 		return
 	}
@@ -3013,6 +3078,9 @@ aof_tr_hexpire :: proc(c: ^Conn, name: string, argv: [][]u8, reply: []u8) {
 		return
 	}
 	at := v
+	if deadline >= 0 {
+		at = deadline
+	} else {
 	switch name {
 	case "hexpire":
 		at = i64(hash_now()) + v * 1000
@@ -3020,6 +3088,7 @@ aof_tr_hexpire :: proc(c: ^Conn, name: string, argv: [][]u8, reply: []u8) {
 		at = i64(hash_now()) + v
 	case "hexpireat":
 		at = v * 1000
+	}
 	}
 	clear(&aof_flags_scratch)
 	ok := true
@@ -3093,11 +3162,11 @@ aof_tr_hexpire :: proc(c: ^Conn, name: string, argv: [][]u8, reply: []u8) {
 		}
 	}
 	if gone > 0 {
-		b := aof_sink(db.id, 2 + gone)
-		aof_put_str(b, "HDEL")
-		aof_put_arg(b, argv[1])
 		for f, k in fields {
 			if aof_flags_scratch[k] == 2 {
+				b := aof_sink(db.id, 3)
+				aof_put_str(b, "HDEL")
+				aof_put_arg(b, argv[1])
 				aof_put_arg(b, f)
 			}
 		}
@@ -3296,7 +3365,7 @@ aof_after_command :: proc(c: ^Conn, cmd: ^Command, flags: Persist_Cmd_Flags, arg
 
 @(private = "file")
 aof_after_inner :: proc(c: ^Conn, cmd: ^Command, kind: Aof_Kind, flags: Persist_Cmd_Flags, argv: [][]u8, pending: int) {
-	if cmd == nil || len(argv) == 0 || aof_is_queueing(c, kind) {
+	if cmd == nil || len(argv) == 0 || lua_is_eval(cmd) || (cmd.handler == cmd_function && !is_write_command(cmd.name, argv)) || aof_is_queueing(c, kind) {
 		return
 	}
 	if aof_snap_cmd != nil && aof_snap_cmd != cmd {
@@ -3726,6 +3795,12 @@ aof_child_tick :: proc(processed: i64) {
 }
 
 aof_rewrite_commands :: proc(w: ^rdb.Writer) -> bool {
+	for library := lua_libraries; library != nil; library = library.next {
+		aof_w_header(w, 3)
+		aof_w_str(w, "FUNCTION")
+		aof_w_str(w, "LOAD")
+		aof_w_arg(w, library.code)
+	}
 	now := aof_now_ms()
 	if aof.timestamps {
 		tmp: [40]u8
@@ -3866,6 +3941,7 @@ aof_open_new_incr_for_rewrite :: proc() -> bool {
 			plog(LOG_WARNING, "Can't open the append-only file ", string(name[:]), ": ", errno_text(err))
 			return false
 		}
+		clear(&aof.buf)
 		aof_switch_fd(fd)
 		return true
 	}
@@ -3918,7 +3994,9 @@ aof_remove_temp_incr :: proc() {
 	defer delete(name)
 	aof_temp_incr_name(&name)
 	buf: [PERSIST_PATH_MAX]u8
-	linux.unlink(aof_cpath(string(name[:]), buf[:]))
+	if linux.unlink(aof_cpath(string(name[:]), buf[:])) == .NONE {
+		plog(LOG_NOTICE, "Removing the temp incr aof file ", string(name[:]))
+	}
 }
 
 @(private = "file")
@@ -3927,6 +4005,7 @@ aof_in_exec :: proc() -> bool {
 }
 
 aof_rewrite_background :: proc() -> bool {
+	keyspace_fence()
 	if pst.child_pid > 0 || pst.loading || aof.loading {
 		return false
 	}
@@ -3941,8 +4020,9 @@ aof_rewrite_background :: proc() -> bool {
 	aof.rewrite_preamble = aof.preamble
 	aof.rewrite_state = aof.state
 	persist_progress_prepare()
-	start := now_ns()
-	pid, ferr := linux.fork()
+	keyspace_before_fork()
+	compute_before_fork()
+	pid, ferr := runtime_fork()
 	if ferr != .NONE {
 		plog(LOG_WARNING, "Can't rewrite append only file in background: fork: ", errno_text(ferr))
 		aof.last_rewrite_err = true
@@ -3951,6 +4031,7 @@ aof_rewrite_background :: proc() -> bool {
 	}
 	if pid == 0 {
 		persist_child_setup()
+		runtime_tuning_enter(.Aof_Rewrite)
 		tbuf: [64]u8
 		tmp := aof_temp_base_name(tbuf[:], linux.getpid(), true)
 		cbuf: [80]u8
@@ -3962,7 +4043,7 @@ aof_rewrite_background :: proc() -> bool {
 		}
 		linux.exit_group(0 if good else 1)
 	}
-	pst.latest_fork_usec = (now_ns() - start) / 1000
+	pst.latest_fork_usec = runtime_fork_last_usec
 	pst.total_forks += 1
 	pst.child_pid = pid
 	pst.child_aof = true
@@ -4004,6 +4085,11 @@ aof_delete_history :: proc() {
 	}
 }
 
+aof_apply_gc :: proc() -> string {
+	aof_delete_history()
+	return ""
+}
+
 @(private = "file")
 aof_recompute_sizes :: proc() {
 	total: i64 = 0
@@ -4038,7 +4124,7 @@ aof_install_rewrite :: proc(pid: linux.Pid) -> bool {
 	if nm.has_base {
 		old := nm.base
 		old.kind = .History
-		append(&nm.history, old)
+		inject_at(&nm.history, 0, old)
 	}
 	nm.base = Aof_File {
 		seq  = nm.base_seq + 1,
@@ -4079,7 +4165,7 @@ aof_install_rewrite :: proc(pid: linux.Pid) -> bool {
 		plog(LOG_NOTICE, "Successfully renamed the temporary AOF incr file ", string(tname[:]), " into ", string(incr_name[:]))
 		for &f in nm.incr {
 			f.kind = .History
-			append(&nm.history, f)
+			inject_at(&nm.history, 0, f)
 		}
 		clear(&nm.incr)
 		f := Aof_File {
@@ -4095,7 +4181,7 @@ aof_install_rewrite :: proc(pid: linux.Pid) -> bool {
 		for &f in nm.incr {
 			if f.seq < aof_rewrite_incr_seq {
 				f.kind = .History
-				append(&nm.history, f)
+				inject_at(&nm.history, 0, f)
 			} else {
 				append(&keep, f)
 			}
@@ -4105,7 +4191,7 @@ aof_install_rewrite :: proc(pid: linux.Pid) -> bool {
 	case .Off:
 		for &f in nm.incr {
 			f.kind = .History
-			append(&nm.history, f)
+			inject_at(&nm.history, 0, f)
 		}
 		clear(&nm.incr)
 	}
@@ -4135,15 +4221,16 @@ aof_rewrite_failed :: proc() {
 	aof.last_rewrite_err = true
 	aof.failures += 1
 	if aof.state == .Wait_Rewrite {
+		aof_close_fd()
+		aof_remove_temp_incr()
+		clear(&aof.buf)
 		aof.rewrite_scheduled = true
 	}
 	if aof.failures >= 3 {
 		shift := min(aof.failures - 3, 6)
 		delay := min(i64(60) << uint(shift), 3600)
 		aof_retry_at = persist_unix_now() + delay
-		tmp: [24]u8
-		n := format_i64(&tmp[0], delay / 60)
-		plog(LOG_WARNING, "Background AOF rewrite has repeatedly failed and triggered the limit, will retry in ", string(tmp[:n]), " minutes")
+		aof_retry_reported = false
 	}
 }
 
@@ -4165,6 +4252,7 @@ aof_rewrite_done :: proc(exitcode: int, bysignal: int) {
 			aof.last_rewrite_err = false
 			aof.failures = 0
 			aof_retry_at = 0
+			aof_retry_reported = false
 			plog(LOG_NOTICE, "Background AOF rewrite finished successfully")
 		} else {
 			aof_rewrite_failed()
@@ -4214,6 +4302,7 @@ aof_kill_child :: proc() {
 }
 
 aof_start :: proc() -> bool {
+	keyspace_fence()
 	if !aof.started {
 		aof.wanted = true
 		return true
@@ -4429,6 +4518,19 @@ aof_startup :: proc() -> bool {
 	}
 	if exists {
 		aof_manifest_set(m)
+		if aof.manifest.has_base && len(aof.manifest.incr) == 0 && len(aof.manifest.history) == 0 && string(aof.manifest.base.name[:]) == aof.filename && !aof_file_exists(aof.filename) {
+			old_buf, destination_buf: [PERSIST_PATH_MAX]u8
+			old := persist_cstr(aof.filename, old_buf[:])
+			old_stat: linux.Stat
+			if linux.stat(old, &old_stat) == .NONE && old_stat.mode & linux.S_IFMT == linux.S_IFREG {
+				if err := linux.rename(old, aof_cpath(aof.filename, destination_buf[:])); err != .NONE {
+					plog(LOG_WARNING, "Error trying to move the old AOF file ", aof.filename, " into dir ", aof.dirname, ": ", errno_text(err))
+					return false
+				}
+				aof_fsync_dir()
+				plog(LOG_NOTICE, "Completed interrupted old-style AOF migration into the AOF directory")
+			}
+		}
 	} else {
 		aof_manifest_free(&m)
 		aof_manifest_set({})
@@ -4462,7 +4564,16 @@ aof_startup :: proc() -> bool {
 
 @(private = "file")
 aof_retry_allowed :: proc() -> bool {
-	return aof.failures < 3 || persist_unix_now() >= aof_retry_at
+	if aof.failures < 3 || persist_unix_now() >= aof_retry_at {
+		return true
+	}
+	if !aof_retry_reported {
+		aof_retry_reported = true
+		tmp: [24]u8
+		n := format_i64(&tmp[0], (aof_retry_at - persist_unix_now() + 59) / 60)
+		plog(LOG_WARNING, "Background AOF rewrite has repeatedly failed and triggered the limit, will retry in ", string(tmp[:n]), " minutes")
+	}
+	return false
 }
 
 aof_cron :: proc() {
@@ -4470,6 +4581,7 @@ aof_cron :: proc() {
 		return
 	}
 	aof_bio_collect()
+	aof_delete_history()
 	if aof.state == .Wait_Rewrite && !aof_rewriting() && !aof.rewrite_scheduled {
 		aof.rewrite_scheduled = true
 	}
@@ -4481,10 +4593,10 @@ aof_cron :: proc() {
 			if aof_retry_allowed() {
 				aof_rewrite_background()
 			}
-		} else if aof.state == .On && aof.auto_pct > 0 && aof.current_size > aof.auto_min && aof_retry_allowed() {
+		} else if aof.state == .On && aof.auto_pct > 0 && aof.current_size > aof.auto_min {
 			base := aof.base_size if aof.base_size > 0 else 1
 			growth := aof.current_size * 100 / base - 100
-			if growth >= aof.auto_pct {
+			if growth >= aof.auto_pct && aof_retry_allowed() {
 				tmp: [24]u8
 				n := format_i64(&tmp[0], growth)
 				plog(LOG_NOTICE, "Starting automatic rewriting of AOF on ", string(tmp[:n]), "% growth")
@@ -4718,6 +4830,15 @@ aof_exec_one :: proc(c: ^Conn, argv: [][]u8, name: string) -> bool {
 	c.wlen = 0
 	c.wpos = 0
 	cmd.handler(c, argv)
+	if c.wlen > 0 && c.wbuf[0] == '-' {
+		last := c.wlen
+		if last >= 2 && c.wbuf[last - 2] == '\r' && c.wbuf[last - 1] == '\n' { last -= 2 }
+		plog(LOG_WARNING, "Error executing '", cmd.name, "' while reading AOF ", name, ": ", string(c.wbuf[1:last]))
+		if cfg.propagation_error_behavior == 1 {
+			plog(LOG_WARNING, "Fatal AOF command execution error: propagation-error-behavior is panic")
+			panic("AOF command execution failed with propagation-error-behavior panic")
+		}
+	}
 	c.wlen = 0
 	c.wpos = 0
 	pst.dirty_explicit = false
@@ -4868,9 +4989,8 @@ aof_load_commands :: proc(r: ^Aof_Reader, name: string, is_last: bool, done_befo
 				persist_serve_events()
 			}
 		}
-		if count & 1023 == 0 && intrinsics.volatile_load(&persist_sig_pending) != 0 && pst.loading {
-			plog(LOG_WARNING, "Eski is now ready to exit, bye bye...")
-			linux.exit_group(0)
+		if count & 1023 == 0 && persist_signal_pending() && pst.loading {
+			persist_signal_loading_exit()
 		}
 	}
 }
@@ -4881,7 +5001,7 @@ aof_load_one :: proc(f: ^Aof_File, is_last: bool, done_before: i64) -> Aof_Load_
 	buf: [PERSIST_PATH_MAX]u8
 	fd, err := linux.open(aof_cpath(name, buf[:]), {.CLOEXEC})
 	if err == .ENOENT {
-		plog(LOG_WARNING, "The AOF file ", name, " doesn't exist")
+		plog(LOG_WARNING, "The AOF file ", name, " doesn't exist: ", errno_text(err))
 		return .Not_Exist
 	}
 	if err != .NONE {
@@ -4967,13 +5087,13 @@ aof_load_all :: proc(at_startup: bool) -> Aof_Load_Result {
 
 @(private = "file")
 aof_load_manifest :: proc(m: ^Aof_Manifest, at_startup: bool) -> Aof_Load_Result {
+	keyspace_fence()
 	if !m.has_base && len(m.incr) == 0 {
 		return .Not_Exist
 	}
 	total: i64 = 0
-	files, missing := 0, 0
+	missing := 0
 	if m.has_base {
-		files += 1
 		if aof_file_exists(string(m.base.name[:])) {
 			total += aof_file_size(string(m.base.name[:]))
 		} else {
@@ -4981,15 +5101,11 @@ aof_load_manifest :: proc(m: ^Aof_Manifest, at_startup: bool) -> Aof_Load_Result
 		}
 	}
 	for f in m.incr {
-		files += 1
 		if aof_file_exists(string(f.name[:])) {
 			total += aof_file_size(string(f.name[:]))
 		} else {
 			missing += 1
 		}
-	}
-	if missing == files {
-		return .Not_Exist
 	}
 	if total == 0 && missing == 0 {
 		return .Empty
@@ -5082,6 +5198,8 @@ aof_debug_loadaof :: proc(c: ^Conn) {
 	}
 	#partial switch res {
 	case .Ok, .Empty, .Truncated:
+		pst.dirty = 0
+		pst.dirty_explicit = false
 		plog(LOG_NOTICE, "Append Only File loaded by DEBUG LOADAOF")
 		reply_ok(c)
 	case:
@@ -5142,4 +5260,42 @@ aof_commands := [?]Command {
 @(init)
 register_aof_commands :: proc "contextless" () {
 	register_commands(aof_commands[:])
+}
+
+aof_keyspace_hash :: proc(task: ^Keyspace_Task) {
+	p := Aof_Rp{b = ks.value_data(task.hash_expired)}
+	for _ in 0 ..< task.hash_expired_count {
+		field, null, ok := aof_rp_bulk(&p)
+		if !ok || null { store_fatal("hash AOF expiry trace invariant") }
+		args := [3][]u8{transmute([]u8)string("HDEL"), task.argv[1], field}
+		aof_feed_argv_direct(task.client.db.id, args[:])
+	}
+	if p.i != len(p.b) { store_fatal("hash AOF expiry trace length invariant") }
+	if task.dirty == 0 { return }
+	#partial switch task.op {
+	case .Hset, .Hmset, .Hsetnx, .Hdel, .Hincrby, .Hincrbyfloat, .Hexpire, .Hpexpire, .Hexpireat, .Hpexpireat, .Hpersist:
+	case: return
+	}
+	text: [64]u8
+	b := Keyspace_Builder{bytes = text[:]}
+	reply: []u8
+	if task.raw {
+		reply = ks.value_data(task.results[0])
+	} else if task.ok {
+		reply = transmute([]u8)string("+OK\r\n")
+	} else {
+		keyspace_builder_integer(&b, task.integer)
+		reply = b.bytes[:b.used]
+	}
+	if task.op == .Hincrbyfloat {
+		_, ok := aof_reply_bulk(reply)
+		if !ok { store_fatal("hash AOF floating result invariant") }
+	}
+	if task.op == .Hincrbyfloat {
+		aof_tr_hincrbyfloat(&task.client, task.argv, reply, task.hash_expire_at)
+	} else if task.op >= .Hexpire && task.op <= .Hpexpireat {
+		aof_tr_hexpire(&task.client, task.command_name, task.argv, reply, task.hash_expire_at)
+	} else {
+		aof_translate(&task.client, task.command, task.argv, reply)
+	}
 }

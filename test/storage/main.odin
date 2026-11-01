@@ -7,6 +7,8 @@ import "core:strconv"
 import "core:slice"
 import "core:strings"
 import "core:sys/linux"
+import "core:thread"
+import cp "compute"
 import st "settype"
 import zt "zsettype"
 import ht "hashtype"
@@ -44,7 +46,7 @@ check :: proc(ok: bool, name: string, loc := #caller_location) {
 settle :: proc() {
 	for _ in 0 ..< 10000 {
 		db_tick()
-		if !lazyfree_jobs_pending() && dead_len == 0 && graveyard_len == 0 && store_rehashing == 0 && !ht.maintenance_pending() && !st.maintenance_pending() && !zt.maintenance_pending() && !slab_reclaim_pending() {
+		if storage_test_worker_idle() && dead_len == 0 && graveyard_len == 0 && store_rehashing == 0 && !ht.maintenance_pending() && !st.maintenance_pending() && !zt.maintenance_pending() && !slab_reclaim_pending() {
 			return
 		}
 		ts := linux.Time_Spec{time_nsec = 100_000}
@@ -77,7 +79,12 @@ audit :: proc() {
 	check(m.slab_empty == m.slab_dirty + m.slab_clean, "dirty and clean pools partition empty runs")
 	check(m.dead_payload == 0 && m.lazy_payload == 0 && m.lazy_slab_live == 0, "pending payload ownership drained")
 	check(m.table_retired == 0 && m.slab_retired == 0, "retired mappings drained")
-	check(mem_used() == mem_startup + db_used_memory + tables + metadata + ps_memory + conn_mem + tx_mem_total + mem_aof_buffer(), "allocated memory recount includes only owned metadata")
+	error_owned := storage_test_error_memory()
+	expected_owned := mem_startup + db_used_memory + tables + metadata + client_metadata_total + client_registry_memory() + conn_mem + tx_mem_total + mem_aof_buffer() + error_owned
+	if mem_used() != expected_owned {
+		fmt.printf("memory recount actual=%d expected=%d hash/set/zset retired=%d/%d/%d dead=%d lazy=%d compute=%d keyspace=%d lua=%d errors=%d\n", mem_used(), expected_owned, ht.maintenance_metadata(), st.maintenance_metadata(), zt.maintenance_metadata(), storage_dead_payload, lazyfree_pending_bytes(), compute_reserved, keyspace_memory_used(), lua_memory_used(), stat_error_memory())
+	}
+	check(mem_used() == expected_owned, "allocated memory recount includes only owned metadata")
 }
 
 put :: proc(key, value: string) {
@@ -1282,7 +1289,7 @@ set_spop_pending :: proc() {
 	check(st.size(newset) == 6 && newset.acct == st.memory_usage(newset) && db_cur.heap_bytes == newset.acct, "SPOP replacement owns only its six copied survivors")
 	mapped, retired, metadata := st.maintenance_memory()
 	check(mapped == 24576 && retired == 8192 && metadata > 0, "old SPOP source remains separately retired while remaining target is pending")
-	check(mem_used() == mem_startup + newset.acct + remaining + metadata + storage_table_allocated(), "new payload, pending old payload and retired record are charged exactly once")
+	check(mem_used() == mem_startup + newset.acct + remaining + metadata + storage_table_allocated() + storage_test_error_memory(), "new payload, pending old payload and retired record are charged exactly once")
 	intrinsics.atomic_store_explicit(&storage_test_worker_pause, 0, .Release)
 	settle()
 	check(lazyfree_pending_bytes() == 0 && db_cur.heap_bytes == newset.acct, "SPOP worker cleanup leaves only the new live Set")
@@ -1606,6 +1613,11 @@ zset_union_attach :: proc() {
 }
 
 main :: proc() {
+	if len(os.args) == 2 && os.args[1] == "mapping-lifetime" {
+		mapping_lifetime()
+		fmt.printf("PASS storage mapping lifetime checks=%d\n", checks)
+		return
+	}
 	if len(os.args) == 3 && os.args[1] == "invalid" {
 		capacity, ok := strconv.parse_int(os.args[2])
 		check(ok, "parse invalid-capacity fixture")
@@ -1613,6 +1625,8 @@ main :: proc() {
 		os.exit(2)
 	}
 	config_init()
+	default_dbfilename := cfg.dbfilename
+	defer delete(default_dbfilename)
 	update_clock()
 	db_init()
 	srv.epfd, _ = linux.epoll_create1({.FDCLOEXEC})
@@ -1623,6 +1637,8 @@ main :: proc() {
 	mem_free(fixed_block)
 	mem_free(slab_block)
 	check(storage_table_allocated() == 0 && storage_slab_virtual == 0, "fresh databases allocate no table or slab mapping")
+	mapping_lifetime()
+	compute_active_accounting()
 	hash_allocator_sample()
 	set_allocator_sample()
 	zset_allocator_sample()
@@ -1664,9 +1680,67 @@ main :: proc() {
 	fork_pending_worker()
 	srv.now_ms += MEM_SAMPLE_MS + 1
 	mem_cron()
-	check(mem_overhead().allocated > 0 && mem_overhead().rss > 0, "allocator and process samples available separately")
+	sampled_allocated, sampled_rss, libc_allocated := storage_test_memory_sample()
+	overhead := mem_overhead()
+	check(overhead.allocated == sampled_allocated && sampled_allocated == libc_allocated && overhead.rss == sampled_rss && sampled_rss > 0, "drained allocation sample matches the actual libc allocator independently of positive process RSS")
 	check(intrinsics.atomic_load_explicit(&storage_table_bytes, .Relaxed) == 0, "final table ownership empty")
 	fmt.printf("PASS storage ownership checks=%d slab_bytes=%d\n", checks, size_of(Slab))
+}
+
+compute_active_accounting :: proc() {
+	check(compute_pending == 0 && compute_reserved == 0 && !compute_registered && !compute_restart && cp.active_workers(&compute_pool) == 0, "active accounting fixture starts without compute ownership")
+	saved_threads, saved_memory := compute_threads, compute_max_memory
+	saved_token, saved_peak := compute_next_token, mem_peak
+	saved_submitted, saved_completed, saved_cancelled := compute_submitted, compute_completed, compute_cancelled
+	saved_fallbacks, saved_worker_ns := compute_fallbacks, compute_worker_ns
+	saved_conns := srv.conns
+	fd, err := linux.socket(.INET, .STREAM, {.NONBLOCK, .CLOEXEC}, .TCP)
+	check(err == .NONE, "active accounting fixture owns a real client descriptor")
+	srv.conns = make([dynamic]^Conn, int(fd) + 1)
+	c := Conn{fd = fd, id = 1, db = db_cur, resp = RESP2}
+	srv.conns[fd] = &c
+	defer {
+		compute_shutdown()
+		delete(srv.conns)
+		srv.conns = saved_conns
+		linux.close(fd)
+		compute_threads, compute_max_memory = saved_threads, saved_memory
+		compute_next_token, mem_peak = saved_token, saved_peak
+		compute_submitted, compute_completed, compute_cancelled = saved_submitted, saved_completed, saved_cancelled
+		compute_fallbacks, compute_worker_ns = saved_fallbacks, saved_worker_ns
+		storage_test_memory_sample()
+	}
+	compute_threads = 1
+	compute_max_memory = 16 << 20
+	compute_start()
+	check(compute_registered && cp.active_workers(&compute_pool) == 1, "active accounting fixture starts the real pool on the server epoll descriptor")
+	before_used := mem_used()
+	before_overhead := mem_overhead().overhead
+	a, b: [1024]u8
+	for &value, i in a {
+		value = u8('a' + i % 7)
+	}
+	b = a
+	args := [4][]u8{transmute([]u8)string("LCS"), transmute([]u8)string("accounting:a"), transmute([]u8)string("accounting:b"), transmute([]u8)string("LEN")}
+	cells := (len(a) + 1) * (len(b) + 1)
+	check(lcs_try_compute(&c, args[:], a[:], b[:], cells, Lcs_Want{length = true}), "real LCS admission owns the complete task and workspace")
+	task := c.compute
+	deadline := now_ns() + 2_000_000_000
+	for intrinsics.atomic_load_explicit(&task.job.state, .Acquire) != .Completed && now_ns() < deadline {
+		ts := linux.Time_Spec{time_nsec = 100_000}
+		linux.nanosleep(&ts, nil)
+	}
+	check(intrinsics.atomic_load_explicit(&task.job.state, .Acquire) == .Completed && task.table[cells - 1] == u32(len(a)), "actual worker completes the expected LCS while its job stays unpolled")
+	check(compute_pending == 1 && cp.pending(&compute_pool) == 1 && compute_reserved > 0 && compute_tasks[task.slot] == task, "completed unpolled job retains real reservation and task ownership")
+	check(mem_used() == before_used + compute_reserved && mem_overhead().overhead == before_overhead + compute_reserved, "manual memory accounting includes an outstanding job reservation exactly once")
+	allocated, _, libc_allocated := storage_test_memory_sample()
+	check(allocated == libc_allocated, "active heap task is already included once in the actual libc allocation sample")
+	compute_shutdown()
+	check(c.compute == nil && compute_pending == 0 && compute_reserved == 0 && cp.pending(&compute_pool) == 0 && cp.active_workers(&compute_pool) == 0 && !compute_registered, "shutdown acknowledges and reclaims the genuine outstanding job")
+	for pending_task in compute_tasks {
+		check(pending_task == nil, "shutdown releases every task slot")
+	}
+	check(mem_used() == before_used && mem_overhead().overhead == before_overhead, "manual compute ownership returns to its original totals")
 }
 
 slab_zero_pressure :: proc() {
@@ -1772,6 +1846,8 @@ slab_worker_metadata :: proc() {
 	put("heap-worker-key", string(heap[:]))
 	payload := db_cur.heap_bytes + db_cur.slab.live
 	old_table := mem_db_overhead(db_cur)
+	old_region := db_cur.t[0].region
+	old_region_size := db_cur.t[0].size
 	check(storage_metadata_owned == 4096 && storage_metadata_virtual == SLAB_METADATA_RESERVE, "old database has one real metadata owner")
 	intrinsics.atomic_store_explicit(&storage_test_worker_entered, 0, .Release)
 	intrinsics.atomic_store_explicit(&storage_test_worker_pause, 1, .Release)
@@ -1786,6 +1862,8 @@ slab_worker_metadata :: proc() {
 	put("new-worker-slab-key", string(value[:]))
 	new_live := db_cur.slab.live
 	new_base := db_cur.slab.base
+	new_region := db_cur.t[0].region
+	check(uintptr(new_region) + uintptr(db_cur.t[0].size) <= uintptr(old_region) || uintptr(old_region) + uintptr(old_region_size) <= uintptr(new_region), "old worker and new database table mappings never overlap while both are live")
 	check(storage_metadata_owned == 4096 && storage_slab_virtual == SLAB_RESERVE + SLAB_COMMIT_STEP && storage_table_allocated() == old_table + mem_db_overhead(db_cur), "new owner is distinct from the paused old writable payload prefix and table")
 	intrinsics.atomic_store_explicit(&storage_test_worker_pause, 0, .Release)
 	deadline = now_ns() + 2_000_000_000
@@ -1795,8 +1873,53 @@ slab_worker_metadata :: proc() {
 	}
 	check(storage_test_worker_idle() && lazyfree_pending_bytes() == 0 && storage_slab_virtual == SLAB_RESERVE, "actual worker releases only detached payload mappings without descriptors")
 	check(db_cur.slab.base == new_base && db_cur.slab.live == new_live && storage_metadata_owned == 4096 && storage_metadata_virtual == SLAB_METADATA_RESERVE && db_used_memory == new_live, "old worker cannot mutate new slab descriptors or ownership")
+	check(db_cur.t[0].region == new_region, "old worker releases only its detached table mapping")
 	check(string(db_find(transmute([]u8)string("new-worker-slab-key")).val) == string(value[:]), "new allocator bytes survive old worker destruction")
 	storage_clear()
+}
+
+Mapping_Lifetime :: struct {
+	table:   Table,
+	started: u32,
+	read:    u64,
+}
+
+mapping_old_owner :: proc(data: rawptr) {
+	state := (^Mapping_Lifetime)(data)
+	intrinsics.atomic_store_explicit(&state.started, 1, .Release)
+	state.read = (^u64)(state.table.region)^
+	intrinsics.atomic_sub_explicit(&storage_table_bytes, state.table.size, .Relaxed)
+	storage_unmap(state.table.region, state.table.size, .Table)
+}
+
+mapping_lifetime :: proc() {
+	before_owned := storage_table_allocated()
+	before_mapped := intrinsics.atomic_load_explicit(&storage_table_mapped, .Relaxed)
+	table := table_alloc(TABLE_MIN_CAP)
+	(^u64)(table.region)^ = 17
+	state := Mapping_Lifetime{table = table}
+	worker := thread.create_and_start_with_data(&state, mapping_old_owner)
+	check(worker != nil, "mapping lifetime worker starts")
+	deadline := now_ns() + 2_000_000_000
+	for intrinsics.atomic_load_explicit(&state.started, .Acquire) == 0 && now_ns() < deadline {
+		linux.sched_yield()
+	}
+	check(intrinsics.atomic_load_explicit(&state.started, .Acquire) == 1, "old owner signals before its final mapped read")
+	fresh: rawptr
+	err := linux.Errno.EEXIST
+	for err == .EEXIST && now_ns() < deadline {
+		fresh, err = linux.mmap(uintptr(table.region), uint(table.size), {.READ, .WRITE}, {.PRIVATE, .ANONYMOUS, .FIXED_NOREPLACE})
+		if err == .EEXIST {
+			linux.sched_yield()
+		}
+	}
+	check(err == .NONE && fresh == rawptr(table.region), "fresh mapping obtains the same address only after the old mapping is gone")
+	(^u64)(fresh)^ = 99
+	thread.join(worker)
+	thread.destroy(worker)
+	check(state.read == 17 && (^u64)(fresh)^ == 99, "old read and fresh write belong to distinct mapping lifetimes")
+	check(storage_table_allocated() == before_owned && intrinsics.atomic_load_explicit(&storage_table_mapped, .Relaxed) == before_mapped, "mapped lifetime releases old table accounting exactly once")
+	check(linux.munmap(fresh, uint(table.size)) == .NONE, "fresh test mapping releases independently")
 }
 
 slab_swap_move :: proc() {

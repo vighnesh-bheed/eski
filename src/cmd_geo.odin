@@ -124,6 +124,7 @@ geo_store :: proc(key: []u8, points: []geo.Point, req: ^geo.Request, event: stri
 	}
 	zt.convert_to_listpack_if_needed(dst, maxlen, totlen)
 	zset_store_result(cur_db(), key, dst, event)
+	if len(points) > 0 { pst.dirty += i64(len(points) - 1) }
 }
 
 @(private = "file")
@@ -155,6 +156,7 @@ geo_reply_points :: proc(c: ^Conn, points: []geo.Point, req: ^geo.Request) {
 
 @(private = "file")
 georadius_generic :: proc(c: ^Conn, argv: [][]u8, src_index: int, flags: geo.Request_Flags) {
+	pst.dirty_explicit = true
 	z, ok := geo_lookup(c, argv[src_index])
 	if !ok {
 		return

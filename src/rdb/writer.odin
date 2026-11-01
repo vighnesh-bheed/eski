@@ -23,6 +23,7 @@ Writer :: struct {
 	errno:      linux.Errno,
 	lzf_buf:    [^]u8,
 	lzf_cap:    int,
+	lzf_context: Lzf_Context,
 	sync_every: i64,
 	synced:     i64,
 }
@@ -56,6 +57,7 @@ writer_init_mem :: proc "contextless" (w: ^Writer, compress: bool, checksum: boo
 }
 
 writer_destroy :: proc "contextless" (w: ^Writer) {
+	lzf_context_destroy(&w.lzf_context)
 	if w.buf != nil {
 		runtime.heap_free(w.buf)
 	}
@@ -247,7 +249,7 @@ put_lzf_string :: proc "contextless" (w: ^Writer, s: []u8) -> bool {
 		w.lzf_cap = max(limit, 4096)
 		w.lzf_buf = w_alloc(w.lzf_cap)
 	}
-	packed := lzf_compress(s, w.lzf_buf[:limit])
+	packed := lzf_compress_with_context(&w.lzf_context, s, w.lzf_buf[:limit])
 	if packed == 0 {
 		return false
 	}

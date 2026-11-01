@@ -7,6 +7,7 @@ import "core:sys/linux"
 import ht "hashtype"
 import lt "listtype"
 import "rdb"
+import lr "lua_runtime"
 import st "settype"
 import sm "streamtype"
 import zt "zsettype"
@@ -122,6 +123,7 @@ persist_cmd_bits: [PERSIST_CMD_SET]Persist_Cmd_Flags
 
 @(private = "file")
 persist_write_names := [?]string {
+	"eval", "evalsha", "fcall", "function",
 	"append", "bitfield", "bitop", "blmove", "blmpop", "blpop", "brpop", "brpoplpush", "bzmpop", "bzpopmax", "bzpopmin",
 	"copy", "decr", "decrby", "del", "expire", "expireat", "flushall", "flushdb", "geoadd", "georadius",
 	"georadiusbymember", "geosearchstore", "getdel", "getex", "getset", "hdel", "hexpire", "hexpireat", "hincrby",
@@ -225,13 +227,19 @@ persist_writes_denied :: #force_inline proc "contextless" () -> bool {
 	return pst.stop_writes && pst.lastbgsave_err && len(pst.save_params) > 0
 }
 
-persist_gate :: proc(c: ^Conn, cmd: ^Command) -> bool {
+persist_gate :: proc(c: ^Conn, cmd: ^Command, argv: [][]u8 = nil) -> bool {
 	flags := persist_cmd_flags(cmd)
 	if pst.loading && .Loading_Ok not_in flags {
 		reply_error(c, ERR_LOADING)
 		return true
 	}
-	if .Write in flags || (cmd != nil && cmd == persist_ping_cmd) {
+	write := .Write in flags
+	if lua_is_eval(cmd) {
+		write = lua_outer_persistence_write(cmd, argv)
+	} else if cmd != nil && cmd.handler == cmd_function && !is_write_command(cmd.name, argv) {
+		write = false
+	}
+	if write || (cmd != nil && cmd == persist_ping_cmd) {
 		if persist_writes_denied() {
 			reply_error(c, ERR_MISCONF)
 			return true
@@ -347,6 +355,7 @@ persist_table_ok :: #force_inline proc "contextless" (t: ^Table) -> bool {
 
 persist_write_rdb :: proc(w: ^rdb.Writer, aof_base: bool = false) -> bool {
 	rdb.put_header(w, persist_unix_now(), i64(mem_used()), aof_base)
+	lua_libraries_save(w)
 	processed: i64 = 0
 	lru := persist_policy_lru()
 	lfu := persist_policy_lfu()
@@ -391,9 +400,7 @@ persist_write_rdb :: proc(w: ^rdb.Writer, aof_base: bool = false) -> bool {
 						return false
 					}
 					processed += 1
-					if pst.in_child {
-						persist_child_tick(processed)
-					}
+					persist_child_tick(processed)
 				}
 			}
 		}
@@ -422,6 +429,12 @@ persist_save_internal :: proc(filename: string) -> bool {
 	temp := persist_temp_name(linux.getpid(), tbuf[:])
 	tcbuf: [80]u8
 	ctemp := persist_cstr(temp, tcbuf[:])
+	if !pst.in_child {
+		intrinsics.atomic_store_explicit(&persist_signal_saving, 1, .Release)
+	}
+	defer {
+		if !pst.in_child { intrinsics.atomic_store_explicit(&persist_signal_saving, 0, .Release) }
+	}
 	fd, err := linux.open(ctemp, {.WRONLY, .CREAT, .TRUNC, .CLOEXEC}, {.IRUSR, .IWUSR, .IRGRP, .IROTH})
 	if err != .NONE {
 		cwd: [PERSIST_PATH_MAX]u8
@@ -466,6 +479,7 @@ persist_save_internal :: proc(filename: string) -> bool {
 }
 
 persist_rdb_save :: proc() -> bool {
+	keyspace_fence()
 	if pst.child_pid > 0 && !pst.child_aof {
 		plog(LOG_WARNING, "Background save already in progress")
 		return false
@@ -482,14 +496,16 @@ persist_rdb_save :: proc() -> bool {
 }
 
 persist_bgsave :: proc() -> bool {
+	keyspace_fence()
 	if pst.child_pid > 0 {
 		return false
 	}
 	pst.dirty_before_bgsave = pst.dirty
 	pst.lastbgsave_try = persist_unix_now()
 	persist_progress_prepare()
-	start := now_ns()
-	pid, err := linux.fork()
+	keyspace_before_fork()
+	compute_before_fork()
+	pid, err := runtime_fork()
 	if err != .NONE {
 		pst.lastbgsave_err = true
 		plog(LOG_WARNING, "Can't save in background: fork: ", errno_text(err))
@@ -498,6 +514,7 @@ persist_bgsave :: proc() -> bool {
 	}
 	if pid == 0 {
 		persist_child_setup()
+		runtime_tuning_enter(.Rdb)
 		good := persist_save_internal(persist_filename())
 		if good {
 			persist_sample_cow()
@@ -505,7 +522,7 @@ persist_bgsave :: proc() -> bool {
 		}
 		linux.exit_group(0 if good else 1)
 	}
-	pst.latest_fork_usec = (now_ns() - start) / 1000
+	pst.latest_fork_usec = runtime_fork_last_usec
 	pst.total_forks += 1
 	pst.stat_rdb_saves += 1
 	pst.child_pid = pid
@@ -995,7 +1012,7 @@ persist_load_version :: proc(magic: []u8) -> int {
 	return v
 }
 
-persist_load_stream :: proc(r: ^rdb.Reader, merge: bool) -> Load_Result {
+persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: bool = false) -> Load_Result {
 	magic, got := rdb.take(r, 9)
 	if !got {
 		persist_load_failed(r)
@@ -1010,6 +1027,9 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool) -> Load_Result {
 		n := format_i64(&tmp[0], i64(version))
 		plog(LOG_WARNING, "Can't handle RDB format version ", string(tmp[:n]))
 		return .Failed
+	}
+	if !preserve_libraries {
+		lua_library_flush(false)
 	}
 	deep := persist_deep_sanitize(false)
 	pst.last_load_loaded = 0
@@ -1102,8 +1122,33 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool) -> Load_Result {
 			}
 			name: [9]u8
 			persist_fail_with(r, "the file carries auxiliary data of unknown module type '", rdb.module_name_by_id(id, &name), "'")
-		case rdb.OPCODE_FUNCTION_PRE_GA, rdb.OPCODE_FUNCTION2:
-			persist_fail_with(r, "the file carries a function library, which cannot be loaded without a scripting engine")
+		case rdb.OPCODE_FUNCTION2:
+			code, good := rdb.get_string(r, 0)
+			if !good {
+				persist_load_failed(r)
+			}
+			capture := Conn{fd = -1, resp = 2, db = db}
+			library := lua_library_prepare(code, &capture)
+			mem_free(capture.wbuf)
+			if library == nil {
+				persist_fail_with(r, "function library compilation failed")
+			}
+			old := lua_library_find(library.name)
+			if old != nil && !merge {
+				lua_library_free(library)
+				return .Failed
+			}
+			if lua_library_collision(library, old) != nil {
+				lua_library_free(library)
+				return .Failed
+			}
+			if old != nil {
+				lua_library_unlink(old, false)
+			}
+			lua_library_publish(library)
+			continue
+		case rdb.OPCODE_FUNCTION_PRE_GA:
+			persist_fail_with(r, "pre-release function library format is unsupported")
 		case:
 			key, kgood := rdb.get_string(r, KEY_SLOT)
 			if !kgood {
@@ -1151,9 +1196,9 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool) -> Load_Result {
 			if cfg.key_load_delay != 0 {
 				persist_debug_delay(cfg.key_load_delay)
 			}
-			if keys_seen & 1023 == 0 && intrinsics.volatile_load(&persist_sig_pending) != 0 && pst.loading {
-				plog(LOG_WARNING, "Eski is now ready to exit, bye bye...")
-				linux.exit_group(0)
+			rdb.reader_poll_progress(r)
+			if keys_seen & 1023 == 0 && persist_signal_pending() && pst.loading {
+				persist_signal_loading_exit()
 			}
 			continue
 		}
@@ -1175,7 +1220,7 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool) -> Load_Result {
 			} else if stored != expected {
 				l: Log_Line
 				persist_fail_begin(&l, r)
-				ll_str(&l, "CRC mismatch, the file stores checksum ")
+				ll_str(&l, "CRC error: CRC mismatch, the file stores checksum ")
 				persist_ll_hex16(&l, stored)
 				ll_str(&l, " but its contents hash to ")
 				persist_ll_hex16(&l, expected)
@@ -1202,7 +1247,8 @@ persist_ll_hex16 :: proc "contextless" (l: ^Log_Line, v: u64) {
 	ll_str(l, string(tmp[:]))
 }
 
-persist_rdb_load :: proc(merge: bool, at_startup: bool) -> Load_Result {
+persist_rdb_load :: proc(merge: bool, at_startup: bool, preserve_libraries: bool = false) -> Load_Result {
+	keyspace_fence()
 	name := persist_filename()
 	pbuf: [PERSIST_PATH_MAX]u8
 	fd, err := linux.open(persist_cstr(name, pbuf[:]), {.CLOEXEC})
@@ -1233,7 +1279,7 @@ persist_rdb_load :: proc(merge: bool, at_startup: bool) -> Load_Result {
 	r.next_tick = r.tick_every
 	start := now_ns()
 	persist_skip_expired = true
-	result := persist_load_stream(&r, merge)
+	result := persist_load_stream(&r, merge, preserve_libraries)
 	persist_skip_expired = false
 	pst.loading_loaded = rdb.reader_offset(&r)
 	rdb.reader_destroy(&r)
@@ -1265,19 +1311,32 @@ Shutdown_Flag :: enum u8 {
 Shutdown_Flags :: bit_set[Shutdown_Flag;u8]
 
 persist_finish_shutdown :: proc(flags: Shutdown_Flags) -> bool {
-	server_close_listeners()
+	runtime_supervised_stopping()
+	keyspace_shutdown()
+	compute_shutdown()
+	transport_close_listeners()
+	lua_debug_shutdown()
+	lua_library_flush(false)
+	lr.reset()
 	remove_pid_file()
 	plog(LOG_WARNING, "Eski is now ready to exit, bye bye...")
+	runtime_operations_shutdown()
+	diagnostics_shutdown()
 	linux.exit_group(0)
 }
 
 persist_prepare_shutdown :: proc(flags_in: Shutdown_Flags) -> bool {
+	keyspace_fence()
 	flags := flags_in
 	if pst.loading {
 		flags += {.Nosave}
 		flags -= {.Save}
 	}
 	plog(LOG_WARNING, "User requested shutdown...")
+	if aof.state == .Wait_Rewrite && .Force not_in flags {
+		plog(LOG_WARNING, "Writing initial AOF, can't exit.")
+		return false
+	}
 	if pst.child_pid > 0 && !pst.child_aof {
 		plog(LOG_WARNING, "There is a child saving an .rdb. Killing it!")
 		persist_kill_child()
@@ -1317,15 +1376,17 @@ persist_signal_flags :: proc(sig: i32) -> Shutdown_Flags {
 }
 
 persist_cron :: proc() {
-	if intrinsics.volatile_load(&persist_sig_pending) != 0 {
-		sig := intrinsics.volatile_load(&persist_sig_last)
+	keyspace_collect()
+	if pending := intrinsics.atomic_load_explicit(&persist_sig_pending, .Acquire); pending != 0 {
+		sig := intrinsics.atomic_load_explicit(&persist_sig_last, .Acquire)
+		persist_signal_log(sig)
 		flags := persist_signal_flags(sig)
 		if persist_prepare_shutdown(flags) {
 			persist_finish_shutdown(flags)
 		}
 		name := "SIGINT" if sig == i32(linux.Signal.SIGINT) else "SIGTERM"
 		plog(LOG_WARNING, name, " received but errors trying to shut down the server, check the logs for more information")
-		intrinsics.volatile_store(&persist_sig_pending, 0)
+		intrinsics.atomic_sub_explicit(&persist_sig_pending, pending, .Acq_Rel)
 	}
 	persist_check_child()
 	aof_cron()
@@ -1464,7 +1525,12 @@ cmd_shutdown :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	if abort {
-		reply_error(c, "ERR No shutdown in progress.")
+		if intrinsics.atomic_exchange_explicit(&persist_sig_pending, 0, .Acq_Rel) != 0 {
+			plog(LOG_WARNING, "Shutdown manually aborted.")
+			reply_ok(c)
+		} else {
+			reply_error(c, "ERR No shutdown in progress.")
+		}
 		return
 	}
 	if persist_prepare_shutdown(flags) {
@@ -1748,7 +1814,7 @@ persist_debug_reload :: proc(c: ^Conn, argv: [][]u8) {
 	if !noflush {
 		db_flush_all()
 	}
-	if persist_rdb_load(merge, false) != .Ok {
+	if persist_rdb_load(merge, false, noflush) != .Ok {
 		reply_error(c, "ERR Error trying to load the RDB dump, check server logs.")
 		return
 	}

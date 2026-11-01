@@ -268,6 +268,7 @@ block_free_key :: proc(m: ^map[string]^Block_Key, key: string) {
 block_for_keys :: proc(c: ^Conn, type: Block_Type, keys: [][]u8, deadline: i64, unblock_on_nokey := false) {
 	if block_reexecuting && c == block_current {
 		block_rearmed = true
+		pst.dirty_explicit = true
 		c.blocked = type
 		return
 	}
@@ -317,6 +318,7 @@ block_for_keys :: proc(c: ^Conn, type: Block_Type, keys: [][]u8, deadline: i64, 
 	if unblock_on_nokey {
 		block_nokey_clients += 1
 	}
+	pst.dirty_explicit = true
 	c.blocked = type
 	block_by_type[type] += 1
 	append(&block_clients, c)

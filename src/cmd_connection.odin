@@ -93,7 +93,7 @@ conn_reset :: proc(c: ^Conn) {
 	}
 	tx_discard(c)
 	pubsub_reset(c)
-	set_conn_string(&c.name, nil)
+	set_conn_string(c, &c.name, nil)
 	c.db = &dbs[0]
 	c.resp = RESP2
 	c.reply -= {.Off, .Skip_Next}
@@ -138,7 +138,8 @@ valid_client_name :: proc(name: []u8) -> bool {
 	return true
 }
 
-set_conn_string :: proc(dst: ^[]u8, v: []u8) {
+set_conn_string :: proc(c: ^Conn, dst: ^[]u8, v: []u8) {
+	if c.fd >= 0 { conn_mem += len(v) - len(dst^) }
 	mem_free(raw_data(dst^))
 	dst^ = nil
 	if len(v) > 0 {
@@ -211,7 +212,7 @@ cmd_hello :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	if has_name {
-		set_conn_string(&c.name, name)
+		set_conn_string(c, &c.name, name)
 	}
 	if ver != 0 {
 		c.resp = u8(ver)
@@ -220,7 +221,7 @@ cmd_hello :: proc(c: ^Conn, argv: [][]u8) {
 	reply_bulk_str(c, "server")
 	reply_bulk_str(c, "eski")
 	reply_bulk_str(c, "version")
-	reply_bulk_str(c, VERSION)
+	reply_bulk_str(c, REDIS_COMPAT_VERSION)
 	reply_bulk_str(c, "proto")
 	reply_int(c, i64(c.resp))
 	reply_bulk_str(c, "id")
@@ -252,7 +253,7 @@ parse_client_type :: proc(s: []u8) -> (Client_Type, bool) {
 }
 
 conn_age :: proc(c: ^Conn) -> i64 {
-	return srv.now_ms / 1000 - c.ctime_ms / 1000
+	return max(0, lua_connection_clock() / 1000 - c.ctime_ms / 1000)
 }
 
 client_info_line :: proc(b: ^[dynamic]u8, other: ^Conn, self: ^Conn, argv: [][]u8) {
@@ -269,7 +270,7 @@ client_info_line :: proc(b: ^[dynamic]u8, other: ^Conn, self: ^Conn, argv: [][]u
 	sb_str(b, " age=")
 	sb_int(b, conn_age(other))
 	sb_str(b, " idle=")
-	sb_int(b, srv.now_ms / 1000 - other.atime_ms / 1000)
+	sb_int(b, max(0, lua_connection_clock() / 1000 - other.atime_ms / 1000))
 	sb_str(b, " flags=")
 	nflags := len(b)
 	if .Monitor in other.flags {
@@ -327,9 +328,9 @@ client_info_line :: proc(b: ^[dynamic]u8, other: ^Conn, self: ^Conn, argv: [][]u
 	sb_str(b, " multi-mem=")
 	sb_int(b, i64(multi_mem))
 	sb_str(b, " rbs=")
-	sb_int(b, i64(other.rcap))
+	sb_int(b, i64(other.wcap))
 	sb_str(b, " rbp=")
-	sb_int(b, i64(other.rpeak))
+	sb_int(b, i64(other.wpeak))
 	sb_str(b, " obl=")
 	sb_int(b, i64(other.wlen - other.wpos))
 	grown := other.wcap > WBUF_INIT
@@ -338,7 +339,7 @@ client_info_line :: proc(b: ^[dynamic]u8, other: ^Conn, self: ^Conn, argv: [][]u
 	sb_str(b, " omem=")
 	sb_int(b, i64(other.wcap) if grown else 0)
 	sb_str(b, " tot-mem=")
-	sb_int(b, i64(size_of(Conn) + other.rcap + other.wcap + request_inline_memory(other) + len(other.name) + len(other.lib_name) + len(other.lib_ver) + multi_mem))
+	sb_int(b, i64(size_of(Conn) + other.rcap + other.wcap + transport_connection_memory(other) + request_inline_memory(other) + len(other.name) + len(other.lib_name) + len(other.lib_ver) + multi_mem + client_metadata_memory(other)))
 	sb_str(b, " events=")
 	sb_str(b, "rw" if other.want_write else "r")
 	sb_str(b, " cmd=")
@@ -683,7 +684,7 @@ client_setinfo :: proc(c: ^Conn, argv: [][]u8) {
 		reply_error_quoted(c, "ERR ", attr, " cannot contain spaces, newlines or special characters.")
 		return
 	}
-	set_conn_string(dst, argv[3])
+	set_conn_string(c, dst, argv[3])
 	reply_ok(c)
 }
 
@@ -692,7 +693,7 @@ client_setname :: proc(c: ^Conn, argv: [][]u8) {
 		reply_error(c, ERR_CLIENT_NAME)
 		return
 	}
-	set_conn_string(&c.name, argv[2])
+	set_conn_string(c, &c.name, argv[2])
 	reply_ok(c)
 }
 
@@ -801,6 +802,7 @@ pause_should_hold :: proc(c: ^Conn, argv: [][]u8) -> bool {
 		full = s.full
 	}
 	if !srv.pause_all {
+		if lua_outer_readonly(cmd, argv) || (cmd.handler == cmd_script && len(argv) > 1 && eq_nocase(argv[1], "load")) { return false }
 		if cmd.handler == cmd_exec && .Multi in c.txf {
 			if !tx_may_replicate(c) {
 				return false

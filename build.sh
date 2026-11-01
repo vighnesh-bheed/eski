@@ -3,12 +3,12 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 usage() {
-	echo "usage: ./build.sh [release|debug|sanitizer|check]" >&2
+	echo "usage: ./build.sh [release|debug|sanitizer|thread-sanitizer|check]" >&2
 }
 
 mode="${1:-release}"
 case "$mode" in
-	release|debug|sanitizer|check)
+	release|debug|sanitizer|thread-sanitizer|check)
 		;;
 	*)
 		usage
@@ -37,6 +37,14 @@ if ! command -v clang >/dev/null 2>&1; then
 	echo "clang not found on PATH; odin links with clang, install it first" >&2
 	exit 1
 fi
+
+case "$mode" in
+	sanitizer) lua_mode=address ;;
+	thread-sanitizer) lua_mode=thread ;;
+	*) lua_mode=release ;;
+esac
+bash tools/build_lua.sh "$lua_mode"
+bash tools/build_diagnostics.sh "$lua_mode"
 
 has_sources() {
 	compgen -G "$1/*.odin" >/dev/null
@@ -197,6 +205,9 @@ case "$mode" in
 		;;
 	sanitizer)
 		"$ODIN" build src -debug -sanitize:address -out:bin/eski
+		;;
+	thread-sanitizer)
+		"$ODIN" build src -debug -sanitize:thread -out:bin/eski
 		;;
 esac
 echo "built bin/eski ($mode)"

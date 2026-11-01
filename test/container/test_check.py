@@ -48,9 +48,9 @@ elif args[0] == "run" and "-d" in args:
     print("docker: cannot start the server", file=sys.stderr)
     sys.exit(125)
 elif args[0] == "run" and "--entrypoint" in args:
-    print(os.environ.get("FAKE_DOCKER_LISTING", "THIRD_PARTY_NOTICES.md ODIN-LICENSE build-info.txt"))
+    print(os.environ.get("FAKE_DOCKER_LISTING", "LICENSE THIRD_PARTY_NOTICES.md ODIN-LICENSE build-info.txt"))
 elif args[0] == "run":
-    print("eski v=0.1.0")
+    print(os.environ.get("FAKE_DOCKER_VERSION", "eski v=0.1.0 license=Apache-2.0"))
 elif args[:2] == ["volume", "create"]:
     print(args[-1])
 elif args[0] == "ps":
@@ -108,9 +108,13 @@ class DatasetTest(unittest.TestCase):
         kinds = {kind for keys in expected.values() for kind, _ in keys.values()}
         self.assertEqual(kinds, {"string", "list", "hash", "set", "zset", "stream"})
         self.assertEqual(sorted(writes), [0, check.SECOND_DB])
+        scripts = [argv for argv in writes[0] if argv[0] == "EVAL"]
+        self.assertEqual(scripts, [("EVAL", "return redis.call('SET',KEYS[1],ARGV[1])", 1, "g0:script", "script-0")])
+        self.assertEqual(expected[0][scripts[0][3]], ("string", scripts[0][4].encode()))
         for db in writes:
+            effect_keys = {argv[3] if argv[0] == "EVAL" else argv[1] for argv in writes[db]}
             for key in expected[db]:
-                self.assertTrue(any(argv[1] == key for argv in writes[db]), key)
+                self.assertIn(key, effect_keys)
         self.assertTrue(any(argv[0] == "PFADD" for argv in writes[0]))
         self.assertTrue(any(argv[0] == "GEOADD" for argv in writes[0]))
         self.assertTrue(any(argv[0] == "HEXPIRE" for argv in writes[0]))
@@ -215,7 +219,7 @@ class ImageTest(unittest.TestCase):
 
 
 class CleanupTest(unittest.TestCase):
-    def fake(self, tmp, config=None, listing=None):
+    def fake(self, tmp, config=None, listing=None, version=None):
         exe = Path(tmp) / "docker"
         exe.write_text(FAKE_DOCKER.format(python=sys.executable))
         exe.chmod(0o755)
@@ -223,6 +227,8 @@ class CleanupTest(unittest.TestCase):
         env = {"FAKE_DOCKER_LOG": str(log), "FAKE_DOCKER_CONFIG": json.dumps(config or GOOD_CONFIG)}
         if listing is not None:
             env["FAKE_DOCKER_LISTING"] = listing
+        if version is not None:
+            env["FAKE_DOCKER_VERSION"] = version
         return exe, log, env
 
     def run_main(self, exe, env, extra=()):
@@ -267,6 +273,21 @@ class CleanupTest(unittest.TestCase):
             self.assertIn("holds /opt/odin", err)
             calls = [json.loads(line) for line in log.read_text().splitlines()]
             self.assertFalse(any(c[:2] == ["volume", "create"] for c in calls))
+
+    def test_missing_project_licence_stops_before_any_volume(self):
+        cases = (
+            ("eski v=0.1.0", None, "license=Apache-2.0"),
+            ("eski v=0.1.0 license=MIT", None, "license=Apache-2.0"),
+            (None, "THIRD_PARTY_NOTICES.md ODIN-LICENSE build-info.txt", "lacks LICENSE"),
+        )
+        for version, listing, expected in cases:
+            with self.subTest(version=version, listing=listing), tempfile.TemporaryDirectory() as tmp:
+                exe, log, env = self.fake(tmp, listing=listing, version=version)
+                rc, err = self.run_main(exe, env)
+                self.assertEqual(rc, 1)
+                self.assertIn(expected, err)
+                calls = [json.loads(line) for line in log.read_text().splitlines()]
+                self.assertFalse(any(c[:2] == ["volume", "create"] for c in calls))
 
 
 if __name__ == "__main__":

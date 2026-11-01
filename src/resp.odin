@@ -27,7 +27,14 @@ wbuf_grow :: proc(c: ^Conn, n: int) {
 			return
 		}
 	}
-	newcap := max(c.wcap * 2, c.wlen + n, WBUF_INIT)
+	floor := 256 if lua_effect_owner(c) else 1024
+	newcap := max(c.wcap * 2, c.wlen + n, floor)
+	class := Obuf_Class.Pubsub if .Subscribed in c.ps else Obuf_Class.Normal
+	if c.fd >= 0 && c.wlen + n <= 16 * WBUF_INIT && (obuf_limits[class].hard != 0 || obuf_limits[class].soft != 0) {
+		wanted := max(c.wlen + n, floor)
+		newcap = wanted + (WBUF_INIT - wanted % WBUF_INIT) % WBUF_INIT
+	}
+	newcap = min(newcap, lua_capture_capacity(c))
 	stat_reply_buffer_expands += 1
 	c.wbuf = ([^]u8)(runtime.heap_resize(c.wbuf, newcap))
 	if c.fd >= 0 {
@@ -53,6 +60,9 @@ reply_raw :: proc(c: ^Conn, s: []u8) #no_bounds_check {
 	if n == 0 {
 		return
 	}
+	if !lua_capture_allow(c, n) {
+		return
+	}
 	p := wb_reserve(c, n)
 	intrinsics.mem_copy_non_overlapping(p, raw_data(s), n)
 	c.wlen += n
@@ -66,10 +76,19 @@ reply_str :: #force_inline proc(c: ^Conn, s: string) {
 @(private = "file")
 reply_line :: proc(c: ^Conn, prefix: u8, s: []u8) #no_bounds_check {
 	n := len(s)
+	for byte, i in s {
+		if byte == 0 { n = i; break }
+	}
+	if !lua_capture_allow(c, n+3) {
+		return
+	}
 	p := wb_reserve(c, n + 3)
 	p[0] = prefix
 	if n > 0 {
 		intrinsics.mem_copy_non_overlapping(&p[1], raw_data(s), n)
+		for i in 1..=n {
+			if p[i] == '\r' || p[i] == '\n' { p[i] = ' ' }
+		}
 	}
 	p[n + 1] = '\r'
 	p[n + 2] = '\n'
@@ -78,6 +97,9 @@ reply_line :: proc(c: ^Conn, prefix: u8, s: []u8) #no_bounds_check {
 
 @(private = "file")
 reply_prefixed_int :: #force_inline proc(c: ^Conn, prefix: u8, v: i64) #no_bounds_check {
+	if !lua_capture_allow(c, 24) {
+		return
+	}
 	p := wb_reserve(c, 24)
 	p[0] = prefix
 	n := format_i64(&p[1], v)
@@ -109,6 +131,9 @@ reply_error_parts :: proc(c: ^Conn, parts: ..string) #no_bounds_check {
 	for s in parts {
 		n += len(s)
 	}
+	if !lua_capture_allow(c, n) {
+		return
+	}
 	p := wb_reserve(c, n)
 	p[0] = '-'
 	o := 1
@@ -118,9 +143,13 @@ reply_error_parts :: proc(c: ^Conn, parts: ..string) #no_bounds_check {
 			o += len(s)
 		}
 	}
+	for i in 1..<o {
+		if p[i] == 0 { o = i; break }
+		if p[i] == '\r' || p[i] == '\n' { p[i] = ' ' }
+	}
 	p[o] = '\r'
 	p[o + 1] = '\n'
-	c.wlen += n
+	c.wlen += o + 2
 	stat_error_reply(c, p[1:o])
 }
 
@@ -182,6 +211,9 @@ reply_attribute :: proc(c: ^Conn, pairs: int) -> bool {
 
 reply_bulk :: proc(c: ^Conn, s: []u8) #no_bounds_check {
 	n := len(s)
+	if !lua_capture_allow(c, n+26) {
+		return
+	}
 	p := wb_reserve(c, n + 26)
 	p[0] = '$'
 	h := format_i64(&p[1], i64(n)) + 1
@@ -238,6 +270,9 @@ reply_verbatim :: proc(c: ^Conn, s: []u8, format: string = "txt") #no_bounds_che
 		return
 	}
 	reply_prefixed_int(c, '=', i64(len(s) + 4))
+	if !lua_capture_allow(c, 4) {
+		return
+	}
 	p := wb_reserve(c, 4)
 	for i in 0 ..< 3 {
 		p[i] = format[i] if i < len(format) else ' '

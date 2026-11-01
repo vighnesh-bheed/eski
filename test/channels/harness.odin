@@ -62,7 +62,8 @@ session_end :: proc(t: ^testing.T) {
 }
 
 expect_quiet :: proc(t: ^testing.T, loc := #caller_location) {
-	testing.expect_value(t, j.ps_memory, 0, loc)
+	testing.expect_value(t, registry_shared_memory(), 0, loc)
+	testing.expect_value(t, j.client_metadata_total, 0, loc)
 	for kind in j.Ps_Kind {
 		testing.expect_value(t, len(j.ps_maps[kind]), 0, loc)
 	}
@@ -181,8 +182,12 @@ send :: proc(cl: ^Client, list: ..string) -> string {
 	payload := encode(..list)
 	n, err := linux.send(cl.peer, transmute([]u8)payload, {})
 	assert(err == .NONE && n == len(payload))
-	j.conn_read(cl.conn)
-	return recv(cl)
+	for _ in 0 ..< 256 {
+		j.conn_read(cl.conn)
+		reply := recv(cl)
+		if len(reply) > 0 || !alive(cl) { return reply }
+	}
+	panic("synchronous actor reply did not arrive within the bounded read pump")
 }
 
 peer_closed :: proc(cl: ^Client) -> bool {

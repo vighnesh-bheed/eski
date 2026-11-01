@@ -27,6 +27,8 @@ Lazy_Job :: struct {
 	count:     int,
 	waiter_fd: linux.Fd,
 	waiter_id: i64,
+	release: proc "contextless" (payload: rawptr),
+	payload: rawptr,
 }
 
 Lazy_Mode :: enum u8 {
@@ -82,6 +84,15 @@ lazyfree_pending_objects :: proc "contextless" () -> i64 {
 
 lazyfreed_objects :: proc "contextless" () -> i64 {
 	return i64(intrinsics.atomic_load_explicit(&lazy_freed, .Relaxed))
+}
+
+lazyfree_note_deferred :: proc "contextless" (count: int) {
+	intrinsics.atomic_add_explicit(&lazy_pending_objs, count, .Relaxed)
+}
+
+lazyfree_note_reaped :: proc "contextless" (count: int) {
+	intrinsics.atomic_add_explicit(&lazy_freed, count, .Relaxed)
+	intrinsics.atomic_sub_explicit(&lazy_pending_objs, count, .Relaxed)
 }
 
 lazyfree_jobs_pending :: proc "contextless" () -> bool {
@@ -166,6 +177,7 @@ lazyfree_effort :: proc(type: Obj_Type, obj: rawptr) -> int {
 
 @(private = "file")
 lazyfree_run :: proc "contextless" (job: ^Lazy_Job) {
+	if job.release != nil { job.release(job.payload) }
 	if job.obj != nil {
 		object_release_any(job.type, job.obj)
 	}
@@ -184,6 +196,10 @@ lazyfree_run :: proc "contextless" (job: ^Lazy_Job) {
 
 @(private = "file")
 lazyfree_main :: proc() {
+	context.assertion_failure_proc = diagnostics_assertion_failure if intrinsics.atomic_load_explicit(&diagnostic_initialized, .Acquire) != 0 else context.assertion_failure_proc
+	diagnostics_thread_enter()
+	defer diagnostics_thread_leave()
+	runtime_tuning_enter(.Bio)
 	for {
 		sync.sema_wait(&lazy_sema)
 		sync.mutex_lock(&lazy_mutex)
@@ -199,7 +215,6 @@ lazyfree_main :: proc() {
 		intrinsics.atomic_sub_explicit(&lazy_pending_slab, job.slab_live, .Relaxed)
 		intrinsics.atomic_sub_explicit(&lazy_pending_objs, job.count, .Relaxed)
 		intrinsics.atomic_add_explicit(&lazy_freed, job.count, .Relaxed)
-		intrinsics.atomic_sub_explicit(&lazy_jobs, 1, .Release)
 		if job.waiter_id != 0 {
 			sync.mutex_lock(&lazy_mutex)
 			append(&lazy_done, [2]i64{i64(job.waiter_fd), job.waiter_id})
@@ -207,7 +222,31 @@ lazyfree_main :: proc() {
 			one := u64(1)
 			linux.write(lazy_efd, ([^]u8)(&one)[:8])
 		}
+		intrinsics.atomic_sub_explicit(&lazy_jobs, 1, .Release)
 	}
+}
+
+lazyfree_before_fork :: proc() {
+	for intrinsics.atomic_load_explicit(&lazy_jobs, .Acquire) != 0 {
+		ts := linux.Time_Spec{time_nsec = 100_000}
+		linux.nanosleep(&ts, nil)
+	}
+}
+
+lazyfree_after_fork :: proc() {
+	if lazy_efd >= 0 { linux.close(lazy_efd) }
+	lazy_efd = -1
+	lazy_thread = nil
+	clear(&lazy_queue)
+	clear(&lazy_done)
+	lazy_head = 0
+	lazy_mutex = {}
+	lazy_sema = {}
+	lazy_pending_objs = 0
+	lazy_pending_mem = 0
+	lazy_pending_slab = 0
+	lazy_jobs = 0
+	lazy_blocked = 0
 }
 
 @(private = "file")
@@ -222,6 +261,12 @@ lazyfree_start :: proc() {
 }
 
 lazyfree_submit :: proc(job: Lazy_Job) {
+	if pst.in_child {
+		local := job
+		lazyfree_run(&local)
+		intrinsics.atomic_add_explicit(&lazy_freed, job.count, .Relaxed)
+		return
+	}
 	if lazy_thread == nil {
 		lazyfree_start()
 	}
@@ -255,6 +300,7 @@ lazyfree_object :: #force_no_inline proc "contextless" (type: Obj_Type, obj: raw
 }
 
 lazyfree_block :: proc(c: ^Conn) {
+	if pst.in_child { reply_ok(c); return }
 	lazyfree_submit(Lazy_Job{waiter_fd = c.fd, waiter_id = c.id})
 	c.blocked = .Lazyfree
 	lazy_blocked += 1

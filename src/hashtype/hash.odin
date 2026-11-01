@@ -244,15 +244,16 @@ get_raw :: proc(h: Hash, field: []u8) -> (v: Value, expire: u64, found: bool) {
 	return {}, EB_EXPIRE_TIME_INVALID, false
 }
 
-get :: proc(h: Hash, field: []u8, now: u64) -> (v: Value, res: Get_Result) {
+get :: proc(h: Hash, field: []u8, now: u64, delete_expired := true) -> (v: Value, res: Get_Result) {
 	val, expiry, found := get_raw(h, field)
 	if !found {
 		return {}, .Not_Found
 	}
 	if expiry != EB_EXPIRE_TIME_INVALID && expiry < now {
-		if field_expired_hook != nil {
-			field_expired_hook(h, field)
+		if !delete_expired {
+			return {}, .Not_Found
 		}
+		notify_field_expired(h, field)
 		delete_field(h, field)
 		if length(h) == 0 {
 			registry_remove(h)
@@ -263,13 +264,13 @@ get :: proc(h: Hash, field: []u8, now: u64) -> (v: Value, res: Get_Result) {
 	return val, .Ok
 }
 
-exists :: proc(h: Hash, field: []u8, now: u64) -> (bool, Get_Result) {
-	_, res := get(h, field, now)
+exists :: proc(h: Hash, field: []u8, now: u64, delete_expired := true) -> (bool, Get_Result) {
+	_, res := get(h, field, now, delete_expired)
 	return res == .Ok, res
 }
 
-field_strlen :: proc(h: Hash, field: []u8, now: u64) -> (int, Get_Result) {
-	v, res := get(h, field, now)
+field_strlen :: proc(h: Hash, field: []u8, now: u64, delete_expired := true) -> (int, Get_Result) {
+	v, res := get(h, field, now, delete_expired)
 	if res != .Ok {
 		return 0, res
 	}

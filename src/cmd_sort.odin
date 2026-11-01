@@ -121,7 +121,7 @@ sort_generic :: proc(c: ^Conn, argv: [][]u8, readonly: bool) {
 			return
 		}
 	}
-	if req.dontsort && kind == .Set && req.has_store {
+	if req.dontsort && kind == .Set && (req.has_store || lua_active != nil) {
 		req.dontsort = false
 		req.alpha = true
 		req.has_by = false

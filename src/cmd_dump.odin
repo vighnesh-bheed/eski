@@ -552,6 +552,7 @@ migrate_connect :: proc(addr: Migrate_Addr, timeout: i64) -> (linux.Fd, bool) {
 	if err != .NONE {
 		return -1, false
 	}
+	runtime_socket_mark(fd)
 	status: linux.Errno
 	if addr.v6 {
 		sa := linux.Sock_Addr_In6 {

@@ -5,7 +5,7 @@ import "core:testing"
 
 #assert(size_of(Hfe_Meta) == 32)
 #assert(size_of(Reg_Item) == 16)
-#assert(size_of(Registry) == 64)
+#assert(size_of(Registry) == 72)
 
 expiry_make :: proc(table: bool) -> Hash {
 	h := create()

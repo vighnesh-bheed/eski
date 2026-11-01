@@ -29,6 +29,10 @@ if ! command -v python3 >/dev/null 2>&1; then
 	exit 1
 fi
 
+bash tools/build_lua.sh all
+bash tools/build_diagnostics.sh all
+
+server_binary="${ESKI_TEST_BIN:-${ESKI_THREADING_BIN:-bin/eski}}"
 ran=0
 work="$(mktemp -d "${TMPDIR:-/tmp}/eski-packages.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
@@ -98,10 +102,43 @@ for script in test/*/run.py; do
 	elif grep -q -e '--mode' "$script"; then
 		run_script "$script" "debug" --mode debug
 		run_script "$script" "release" --mode release
+	elif grep -q -e '--server' "$script"; then
+		selected_binary="$server_binary"
+		if [ "$script" = test/scripting/run.py ] && [ -z "${ESKI_TEST_BIN:-}" ]; then
+			selected_binary="${ESKI_SCRIPTING_BIN:-$server_binary}"
+		fi
+		run_script "$script" "server" --server "$selected_binary"
 	else
 		run_script "$script" "debug+release"
 	fi
 done
+
+run_script "test/conformance/test_managed_fixture.py" "managed-fixture"
+run_script "test/threading/keyspace.py" "keyspace" --server "$server_binary"
+run_script "test/threading/full_keyspace.py" "datatype-workers" --server "$server_binary"
+run_script "test/threading/features.py" "worker-features" --server "$server_binary"
+run_script "test/compatibility/memory_threading.py" "memory-frontend" --server "$server_binary"
+run_script "test/compatibility/transport.py" "transport" --server "$server_binary"
+run_script "test/compatibility/aof_manifest.py" "aof-manifest" --server "$server_binary"
+run_script "test/compatibility/persistence_boundaries.py" "persistence" --server "$server_binary"
+run_script "test/compatibility/request_lifecycle.py" "request-lifecycle" --server "$server_binary" --keyspace-threads 0
+run_script "test/compatibility/request_lifecycle.py" "request-workers" --server "$server_binary" --keyspace-threads 2
+run_script "test/compatibility/process_title.py" "process-title" --server "$server_binary"
+run_script "test/compatibility/runtime_operations.py" "runtime-operations" --server "$server_binary"
+run_script "test/compatibility/runtime_tuning.py" "runtime-tuning" --server "$server_binary"
+run_script "test/compatibility/diagnostics.py" "native-diagnostics" --server "$server_binary" --sanitizer "${ESKI_TEST_SANITIZER:-none}"
+run_script "test/compatibility/propagation_errors.py" "propagation-errors-coordinator" --server "$server_binary" --keyspace-threads 0
+run_script "test/compatibility/propagation_errors.py" "propagation-errors-workers" --server "$server_binary" --keyspace-threads 2
+run_script "test/compatibility/server_defaults.py" "server-defaults" --server "$server_binary"
+run_script "test/compatibility/client_metadata.py" "client-metadata" --server "$server_binary"
+run_script "test/compatibility/lua_edges.py" "lua-edges" --server "$server_binary"
+run_script "test/compatibility/hfe_workers.py" "field-expiry-reads" --server "$server_binary" --keyspace-threads 0
+run_script "test/compatibility/hfe_workers.py" "field-expiry-worker-reads" --server "$server_binary" --keyspace-threads 2
+run_script "test/compatibility/worker_metadata.py" "worker-metadata-coordinator" --server "$server_binary" --keyspace-threads 0
+run_script "test/compatibility/worker_metadata.py" "worker-metadata-parallel" --server "$server_binary" --keyspace-threads 2
+run_script "test/compatibility/hfe_aof.py" "field-expiry-aof" --server "$server_binary" --keyspace-threads 0
+run_script "test/compatibility/hfe_aof.py" "field-expiry-workers" --server "$server_binary" --keyspace-threads 2
+run_script "test/scripting/debugger.py" "lua-debugger" --server "$server_binary"
 
 if [ "$ran" -eq 0 ]; then
 	echo "no test packages found yet"

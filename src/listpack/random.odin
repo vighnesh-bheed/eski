@@ -1,18 +1,26 @@
 package listpack
 
+import "base:intrinsics"
+
 random_state: u64 = 11400714819323198485
 
 lp_srand :: proc "contextless" (seed: u64) {
-	random_state = seed if seed != 0 else 11400714819323198485
+	intrinsics.atomic_store_explicit(&random_state, seed if seed != 0 else 11400714819323198485, .Relaxed)
 }
 
 lp_rand :: proc "contextless" () -> u32 {
-	state := random_state
-	state ~= state >> 12
-	state ~= state << 25
-	state ~= state >> 27
-	random_state = state
-	return u32((state * 2685821657736338717) >> 33)
+	previous := intrinsics.atomic_load_explicit(&random_state, .Relaxed)
+	for {
+		state := previous
+		state ~= state >> 12
+		state ~= state << 25
+		state ~= state >> 27
+		observed, exchanged := intrinsics.atomic_compare_exchange_weak_explicit(&random_state, previous, state, .Relaxed, .Relaxed)
+		if exchanged {
+			return u32((state * 2685821657736338717) >> 33)
+		}
+		previous = observed
+	}
 }
 
 random_below :: proc "contextless" (limit: u64) -> u64 {

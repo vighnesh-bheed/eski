@@ -16,9 +16,7 @@ expire_due_fields :: proc(h: Hash, now: u64, quota: int) -> int {
 		} else {
 			field = value_bytes(value_from_lp(pack_first(h.lp)), &buf)
 		}
-		if field_expired_hook != nil {
-			field_expired_hook(h, field)
-		}
+		notify_field_expired(h, field)
 		if !delete_field(h, field) {
 			break
 		}

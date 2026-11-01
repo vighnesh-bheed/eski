@@ -144,11 +144,13 @@ zset_new_skiplist :: proc(expected: int) -> zt.Zset {
 }
 
 zset_store_result :: proc(db: ^Db, key: []u8, z: zt.Zset, event: string) {
+	pst.dirty_explicit = true
 	if zt.length(z) == 0 {
 		zt.destroy(z)
 		zset_store_delete(key)
 		return
 	}
+	pst.dirty += 1
 	zset_store(db, key, z)
 	signal_key_in(key, db)
 	notify_in(.Zset, event, key, db)
@@ -156,8 +158,10 @@ zset_store_result :: proc(db: ^Db, key: []u8, z: zt.Zset, event: string) {
 }
 
 zset_store_delete :: proc(key: []u8) {
-	found, _ := db_remove(key)
+	found, expired := db_remove(key)
+	pst.dirty_explicit = true
 	if found {
+		if !expired { pst.dirty += 1 }
 		signal_key(key)
 		notify(.Generic, "del", key)
 	}
@@ -173,6 +177,7 @@ zadd_notify :: proc(key: []u8, added, updated: int, incr: bool) {
 }
 
 zadd_generic :: proc(c: ^Conn, argv: [][]u8, incr_cmd: bool) {
+	pst.dirty_explicit = true
 	a, err := zt.parse_zadd(argv, incr_cmd)
 	if err != .None {
 		reply_zset_error(c, err)
@@ -217,16 +222,18 @@ zadd_generic :: proc(c: ^Conn, argv: [][]u8, incr_cmd: bool) {
 			return
 		}
 		if .Added in out {
+			pst.dirty += 1
 			added += 1
 		}
 		if .Updated in out {
+			pst.dirty += 1
 			updated += 1
 		}
 		nop = .Nop in out
 		result = value
 	}
 	zset_done(e, z)
-	zadd_notify(key, added, updated, incr_cmd)
+	zadd_notify(key, added, updated, .Incr in a.flags)
 	if .Incr in a.flags {
 		if nop {
 			reply_null(c)
@@ -251,9 +258,11 @@ cmd_zincrby :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 zset_removed :: proc(key: []u8, e: ^Entry, z: zt.Zset, removed: int, event: string) {
+	pst.dirty_explicit = true
 	if removed == 0 {
 		return
 	}
+	pst.dirty += i64(removed)
 	notify(.Zset, event, key)
 	if zt.length(z) == 0 {
 		db_remove(key)
@@ -265,6 +274,7 @@ zset_removed :: proc(key: []u8, e: ^Entry, z: zt.Zset, removed: int, event: stri
 }
 
 cmd_zrem :: proc(c: ^Conn, argv: [][]u8) {
+	pst.dirty_explicit = true
 	e, z, wrong := zset_lookup(argv[1], false)
 	if wrong {
 		reply_wrongtype(c)
@@ -283,6 +293,7 @@ cmd_zrem :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 zremrange_generic :: proc(c: ^Conn, argv: [][]u8, kind: zt.Range_Kind) {
+	pst.dirty_explicit = true
 	a, err := zt.parse_zrange(argv, 1, false, kind, .Forward)
 	if err != .None {
 		reply_zset_error(c, err)
@@ -313,6 +324,7 @@ zremrange_generic :: proc(c: ^Conn, argv: [][]u8, kind: zt.Range_Kind) {
 }
 
 zrange_generic :: proc(c: ^Conn, argv: [][]u8, argc_start: int, store: bool, kind: zt.Range_Kind, dir: zt.Direction) {
+	if store { pst.dirty_explicit = true }
 	a, err := zt.parse_zrange(argv, argc_start, store, kind, dir)
 	if err != .None {
 		reply_zset_error(c, err)
@@ -546,6 +558,7 @@ zset_free_temps :: proc() {
 }
 
 setop_generic :: proc(c: ^Conn, argv: [][]u8, name: string, numkeys_index: int, op: zt.Setop, cardinality_only: bool) {
+	if numkeys_index == 2 { pst.dirty_explicit = true }
 	n, err := zt.parse_setop_numkeys(argv, numkeys_index)
 	if err != .None {
 		if err == .At_Least_One_Key {
@@ -628,6 +641,7 @@ zpop_serve :: proc(c: ^Conn, key: []u8, e: ^Entry, z: zt.Zset, max_end: bool, em
 }
 
 zpop_generic :: proc(c: ^Conn, keys: [][]u8, max_end: bool, emit_key: bool, count: i64, nested: bool, nil_when_empty: bool) {
+	pst.dirty_explicit = true
 	for key in keys {
 		e, z, wrong := zset_lookup(key, false)
 		if wrong {

@@ -47,6 +47,7 @@ entry_is_string :: #force_inline proc "contextless" (e: ^Entry) -> bool {
 hash_store_init :: proc() {
 	ht.set_hash_seed(rng_next())
 	lp.lp_srand(rng_next())
+	ht.field_expired_hook = aof_hash_field_expired
 }
 
 @(private)
@@ -71,29 +72,36 @@ hash_obj_encoding :: #force_inline proc "contextless" (h: ht.Hash) -> Obj_Encodi
 hash_key_ref_free :: proc "contextless" (h: ht.Hash) {
 	k := ht.key_ref(h)
 	if k != nil {
+		intrinsics.atomic_sub_explicit(&storage_metadata_owned, (^int)(k)^ + 16, .Relaxed)
 		mem_free(k)
 		ht.set_key_ref(h, nil)
 	}
 }
 
 @(private)
-hash_key_ref_new :: proc "contextless" (key: []u8) -> rawptr {
+hash_key_ref_new :: proc "contextless" (key: []u8, registry: ^ht.Registry) -> rawptr {
 	n := len(key)
-	p := mem_alloc(n + 8)
-	if p == nil {
-		store_fatal("out of memory")
-	}
+	p := mem_alloc(n + 16)
+	if p == nil { store_fatal("out of memory") }
+	intrinsics.atomic_add_explicit(&storage_metadata_owned, n + 16, .Relaxed)
 	(^int)(p)^ = n
-	if n > 0 {
-		intrinsics.mem_copy_non_overlapping(&p[8], raw_data(key), n)
-	}
+	(^^ht.Registry)(rawptr(uintptr(p) + 8))^ = registry
+	if n > 0 { intrinsics.mem_copy_non_overlapping(&p[16], raw_data(key), n) }
 	return p
 }
 
 @(private)
 hash_key_ref_bytes :: #force_inline proc "contextless" (ref: rawptr) -> []u8 {
 	p := ([^]u8)(ref)
-	return p[8:8 + (^int)(p)^]
+	return p[16:16 + (^int)(p)^]
+}
+
+hash_key_ref_registry :: proc "contextless" (ref: rawptr) -> ^ht.Registry {
+	return (^^ht.Registry)(rawptr(uintptr(ref) + 8))^
+}
+
+hash_key_ref_move :: proc "contextless" (ref: rawptr, registry: ^ht.Registry) {
+	if ref != nil { (^^ht.Registry)(rawptr(uintptr(ref) + 8))^ = registry }
 }
 
 object_release :: proc "contextless" (type: Obj_Type, obj: rawptr) -> int {
@@ -147,7 +155,7 @@ hash_copy_attach :: proc(dst: ^Entry, key: []u8, obj: rawptr, min_expire: u64) {
 	entry_object_attach(dst, h, .Hash, hash_obj_encoding(h), h.acct)
 	ht.maintenance_bind(h, dst.db.hreg)
 	if min_expire != ht.EB_EXPIRE_TIME_INVALID {
-		ht.set_key_ref(h, hash_key_ref_new(key))
+		ht.set_key_ref(h, hash_key_ref_new(key, dst.db.hreg))
 		ht.registry_add(dst.db.hreg, h, min_expire)
 	}
 }

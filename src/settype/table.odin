@@ -3,6 +3,8 @@ package settype
 import lp "../listpack"
 import xxhash "core:hash/xxhash"
 import "base:runtime"
+import "base:intrinsics"
+import "core:sync"
 
 TABLE_INITIAL_SIZE :: 4
 TABLE_MIN_FILL :: 8
@@ -28,19 +30,20 @@ Table :: struct {
 
 hash_seed: u64 = 0x9E3779B97F4A7C15
 hash_seeded: bool
+hash_seed_init_mutex: sync.Mutex
 EMPTY_MEMBER := [1]u8{0}
 set_random_state: u64 = 0xD1B54A32D192ED03
 
 set_hash_seed :: proc "contextless" (seed: u64) {
-	hash_seed = seed
-	hash_seeded = true
+	intrinsics.atomic_store_explicit(&hash_seed, seed, .Relaxed)
+	intrinsics.atomic_store_explicit(&hash_seeded, true, .Release)
 }
 
 hash_member :: proc(m: []u8) -> u64 {
 	if len(m) == 0 {
-		return xxhash.XXH3_64_with_seed(EMPTY_MEMBER[:0], hash_seed)
+		return xxhash.XXH3_64_with_seed(EMPTY_MEMBER[:0], intrinsics.atomic_load_explicit(&hash_seed, .Relaxed))
 	}
-	return xxhash.XXH3_64_with_seed(m, hash_seed)
+	return xxhash.XXH3_64_with_seed(m, intrinsics.atomic_load_explicit(&hash_seed, .Relaxed))
 }
 
 blob_bytes :: proc "contextless" (b: ^Blob) -> []u8 {
@@ -79,8 +82,12 @@ cap_for :: proc "contextless" (n: int) -> int {
 
 table_make :: proc "contextless" (expected: int) -> ^Table {
 	capacity := cap_for(expected)
-	if !hash_seeded {
-		set_hash_seed(rand64())
+	if !intrinsics.atomic_load_explicit(&hash_seeded, .Acquire) {
+		sync.mutex_lock(&hash_seed_init_mutex)
+		if !intrinsics.atomic_load_explicit(&hash_seeded, .Acquire) {
+			set_hash_seed(rand64())
+		}
+		sync.mutex_unlock(&hash_seed_init_mutex)
 	}
 	t := cast(^Table)runtime.heap_alloc(size_of(Table))
 	resize_require(t != nil)
@@ -283,8 +290,7 @@ table_memory :: proc "contextless" (t: ^Table) -> int {
 }
 
 rand64 :: proc "contextless" () -> u64 {
-	set_random_state += 0x9E3779B97F4A7C15
-	v := set_random_state
+	v := intrinsics.atomic_add_explicit(&set_random_state, u64(0x9E3779B97F4A7C15), .Relaxed) + 0x9E3779B97F4A7C15
 	v = (v ~ (v >> 30)) * 0xBF58476D1CE4E5B9
 	v = (v ~ (v >> 27)) * 0x94D049BB133111EB
 	return v ~ (v >> 31)

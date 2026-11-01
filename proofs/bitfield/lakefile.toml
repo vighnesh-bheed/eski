@@ -1,0 +1,11 @@
+name = "eski-bitfield"
+version = "0.1.0"
+defaultTargets = ["Bitfield", "bitfield_model"]
+moreLeanArgs = ["-j1"]
+
+[[lean_lib]]
+name = "Bitfield"
+
+[[lean_exe]]
+name = "bitfield_model"
+root = "Main"

@@ -32,6 +32,7 @@ Limits :: struct {
 Result :: struct {
 	consumed:   int,
 	need:       int,
+	payload:    int,
 	argc:       int,
 	kind:       Kind,
 	fault:      Fault,
@@ -187,7 +188,7 @@ parse_array :: #force_inline proc(input: []u8, scratch: ^Scratch, limits: Limits
 		}
 		next := payload + int(length) + 2
 		if next > len(input) {
-			return {kind = .Incomplete, need = next}
+			return {kind = .Incomplete, need = next, payload = payload}
 		}
 		#no_bounds_check {
 			scratch.args[argument] = input[payload:next - 2]
@@ -258,7 +259,7 @@ parse_array_slow_fields :: #force_no_inline proc(input: []u8, scratch: ^Scratch,
 		}
 		payload_end := next - 2
 		if next > len(input) {
-			return {kind = .Incomplete, need = next}
+			return {kind = .Incomplete, need = next, payload = cursor}
 		}
 		if !ensure_args(scratch, argument + 1) {
 			return {kind = .Error, fault = .Invalid_Array_Length}

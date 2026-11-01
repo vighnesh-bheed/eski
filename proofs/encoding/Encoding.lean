@@ -1,0 +1,45 @@
+import Encoding.Codec
+import Encoding.Parser
+
+#print axioms Encoding.digits_length
+#print axioms Encoding.digits_bounded
+#print axioms Encoding.digits_reconstruct
+#print axioms Encoding.byte_capacity
+#print axioms Encoding.signed_bytes_bits
+#print axioms Encoding.signed_bytes_roundtrip
+#print axioms Encoding.int13_tags
+#print axioms Encoding.int13_roundtrip
+#print axioms Encoding.int7_roundtrip
+#print axioms Encoding.extended_integer_roundtrip
+#print axioms Encoding.string_header_length
+#print axioms Encoding.string_header_roundtrip
+#print axioms Encoding.back_width_capacity
+#print axioms Encoding.back_width_positive
+#print axioms Encoding.back_roundtrip
+#print axioms Encoding.entry_extent_bounds
+#print axioms Encoding.string_payload_reconstruction
+#print axioms Encoding.string_body_length
+#print axioms Encoding.encoded_entry_boundary
+#print axioms Encoding.extended_body_roundtrip
+#print axioms Encoding.tagged_integer_roundtrip
+#print axioms Encoding.string_body_roundtrip
+#print axioms Encoding.back_scan_groups
+#print axioms Encoding.back_scan_roundtrip
+#print axioms Encoding.read_back_roundtrip
+#print axioms Encoding.decoded_entry_bounds
+#print axioms Encoding.bulk_guard_refines
+#print axioms Encoding.bulk_success_bounds
+#print axioms Encoding.bulk_slice_bounds
+#print axioms Encoding.fast_slow_bulk_equivalent
+#print axioms Encoding.feed_append
+#print axioms Encoding.chunks_bytes
+#print axioms Encoding.chunks_semantics
+#print axioms Encoding.fragmentation_invariant
+#print axioms Encoding.parser_nil_array
+#print axioms Encoding.parser_nil_bulk
+#print axioms Encoding.parser_incomplete_bulk
+#print axioms Encoding.parser_binary_success
+#print axioms Encoding.header_complete_bounds
+#print axioms Encoding.incomplete_not_success
+#print axioms Encoding.parse_bulks_success_bounds
+#print axioms Encoding.parse_array_success_bounds

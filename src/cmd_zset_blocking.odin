@@ -4,6 +4,7 @@ import zt "zsettype"
 
 @(private)
 bzpop_generic :: proc(c: ^Conn, keys: [][]u8, timeout: []u8, max_end: bool, count: i64, nested: bool) {
+	pst.dirty_explicit = true
 	deadline, ok := block_parse_timeout(c, timeout)
 	if !ok {
 		return

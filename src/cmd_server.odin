@@ -2,6 +2,7 @@ package main
 
 import "core:strconv"
 import "core:sys/linux"
+import "core:sys/posix"
 import "rdb"
 
 read_rss :: proc() -> i64 {
@@ -43,11 +44,11 @@ debug_sleep :: proc(arg: []u8) {
 		return
 	}
 	us := i64(scaled)
-	ts := linux.Time_Spec {
-		time_sec  = uint(us / 1_000_000),
-		time_nsec = uint(us % 1_000_000) * 1000,
+	ts := posix.timespec {
+		tv_sec  = auto_cast us / 1_000_000,
+		tv_nsec = auto_cast (us % 1_000_000) * 1000,
 	}
-	for linux.nanosleep(&ts, &ts) == .EINTR {
+	for posix.nanosleep(&ts, &ts) != .OK && posix.errno() == .EINTR {
 	}
 	update_clock()
 }
@@ -57,7 +58,13 @@ cmd_debug :: proc(c: ^Conn, argv: [][]u8) {
 		reply_error(c, ERR_DEBUG_NOT_ALLOWED)
 		return
 	}
+	if diagnostics_debug(c, argv) { return }
 	if persist_debug(c, argv) {
+		return
+	}
+	if eq_nocase(argv[1], "set-disable-deny-scripts") && len(argv) == 3 {
+		lua_deny_scripts_disabled = c_atoi(argv[2]) != 0
+		reply_ok(c)
 		return
 	}
 	if eq_nocase(argv[1], "config-rewrite-force-all") && len(argv) == 2 {
@@ -97,7 +104,7 @@ cmd_debug :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	if eq_nocase(argv[1], "object") && len(argv) == 3 {
-		e := db_find_notouch(argv[2])
+		e := db_find_raw_in(c.db, argv[2])
 		if e == nil {
 			reply_error(c, ERR_NO_KEY)
 			return
@@ -186,6 +193,9 @@ debug_serialized_length :: proc(e: ^Entry, key: []u8) -> int {
 
 cmd_time :: proc(c: ^Conn, argv: [][]u8) {
 	sec, usec := now_realtime()
+	if lua_active != nil {
+		sec, usec = srv.now_us / 1_000_000, srv.now_us % 1_000_000
+	}
 	reply_array(c, 2)
 	reply_bulk_int(c, sec)
 	reply_bulk_int(c, usec)
@@ -309,105 +319,8 @@ reply_error_arg :: proc(c: ^Conn, prefix: string, arg: []u8) {
 }
 
 cmd_function :: proc(c: ^Conn, argv: [][]u8) {
-	sub := argv[1]
-	n := len(argv)
-	switch {
-	case eq_nocase(sub, "flush"):
-		if n > 3 {
-			reply_subcommand_syntax_error(c, sub, "FUNCTION")
-			return
-		}
-		if n == 3 && !eq_nocase(argv[2], "sync") && !eq_nocase(argv[2], "async") {
-			reply_error(c, "ERR FUNCTION FLUSH only supports SYNC|ASYNC option")
-			return
-		}
-		reply_ok(c)
-	case eq_nocase(sub, "list"):
-		with_code, has_name: bool
-		for i := 2; i < n; i += 1 {
-			if !with_code && eq_nocase(argv[i], "withcode") {
-				with_code = true
-				continue
-			}
-			if !has_name && eq_nocase(argv[i], "libraryname") {
-				if i >= n - 1 {
-					reply_error(c, "ERR library name argument was not given")
-					return
-				}
-				has_name = true
-				i += 1
-				continue
-			}
-			reply_error_arg(c, "ERR Unknown argument ", argv[i])
-			return
-		}
-		reply_array(c, 0)
-	case eq_nocase(sub, "stats"):
-		if n != 2 {
-			reply_wrong_args(c, "function|stats")
-			return
-		}
-		reply_map(c, 2)
-		reply_bulk_str(c, "running_script")
-		reply_null(c)
-		reply_bulk_str(c, "engines")
-		reply_map(c, 1)
-		reply_bulk_str(c, "LUA")
-		reply_map(c, 2)
-		reply_bulk_str(c, "libraries_count")
-		reply_int(c, 0)
-		reply_bulk_str(c, "functions_count")
-		reply_int(c, 0)
-	case eq_nocase(sub, "dump"):
-		if n != 2 {
-			reply_wrong_args(c, "function|dump")
-			return
-		}
-		reply_bulk_str(c, FUNCTION_EMPTY_DUMP)
-	case eq_nocase(sub, "restore"):
-		if n < 3 {
-			reply_wrong_args(c, "function|restore")
-			return
-		}
-		if n > 4 {
-			reply_subcommand_syntax_error(c, sub, "FUNCTION")
-			return
-		}
-		if n == 4 && !eq_nocase(argv[3], "append") && !eq_nocase(argv[3], "replace") && !eq_nocase(argv[3], "flush") {
-			reply_error(c, "ERR Wrong restore policy given, value should be either FLUSH, APPEND or REPLACE.")
-			return
-		}
-		if !bytes_eq(argv[2], transmute([]u8)string(FUNCTION_EMPTY_DUMP)) {
-			reply_error(c, "ERR DUMP payload version or checksum are wrong")
-			return
-		}
-		reply_ok(c)
-	case eq_nocase(sub, "delete"):
-		if n != 3 {
-			reply_wrong_args(c, "function|delete")
-			return
-		}
-		reply_error(c, "ERR Library not found")
-	case eq_nocase(sub, "kill"):
-		if n != 2 {
-			reply_wrong_args(c, "function|kill")
-			return
-		}
-		reply_error(c, "NOTBUSY No scripts in execution right now.")
-	case eq_nocase(sub, "load"):
-		if n < 3 {
-			reply_wrong_args(c, "function|load")
-			return
-		}
-		for i in 2 ..< n - 1 {
-			if !eq_nocase(argv[i], "replace") {
-				reply_error_arg(c, "ERR Unknown option given: ", argv[i])
-				return
-			}
-		}
-		reply_error(c, "ERR Missing library metadata")
-	case eq_nocase(sub, "help"):
-		if n != 2 {
+	if eq_nocase(argv[1], "help") {
+		if len(argv) != 2 {
 			reply_wrong_args(c, "function|help")
 			return
 		}
@@ -415,9 +328,9 @@ cmd_function :: proc(c: ^Conn, argv: [][]u8) {
 		for line in function_help {
 			reply_simple(c, line)
 		}
-	case:
-		reply_unknown_subcommand(c, sub, "FUNCTION")
+		return
 	}
+	lua_function_dispatch(c, argv)
 }
 
 @(private = "file")

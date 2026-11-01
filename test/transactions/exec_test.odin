@@ -348,7 +348,7 @@ aof_staging_wraps_multiple_writes :: proc(t: ^testing.T) {
 	expect_call(t, a, "SELECT 0", "+QUEUED\r\n")
 	expect_call(t, a, "SET y 1", "+QUEUED\r\n")
 	expect_call(t, a, "EXEC", "*4\r\n+OK\r\n+OK\r\n+OK\r\n+OK\r\n")
-	testing.expect_value(t, string(j.aof.buf[:]), "*2\r\n$6\r\nSELECT\r\n$1\r\n3\r\n*1\r\n$5\r\nMULTI\r\n*3\r\n$3\r\nSET\r\n$1\r\nx\r\n$1\r\n1\r\n*2\r\n$6\r\nSELECT\r\n$1\r\n0\r\n*3\r\n$3\r\nSET\r\n$1\r\ny\r\n$1\r\n1\r\n*1\r\n$4\r\nEXEC\r\n")
+	testing.expect_value(t, string(j.aof.buf[:]), "*1\r\n$5\r\nMULTI\r\n*2\r\n$6\r\nSELECT\r\n$1\r\n3\r\n*3\r\n$3\r\nSET\r\n$1\r\nx\r\n$1\r\n1\r\n*2\r\n$6\r\nSELECT\r\n$1\r\n0\r\n*3\r\n$3\r\nSET\r\n$1\r\ny\r\n$1\r\n1\r\n*1\r\n$4\r\nEXEC\r\n")
 	clear(&j.aof.buf)
 	expect_call(t, a, "MULTI", "+OK\r\n")
 	expect_call(t, a, "SET x 1", "+QUEUED\r\n")

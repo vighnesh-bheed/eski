@@ -18,11 +18,12 @@ hash_rename :: proc(key: []u8) {
 		return
 	}
 	hash_key_ref_free(h)
-	ht.set_key_ref(h, hash_key_ref_new(key))
+	ht.set_key_ref(h, hash_key_ref_new(key, e.db.hreg))
 	hash_done(e, h)
 }
 
 hash_move_registry :: proc "contextless" (h: ht.Hash, from: ^Db, to: ^Db) {
+	hash_key_ref_move(ht.key_ref(h), to.hreg)
 	ht.maintenance_bind(h, to.hreg)
 	minimum := ht.registered_expire(h)
 	if minimum == ht.EB_EXPIRE_TIME_INVALID || from.hreg == to.hreg {
@@ -61,6 +62,9 @@ hash_lazy :: proc(key: []u8, e: ^Entry, h: ht.Hash, res: ht.Get_Result) -> (dele
 }
 
 hash_expire_if_needed :: proc(key: []u8, e: ^Entry, h: ht.Hash) -> (deleted: bool) {
+	if expiry_deletion_paused() {
+		return false
+	}
 	before := ht.length(h)
 	emptied := ht.expire_if_needed(h, hash_now())
 	if emptied {
@@ -96,6 +100,7 @@ reply_ints_repeat :: proc(c: ^Conn, v: i64, n: int) {
 }
 
 hexpire_generic :: proc(c: ^Conn, argv: [][]u8, name: string, unit_seconds: bool, relative: bool) {
+	pst.dirty_explicit = true
 	key := argv[1]
 	e, h, wrong := hash_lookup(key, false)
 	if wrong {
@@ -128,7 +133,7 @@ hexpire_generic :: proc(c: ^Conn, argv: [][]u8, name: string, unit_seconds: bool
 	}
 	ref := ht.key_ref(h)
 	if ref == nil {
-		ref = hash_key_ref_new(key)
+		ref = hash_key_ref_new(key, e.db.hreg)
 	}
 	clear(&hash_ints)
 	empty := ht.expire_fields(e.db.hreg, ref, h, args.fields, args.expire_at, args.cond, now, &hash_ints)
@@ -140,6 +145,7 @@ hexpire_generic :: proc(c: ^Conn, argv: [][]u8, name: string, unit_seconds: bool
 			updated += 1
 		}
 	}
+	pst.dirty += i64(deleted + updated)
 	stat_expired_subkeys += i64(deleted)
 	hash_done(e, h)
 	owned: []u8
@@ -218,6 +224,7 @@ cmd_hpexpiretime :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 cmd_hpersist :: proc(c: ^Conn, argv: [][]u8) {
+	pst.dirty_explicit = true
 	e, h, wrong := hash_lookup(argv[1], false)
 	if wrong {
 		reply_wrongtype(c)
@@ -234,6 +241,7 @@ cmd_hpersist :: proc(c: ^Conn, argv: [][]u8) {
 	}
 	clear(&hash_ints)
 	if ht.persist_fields(h, fields, hash_now(), &hash_ints) {
+		pst.dirty += 1
 		hash_done(e, h)
 		signal_key(argv[1])
 		notify(.Hash, "hpersist", argv[1])
@@ -262,7 +270,7 @@ hash_tick :: proc "contextless" () {
 		return
 	}
 	hash_tick_due = srv.now_ms + CRON_INTERVAL_MS
-	if !active_expire_enabled || len(dbs) == 0 {
+	if !active_expire_enabled || expiry_deletion_paused() || len(dbs) == 0 {
 		return
 	}
 	deadline := now_ns() + EXPIRE_TICK_NS

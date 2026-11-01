@@ -12,7 +12,8 @@ DEFAULT_IMAGE = "eski:local"
 BINARY = "/usr/local/bin/eski"
 DATA_DIR = "/data"
 DEFAULT_PORT = "6399/tcp"
-DOC_FILES = ("THIRD_PARTY_NOTICES.md", "ODIN-LICENSE", "build-info.txt")
+PROJECT_LICENSE = "Apache-2.0"
+DOC_FILES = ("LICENSE", "THIRD_PARTY_NOTICES.md", "ODIN-LICENSE", "build-info.txt")
 FORBIDDEN_PATHS = ("/opt/odin", "/build", "/src", "/out")
 FORBIDDEN_TOOLS = ("odin", "clang", "cc", "gcc", "ld")
 SERVER_ARGS = ("--save", "3600 1")
@@ -153,6 +154,7 @@ def dataset(gen):
     stream_ids = [f"{1000 + i}-{gen}" for i in range(60)]
     writes = [
         ("SET", p + "string", f"value-{gen}"),
+        ("EVAL", "return redis.call('SET',KEYS[1],ARGV[1])", 1, p + "script", f"script-{gen}"),
         ("SET", p + "integer", str(1234567 + gen)),
         ("INCRBY", p + "integer", "10"),
         ("SET", p + "binary", binary),
@@ -190,6 +192,7 @@ def dataset(gen):
     expect = {
         0: {
             p + "string": ("string", f"value-{gen}".encode()),
+            p + "script": ("string", f"script-{gen}".encode()),
             p + "integer": ("string", str(1234577 + gen).encode()),
             p + "binary": ("string", binary),
             p + "large": ("string", large),
@@ -456,8 +459,8 @@ def check_image(docker, image):
     image_id = data[0].get("Id")
     problems = check_image_config(data[0].get("Config") or {})
     version = docker.run("run", "--rm", "--label", docker.label, image, "-v").stdout.strip()
-    if not re.fullmatch(r"eski v=\S+", version):
-        problems.append(f"-v printed {version!r}, expected 'eski v=<version>'")
+    if not re.fullmatch(r"eski v=[0-9A-Za-z.+-]+ license=" + re.escape(PROJECT_LICENSE), version):
+        problems.append(f"-v printed {version!r}, expected 'eski v=<version> license={PROJECT_LICENSE}'")
     script = (
         "ls /usr/share/doc/eski; "
         + "".join(f"test ! -e {p} || echo found {p}; " for p in FORBIDDEN_PATHS)

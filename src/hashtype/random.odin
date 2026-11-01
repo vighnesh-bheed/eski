@@ -1,6 +1,7 @@
 package hashtype
 
 import lp "../listpack"
+import "base:intrinsics"
 
 HRANDFIELD_SUB_STRATEGY_MUL :: 3
 HRANDFIELD_RANDOM_SAMPLE_LIMIT :: 1000
@@ -8,12 +9,18 @@ HRANDFIELD_RANDOM_SAMPLE_LIMIT :: 1000
 random_state: u64 = 0x8b8b8b8b5a5a5a5a
 
 rand64 :: #force_inline proc "contextless" () -> u64 {
-	x := random_state
-	x ~= x >> 12
-	x ~= x << 25
-	x ~= x >> 27
-	random_state = x
-	return x * 0x2545f4914f6cdd1d
+	previous := intrinsics.atomic_load_explicit(&random_state, .Relaxed)
+	for {
+		x := previous
+		x ~= x >> 12
+		x ~= x << 25
+		x ~= x >> 27
+		observed, exchanged := intrinsics.atomic_compare_exchange_weak_explicit(&random_state, previous, x, .Relaxed, .Relaxed)
+		if exchanged {
+			return x * 0x2545f4914f6cdd1d
+		}
+		previous = observed
+	}
 }
 
 rand_below :: #force_inline proc "contextless" (n: u64) -> u64 {

@@ -65,6 +65,7 @@ Registry :: struct {
 	resize_tail:  ^Resize_State,
 	resize_count: int,
 	owner:        rawptr,
+	expired_hook: Field_Expired_Hook,
 	resize_epoch: u64,
 }
 
@@ -81,4 +82,12 @@ Expire_Args :: struct {
 	expire_at: u64,
 	cond:      Expire_Condition,
 	fields:    [][]u8,
+}
+
+notify_field_expired :: proc(h: Hash, field: []u8) {
+	if h.hfe != nil && h.hfe.reg != nil && h.hfe.reg.expired_hook != nil {
+		h.hfe.reg.expired_hook(h, field)
+	} else if field_expired_hook != nil {
+		field_expired_hook(h, field)
+	}
 }

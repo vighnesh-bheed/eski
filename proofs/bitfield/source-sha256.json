@@ -1,0 +1,12 @@
+{
+  "src/bitmap/bitfield.odin": "d9259bfd042faf82ce3b724d4542ab0cc4b94935b43a6a578e534c8381242b53",
+  "src/bitmap/parse.odin": "23b7e97f29bbeea6f2d440e446c4cae116175a31e3361e49c0ad1d6895b698d8",
+  "src/bitmap/alloc.odin": "05724974d5a901236b50a759a3f4c7e9664255d8e0d4ddc48b858d2f038ce49f",
+  "src/bitmap/bits.odin": "6a9920ce4da6900787b03618e80bd6c7daa817e93664fe84d8e26d6b8651c6a9",
+  "src/integer/parse.odin": "83a3e44142f09fa932cfb7ee108cad049f467f103f82769aafa079f16e9648cd",
+  "src/cmd_bitmap.odin": "5bc648a8475f49ae0d916498d455a343d7ccc59915121c570d8c2e2bb322a741",
+  "src/keyspace_bitmap.odin": "cfaf2d8f21ca2f632aff7af8a967c972dcef4cadc1b7eb14dff310791adba3d6",
+  "test/bits/reference.odin": "0a374f758ad5bdd4b42f90ca40a4c8e0e07812501354cd4e0cba86ae8625a93b",
+  "test/bits/bitfield_test.odin": "80b97e34fc0caf8208c49d02f31e4ae9d38ee5ae6260ba9aa992cece417f79e7",
+  "test/bits/replay_test.odin": "b2097a8383290b39edac2e2694d09e85457c5ff6f1b477842999444529f0a608"
+}

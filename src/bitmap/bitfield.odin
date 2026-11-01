@@ -327,7 +327,7 @@ bitfield_apply :: proc "contextless" (data: []u8, op: Bitfield_Op, grown: bool) 
 		if op.opcode == .Set {
 			return {value = old}, grown || (u64(old) ~ u64(next)) & field_mask(bits) != 0
 		}
-		return {value = next}, true
+		return {value = next}, grown || (u64(old) ~ u64(next)) & field_mask(bits) != 0
 	}
 	old := get_unsigned_bitfield(data, op.offset, bits)
 	value, incr := u64(op.value), i64(0)
@@ -351,7 +351,7 @@ bitfield_apply :: proc "contextless" (data: []u8, op: Bitfield_Op, grown: bool) 
 	if op.opcode == .Set {
 		return {value = i64(old)}, grown || (old ~ next) & field_mask(bits) != 0
 	}
-	return {value = i64(next)}, true
+	return {value = i64(next)}, grown || (old ~ next) & field_mask(bits) != 0
 }
 
 bitfield_execute :: proc(

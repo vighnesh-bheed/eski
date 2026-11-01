@@ -107,7 +107,7 @@ info_value() {
 }
 
 source_digest() {
-  (cd "$ROOT_DIR" && find src -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+  (cd "$ROOT_DIR" && bash tools/source_digest.sh)
 }
 
 import_image() {
@@ -140,9 +140,12 @@ fi
 SOURCE_SHA=$(source_digest)
 SOURCE_VERSION=$(sed -n 's/^VERSION :: "\([0-9A-Za-z.+-]*\)"$/\1/p' "$ROOT_DIR/src/main.odin" | head -n 1)
 [ -n "$SOURCE_VERSION" ] || die "cannot read the VERSION constant from $ROOT_DIR/src/main.odin"
+SOURCE_LICENSE=$(sed -n 's/^PROJECT_LICENSE :: "\([0-9A-Za-z.+-]*\)"$/\1/p' "$ROOT_DIR/src/main.odin" | head -n 1)
+[ -n "$SOURCE_LICENSE" ] || die "cannot read the PROJECT_LICENSE constant from $ROOT_DIR/src/main.odin"
 build=(docker build --file "$ROOT_DIR/Dockerfile" --tag "$TAG" --iidfile "$WORK/iid"
   --provenance=false --sbom=false
-  --build-arg "SOURCE_REVISION=$REVISION" --build-arg "BUILD_JOBS=$JOBS" --build-arg "ESKI_VERSION=$SOURCE_VERSION")
+  --build-arg "SOURCE_REVISION=$REVISION" --build-arg "BUILD_JOBS=$JOBS" --build-arg "ESKI_VERSION=$SOURCE_VERSION"
+  --build-arg "ESKI_LICENSE=$SOURCE_LICENSE")
 [ "$NO_CACHE" = 1 ] && build+=(--no-cache)
 say "building  $TAG from $ROOT_DIR"
 "${build[@]}" "$ROOT_DIR" >&2 || die "docker build failed"
@@ -153,14 +156,22 @@ HEX=${ID#sha256:}
 CID=$(docker create --label "$LABEL" "$ID") || die "docker create failed for $ID"
 docker cp "$CID:/usr/local/bin/eski" "$WORK/eski" >/dev/null || die "cannot copy the binary out of $ID"
 docker cp "$CID:/usr/share/doc/eski/build-info.txt" "$WORK/build-info.txt" >/dev/null || die "cannot copy the build info out of $ID"
+docker cp "$CID:/usr/share/doc/eski/LICENSE" "$WORK/LICENSE" >/dev/null || die "cannot copy the project licence out of $ID"
+docker cp "$CID:/usr/share/doc/eski/THIRD_PARTY_NOTICES.md" "$WORK/THIRD_PARTY_NOTICES.md" >/dev/null || die "cannot copy the third party notices out of $ID"
 docker rm "$CID" >/dev/null
 BIN_SHA=$(sha256_of "$WORK/eski")
 VERSION=$(docker run --rm --label "$LABEL" "$ID" -v) || die "the image does not print its version"
 VERSION=${VERSION%%$'\r'}
+[ "$VERSION" = "eski v=$SOURCE_VERSION license=$SOURCE_LICENSE" ] || die "the image prints '$VERSION', expected the source version and licence"
 
 [ "$(info_value binary_sha256 "$WORK/build-info.txt")" = "$BIN_SHA" ] || die "the binary in $ID does not match the sha256 its build info records"
 [ "$(info_value version "$WORK/build-info.txt")" = "$VERSION" ] || die "the image prints '$VERSION' but its build info records '$(info_value version "$WORK/build-info.txt")'"
-[ "$(info_value source_sha256 "$WORK/build-info.txt")" = "$SOURCE_SHA" ] || die "the image was built from a source tree other than $ROOT_DIR/src (the tree changed during the build?)"
+[ "$(info_value source_sha256 "$WORK/build-info.txt")" = "$SOURCE_SHA" ] || die "the image was built from a source and Lua dependency tree other than $ROOT_DIR (the tree changed during the build?)"
+[ "$(info_value license "$WORK/build-info.txt")" = "$SOURCE_LICENSE" ] || die "the image records a licence other than $SOURCE_LICENSE"
+[ "$(sha256_of "$WORK/LICENSE")" = "$(sha256_of "$ROOT_DIR/LICENSE")" ] || die "the image holds a project licence different from $ROOT_DIR/LICENSE"
+[ "$(sha256_of "$WORK/THIRD_PARTY_NOTICES.md")" = "$(sha256_of "$ROOT_DIR/THIRD_PARTY_NOTICES.md")" ] || die "the image holds third party notices different from this tree"
+[ "$(info_value license_sha256 "$WORK/build-info.txt")" = "$(sha256_of "$WORK/LICENSE")" ] || die "the image licence hash disagrees with its build info"
+[ "$(info_value notices_sha256 "$WORK/build-info.txt")" = "$(sha256_of "$WORK/THIRD_PARTY_NOTICES.md")" ] || die "the image notices hash disagrees with its build info"
 
 ARCHIVE=""
 ARCHIVE_SHA=""
@@ -211,6 +222,7 @@ data = {
     "source_revision": revision,
     "source_sha256": info.get("source_sha256"),
     "binary": {"path": info.get("binary_path"), "sha256": binary_sha, "version": version},
+    "license": {"spdx": info.get("license"), "sha256": info.get("license_sha256"), "notices_sha256": info.get("notices_sha256")},
     "build": {
         "flags": info.get("build_flags"),
         "check_flags": info.get("check_flags"),
