@@ -1057,6 +1057,10 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 ```
 
+## Memcached text protocol
+
+The memcached text endpoint in src/memcached.odin, including its parsing of numeric command arguments, is Eski code written from the memcached protocol specification, the protocol.txt document published by the memcached project, and from black box comparison of replies with a reference memcached server. It contains no memcached code, and no memcached licence terms apply to it.
+
 ## OpenSSL 3 transport
 
 The original Odin adapter in `src/transport_tls.odin` dynamically links OpenSSL 3 `libssl` and `libcrypto` through their published C APIs. No OpenSSL implementation source is incorporated in this adapter. Project: https://www.openssl.org/ . OpenSSL 3 is licensed under the Apache License 2.0. Native development used the system OpenSSL 3.5.5; the pinned Ubuntu 24.04 container uses package `libssl3t64` version `3.0.13-0ubuntu3.16`, with its shared libraries and complete distribution copyright file copied from the build stage. API references: https://docs.openssl.org/3.5/man3/SSL_accept/ , https://docs.openssl.org/3.5/man3/SSL_read/ and https://docs.openssl.org/3.5/man3/SSL_write/ .
