@@ -1575,7 +1575,7 @@ cmd_shutdown :: proc(c: ^Conn, argv: [][]u8) {
 			return
 		}
 	}
-	if (abort && len(argv) != 2) || (.Nosave in flags && .Save in flags) {
+	if (abort && flags != {}) || (.Nosave in flags && .Save in flags) {
 		reply_error(c, ERR_SYNTAX)
 		return
 	}

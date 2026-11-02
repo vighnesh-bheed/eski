@@ -2,6 +2,7 @@ package main
 
 import "base:intrinsics"
 import "base:runtime"
+import "core:hash"
 import "core:sys/linux"
 
 Conn_Kind :: enum u8 {
@@ -35,6 +36,12 @@ MC_ERR_DELTA :: "CLIENT_ERROR invalid numeric delta argument\r\n"
 MC_ERR_NON_NUMERIC :: "CLIENT_ERROR cannot increment or decrement non-numeric value\r\n"
 MC_ERR_SHUTDOWN :: "SERVER_ERROR: shutdown not enabled\r\n"
 MC_ERR_NO_MEMORY :: "SERVER_ERROR out of memory storing object\r\n"
+MC_ERR_LINE :: "CLIENT_ERROR bad command line\r\n"
+MC_ERR_SLAB_ID :: "CLIENT_ERROR Illegal slab id\r\n"
+MC_ERR_DETAIL_USAGE :: "CLIENT_ERROR usage: stats detail on|off|dump\r\n"
+MC_SLAB_CLASSES :: 64
+MC_PREFIX_BUCKETS :: 256
+MC_PREFIX_DELIMITER :: ':'
 MC_VERSION_LINE :: "VERSION " + VERSION + "\r\n"
 
 Mc_Meta :: struct {
@@ -120,6 +127,188 @@ mc_noreply: bool
 mc_oom: bool
 mc_stats: Mc_Stats
 mc_tmp: [dynamic]u8
+mc_detail_on: bool
+mc_prefixes: [MC_PREFIX_BUCKETS]^Mc_Prefix
+
+Mc_Prefix :: struct {
+	next:   ^Mc_Prefix,
+	prefix: []u8,
+	get:    u64,
+	hit:    u64,
+	set:    u64,
+	del:    u64,
+}
+
+mc_prefix_of :: proc(key: []u8) -> ^Mc_Prefix {
+	if !mc_detail_on {
+		return nil
+	}
+	cut := -1
+	for b, i in key {
+		if b == MC_PREFIX_DELIMITER {
+			cut = i
+			break
+		}
+	}
+	if cut < 0 {
+		return nil
+	}
+	name := key[:cut]
+	bucket := hash.murmur32(name, 0) & (MC_PREFIX_BUCKETS - 1)
+	for p := mc_prefixes[bucket]; p != nil; p = p.next {
+		if bytes_eq(p.prefix, name) {
+			return p
+		}
+	}
+	p := new(Mc_Prefix)
+	p.prefix = make([]u8, len(name))
+	copy(p.prefix, name)
+	p.next = mc_prefixes[bucket]
+	mc_prefixes[bucket] = p
+	return p
+}
+
+mc_prefix_reset :: proc() {
+	for &head in mc_prefixes {
+		for head != nil {
+			next := head.next
+			delete(head.prefix)
+			free(head)
+			head = next
+		}
+	}
+}
+
+@(private = "file")
+mc_stats_detail_dump :: proc(b: ^[dynamic]u8) {
+	for head in mc_prefixes {
+		for p := head; p != nil; p = p.next {
+			sb_str(b, "PREFIX ")
+			sb_bytes(b, p.prefix)
+			sb_str(b, " get ")
+			sb_int(b, i64(p.get))
+			sb_str(b, " hit ")
+			sb_int(b, i64(p.hit))
+			sb_str(b, " set ")
+			sb_int(b, i64(p.set))
+			sb_str(b, " del ")
+			sb_int(b, i64(p.del))
+			sb_str(b, "\r\n")
+		}
+	}
+}
+
+@(private = "file")
+mc_stats_conn_line :: proc(b: ^[dynamic]u8, fd: linux.Fd, name: string, value: []u8) {
+	sb_str(b, "STAT ")
+	sb_int(b, i64(fd))
+	sb_byte(b, ':')
+	sb_str(b, name)
+	sb_byte(b, ' ')
+	sb_bytes(b, value)
+	sb_str(b, "\r\n")
+}
+
+@(private = "file")
+mc_stats_conn_addr :: proc(b: ^[dynamic]u8, fd: linux.Fd, name: string, text: []u8) {
+	scheme := "tcp6:" if len(text) > 0 && text[0] == '[' else "tcp:"
+	value := make([dynamic]u8, context.temp_allocator)
+	sb_str(&value, scheme)
+	sb_bytes(&value, text)
+	mc_stats_conn_line(b, fd, name, value[:])
+}
+
+@(private = "file")
+mc_stats_conn_seconds :: proc(b: ^[dynamic]u8, fd: linux.Fd, since_ms: i64) {
+	value: [24]u8
+	n := format_i64(&value[0], max(srv.now_ms - since_ms, 0) / 1000)
+	mc_stats_conn_line(b, fd, "secs_since_last_cmd", value[:n])
+}
+
+@(private = "file")
+mc_stats_conns :: proc(b: ^[dynamic]u8, self: ^Conn) {
+	listener_done := mc_lfd < 0
+	emit_listener :: proc(b: ^[dynamic]u8) {
+		local: linux.Sock_Addr_Any
+		text: [128]u8
+		n := 0
+		if linux.getsockname(mc_lfd, &local) == .NONE {
+			n = transport_format(text[:], &local)
+		}
+		mc_stats_conn_addr(b, mc_lfd, "addr", text[:n])
+		mc_stats_conn_line(b, mc_lfd, "state", transmute([]u8)string("conn_listening"))
+		mc_stats_conn_seconds(b, mc_lfd, srv.start_ms)
+	}
+	for c, fd in srv.conns {
+		if !listener_done && linux.Fd(fd) > mc_lfd {
+			emit_listener(b)
+			listener_done = true
+		}
+		if c == nil || c.kind != .Memcached {
+			continue
+		}
+		state := "conn_read"
+		switch {
+		case c == self:
+			state = "conn_parse_cmd"
+		case c.need != 0:
+			state = "conn_nread"
+		case c.atime_ms == c.ctime_ms:
+			state = "conn_new_cmd"
+		}
+		mc_stats_conn_addr(b, c.fd, "addr", c.addr[:c.addr_len])
+		mc_stats_conn_addr(b, c.fd, "listen_addr", conn_laddr(c))
+		mc_stats_conn_line(b, c.fd, "state", transmute([]u8)state)
+		mc_stats_conn_seconds(b, c.fd, srv.now_ms if c == self else c.atime_ms)
+	}
+	if !listener_done {
+		emit_listener(b)
+	}
+}
+
+@(private = "file")
+mc_parse_slab_number :: proc "contextless" (s: []u8) -> (u32, bool) {
+	v, ok := mc_parse_digits(s, len(s))
+	if !ok || v > u64(max(u32)) {
+		return 0, false
+	}
+	return u32(v), true
+}
+
+@(private = "file")
+mc_stats_cachedump :: proc(c: ^Conn, t: ^Mc_Line) -> bool {
+	if t.ntok < 4 {
+		mc_out(c, MC_ERR_LINE)
+		return false
+	}
+	id, id_ok := mc_parse_slab_number(t.tok[2])
+	_, limit_ok := mc_parse_slab_number(t.tok[3])
+	if !id_ok || !limit_ok {
+		mc_out(c, MC_ERR_FORMAT)
+		return false
+	}
+	if id >= MC_SLAB_CLASSES {
+		mc_out(c, MC_ERR_SLAB_ID)
+		return false
+	}
+	return true
+}
+
+@(private = "file")
+mc_stats_detail :: proc(c: ^Conn, t: ^Mc_Line, b: ^[dynamic]u8) -> bool {
+	mode := string(t.tok[2]) if t.ntok >= 3 else ""
+	switch mode {
+	case "on", "off":
+		mc_detail_on = mode == "on"
+		mc_out(c, "OK\r\n")
+		return false
+	case "dump":
+		mc_stats_detail_dump(b)
+		return true
+	}
+	mc_out(c, MC_ERR_DETAIL_USAGE)
+	return false
+}
 
 mc_parse_size :: proc "contextless" (s: []u8) -> (int, bool) {
 	n := len(s)
@@ -415,19 +604,6 @@ mc_scan_text_number :: proc "contextless" (text: []u8) -> (magnitude: u128, nega
 	return
 }
 
-@(private = "file")
-mc_minus_before_nul :: proc "contextless" (text: []u8) -> bool {
-	for b in text {
-		switch b {
-		case 0:
-			return false
-		case '-':
-			return true
-		}
-	}
-	return false
-}
-
 mc_text_unsigned :: proc "contextless" (text: []u8) -> (u64, bool) {
 	magnitude, negative, ok := mc_scan_text_number(text)
 	if !ok {
@@ -435,7 +611,7 @@ mc_text_unsigned :: proc "contextless" (text: []u8) -> (u64, bool) {
 	}
 	signed := -i128(magnitude) if negative else i128(magnitude)
 	wrapped := u64(signed & i128(max(u64)))
-	if wrapped >= 1 << 63 && (negative || mc_minus_before_nul(text)) {
+	if wrapped >= 1 << 63 && negative {
 		return 0, false
 	}
 	return wrapped, true
@@ -737,6 +913,10 @@ mc_get_key :: proc(c: ^Conn, db: ^Db, key: []u8, mode: Mc_Get, exptime: i64) {
 	} else {
 		mc_stats.cmd_get += 1
 	}
+	prefix := mc_prefix_of(key)
+	if prefix != nil {
+		prefix.get += 1
+	}
 	if e == nil || !entry_is_string(e) {
 		if touch {
 			mc_stats.touch_misses += 1
@@ -754,6 +934,9 @@ mc_get_key :: proc(c: ^Conn, db: ^Db, key: []u8, mode: Mc_Get, exptime: i64) {
 		mc_stats.touch_hits += 1
 	} else {
 		mc_stats.get_hits += 1
+	}
+	if prefix != nil {
+		prefix.hit += 1
 	}
 	srv.stat_hits += 1
 	with_cas := mode == .Gets || mode == .Gats
@@ -1023,6 +1206,9 @@ mc_cmd_store :: proc(c: ^Conn, t: ^Mc_Line, op: Mc_Store, buf: []u8, used: int) 
 		return 0
 	}
 	mc_stats.cmd_set += 1
+	if p := mc_prefix_of(key); p != nil {
+		p.set += 1
+	}
 	if buf[total - 2] != '\r' || buf[total - 1] != '\n' {
 		mc_out(c, MC_ERR_CHUNK)
 		return total
@@ -1037,6 +1223,9 @@ mc_cmd_delete :: proc(c: ^Conn, t: ^Mc_Line) {
 	if ntok < 2 || len(t.tok[1]) > MC_KEY_MAX {
 		mc_out(c, MC_ERR_FORMAT)
 		return
+	}
+	if p := mc_prefix_of(t.tok[1]); p != nil {
+		p.del += 1
 	}
 	if mc_delete(&dbs[0], t.tok[1]) {
 		mc_stats.delete_hits += 1
@@ -1285,7 +1474,7 @@ mc_stats_settings :: proc(b: ^[dynamic]u8) {
 	mc_stat_str(b, "domain_socket", "NULL")
 	mc_stat_str(b, "shutdown_command", "no")
 	mc_stat(b, "num_threads", 1)
-	mc_stat_str(b, "detail_enabled", "no")
+	mc_stat_str(b, "detail_enabled", "yes" if mc_detail_on else "no")
 	mc_stat_str(b, "cas_enabled", "yes")
 	mc_stat(b, "tcp_backlog", LISTEN_BACKLOG)
 	mc_stat_str(b, "binding_protocol", "ascii")
@@ -1306,9 +1495,20 @@ mc_cmd_stats :: proc(c: ^Conn, t: ^Mc_Line) {
 			mc_stats_settings(b)
 		case "reset":
 			mc_stats = {}
+			mc_prefix_reset()
 			mc_out(c, "RESET\r\n")
 			return
-		case "items", "cachedump":
+		case "detail":
+			if !mc_stats_detail(c, t, b) {
+				return
+			}
+		case "conns":
+			mc_stats_conns(b, c)
+		case "cachedump":
+			if !mc_stats_cachedump(c, t) {
+				return
+			}
+		case "items", "extstore":
 		case "slabs":
 			mc_stat(b, "active_slabs", 0)
 			mc_stat(b, "total_malloced", u64(db_used_memory))

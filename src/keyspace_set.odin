@@ -149,7 +149,7 @@ keyspace_set_scan :: proc(task: ^Keyspace_Task, s: st.Set, cursor: u64) {
 	opts: ht.Scan_Options
 	if s != nil {
 		err: ht.Error
-		opts, err = set_scan_options(task.argv[3:])
+		opts, err = ht.parse_scan_options(task.argv[3:], false)
 		if err != .None { task.failed = true; return }
 	}
 	charge := st.size(s) * 2 * size_of(st.Member) + len(task.argv) * size_of([]u8)

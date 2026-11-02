@@ -359,7 +359,38 @@ def staged_cases():
         ("too large error waits for the swallowed data", [b"set k 0 0 2000000\r\n", b"y" * 1000000, b"y" * 1000002 + b"version\r\n"]),
         ("swallow spans later commands", [b"cas num 65535  0 41\r\n", b"\r\n", b"gats 100000 key:2\r\n", b"gets a\r\n", b"add " + b"z" * 250 + b" abc 0 3 noreply\r\nabc\r\n"]),
         ("swallow exact length", [b"cas num 65535  0 41\r\n", b"y" * 43 + b"version\r\n"]),
+        ("flags 2^63 then tab minus", [b"set foo 9223372036854775808\t- 0 3\r\nbar\r\nget foo\r\n"]),
+        ("flags u64 max then tab minus", [b"set foo 18446744073709551615\t- 0 3\r\nbar\r\nget foo\r\n"]),
+        ("incr value 2^63 then minus", [b"set n 0 0 21\r\n9223372036854775808 -\r\nincr n 1\r\nget n\r\n"]),
+        ("incr value u64 max then minus", [b"set n 0 0 22\r\n18446744073709551615 -\r\nincr n 1\r\nget n\r\n"]),
+        ("incr delta 2^63 then tab minus", [b"set n 0 0 1\r\n0\r\nincr n 9223372036854775808\t-\r\nget n\r\n"]),
+        ("stats detail", [b"stats detail on\r\nset foo:a 0 0 1\r\nx\r\nget foo:a foo:b bar\r\ndelete foo:a\r\nstats detail dump\r\n"
+                         b"stats detail off\r\nstats detail dump\r\nstats detail\r\nstats detail x\r\nstats detail ON\r\nstats reset\r\nstats detail dump\r\n"]),
+        ("stats detail prefix order", [b"stats detail on\r\nset zz:1 0 0 1\r\nx\r\nset aa:1 0 0 1\r\nx\r\nset mm:1 0 0 1\r\nx\r\n"
+                                      b"get aa:1 mm:1 zz:1 qq:1\r\nset a:b:c 0 0 1\r\nx\r\nset :e 0 0 1\r\nx\r\nstats detail dump\r\nstats detail off\r\nstats reset\r\n"]),
+        ("stats extstore", [b"stats extstore\r\nstats extstore x y\r\n"]),
+        ("stats cachedump arguments", [b"stats cachedump\r\nstats cachedump 1\r\nstats cachedump x y\r\nstats cachedump 99 x\r\n"
+                                      b"stats cachedump +1 1\r\nstats cachedump 1 4294967296\r\nstats cachedump 64 1\r\nstats cachedump 63 1\r\n"]),
     ]
+
+
+def conns_shape(port):
+    out = send(port, [b"stats conns x\r\n"])
+    blocks = {}
+    order = []
+    for line in out.split(b"\r\n"):
+        p = line.split(b" ", 2)
+        if len(p) == 3 and p[0] == b"STAT" and b":" in p[1]:
+            fd, field = p[1].split(b":", 1)
+            if fd not in blocks:
+                blocks[fd] = []
+                order.append(fd)
+            value = p[2] if field == b"state" else re.sub(rb"[0-9.]+:[0-9]+$", b"<addr>", p[2]) if field.endswith(b"addr") else b"<n>"
+            blocks[fd].append((field, value))
+    shapes = [blocks[fd] for fd in order]
+    listener = [s for s in shapes if (b"state", b"conn_listening") in s]
+    requester = [s for s in shapes if (b"state", b"conn_parse_cmd") in s]
+    return out.endswith(b"END\r\n"), listener[:1], requester
 
 
 def stats_map(port, arg=b""):
@@ -388,6 +419,8 @@ def run_compare(jport, rport):
         a = send(jport, parts, gap=0.02, wait=0.4)
         b = send(rport, parts, gap=0.02, wait=0.4)
         r.check("mc " + name, a == b, "eski=" + show(a) + " ref=" + show(b))
+    jc, rc = conns_shape(jport), conns_shape(rport)
+    r.check("mc stats conns shape", jc == rc and jc[0] and len(jc[1]) == 1 and len(jc[2]) == 1, "eski=%r ref=%r" % (jc, rc))
     for port in (jport, rport):
         send(port, [b"flush_all\r\nstats reset\r\n"])
     seq = [b"get a b c\r\n", b"set a 0 0 1\r\n1\r\n", b"set a 7 0 2\r\n12\r\n", b"get a a b\r\n", b"gets a\r\n",

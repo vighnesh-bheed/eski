@@ -462,7 +462,7 @@ get_string_kind :: proc "contextless" (r: ^Reader, slot: int) -> (out: []u8, iva
 		if !ok(r) {
 			return
 		}
-		if clen == 0 || olen == 0 || clen > MAX_STRING_BYTES || olen > MAX_STRING_BYTES || olen > clen * LZF_MAX_RATIO + 64 {
+		if (clen == 0 && olen != 0) || clen > MAX_STRING_BYTES || olen > MAX_STRING_BYTES || olen > clen * LZF_MAX_RATIO + 64 {
 			corrupt(r, "Invalid LZF compressed string")
 			return
 		}
@@ -483,6 +483,9 @@ get_string_kind :: proc "contextless" (r: ^Reader, slot: int) -> (out: []u8, iva
 				return
 			}
 			packed = src[:int(clen)]
+		}
+		if olen == 0 {
+			return packed[:0], 0, .Lzf, true
 		}
 		dst := scratch_reserve(&r.scratch[index], int(olen))
 		if lzf_decompress(packed, dst[:int(olen)]) != int(olen) {

@@ -46,6 +46,10 @@ UNSIGNED_CASES := [?]Unsigned_Case {
 	{"9223372036854775808", 1 << 63, true},
 	{"9223372036854775807 -", 1 << 63 - 1, true},
 	{"9223372036854775808\x00-", 1 << 63, true},
+	{"9223372036854775808 -", 1 << 63, true},
+	{"9223372036854775808\t-", 1 << 63, true},
+	{"18446744073709551615 -", max(u64), true},
+	{"18446744073709551615\t-", max(u64), true},
 	{"-9223372036854775809", 1 << 63 - 1, true},
 	{"-18446744073709551615", 1, true},
 	{"", 0, false},
@@ -67,8 +71,6 @@ UNSIGNED_CASES := [?]Unsigned_Case {
 	{"\t-1", 0, false},
 	{"-9223372036854775808", 0, false},
 	{"-18446744073709551616", 0, false},
-	{"9223372036854775808 -", 0, false},
-	{"18446744073709551615\t-", 0, false},
 }
 
 SIGNED_CASES := [?]Signed_Case {
@@ -124,6 +126,8 @@ fresh :: proc() {
 	j.db_flush_all()
 	j.mc_flush_at = 0
 	j.mc_item_size_max = OBSERVED_ITEM_SIZE_DEFAULT
+	j.mc_prefix_reset()
+	j.mc_detail_on = false
 }
 
 exchange :: proc(request: string) -> string {

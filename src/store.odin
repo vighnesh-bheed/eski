@@ -27,7 +27,6 @@ Db :: struct {
 	heap_objs:     int,
 	heap_bytes:    int,
 	expire_cursor: int,
-	scan_mask_max: u64,
 	rehash_credit: int,
 	next:          Table,
 	next_warm:     int,
@@ -51,10 +50,10 @@ Dead :: struct {
 }
 
 #assert(size_of(Entry) == 64)
-#assert(size_of(Db) == 3 * size_of(Table) + 8 + size_of(Slab) + 13 * 8)
-#assert(size_of(Db) == 888)
-#assert(offset_of(Db, zctx) == 3 * size_of(Table) + 8 + size_of(Slab) + 12 * 8)
-#assert(offset_of(Db, sctx) == 3 * size_of(Table) + 8 + size_of(Slab) + 11 * 8)
+#assert(size_of(Db) == 3 * size_of(Table) + 8 + size_of(Slab) + 12 * 8)
+#assert(size_of(Db) == 880)
+#assert(offset_of(Db, zctx) == 3 * size_of(Table) + 8 + size_of(Slab) + 11 * 8)
+#assert(offset_of(Db, sctx) == 3 * size_of(Table) + 8 + size_of(Slab) + 10 * 8)
 #assert(size_of(Release) == 24)
 #assert(offset_of(Db, slab) == 2 * size_of(Table) + size_of(i64))
 #assert(size_of(Dead) == size_of(Table) + 8)
@@ -853,7 +852,6 @@ db_rehash_start :: proc "contextless" (db: ^Db, cap: int) {
 
 @(private = "file")
 db_rehash_begin :: proc "contextless" (db: ^Db) {
-	db.scan_mask_max = max(db.scan_mask_max, db.t[1].gmask)
 	db.rehash_idx = 0
 	db.rehash_credit = 0
 	store_rehashing += 1
@@ -1484,7 +1482,6 @@ db_flush_in :: proc(db: ^Db, lazy: bool = false) {
 	db.heap_objs = 0
 	db.heap_bytes = 0
 	db.expire_cursor = 0
-	db.scan_mask_max = 0
 }
 
 graveyard_push :: proc "contextless" (base: [^]u8, size: int, kind: Storage_Kind) {
@@ -1743,9 +1740,12 @@ db_active_expire :: proc() {
 	latency_add_if_needed("expire-cycle", elapsed / 1_000_000)
 }
 
+RANDOM_KEY_PAUSED_TRIES :: 100
+
 db_random_key :: proc() -> (key: string, ok: bool) #no_bounds_check {
 	db := cur_db()
-	for _ in 0 ..< 100 {
+	tries := RANDOM_KEY_PAUSED_TRIES
+	for {
 		total := db_size_of(db)
 		if total == 0 {
 			return
@@ -1763,16 +1763,24 @@ db_random_key :: proc() -> (key: string, ok: bool) #no_bounds_check {
 		}
 		if db.expires > 0 {
 			exp := i64(t.slots[i].meta.expire_at)
-			if exp != 0 && exp <= expire_now() && !expiry_deletion_paused() {
-				expired_key_copy(&t.slots[i].key, &db.slab)
-				db_erase_expired(db, t, i)
-				key_expired_event(expired_key_buf[:], db)
-				continue
+			if exp != 0 && exp <= expire_now() {
+				if !expiry_deletion_paused() {
+					expired_key_copy(&t.slots[i].key, &db.slab)
+					db_erase_expired(db, t, i)
+					key_expired_event(expired_key_buf[:], db)
+					continue
+				}
+				if db.expires < total {
+					continue
+				}
+				tries -= 1
+				if tries > 0 {
+					continue
+				}
 			}
 		}
 		return transmute(string)key_bytes(&t.slots[i].key, &db.slab), true
 	}
-	return
 }
 
 db_keys :: proc(pat: []u8, all: bool) #no_bounds_check {
@@ -1892,7 +1900,7 @@ scan_round :: proc(pass: ^Scan_Pass, cursor: u64) -> u64 {
 db_scan :: proc(cursor: u64, count: i64, pat: []u8, has_pat: bool) -> u64 {
 	pass := Scan_Pass{db = cur_db(), pattern = pat, filtered = has_pat, now = srv.now_ms}
 	scan_reset()
-	if !scan_cursor_known(pass.db, cursor) {
+	if db_size_of(pass.db) == 0 {
 		return 0
 	}
 	rounds := I64_MAX if count >= I64_MAX / 10 else count * 10
@@ -1912,14 +1920,6 @@ scan_reset :: proc() {
 	clear(&scan_expired_ends)
 	clear(&scan_expired)
 	clear(&key_scratch)
-}
-
-@(private = "file")
-scan_cursor_known :: proc "contextless" (db: ^Db, cursor: u64) -> bool {
-	if db_size_of(db) == 0 {
-		return false
-	}
-	return cursor <= max(db.scan_mask_max, db.t[0].gmask)
 }
 
 @(private = "file")
@@ -2022,7 +2022,7 @@ entry_debug_lru :: proc "contextless" (e: ^Entry) -> i64 {
 }
 
 entry_touch :: #force_inline proc "contextless" (e: ^Entry) {
-	if store_no_touch {
+	if store_no_touch || pst.child_pid > 0 {
 		return
 	}
 	if access_counts_hits {

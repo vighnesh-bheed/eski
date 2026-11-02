@@ -30,12 +30,12 @@ main :: proc() {
 			write_fd(1, "eski v=" + VERSION + " license=" + PROJECT_LICENSE + "\n")
 			linux.exit_group(0)
 		case "--help", "-h":
-			usage(1)
-			linux.exit_group(0)
+			usage(2)
+			linux.exit_group(1)
 		}
 		filename, from_stdin, options := config_parse_command_line(args[:])
 		if filename != "" {
-			config_file = absolute_path(filename)
+			config_file = info_absolute_path(filename)
 		}
 		config_load_file(filename, from_stdin, options)
 	}

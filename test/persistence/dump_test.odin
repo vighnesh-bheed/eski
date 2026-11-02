@@ -154,6 +154,16 @@ restore_lru_and_rejections :: proc(t: ^testing.T) {
 	expect_reply(t, restore("bad", "0", frame(from_hex("1e0568656c6c6f"))), bad_data, "unknown type")
 	expect_reply(t, restore("bad", "0", frame(from_hex("00c4"))), bad_data, "unknown string encoding")
 	expect_reply(t, restore("bad", "0", frame(from_hex("00c3050a0000000000"))), bad_data, "corrupt lzf")
+	expect_reply(t, restore("bad", "0", frame(from_hex("00c30005"))), bad_data, "lzf without input")
+	expect_reply(t, restore("lzf-empty", "0", frame(from_hex("00c30000"))), "+OK\r\n", "lzf with zero lengths")
+	expect_reply(t, cmd("GET", "lzf-empty"), bulk(""), "lzf with zero lengths value")
+	expect_reply(t, restore("lzf-empty", "0", frame(from_hex("00c3010000")), "REPLACE"), "+OK\r\n", "lzf with zero output")
+	expect_reply(t, cmd("GET", "lzf-empty"), bulk(""), "lzf with zero output value")
+	for header in ([]string{"80", "81", "bf"}) {
+		body := strings.concatenate({"0a12120000000a0000000100", "00", header, "0000000161ff"}, context.temp_allocator)
+		expect_reply(t, restore("zl32", "0", frame(from_hex(body)), "REPLACE"), "+OK\r\n", body)
+		expect_reply(t, cmd("LRANGE", "zl32", "0", "-1"), "*1\r\n$1\r\na\r\n", body)
+	}
 	expect_reply(t, restore("bad", "0", frame(from_hex("12010205000000"))), bad_data, "corrupt quicklist")
 	for body in ([]string{"0598016140000000000000f03f", "059b016140000000000000f03f", "0498016101", "049c016101", "02b30161", "03b30161033132"}) {
 		expect_reply(t, restore("bad", "0", frame(from_hex(body))), bad_data, body)

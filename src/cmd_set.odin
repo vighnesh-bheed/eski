@@ -622,21 +622,6 @@ reply_cursor :: proc(c: ^Conn, v: u64) {
 	reply_bulk(c, buffer[:n])
 }
 
-set_scan_options :: proc(args: [][]u8) -> (ht.Scan_Options, ht.Error) {
-	normalized := make([][]u8, len(args))
-	defer delete(normalized)
-	copy(normalized, args)
-	for position := 0; position < len(normalized); position += 2 {
-		for character, index in normalized[position] {
-			if character == 0 {
-				normalized[position] = normalized[position][:index]
-				break
-			}
-		}
-	}
-	return ht.parse_scan_options(normalized, false)
-}
-
 cmd_sscan :: proc(c: ^Conn, argv: [][]u8) {
 	cursor, valid := ht.parse_scan_cursor(argv[2])
 	if !valid {
@@ -654,7 +639,7 @@ cmd_sscan :: proc(c: ^Conn, argv: [][]u8) {
 		reply_array(c, 0)
 		return
 	}
-	opts, err := set_scan_options(argv[3:])
+	opts, err := ht.parse_scan_options(argv[3:], false)
 	if err != .None {
 		reply_hash_error(c, err)
 		return

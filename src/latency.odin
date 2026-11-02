@@ -649,7 +649,7 @@ cmd_latency :: proc(c: ^Conn, argv: [][]u8) {
 		if ts == nil {
 			clear(&scratch)
 			sb_str(&scratch, "ERR No samples available for event '")
-			sb_bytes(&scratch, argv[2])
+			sb_bytes(&scratch, generic_cstr(argv[2]))
 			sb_byte(&scratch, '\'')
 			sanitize_scratch()
 			reply_error_bytes(c, scratch[:])

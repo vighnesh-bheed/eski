@@ -150,7 +150,7 @@ set_conn_string :: proc(c: ^Conn, dst: ^[]u8, v: []u8) {
 reply_error_quoted :: proc(c: ^Conn, prefix: string, arg: []u8, suffix: string) {
 	clear(&scratch)
 	sb_str(&scratch, prefix)
-	sb_bytes(&scratch, arg)
+	sb_bytes(&scratch, generic_cstr(arg))
 	sb_str(&scratch, suffix)
 	sanitize_scratch()
 	reply_error_bytes(c, scratch[:])
@@ -361,7 +361,7 @@ client_info_line :: proc(b: ^[dynamic]u8, other: ^Conn, self: ^Conn, argv: [][]u
 	sb_str(b, " rbs=")
 	sb_int(b, i64(other.wcap))
 	sb_str(b, " rbp=")
-	sb_int(b, i64(other.wpeak))
+	sb_int(b, i64(min(other.wpeak, other.wcap)))
 	sb_str(b, " obl=")
 	sb_int(b, i64(other.wlen - other.wpos))
 	grown := other.wcap > WBUF_INIT
@@ -553,8 +553,15 @@ client_list_filtered :: proc(c: ^Conn, argv: [][]u8) -> bool {
 
 client_list :: proc(c: ^Conn, argv: [][]u8) {
 	clear(&scratch)
-	by_id := len(argv) > 3 && eq_nocase(argv[2], "id")
-	listed := client_list_by_ids(c, argv) if by_id else client_list_filtered(c, argv)
+	listed: bool
+	switch {
+	case len(argv) > 3 && eq_nocase(argv[2], "id"):
+		listed = client_list_by_ids(c, argv)
+	case len(argv) == 2 || (len(argv) == 4 && eq_nocase(argv[2], "type")):
+		listed = client_list_filtered(c, argv)
+	case:
+		reply_error(c, ERR_SYNTAX)
+	}
 	if listed {
 		reply_verbatim(c, scratch[:])
 	}
@@ -706,9 +713,9 @@ client_reply :: proc(c: ^Conn, argv: [][]u8) {
 @(private = "file")
 client_metadata_slot :: proc(c: ^Conn, option: []u8) -> ^[]u8 {
 	switch {
-	case eq_nocase(option, "lib-name"):
+	case eq_nocase(generic_cstr(option), "lib-name"):
 		return &c.lib_name
-	case eq_nocase(option, "lib-ver"):
+	case eq_nocase(generic_cstr(option), "lib-ver"):
 		return &c.lib_ver
 	}
 	return nil

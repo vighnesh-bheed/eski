@@ -688,13 +688,13 @@ RESET x
 CMDS
 )"
 
-expect "client list addr filter without a match" "" client list addr 1.2.3.4:5
-expect "client list type and addr filters" "" client list type normal addr 1.2.3.4:5
-expect "client list maxage filter keeps only older clients" "" client list maxage 100000
-expect "client list unknown user" $'ERR No such user \'nobody\'' client list user nobody
-expect "client list maxage zero" "ERR maxage should be greater than 0" client list maxage 0
-expect "client list maxage not an integer" "ERR maxage is not an integer or out of range" client list maxage x
-expect "client list bad skipme" "ERR syntax error" client list skipme maybe
+expect "client list rejects an addr filter" "ERR syntax error" client list addr 1.2.3.4:5
+expect "client list rejects type with addr" "ERR syntax error" client list type normal addr 1.2.3.4:5
+expect "client list rejects a maxage filter" "ERR syntax error" client list maxage 100000
+expect "client list rejects a user filter" "ERR syntax error" client list user nobody
+expect "client list rejects maxage zero" "ERR syntax error" client list maxage 0
+expect "client list rejects a word maxage" "ERR syntax error" client list maxage x
+expect "client list rejects skipme" "ERR syntax error" client list skipme maybe
 exec {raw}<>"/dev/tcp/127.0.0.1/$PORT"
 printf 'CLIENT ID\r\nCLIENT INFO\r\n' >&"$raw"
 got="$(raw_collect "$raw" 0.5)"
@@ -709,7 +709,7 @@ fi
 printf 'CLIENT LIST ADDR %s LADDR %s USER default SKIPME no\r\nCLIENT LIST ADDR %s SKIPME yes\r\n' "$myaddr" "$myladdr" "$myaddr" >&"$raw"
 got="$(raw_collect "$raw" 0.5)"
 exec {raw}>&-
-if [ -n "$myid" ] && [[ "$got" =~ ^\$[0-9]+$'\n'id=$myid\ addr=$myaddr\ laddr=$myladdr\ [^$'\n']*\ cmd=client\|list\ [^$'\n']*$'\n\n'\$0$ ]]; then pass; else fail "client list addr, laddr, user and skipme filters" "own line, then an empty list with skipme yes" "$got"; fi
+if [ -n "$myid" ] && [ "$got" = $'-ERR syntax error\n-ERR syntax error' ]; then pass; else fail "client list rejects addr, laddr, user and skipme filters" "two syntax errors" "$got"; fi
 
 got="$(printf 'CLIENT SETNAME infoname\nSELECT 3\nCLIENT NO-EVICT on\nCLIENT NO-TOUCH on\nCLIENT SETINFO lib-name smokelib\nCLIENT SETINFO lib-ver 2.0\nCLIENT INFO\nRESET\nCLIENT GETNAME\nCLIENT INFO\n' | cli_pipe)"
 INFO_RE='^OK
