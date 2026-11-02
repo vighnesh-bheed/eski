@@ -14,7 +14,8 @@ keyspace_fence_test_settled :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(keyspace_retries), 0)
 	testing.expect_value(t, keyspace_publish_sequence, keyspace_next_sequence)
 	testing.expect_value(t, ks.pending(&keyspace_pool), 0)
-	for head in keyspace_directory { testing.expect(t, head == nil) }
+	testing.expect_value(t, len(keyspace_index), 0)
+	for slot in keyspace_index_fixed { testing.expect(t, slot.record == nil) }
 	for task in keyspace_completions { testing.expect(t, task == nil) }
 	testing.expect(t, keyspace_fence_idle())
 }
@@ -90,10 +91,8 @@ private_keyspace_fence_fast_path_keeps_barrier_postconditions :: proc(t: ^testin
 	r := ks.record_new(&keyspace_pool, 0, key, 1, false, nil, 0)
 	testing.expect(t, r != nil)
 	if r == nil { return }
-	bucket := int(hash_bytes(key) & (KEYSPACE_BUCKETS - 1))
-	r.caller_next = keyspace_directory[bucket]
-	keyspace_directory[bucket] = r
-	keyspace_records += 1
+	testing.expect(t, keyspace_index_reserve())
+	keyspace_index_insert(hash_bytes(key), r)
 	keyspace_timed = true
 	testing.expect(t, !keyspace_fence_idle())
 	region := ks.allocate(&keyspace_pool, size_of(Keyspace_Task))
@@ -132,4 +131,107 @@ private_keyspace_fence_fast_path_keeps_barrier_postconditions :: proc(t: ^testin
 	testing.expect_value(t, keyspace_barriers, barriers + 1)
 	testing.expect(t, keyspace_pool.accepting && !keyspace_pool.paused)
 	testing.expect_value(t, ks.memory_used(&keyspace_pool), 0)
+}
+
+keyspace_index_test_key :: proc(buffer: ^[24]u8, i: int) -> []u8 {
+	copy(buffer[:], "index:")
+	return buffer[:6 + format_i64(&buffer[6], i64(i))]
+}
+
+keyspace_index_test_insert :: proc(t: ^testing.T, buffer: ^[24]u8, i: int) -> (^ks.Record, int) {
+	key := keyspace_index_test_key(buffer, i)
+	db := i % 2
+	hash := hash_bytes(key) ~ (u64(db) * WY_P1)
+	testing.expect(t, keyspace_index_find(hash, db, key) == nil)
+	used := ks.memory_used(&keyspace_pool)
+	if !keyspace_index_reserve() { return nil, 0 }
+	charge := ks.memory_used(&keyspace_pool) - used
+	r := ks.record_new(&keyspace_pool, db, key, i % 2, false, nil, 0)
+	testing.expect(t, r != nil)
+	if r == nil { return nil, charge }
+	keyspace_index_insert(hash, r)
+	return r, charge
+}
+
+keyspace_index_test_found :: proc(t: ^testing.T, records: []^ks.Record) {
+	buffer: [24]u8
+	for r, i in records {
+		key := keyspace_index_test_key(&buffer, i)
+		db := i % 2
+		testing.expect(t, keyspace_index_find(hash_bytes(key) ~ (u64(db) * WY_P1), db, key) == r)
+		other := 1 - db
+		testing.expect(t, keyspace_index_find(hash_bytes(key) ~ (u64(other) * WY_P1), other, key) == nil)
+	}
+}
+
+@(test)
+private_keyspace_record_index_grows_within_budget_and_resets_at_the_fence :: proc(t: ^testing.T) {
+	context.allocator = runtime.heap_allocator()
+	testing.expect(t, !keyspace_initialized && !keyspace_pool.initialized)
+	if keyspace_initialized || keyspace_pool.initialized { return }
+	saved_pool := keyspace_pool
+	saved_barriers, saved_tracking, saved_threshold := keyspace_barriers, cfg.latency_tracking, cfg.latency_monitor_threshold
+	defer {
+		keyspace_pool = saved_pool
+		keyspace_barriers, cfg.latency_tracking, cfg.latency_monitor_threshold = saved_barriers, saved_tracking, saved_threshold
+	}
+	cfg.latency_tracking = false
+	cfg.latency_monitor_threshold = 0
+	testing.expect(t, ks.init(&keyspace_pool, 2, 8 << 20))
+	keyspace_initialized = true
+	defer {
+		keyspace_initialized = false
+		testing.expect(t, ks.destroy(&keyspace_pool))
+	}
+	keyspace_fence_test_settled(t)
+	records := make([]^ks.Record, 2 * KEYSPACE_INDEX_SLOTS)
+	defer delete(records)
+	buffer: [24]u8
+	charged := 0
+	for i in 0 ..< len(records) {
+		charge: int
+		records[i], charge = keyspace_index_test_insert(t, &buffer, i)
+		if records[i] == nil { return }
+		charged += charge
+		testing.expect(t, 2 * keyspace_records <= len(keyspace_index_slots()))
+		if i < KEYSPACE_INDEX_SLOTS / 2 {
+			testing.expect_value(t, len(keyspace_index), 0)
+			testing.expect_value(t, charge, 0)
+		}
+	}
+	testing.expect_value(t, keyspace_records, len(records))
+	testing.expect_value(t, len(keyspace_index), 4 * KEYSPACE_INDEX_SLOTS)
+	for slot in keyspace_index_fixed { testing.expect(t, slot.record == nil) }
+	bytes := len(keyspace_index) * size_of(Keyspace_Slot)
+	testing.expect(t, charged >= bytes && charged - bytes <= 64)
+	keyspace_index_test_found(t, records)
+	barriers := keyspace_barriers
+	keyspace_fence()
+	keyspace_fence_test_settled(t)
+	testing.expect_value(t, keyspace_barriers, barriers + 1)
+	testing.expect_value(t, ks.memory_used(&keyspace_pool), 0)
+	testing.expect(t, ks.resume(&keyspace_pool))
+
+	full := KEYSPACE_INDEX_SLOTS / 2
+	for i in 0 ..< full {
+		records[i], _ = keyspace_index_test_insert(t, &buffer, i)
+		if records[i] == nil { return }
+	}
+	testing.expect_value(t, len(keyspace_index), 0)
+	used := ks.memory_used(&keyspace_pool)
+	blocked := keyspace_pool.memory_limit - used - KEYSPACE_INDEX_SLOTS * size_of(Keyspace_Slot)
+	testing.expect(t, ks.reserve_external(&keyspace_pool, blocked))
+	testing.expect(t, !keyspace_index_reserve())
+	testing.expect_value(t, ks.memory_used(&keyspace_pool), used + blocked)
+	testing.expect_value(t, len(keyspace_index), 0)
+	testing.expect_value(t, keyspace_records, full)
+	keyspace_index_test_found(t, records[:full])
+	ks.release_external(&keyspace_pool, blocked)
+	testing.expect(t, keyspace_index_reserve())
+	testing.expect_value(t, len(keyspace_index), 2 * KEYSPACE_INDEX_SLOTS)
+	keyspace_index_test_found(t, records[:full])
+	keyspace_fence()
+	keyspace_fence_test_settled(t)
+	testing.expect_value(t, ks.memory_used(&keyspace_pool), 0)
+	testing.expect(t, ks.resume(&keyspace_pool))
 }
