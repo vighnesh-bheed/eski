@@ -1060,3 +1060,187 @@ ffi_nested_error_metadata_outlives_function_vm_and_failed_output_cleans_it :: pr
 	native_finish(t, &result, LIMIT)
 	testing.expect_value(t, detached_memory(), baseline)
 }
+
+native_cached :: proc(source, digest: string, options: ^Options, callbacks: ^Callbacks = nil) -> Result {
+	return eval_cached(native_arg(source), native_arg(digest), 0, nil, 0, nil, 2, options, callbacks)
+}
+
+native_same :: proc(t: ^testing.T, expected, actual: ^Result) {
+	testing.expect_value(t, actual.status, expected.status)
+	testing.expect_value(t, actual.forwarded_error, expected.forwarded_error)
+	testing.expect(t, expected.data != nil && actual.data != nil)
+	if expected.data != nil && actual.data != nil {
+		testing.expect_value(t, string(actual.data[:int(actual.len)]), string(expected.data[:int(expected.len)]))
+	}
+	free_result(expected)
+	free_result(actual)
+}
+
+@(test)
+ffi_cached_eval_compiles_once_and_runs_until_forgotten :: proc(t: ^testing.T) {
+	reset()
+	defer reset()
+	options := native_options()
+	prepared := eval_prepare(native_arg("return 1+1"), native_arg("once"), &options)
+	native_finish(t, &prepared, OK, "+OK\r\n")
+	testing.expect(t, eval_stats().current_bytes > 0)
+	testing.expect(t, eval_active_stats().current_bytes > 0 && eval_active_stats().current_bytes < eval_stats().current_bytes)
+	result := native_cached("return 99", "once", &options)
+	native_finish(t, &result, OK, ":2\r\n")
+	prepared = eval_prepare(native_arg("return 98"), native_arg("once"), &options)
+	native_finish(t, &prepared, OK, "+OK\r\n")
+	result = native_cached("return 99", "once", &options)
+	native_finish(t, &result, OK, ":2\r\n")
+	eval_forget(native_arg("once"))
+	eval_forget(native_arg("never-stored"))
+	result = native_cached("return 99", "once", &options)
+	native_finish(t, &result, OK, ":99\r\n")
+	result = native_cached("return 100", "once", &options)
+	native_finish(t, &result, OK, ":99\r\n")
+	for value in ([]string{"first", "second"}) {
+		key, argument := native_arg(value), native_arg(value)
+		keyed := eval_cached(native_arg("return {KEYS[1],ARGV[1],#KEYS,#ARGV}"), native_arg("keyed"), 1, &key, 1, &argument, 2, &options, nil)
+		native_finish(t, &keyed, OK, value == "first" ? "*4\r\n$5\r\nfirst\r\n$5\r\nfirst\r\n:1\r\n:1\r\n" : "*4\r\n$6\r\nsecond\r\n$6\r\nsecond\r\n:1\r\n:1\r\n")
+	}
+	empty := eval_cached(native_arg("return {#KEYS,#ARGV}"), native_arg("keyed-empty"), 0, nil, 0, nil, 2, &options, nil)
+	native_finish(t, &empty, OK, "*2\r\n:0\r\n:0\r\n")
+	reset()
+	testing.expect_value(t, eval_stats().current_bytes, c.size_t(0))
+	testing.expect_value(t, eval_active_stats().current_bytes, c.size_t(0))
+	result = native_cached("return 7", "once", &options)
+	native_finish(t, &result, OK, ":7\r\n")
+}
+
+@(test)
+ffi_cached_eval_errors_and_globals_match_uncached_eval :: proc(t: ^testing.T) {
+	reset()
+	defer reset()
+	options := native_options()
+	for source in ([]string{"return function(", "local = 7", "\x1bLua\x55\x00binary"}) {
+		expected := compile(native_arg(source), &options)
+		actual := eval_prepare(native_arg(source), native_arg("broken"), &options)
+		native_same(t, &expected, &actual)
+		recovered := native_cached("return 5", "broken", &options)
+		native_finish(t, &recovered, OK, ":5\r\n")
+		eval_forget(native_arg("broken"))
+	}
+	for source in ([]string{"undeclared=1", "return undeclared", "error('planned')", "error({err='CUSTOM table'})", "math.abs=1", "KEYS[1]='x' return KEYS[1]", "local t={} setmetatable(t,{__index=function() return 4 end}) return t.x"}) {
+		prepared := eval_prepare(native_arg(source), native_arg(source), &options)
+		native_finish(t, &prepared, OK, "+OK\r\n")
+		for _ in 0..<2 {
+			expected := eval(native_arg(source), 0, nil, 0, nil, 2, &options, nil)
+			actual := native_cached(source, source, &options)
+			native_same(t, &expected, &actual)
+		}
+	}
+	healthy := native_cached("return 17", "healthy", &options)
+	native_finish(t, &healthy, OK, ":17\r\n")
+}
+
+@(test)
+ffi_cached_eval_restores_the_function_environment_each_call :: proc(t: ^testing.T) {
+	reset()
+	defer reset()
+	options := native_options()
+	options.enable_deprecated_api = 1
+	source := "local before=type(redis);setfenv(1,{});return before"
+	prepared := eval_prepare(native_arg(source), native_arg("environment"), &options)
+	native_finish(t, &prepared, OK, "+OK\r\n")
+	for _ in 0..<3 {
+		result := native_cached(source, "environment", &options)
+		native_finish(t, &result, OK, "$5\r\ntable\r\n")
+	}
+	result := native_cached("return getfenv(1)==_G", "environment-check", &options)
+	native_finish(t, &result, OK, ":1\r\n")
+}
+
+@(test)
+ffi_forgotten_cached_function_is_reclaimed_by_the_collector :: proc(t: ^testing.T) {
+	reset()
+	defer reset()
+	options := native_options()
+	collect := "collectgarbage('collect') return 1"
+	result := native_cached(collect, "collect", &options)
+	native_finish(t, &result, OK, ":1\r\n")
+	body := make([dynamic]u8)
+	defer delete(body)
+	append(&body, "local t={}\n")
+	for _ in 0..<2000 {
+		append(&body, "t[#t+1]=#t\n")
+	}
+	append(&body, "return 3")
+	prepared := eval_prepare(Arg{raw_data(body[:]), c.size_t(len(body))}, native_arg("large"), &options)
+	native_finish(t, &prepared, OK, "+OK\r\n")
+	result = native_cached(collect, "collect", &options)
+	native_finish(t, &result, OK, ":1\r\n")
+	retained := eval_stats().current_bytes
+	eval_forget(native_arg("large"))
+	result = native_cached(collect, "collect", &options)
+	native_finish(t, &result, OK, ":1\r\n")
+	released := eval_stats().current_bytes
+	testing.expect(t, released+16*1024 < retained)
+	result = native_cached("return 4", "large", &options)
+	native_finish(t, &result, OK, ":4\r\n")
+}
+
+native_reentrant :: proc "c" (opaque: rawptr, resp: i32, argc: c.size_t, args: [^]Arg, stats: ^Stats) -> Result {
+	context = runtime.default_context()
+	state := cast(^Native_Test_State)opaque
+	state.calls += 1
+	options := native_options()
+	prepared := eval_prepare(native_arg("return 3"), native_arg("inner"), &options)
+	state.valid = state.valid && prepared.status == OK
+	free_result(&prepared)
+	eval_forget(native_arg("outer"))
+	nested := eval_cached(native_arg("return 4"), native_arg("inner"), 0, nil, 0, nil, 2, &options, nil)
+	state.valid = state.valid && nested.status == ARGUMENT
+	free_result(&nested)
+	return native_fixed("+OK\r\n")
+}
+
+@(test)
+ffi_cached_eval_entry_points_do_not_reenter_a_running_script :: proc(t: ^testing.T) {
+	reset()
+	defer reset()
+	options := native_options()
+	state := Native_Test_State{valid = true}
+	callbacks := Callbacks{command = native_reentrant, opaque = &state}
+	result := native_cached("local r=redis.call('INNER') return {r.ok,8}", "outer", &options, &callbacks)
+	native_finish(t, &result, OK, "*2\r\n$2\r\nOK\r\n:8\r\n")
+	testing.expect(t, state.valid && state.calls == 1)
+	result = native_cached("return 9", "outer", &options, &callbacks)
+	native_finish(t, &result, OK, "*2\r\n$2\r\nOK\r\n:8\r\n")
+	testing.expect(t, state.valid && state.calls == 2)
+	result = native_cached("return 5", "inner", &options)
+	native_finish(t, &result, OK, ":5\r\n")
+}
+
+@(test)
+ffi_cached_eval_allocation_failures_stay_protected :: proc(t: ^testing.T) {
+	source := "local t={} for i=1,20 do t[i]=string.rep('x',i) end return #t"
+	completed := 0
+	for limit := c.size_t(1024); limit <= 160*1024; limit += 2*1024 {
+		reset()
+		options := native_options()
+		options.memory_limit = limit
+		prepared := eval_prepare(native_arg(source), native_arg("pressure"), &options)
+		testing.expect(t, prepared.status == OK || prepared.status == MEMORY)
+		testing.expect(t, prepared.stats.peak_bytes <= limit)
+		native_finish(t, &prepared, prepared.status)
+		result := native_cached(source, "pressure", &options)
+		testing.expect(t, result.status == OK || result.status == MEMORY)
+		if result.status == OK {
+			completed += 1
+		}
+		native_finish(t, &result, result.status)
+		eval_forget(native_arg("pressure"))
+		again := native_cached(source, "pressure", &options)
+		testing.expect(t, again.status == OK || again.status == MEMORY)
+		native_finish(t, &again, again.status)
+	}
+	testing.expect(t, completed > 0)
+	reset()
+	testing.expect_value(t, eval_stats().current_bytes, c.size_t(0))
+	fresh := native_eval("return 17")
+	native_finish(t, &fresh, OK, ":17\r\n")
+}

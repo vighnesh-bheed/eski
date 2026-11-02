@@ -252,7 +252,7 @@ lua_source_text :: proc(body: []u8) -> (text: []u8, readonly: bool, err: string)
 	return parsed_text, flags & LUA_FLAG_NO_WRITES != 0, parsed_err
 }
 
-lua_source_compile :: proc(client: ^Conn, body: []u8) -> bool {
+lua_source_prepare :: proc(client: ^Conn, body: []u8, digest: [40]u8) -> bool {
 	text, _, err := lua_source_text(body)
 	if err != "" {
 		lua_function_error(client, err)
@@ -260,7 +260,9 @@ lua_source_compile :: proc(client: ^Conn, body: []u8) -> bool {
 	}
 	options := lua_options()
 	defer mem_registry_changed()
-	result := lr.compile(lua_arg(text), &options)
+	hex := digest
+	key := lua_digest_key(hex[:])
+	result := lr.eval_prepare(lua_arg(text), lua_arg(key[:]), &options)
 	defer lr.free_result(&result)
 	lua_connection_time_floor = max(lua_connection_time_floor, lua_wallclock_ms())
 	client.atime_ms = max(client.atime_ms, lua_connection_clock())
@@ -587,13 +589,19 @@ lua_eval_common :: proc(client: ^Conn, argv: [][]u8, digest_only, readonly: bool
 			return
 		}
 	} else {
-		if !lua_source_compile(client, argv[1]) {
-			return
-		}
-		entry = lua_cache_store(argv[1], false)
+		digest := lua_digest(argv[1])
+		entry = lua_cache_find(digest, true)
 		if entry == nil {
-			reply_error(client, "OOM Lua source cache limit exceeded")
-			return
+			if !lua_source_prepare(client, argv[1], digest) {
+				return
+			}
+			entry = lua_cache_store(argv[1], digest, false)
+			if entry == nil {
+				key := lua_digest_key(digest[:])
+				lr.eval_forget(lua_arg(key[:]))
+				reply_error(client, "OOM Lua source cache limit exceeded")
+				return
+			}
 		}
 	}
 	text, flags, flagged, header_err := lua_source_plan(entry.body)
@@ -665,7 +673,8 @@ lua_invoke :: proc(client: ^Conn, argv: [][]u8, numkeys: int, text: []u8, readon
 		plog(LOG_NOTICE, "Eski synchronous debugging eval session started")
 	}
 	if library == nil {
-		result = lr.eval(lua_arg(text), c.size_t(numkeys), keys, c.size_t(argument_count), args, i32(client.resp), &options, &callbacks)
+		key := lua_digest_key(identifier)
+		result = lr.eval_cached(lua_arg(text), lua_arg(key[:]), c.size_t(numkeys), keys, c.size_t(argument_count), args, i32(client.resp), &options, &callbacks)
 	} else {
 		result = lr.library_call(library.handle, c.size_t(index), c.size_t(numkeys), keys, c.size_t(argument_count), args, i32(client.resp), &options, &callbacks)
 	}
@@ -786,11 +795,14 @@ cmd_script :: proc(client: ^Conn, argv: [][]u8) {
 			reply_wrong_args(client, "script|load")
 			return
 		}
-		if !lua_source_compile(client, argv[2]) {
+		digest := lua_digest(argv[2])
+		if !lua_source_prepare(client, argv[2], digest) {
 			return
 		}
-		entry := lua_cache_store(argv[2], true)
+		entry := lua_cache_store(argv[2], digest, true)
 		if entry == nil {
+			key := lua_digest_key(digest[:])
+			lr.eval_forget(lua_arg(key[:]))
 			reply_error(client, "OOM Lua source cache limit exceeded")
 			return
 		}

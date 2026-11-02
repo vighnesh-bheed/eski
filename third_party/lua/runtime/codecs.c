@@ -7,7 +7,7 @@ int luaopen_bit(lua_State *L);
 
 static _Thread_local lua_State *es_module_state;
 
-void es_module_bind(lua_State *L) { es_module_state = L; }
+lua_State *es_module_bind(lua_State *L) { lua_State *previous = es_module_state; es_module_state = L; return previous; }
 
 void *es_module_realloc(void *ptr, size_t size) {
     es_context *ctx = es_context_of(es_module_state);

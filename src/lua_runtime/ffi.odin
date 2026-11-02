@@ -118,6 +118,9 @@ foreign runtime_library {
 	library_stats :: proc(library: rawptr) -> Stats ---
 	eval :: proc(source: Arg, numkeys: c.size_t, keys: [^]Arg, argc: c.size_t, args: [^]Arg, client_resp: i32, options: ^Options, callbacks: ^Callbacks) -> Result ---
 	compile :: proc(source: Arg, options: ^Options) -> Result ---
+	eval_cached :: proc(source: Arg, digest: Arg, numkeys: c.size_t, keys: [^]Arg, argc: c.size_t, args: [^]Arg, client_resp: i32, options: ^Options, callbacks: ^Callbacks) -> Result ---
+	eval_prepare :: proc(source: Arg, digest: Arg, options: ^Options) -> Result ---
+	eval_forget :: proc(digest: Arg) ---
 	free_result :: proc(result: ^Result) ---
 	version :: proc() -> cstring ---
 	reset :: proc() ---
@@ -125,6 +128,7 @@ foreign runtime_library {
 	functions_stats :: proc() -> Stats ---
 	functions_active_stats :: proc() -> Stats ---
 	eval_stats :: proc() -> Stats ---
+	eval_active_stats :: proc() -> Stats ---
 	detached_memory :: proc() -> c.size_t ---
 	set_number_format :: proc(format: Number_Fn) ---
 	set_load_log :: proc(log: Log_Fn) ---

@@ -112,6 +112,11 @@ eslua_result eslua_eval(eslua_arg source, size_t numkeys, const eslua_arg *keys,
                        size_t argc, const eslua_arg *args, int32_t client_resp,
                        const eslua_options *options, const eslua_callbacks *callbacks);
 eslua_result eslua_compile(eslua_arg source, const eslua_options *options);
+eslua_result eslua_eval_cached(eslua_arg source, eslua_arg digest, size_t numkeys, const eslua_arg *keys,
+                              size_t argc, const eslua_arg *args, int32_t client_resp,
+                              const eslua_options *options, const eslua_callbacks *callbacks);
+eslua_result eslua_eval_prepare(eslua_arg source, eslua_arg digest, const eslua_options *options);
+void eslua_eval_forget(eslua_arg digest);
 void eslua_free_result(eslua_result *result);
 const char *eslua_version(void);
 void eslua_reset(void);
@@ -119,6 +124,7 @@ void eslua_functions_reset(void);
 eslua_stats eslua_functions_stats(void);
 eslua_stats eslua_functions_active_stats(void);
 eslua_stats eslua_eval_stats(void);
+eslua_stats eslua_eval_active_stats(void);
 size_t eslua_detached_memory(void);
 void eslua_set_number_format(eslua_number_fn format);
 void eslua_set_load_log(eslua_log_fn log);
