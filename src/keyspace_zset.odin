@@ -12,11 +12,11 @@ keyspace_builder_double :: proc "contextless" (task: ^Keyspace_Task, b: ^Keyspac
 	if task.client.resp == RESP3 { keyspace_builder_text(b, ","); keyspace_builder_bytes(b, buf[:n]); keyspace_builder_text(b, "\r\n") } else { keyspace_builder_bulk(b, buf[:n]) }
 }
 
-keyspace_zset_reply_items :: proc(task: ^Keyspace_Task, b: ^Keyspace_Builder, items: []zt.Item, scores: bool, nested: bool = false) {
-	width := 2 if scores && task.client.resp != RESP3 && !nested else 1
+keyspace_zset_reply_items :: proc(task: ^Keyspace_Task, b: ^Keyspace_Builder, items: []zt.Item, scores: bool, paired: bool = false) {
+	width := 2 if scores && task.client.resp != RESP3 && !paired else 1
 	keyspace_builder_integer(b, i64(len(items) * width), '*')
 	for &item in items {
-		if scores && (task.client.resp == RESP3 || nested) { keyspace_builder_integer(b, 2, '*') }
+		if scores && (task.client.resp == RESP3 || paired) { keyspace_builder_integer(b, 2, '*') }
 		buf: [21]u8
 		keyspace_builder_bulk(b, zt.item_bytes(&item, &buf))
 		if scores { keyspace_builder_double(task, b, item.score) }

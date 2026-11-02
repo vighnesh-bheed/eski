@@ -325,53 +325,63 @@ reply_random_pairs :: proc(c: ^Conn, with_values: bool) {
 	}
 }
 
-hrandfield_with_count :: proc(c: ^Conn, key: []u8, l: i64, with_values: bool) {
+@(private = "file")
+hrandfield_keep_streaming :: proc(c: ^Conn) -> bool {
+	if !lua_capture_allow(c, 0) {
+		return false
+	}
+	over := c.fd >= 0 && obuf_normal_limited && .Subscribed not_in c.ps && obuf_class_over(c, .Normal, &c.obuf_soft)
+	if over {
+		c.close_after = true
+	}
+	return !over
+}
+
+@(private = "file")
+hrandfield_page :: proc(c: ^Conn, h: ht.Hash, size: int, with_values: bool) {
+	clear(&hash_fields)
+	clear(&hash_values)
+	ht.random_with_repeats(h, size, with_values, &hash_fields, &hash_values)
+	reply_random_pairs(c, with_values)
+}
+
+@(private = "file")
+hrandfield_counted :: proc(c: ^Conn, key: []u8, count: i64, with_values: bool) {
 	e, h, wrong := hash_lookup(key, true)
-	if wrong {
+	switch {
+	case wrong:
 		reply_wrongtype(c)
 		return
-	}
-	if h == nil || hash_expire_if_needed(key, e, h) {
+	case h == nil || hash_expire_if_needed(key, e, h):
 		reply_array(c, 0)
 		return
 	}
-	n := l
-	if n >= 0 {
-		n = min(n, i64(ht.length(h)))
-	} else {
-		n = -n
+	defer {
+		clear(&hash_fields)
+		clear(&hash_values)
 	}
-	width := 1
-	if with_values && c.resp != 3 {
-		width = 2
-	}
-	reply_array(c, int(n) * width)
-	if n == 0 {
-		return
-	}
-	clear(&hash_fields)
-	clear(&hash_values)
-	if l >= 0 {
-		ht.random_unique(h, int(n), with_values, &hash_fields, &hash_values)
-		reply_random_pairs(c, with_values)
-	} else {
-		remaining := n
-		for remaining > 0 {
+	per_pick := 2 if with_values && c.resp != 3 else 1
+	if count >= 0 {
+		wanted := min(count, i64(ht.length(h)))
+		reply_array(c, int(wanted) * per_pick)
+		if wanted > 0 {
 			clear(&hash_fields)
 			clear(&hash_values)
-			batch := min(remaining, ht.RANDOM_PICK_BATCH)
-			ht.random_with_repeats(h, int(batch), with_values, &hash_fields, &hash_values)
+			ht.random_unique(h, int(wanted), with_values, &hash_fields, &hash_values)
 			reply_random_pairs(c, with_values)
-			remaining -= batch
-			if !lua_capture_allow(c, 0) { break }
-			if c.fd >= 0 && obuf_normal_limited && .Subscribed not_in c.ps && obuf_class_over(c, .Normal, &c.obuf_soft) {
-				c.close_after = true
-				break
-			}
+		}
+		return
+	}
+	picks := -count
+	reply_array(c, int(picks) * per_pick)
+	pages := (picks - 1) / ht.RANDOM_PICK_BATCH + 1
+	tail := int(picks - (pages - 1) * ht.RANDOM_PICK_BATCH)
+	for page in 1 ..= pages {
+		hrandfield_page(c, h, ht.RANDOM_PICK_BATCH if page < pages else tail, with_values)
+		if !hrandfield_keep_streaming(c) {
+			break
 		}
 	}
-	clear(&hash_fields)
-	clear(&hash_values)
 }
 
 cmd_hrandfield :: proc(c: ^Conn, argv: [][]u8) {
@@ -382,7 +392,7 @@ cmd_hrandfield :: proc(c: ^Conn, argv: [][]u8) {
 	}
 	key := argv[1]
 	if args.has_count {
-		hrandfield_with_count(c, key, args.count, args.with_values)
+		hrandfield_counted(c, key, args.count, args.with_values)
 		return
 	}
 	e, h, wrong := hash_lookup(key, true)

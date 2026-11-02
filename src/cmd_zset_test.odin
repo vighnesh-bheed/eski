@@ -31,7 +31,7 @@ zset_zero_pop_shapes :: proc(t: ^testing.T) {
 		z := zt.create_listpack()
 		_, _, _ = zt.add(z, 1, []u8{'m'}, {})
 		c := Conn{resp = version}
-		deleted := zpop_serve(&c, []u8{'k'}, nil, z, false, true, 0, true)
+		deleted := zpop_emit(&c, []u8{'k'}, nil, z, Zpop_Order{shape = .Keyed_Run, count = 0})
 		testing.expect(t, !deleted && zt.length(z) == 1)
 		testing.expect(t, string(c.wbuf[:c.wlen]) == "*2\r\n$1\r\nk\r\n*0\r\n")
 		runtime.heap_free(c.wbuf)

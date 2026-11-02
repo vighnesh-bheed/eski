@@ -25,11 +25,11 @@ ERR_RESTORE_IDLETIME :: "ERR Invalid IDLETIME value, must be >= 0"
 
 ERR_RESTORE_FREQ :: "ERR Invalid FREQ value, must be >= 0 and <= 255"
 
-MIGRATE_CACHE_ITEMS :: 64
+MIGRATE_POOL_SIZE :: 64
 
-MIGRATE_CACHE_TTL :: 10
+MIGRATE_POOL_IDLE_SECONDS :: 10
 
-MIGRATE_DEFAULT_TIMEOUT :: 1000
+MIGRATE_TIMEOUT_DEFAULT_MS :: 1000
 
 DUMP_TRAILER_LEN :: 10
 
@@ -46,10 +46,11 @@ MIGRATE_KEEP_BYTES :: 1024 * 1024
 MIGRATE_TARGET_PREFIX :: "ERR Target instance replied with error: "
 
 Migrate_Socket :: struct {
-	fd:        linux.Fd,
-	last_dbid: i64,
-	last_use:  i64,
-	name:      [dynamic]u8,
+	fd:         linux.Fd,
+	selected:   i64,
+	idle_since: i64,
+	stamp:      u64,
+	name:       [dynamic]u8,
 }
 
 migrate_cache: [dynamic]^Migrate_Socket
@@ -336,7 +337,13 @@ cmd_restore :: proc(c: ^Conn, argv: [][]u8) {
 	if at != 0 {
 		entry_set_expire(e, min(at, MAX_EXPIRE_MS))
 	}
-	persist_set_lru(e, opts.idle, opts.freq)
+	hint: Access_Hint
+	if opts.freq >= 0 {
+		hint = Access_Hint{.Frequency, opts.freq}
+	} else if opts.idle >= 0 {
+		hint = Access_Hint{.Idle_Seconds, opts.idle}
+	}
+	persist_apply_access_hint(e, hint)
 	#partial switch v.type {
 	case .List, .Stream:
 		block_signal_key(db, key, v.type)
@@ -431,12 +438,9 @@ migrate_forget :: proc(cs: ^Migrate_Socket) {
 
 migrate_cron :: proc() {
 	now := migrate_clock_s()
-	i := 0
-	for i < len(migrate_cache) {
-		if now - migrate_cache[i].last_use > MIGRATE_CACHE_TTL {
-			migrate_close_at(i)
-		} else {
-			i += 1
+	for n := len(migrate_cache) - 1; n >= 0; n -= 1 {
+		if now - migrate_cache[n].idle_since > MIGRATE_POOL_IDLE_SECONDS {
+			migrate_close_at(n)
 		}
 	}
 }
@@ -584,44 +588,72 @@ migrate_connect :: proc(addr: Migrate_Addr, timeout: i64) -> (linux.Fd, bool) {
 }
 
 @(private = "file")
-migrate_get_socket :: proc(host: []u8, port: []u8, timeout: i64) -> (cs: ^Migrate_Socket, reused: bool) {
-	clear(&migrate_name)
-	append(&migrate_name, ..host)
-	append(&migrate_name, ':')
-	append(&migrate_name, ..port)
-	now := migrate_clock_s()
+migrate_pool_clock: u64
+
+@(private = "file")
+migrate_pool_touch :: proc(cs: ^Migrate_Socket) {
+	migrate_pool_clock += 1
+	cs.stamp = migrate_pool_clock
+	cs.idle_since = migrate_clock_s()
+}
+
+@(private = "file")
+migrate_pool_find :: proc(name: []u8) -> ^Migrate_Socket {
 	for held in migrate_cache {
-		if bytes_eq(held.name[:], migrate_name[:]) {
-			held.last_use = now
-			return held, true
+		if bytes_eq(held.name[:], name) {
+			return held
 		}
 	}
-	addr, resolved := migrate_resolve(host, port)
-	if !resolved {
-		return nil, false
-	}
-	fd, connected := migrate_connect(addr, timeout)
-	if !connected {
-		return nil, false
-	}
-	if len(migrate_cache) >= MIGRATE_CACHE_ITEMS {
-		oldest := 0
-		for held, i in migrate_cache {
-			if held.last_use < migrate_cache[oldest].last_use {
-				oldest = i
-			}
+	return nil
+}
+
+@(private = "file")
+migrate_pool_evict :: proc() {
+	victim := 0
+	for held, n in migrate_cache {
+		if held.stamp < migrate_cache[victim].stamp {
+			victim = n
 		}
-		migrate_close_at(oldest)
+	}
+	migrate_close_at(victim)
+}
+
+@(private = "file")
+migrate_pool_add :: proc(fd: linux.Fd, name: []u8) -> ^Migrate_Socket {
+	if len(migrate_cache) >= MIGRATE_POOL_SIZE {
+		migrate_pool_evict()
 	}
 	heap := runtime.heap_allocator()
-	cs = new(Migrate_Socket, heap)
+	cs := new(Migrate_Socket, heap)
 	cs.fd = fd
-	cs.last_dbid = -1
-	cs.last_use = now
-	cs.name = make([dynamic]u8, 0, len(migrate_name), heap)
-	append(&cs.name, ..migrate_name[:])
+	cs.selected = -1
+	cs.name = make([dynamic]u8, 0, len(name), heap)
+	append(&cs.name, ..name)
+	migrate_pool_touch(cs)
 	append(&migrate_cache, cs)
-	return cs, false
+	return cs
+}
+
+@(private = "file")
+migrate_open :: proc(host: []u8, port: []u8, timeout: i64) -> (fd: linux.Fd, ok: bool) {
+	addr := migrate_resolve(host, port) or_return
+	return migrate_connect(addr, timeout)
+}
+
+@(private = "file")
+migrate_pool_get :: proc(host: []u8, port: []u8, timeout: i64) -> (cs: ^Migrate_Socket, reused: bool) {
+	clear(&migrate_name)
+	for part in ([3][]u8{host, {':'}, port}) {
+		append(&migrate_name, ..part)
+	}
+	if held := migrate_pool_find(migrate_name[:]); held != nil {
+		migrate_pool_touch(held)
+		return held, true
+	}
+	if fd, opened := migrate_open(host, port, timeout); opened {
+		cs = migrate_pool_add(fd, migrate_name[:])
+	}
+	return
 }
 
 @(private = "file")
@@ -752,7 +784,7 @@ migrate_parse :: proc(c: ^Conn, argv: [][]u8) -> (req: Migrate_Request, ok: bool
 		reply_error(c, ERR_NOT_INT)
 		return
 	}
-	req.timeout = timeout if timeout > 0 else MIGRATE_DEFAULT_TIMEOUT
+	req.timeout = timeout if timeout > 0 else MIGRATE_TIMEOUT_DEFAULT_MS
 	req.dbid = dbid
 	ok = true
 	return
@@ -790,54 +822,72 @@ migrate_collect :: proc(req: ^Migrate_Request) -> int {
 }
 
 @(private = "file")
-migrate_exchange :: proc(cs: ^Migrate_Socket, req: ^Migrate_Request, reused: bool) -> (o: Migrate_Outcome) {
+migrate_preamble :: proc(cs: ^Migrate_Socket, req: ^Migrate_Request) -> (commands: int) {
 	clear(&migrate_head)
-	heads := 0
-	if req.auth {
-		if req.user != nil {
-			migrate_put_cmd(&migrate_head, transmute([]u8)string("AUTH"), req.user, req.password)
-		} else {
-			migrate_put_cmd(&migrate_head, transmute([]u8)string("AUTH"), req.password)
-		}
-		heads += 1
+	if req.auth && req.user != nil {
+		migrate_put_cmd(&migrate_head, transmute([]u8)string("AUTH"), req.user, req.password)
+		commands += 1
+	} else if req.auth {
+		migrate_put_cmd(&migrate_head, transmute([]u8)string("AUTH"), req.password)
+		commands += 1
 	}
-	if req.dbid != cs.last_dbid {
+	if cs.selected != req.dbid {
 		digits: [24]u8
-		k := format_i64(raw_data(digits[:]), req.dbid)
-		migrate_put_cmd(&migrate_head, transmute([]u8)string("SELECT"), digits[:k])
-		heads += 1
+		width := format_i64(raw_data(digits[:]), req.dbid)
+		migrate_put_cmd(&migrate_head, transmute([]u8)string("SELECT"), digits[:width])
+		commands += 1
 	}
-	clear(&migrate_in)
-	migrate_in_pos = 0
-	migrate_timed_out = false
-	resize(&migrate_acks, len(migrate_keys))
-	for &a in migrate_acks {
-		a = false
-	}
-	if !migrate_write_all(cs.fd, migrate_head[:], req.timeout) || !migrate_write_all(cs.fd, migrate_out[:], req.timeout) {
-		o.failure = .Write
-		o.retryable = reused && !migrate_timed_out
+	return
+}
+
+@(private = "file")
+migrate_fail :: proc(o: ^Migrate_Outcome, failure: Migrate_Failure, may_retry: bool) {
+	o.failure = failure
+	o.retryable = may_retry && !migrate_timed_out
+}
+
+@(private = "file")
+migrate_await :: proc(cs: ^Migrate_Socket, req: ^Migrate_Request, reused: bool, o: ^Migrate_Outcome) -> (refused: bool, ok: bool) {
+	reply, got := migrate_read_line(cs.fd, req.timeout)
+	if !got {
+		migrate_fail(o, .Read, reused && o.replies == 0)
 		return
 	}
-	total := heads + len(migrate_keys)
-	for o.replies < total {
-		line, got := migrate_read_line(cs.fd, req.timeout)
+	o.replies += 1
+	if len(reply) > 0 && reply[0] == '-' {
+		migrate_note_error(o, reply)
+		refused = true
+	}
+	return refused, true
+}
+
+@(private = "file")
+migrate_transfer :: proc(cs: ^Migrate_Socket, req: ^Migrate_Request, reused: bool) -> (o: Migrate_Outcome) {
+	preamble := migrate_preamble(cs, req)
+	migrate_in_pos, migrate_timed_out = 0, false
+	clear(&migrate_in)
+	resize(&migrate_acks, len(migrate_keys))
+	sent := migrate_write_all(cs.fd, migrate_head[:], req.timeout) && migrate_write_all(cs.fd, migrate_out[:], req.timeout)
+	if !sent {
+		migrate_fail(&o, .Write, reused)
+		return
+	}
+	for _ in 0 ..< preamble {
+		refused, got := migrate_await(cs, req, reused, &o)
 		if !got {
-			o.failure = .Read
-			o.retryable = reused && !migrate_timed_out && o.replies == 0
 			return
 		}
-		failed := len(line) > 0 && line[0] == '-'
-		if failed {
-			migrate_note_error(&o, line)
+		if refused {
+			o.head_error = true
 		}
-		if o.replies < heads {
-			o.head_error = o.head_error || failed
-		} else {
-			migrate_acks[o.replies - heads] = !failed
-			o.acked += 1
+	}
+	for &ack in migrate_acks {
+		refused, got := migrate_await(cs, req, reused, &o)
+		if !got {
+			return
 		}
-		o.replies += 1
+		ack = !refused
+		o.acked += 1
 	}
 	return
 }
@@ -855,71 +905,96 @@ reply_target_error :: proc(c: ^Conn, line: []u8) {
 	reply_error_parts(c, MIGRATE_TARGET_PREFIX, string(line))
 }
 
-cmd_migrate :: proc(c: ^Conn, argv: [][]u8) {
-	migrate_heap_ready()
-	req, parsed := migrate_parse(c, argv)
-	if !parsed {
-		return
-	}
-	if migrate_collect(&req) == 0 {
-		pst.dirty_explicit = true
-		reply_simple(c, "NOKEY")
-		return
-	}
-	cs, reused := migrate_get_socket(req.host, req.port, req.timeout)
-	if cs == nil {
-		reply_error(c, ERR_MIGRATE_CONNECT)
-		return
-	}
-	o := migrate_exchange(cs, &req, reused)
-	if o.failure != .None && o.retryable {
-		migrate_forget(cs)
-		cs, reused = migrate_get_socket(req.host, req.port, req.timeout)
+@(private = "file")
+migrate_attempt :: proc(req: ^Migrate_Request) -> (o: Migrate_Outcome, cs: ^Migrate_Socket, connected: bool) {
+	for round in 1 ..= 2 {
+		reused: bool
+		cs, reused = migrate_pool_get(req.host, req.port, req.timeout)
 		if cs == nil {
-			reply_error(c, ERR_MIGRATE_CONNECT)
 			return
 		}
-		o = migrate_exchange(cs, &req, reused)
+		o = migrate_transfer(cs, req, reused)
+		if o.failure == .None || !o.retryable || round == 2 {
+			break
+		}
+		migrate_forget(cs)
 	}
+	connected = true
+	return
+}
+
+@(private = "file")
+migrate_drop_acked :: proc(c: ^Conn, acked: int) {
 	clear(&migrate_gone)
-	if !req.copy && !o.head_error {
-		db := cur_db()
-		for i in 0 ..< o.acked {
-			if !migrate_acks[i] {
-				continue
+	for key, n in migrate_keys[:acked] {
+		if migrate_acks[n] {
+			if found, _ := db_remove(key); found {
+				append(&migrate_gone, key)
 			}
-			key := migrate_keys[i]
-			found, _ := db_remove(key)
-			if !found {
-				continue
-			}
-			signal_key_in(key, db)
-			notify_in(.Generic, "del", key, db)
-			pst.dirty += 1
-			append(&migrate_gone, key)
-		}
-		if len(migrate_gone) > 0 {
-			aof_migrate_deleted(c, migrate_gone[:])
 		}
 	}
+	if len(migrate_gone) == 0 {
+		return
+	}
+	db := cur_db()
+	for key in migrate_gone {
+		signal_key_in(key, db)
+		notify_in(.Generic, "del", key, db)
+	}
+	pst.dirty += i64(len(migrate_gone))
+	aof_migrate_deleted(c, migrate_gone[:])
+}
+
+@(private = "file")
+migrate_settle :: proc(cs: ^Migrate_Socket, req: ^Migrate_Request, o: ^Migrate_Outcome) {
 	if o.failure != .None {
 		migrate_forget(cs)
-	} else {
-		cs.last_dbid = -1 if o.any_error else req.dbid
-		cs.last_use = migrate_clock_s()
+		return
 	}
-	migrate_trim(&migrate_out)
-	migrate_trim(&migrate_in)
+	cs.selected = -1 if o.any_error else req.dbid
+	migrate_pool_touch(cs)
+}
+
+@(private = "file")
+migrate_answer :: proc(c: ^Conn, o: ^Migrate_Outcome) {
 	switch {
 	case o.any_error:
 		reply_target_error(c, migrate_line[:])
-	case o.failure == .Write:
-		reply_error(c, ERR_MIGRATE_WRITE)
-	case o.failure == .Read:
-		reply_error(c, ERR_MIGRATE_READ)
-	case:
+	case o.failure == .None:
 		pst.dirty_explicit = true
 		reply_ok(c)
+	case o.failure == .Write:
+		reply_error(c, ERR_MIGRATE_WRITE)
+	case:
+		reply_error(c, ERR_MIGRATE_READ)
+	}
+}
+
+@(private = "file")
+migrate_run :: proc(c: ^Conn, req: ^Migrate_Request) {
+	if present := migrate_collect(req); present == 0 {
+		reply_simple(c, "NOKEY")
+		pst.dirty_explicit = true
+		return
+	}
+	o, cs, connected := migrate_attempt(req)
+	if !connected {
+		reply_error(c, ERR_MIGRATE_CONNECT)
+		return
+	}
+	if !req.copy && !o.head_error {
+		migrate_drop_acked(c, o.acked)
+	}
+	migrate_settle(cs, req, &o)
+	migrate_trim(&migrate_out)
+	migrate_trim(&migrate_in)
+	migrate_answer(c, &o)
+}
+
+cmd_migrate :: proc(c: ^Conn, argv: [][]u8) {
+	migrate_heap_ready()
+	if req, parsed := migrate_parse(c, argv); parsed {
+		migrate_run(c, &req)
 	}
 }
 

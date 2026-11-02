@@ -71,7 +71,7 @@ source_score :: proc(src: ^Source, member: []u8) -> (f64, bool) {
 	return v * src.weight, true
 }
 
-setop_compute :: proc(srcs: []Source, op: Setop, agg: Aggregate, cardinality_only: bool, limit: int) -> (dst: Zset, card: int, maxelelen: int, totelelen: int) {
+setop_compute :: proc(srcs: []Source, op: Setop, agg: Aggregate, count_only: bool, limit: int) -> (dst: Zset, card: int, maxelelen: int, totelelen: int) {
 	if op != .Diff {
 		for i in 1 ..< len(srcs) {
 			j := i
@@ -81,7 +81,7 @@ setop_compute :: proc(srcs: []Source, op: Setop, agg: Aggregate, cardinality_onl
 			}
 		}
 	}
-	card_mode := op == .Inter && cardinality_only
+	card_mode := op == .Inter && count_only
 	if !card_mode {
 		dst = create_skiplist(0)
 	}

@@ -2,7 +2,7 @@ package main
 
 import "base:intrinsics"
 import "base:runtime"
-import "core:crypto/legacy/sha1"
+import "core:crypto/blake2b"
 import "core:sys/linux"
 import ht "hashtype"
 import lt "listtype"
@@ -12,7 +12,9 @@ import st "settype"
 import sm "streamtype"
 import zt "zsettype"
 
-PERSIST_BGSAVE_RETRY_DELAY :: 5
+PERSIST_FAILED_SAVE_BACKOFF :: 5
+
+PERSIST_COW_SAMPLE_KEYS :: 1024
 
 PERSIST_CMD_SET :: 1024
 
@@ -64,15 +66,14 @@ Load_Result :: enum u8 {
 
 Persist :: struct {
 	dirty:               i64,
-	dirty_before_bgsave: i64,
+	dirty_at_fork:       i64,
 	lastsave:            i64,
-	lastbgsave_try:      i64,
+	bgsave_attempt_at:   i64,
 	lastbgsave_err:      bool,
 	child_pid:           linux.Pid,
 	save_time_start:     i64,
 	save_time_last:      i64,
 	bgsave_scheduled:    bool,
-	bgsave_aborted:      bool,
 	stat_rdb_saves:      i64,
 	stat_rdb_cow:        i64,
 	progress:            ^Persist_Progress,
@@ -400,7 +401,7 @@ persist_write_rdb :: proc(w: ^rdb.Writer, aof_base: bool = false) -> bool {
 						return false
 					}
 					processed += 1
-					persist_child_tick(processed)
+					persist_child_progress(processed)
 				}
 			}
 		}
@@ -410,16 +411,22 @@ persist_write_rdb :: proc(w: ^rdb.Writer, aof_base: bool = false) -> bool {
 }
 
 @(private = "file")
-persist_child_tick :: proc(processed: i64) {
+persist_publish_progress :: proc(processed: i64) {
 	p := pst.progress
-	if p != nil {
-		intrinsics.volatile_store(&p.processed, processed)
-		if processed & 1023 == 0 {
-			persist_sample_cow()
-		}
+	if p == nil {
+		return
 	}
-	if pst.key_save_delay != 0 {
-		persist_debug_delay(pst.key_save_delay)
+	intrinsics.volatile_store(&p.processed, processed)
+	if processed % PERSIST_COW_SAMPLE_KEYS == 0 {
+		persist_sample_cow()
+	}
+}
+
+@(private = "file")
+persist_child_progress :: proc(processed: i64) {
+	persist_publish_progress(processed)
+	if delay := pst.key_save_delay; delay != 0 {
+		persist_debug_delay(delay)
 	}
 }
 
@@ -500,8 +507,8 @@ persist_bgsave :: proc() -> bool {
 	if pst.child_pid > 0 {
 		return false
 	}
-	pst.dirty_before_bgsave = pst.dirty
-	pst.lastbgsave_try = persist_unix_now()
+	pst.dirty_at_fork = pst.dirty
+	pst.bgsave_attempt_at = persist_unix_now()
 	persist_progress_prepare()
 	keyspace_before_fork()
 	compute_before_fork()
@@ -529,7 +536,6 @@ persist_bgsave :: proc() -> bool {
 	pst.child_aof = false
 	pst.save_time_start = persist_unix_now()
 	pst.bgsave_scheduled = false
-	pst.bgsave_aborted = false
 	tmp: [24]u8
 	n := format_i64(&tmp[0], i64(pid))
 	plog(LOG_NOTICE, "Background saving started by pid ", string(tmp[:n]))
@@ -543,56 +549,66 @@ persist_remove_temp :: proc(pid: linux.Pid) {
 	linux.unlink(persist_cstr(name, cbuf[:]))
 }
 
+Persist_Child_Result :: enum u8 {
+	Saved,
+	Failed,
+	Killed,
+}
+
 persist_kill_child :: proc() {
-	if pst.child_pid <= 0 || pst.child_aof {
+	pid := pst.child_pid
+	if pid <= 0 || pst.child_aof {
 		return
 	}
-	pid := pst.child_pid
 	linux.kill(pid, .SIGUSR1)
-	status: u32
-	for {
-		_, werr := linux.wait4(pid, &status, {}, nil)
-		if werr != .EINTR {
-			break
-		}
-	}
+	persist_reap(pid)
 	persist_remove_temp(pid)
-	pst.bgsave_aborted = true
-	persist_bgsave_done(0, int(linux.Signal.SIGUSR1))
+	persist_rdb_child_finished(.Killed, int(linux.Signal.SIGUSR1))
 }
 
 @(private = "file")
-persist_bgsave_done :: proc(exitcode: int, bysignal: int) {
+persist_reap :: proc(pid: linux.Pid) {
+	status: u32
+	for {
+		_, err := linux.wait4(pid, &status, {}, nil)
+		if err != .EINTR {
+			return
+		}
+	}
+}
+
+@(private = "file")
+persist_rdb_child_finished :: proc(result: Persist_Child_Result, signal: int = 0) {
 	now := persist_unix_now()
-	pid := pst.child_pid
-	if bysignal == 0 && exitcode == 0 {
+	switch result {
+	case .Saved:
 		plog(LOG_NOTICE, "Background saving terminated with success")
-		pst.dirty = max(pst.dirty - pst.dirty_before_bgsave, 0)
+		pst.dirty = max(pst.dirty - pst.dirty_at_fork, 0)
 		pst.lastsave = now
 		pst.lastbgsave_err = false
-	} else if bysignal == 0 {
+	case .Failed:
 		plog(LOG_WARNING, "Background saving error")
 		pst.lastbgsave_err = true
-	} else {
-		tmp: [24]u8
-		n := format_i64(&tmp[0], i64(bysignal))
-		plog(LOG_WARNING, "Background saving terminated by signal ", string(tmp[:n]))
-		if pid > 0 {
-			persist_remove_temp(pid)
+	case .Killed:
+		digits: [24]u8
+		width := format_i64(&digits[0], i64(signal))
+		plog(LOG_WARNING, "Background saving terminated by signal ", string(digits[:width]))
+		if pst.child_pid > 0 {
+			persist_remove_temp(pst.child_pid)
 		}
-		if bysignal != int(linux.Signal.SIGUSR1) {
+		if signal != int(linux.Signal.SIGUSR1) {
 			pst.lastbgsave_err = true
 		}
 	}
-	if pst.progress != nil {
-		pst.stat_rdb_cow = intrinsics.volatile_load(&pst.progress.cow)
+	if p := pst.progress; p != nil {
+		pst.stat_rdb_cow = intrinsics.volatile_load(&p.cow)
 	}
-	if pst.save_time_start >= 0 {
-		pst.save_time_last = now - pst.save_time_start
-	}
+	started := pst.save_time_start
 	pst.save_time_start = -1
-	pst.child_pid = 0
-	pst.child_aof = false
+	if started >= 0 {
+		pst.save_time_last = now - started
+	}
+	pst.child_pid, pst.child_aof = 0, false
 	persist_update_gate()
 }
 
@@ -627,7 +643,14 @@ persist_check_child :: proc() {
 		}
 		return
 	}
-	persist_bgsave_done(exitcode, bysignal)
+	switch {
+	case bysignal != 0:
+		persist_rdb_child_finished(.Killed, bysignal)
+	case exitcode == 0:
+		persist_rdb_child_finished(.Saved)
+	case:
+		persist_rdb_child_finished(.Failed)
+	}
 }
 
 Loaded_Value :: struct {
@@ -980,15 +1003,29 @@ persist_handle_aux :: proc(key: []u8, val: []u8) {
 	}
 }
 
-persist_set_lru :: proc(e: ^Entry, lru_idle: i64, lfu_freq: i64) {
-	if lfu_freq >= 0 {
-		if persist_policy_lfu() {
-			entry_set_lru(e, u32(lfu_minutes()) << 8 | u32(min(lfu_freq, 255)))
+Access_Hint_Kind :: enum u8 {
+	None,
+	Idle_Seconds,
+	Frequency,
+}
+
+Access_Hint :: struct {
+	kind:  Access_Hint_Kind,
+	value: i64,
+}
+
+persist_apply_access_hint :: proc(e: ^Entry, hint: Access_Hint) {
+	counting := persist_policy_lfu()
+	switch hint.kind {
+	case .None:
+	case .Frequency:
+		if counting {
+			entry_set_lru(e, u32(lfu_minutes()) << 8 | u32(min(hint.value, 255)))
 		}
-		return
-	}
-	if lru_idle >= 0 && !persist_policy_lfu() {
-		entry_restore_idle(e, lru_idle)
+	case .Idle_Seconds:
+		if !counting {
+			entry_restore_idle(e, hint.value)
+		}
 	}
 }
 
@@ -1035,8 +1072,7 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 	pst.last_load_empty = 0
 	db := &dbs[0]
 	expire: i64 = -1
-	lru_idle: i64 = -1
-	lfu_freq: i64 = -1
+	hint: Access_Hint
 	now_ms := persist_unix_ms()
 	keys_seen: i64 = 0
 	for {
@@ -1064,14 +1100,16 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 			if !good {
 				persist_load_failed(r)
 			}
-			lfu_freq = i64(f)
+			hint = Access_Hint{.Frequency, i64(f)}
 			continue
 		case rdb.OPCODE_IDLE:
 			idle := rdb.get_len(r)
 			if !rdb.ok(r) {
 				persist_load_failed(r)
 			}
-			lru_idle = i64(min(idle, u64(max(i64))))
+			if hint.kind != .Frequency {
+				hint = Access_Hint{.Idle_Seconds, i64(min(idle, u64(max(i64))))}
+			}
 			continue
 		case rdb.OPCODE_EOF:
 		case rdb.OPCODE_SELECTDB:
@@ -1157,7 +1195,7 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 				r.status = .Ok
 				persist_log_empty_key(key)
 				pst.last_load_empty += 1
-				expire, lru_idle, lfu_freq = -1, -1, -1
+				expire, hint = -1, {}
 				continue
 			}
 			if !rdb.ok(r) {
@@ -1167,7 +1205,7 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 			if persist_skip_expired && expire != -1 && expire < now_ms {
 				persist_free_loaded(v)
 				pst.last_load_expired += 1
-				expire, lru_idle, lfu_freq = -1, -1, -1
+				expire, hint = -1, {}
 				continue
 			}
 			e, created := db_upsert_in(db, key)
@@ -1188,9 +1226,9 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 			if expire != -1 {
 				entry_set_expire(e, expire)
 			}
-			persist_set_lru(e, lru_idle, lfu_freq)
+			persist_apply_access_hint(e, hint)
 			pst.last_load_loaded += 1
-			expire, lru_idle, lfu_freq = -1, -1, -1
+			expire, hint = -1, {}
 			if cfg.key_load_delay != 0 {
 				persist_debug_delay(cfg.key_load_delay)
 			}
@@ -1373,48 +1411,65 @@ persist_signal_flags :: proc(sig: i32) -> Shutdown_Flags {
 	return flags
 }
 
+@(private = "file")
+persist_cron_signals :: proc() {
+	pending := intrinsics.atomic_load_explicit(&persist_sig_pending, .Acquire)
+	if pending == 0 {
+		return
+	}
+	sig := intrinsics.atomic_load_explicit(&persist_sig_last, .Acquire)
+	persist_signal_log(sig)
+	if flags := persist_signal_flags(sig); persist_prepare_shutdown(flags) {
+		persist_finish_shutdown(flags)
+	}
+	name := "SIGINT" if sig == i32(linux.Signal.SIGINT) else "SIGTERM"
+	plog(LOG_WARNING, name, " received but errors trying to shut down the server, check the logs for more information")
+	intrinsics.atomic_sub_explicit(&persist_sig_pending, pending, .Acq_Rel)
+}
+
+@(private = "file")
+persist_due_save_rule :: proc(now: i64) -> (rule: Save_Param, due: bool) {
+	if pst.lastbgsave_err && now - pst.bgsave_attempt_at <= PERSIST_FAILED_SAVE_BACKOFF {
+		return
+	}
+	for candidate in pst.save_params {
+		if pst.dirty >= candidate.changes && now - pst.lastsave > candidate.seconds {
+			return candidate, true
+		}
+	}
+	return
+}
+
+@(private = "file")
+persist_auto_save :: proc(now: i64) {
+	rule, due := persist_due_save_rule(now)
+	if !due {
+		return
+	}
+	l: Log_Line
+	ll_begin(&l, LOG_NOTICE)
+	ll_int(&l, rule.changes)
+	ll_str(&l, " changes in ")
+	ll_int(&l, rule.seconds)
+	ll_str(&l, " seconds. Saving...")
+	ll_end(&l)
+	persist_bgsave()
+}
+
 persist_cron :: proc() {
 	keyspace_collect()
-	if pending := intrinsics.atomic_load_explicit(&persist_sig_pending, .Acquire); pending != 0 {
-		sig := intrinsics.atomic_load_explicit(&persist_sig_last, .Acquire)
-		persist_signal_log(sig)
-		flags := persist_signal_flags(sig)
-		if persist_prepare_shutdown(flags) {
-			persist_finish_shutdown(flags)
-		}
-		name := "SIGINT" if sig == i32(linux.Signal.SIGINT) else "SIGTERM"
-		plog(LOG_WARNING, name, " received but errors trying to shut down the server, check the logs for more information")
-		intrinsics.atomic_sub_explicit(&persist_sig_pending, pending, .Acq_Rel)
-	}
-	persist_check_child()
-	aof_cron()
+	persist_cron_signals()
 	migrate_cron()
 	set_scratch_trim()
 	zset_reset_scratch()
-	if pst.child_pid > 0 || pst.loading {
-		return
-	}
-	if pst.bgsave_scheduled {
+	persist_check_child()
+	aof_cron()
+	switch {
+	case pst.child_pid > 0 || pst.loading:
+	case pst.bgsave_scheduled:
 		persist_bgsave()
-		return
-	}
-	now := persist_unix_now()
-	for sp in pst.save_params {
-		if pst.dirty < sp.changes || now - pst.lastsave <= sp.seconds {
-			continue
-		}
-		if pst.lastbgsave_err && now - pst.lastbgsave_try <= PERSIST_BGSAVE_RETRY_DELAY {
-			continue
-		}
-		l: Log_Line
-		ll_begin(&l, LOG_NOTICE)
-		ll_int(&l, sp.changes)
-		ll_str(&l, " changes in ")
-		ll_int(&l, sp.seconds)
-		ll_str(&l, " seconds. Saving...")
-		ll_end(&l)
-		persist_bgsave()
-		break
+	case:
+		persist_auto_save(persist_unix_now())
 	}
 }
 
@@ -1607,143 +1662,187 @@ persist_info_loading :: proc(b: ^[dynamic]u8) {
 	info_line_int(b, "loading_eta_seconds", max(eta, 0))
 }
 
+DIGEST_BYTES :: 20
+
+Digest :: [DIGEST_BYTES]u8
+
 @(private = "file")
-digest_xor :: proc(d: ^[20]u8, data: []u8) {
-	ctx: sha1.Context
-	sha1.init(&ctx)
-	sha1.update(&ctx, data)
-	h: [20]u8
-	sha1.final(&ctx, h[:])
-	for i in 0 ..< 20 {
-		d[i] ~= h[i]
+Digest_Tag :: enum u8 {
+	String = 1,
+	List,
+	Set,
+	Zset,
+	Hash,
+	Stream,
+	Key,
+}
+
+@(private = "file")
+digest_begin :: proc(h: ^blake2b.Context, tag: Digest_Tag) {
+	blake2b.init(h, DIGEST_BYTES)
+	label := [1]u8{u8(tag)}
+	blake2b.update(h, label[:])
+}
+
+@(private = "file")
+digest_word :: proc(h: ^blake2b.Context, v: u64) {
+	le: [8]u8
+	for n in 0 ..< 8 {
+		le[n] = u8(v >> (8 * uint(n)))
+	}
+	blake2b.update(h, le[:])
+}
+
+@(private = "file")
+digest_text :: proc(h: ^blake2b.Context, text: []u8) {
+	digest_word(h, u64(len(text)))
+	blake2b.update(h, text)
+}
+
+@(private = "file")
+digest_close :: proc(h: ^blake2b.Context) -> (sum: Digest) {
+	blake2b.final(h, sum[:])
+	return
+}
+
+@(private = "file")
+digest_accumulate :: proc(total: ^Digest, part: Digest) {
+	carry: u16 = 0
+	for n in 0 ..< DIGEST_BYTES {
+		lane := u16(total[n]) + u16(part[n]) + carry
+		total[n] = u8(lane)
+		carry = lane >> 8
 	}
 }
 
 @(private = "file")
-digest_mix :: proc(d: ^[20]u8, data: []u8) {
-	digest_xor(d, data)
-	ctx: sha1.Context
-	sha1.init(&ctx)
-	sha1.update(&ctx, d[:])
-	sha1.final(&ctx, d[:])
+digest_score_bits :: proc(score: f64) -> u64 {
+	return 0 if score == 0 else transmute(u64)score
 }
 
 @(private = "file")
-digest_u32 :: proc(d: ^[20]u8, v: u32) {
-	b := [4]u8{u8(v), u8(v >> 8), u8(v >> 16), u8(v >> 24)}
-	digest_mix(d, b[:])
+digest_list :: proc(h: ^blake2b.Context, l: lt.List) {
+	walk := lt.iterator(l, 0, .Tail)
+	entry: lt.List_Entry
+	for lt.iter_next(&walk, &entry) {
+		scratch: [24]u8
+		digest_text(h, lt.value_bytes(lt.entry_value(&walk, &entry), cast(^[21]u8)&scratch))
+	}
 }
 
 @(private = "file")
-digest_score :: proc(d: ^[20]u8, score: f64) {
-	b: [8]u8
-	bits := transmute(u64)score
-	if score == 0 {
-		bits = 0
+digest_set :: proc(s: st.Set) -> (total: Digest) {
+	walk := st.iterator(s)
+	for {
+		member, more := st.next(&walk)
+		if !more {
+			break
+		}
+		scratch: [24]u8
+		h: blake2b.Context
+		digest_begin(&h, .Set)
+		digest_text(&h, st.value_bytes(member, cast(^[21]u8)&scratch))
+		digest_accumulate(&total, digest_close(&h))
 	}
-	for i in 0 ..< 8 {
-		b[i] = u8(bits >> (8 * uint(i)))
-	}
-	digest_mix(d, b[:])
+	return
 }
 
 @(private = "file")
-digest_value :: proc(v: Slot_Value, d: ^[20]u8) {
-	if v.obj == nil || v.type == .String {
-		digest_u32(d, 0)
-		digest_mix(d, v.str)
-		return
+digest_zset :: proc(z: zt.Zset) -> (total: Digest) {
+	walk := zt.iter_make(z, false)
+	item: zt.Item
+	for zt.iter_next(&walk, &item) {
+		scratch: [24]u8
+		h: blake2b.Context
+		digest_begin(&h, .Zset)
+		digest_text(&h, zt.item_bytes(&item, cast(^[21]u8)&scratch))
+		digest_word(&h, digest_score_bits(item.score))
+		digest_accumulate(&total, digest_close(&h))
 	}
-	switch v.type {
-	case .String:
+	return
+}
+
+@(private = "file")
+digest_hash :: proc(hv: ht.Hash) -> (total: Digest) {
+	walk := ht.iterator(hv)
+	for ht.next(&walk) {
+		field_scratch, value_scratch: [24]u8
+		h: blake2b.Context
+		digest_begin(&h, .Hash)
+		digest_text(&h, ht.value_bytes(ht.current_field(&walk), cast(^[21]u8)&field_scratch))
+		digest_text(&h, ht.value_bytes(ht.current_value(&walk), cast(^[21]u8)&value_scratch))
+		deadline := ht.current_expire(&walk)
+		if deadline != ht.NO_FIELD_DEADLINE && deadline != 0 {
+			digest_word(&h, u64(deadline))
+		}
+		digest_accumulate(&total, digest_close(&h))
+	}
+	return
+}
+
+@(private = "file")
+digest_stream :: proc(h: ^blake2b.Context, s: sm.Stream) {
+	walk: sm.Iterator
+	sm.iterator_start(&walk, s, nil, nil, false)
+	defer sm.iterator_stop(&walk)
+	id: sm.ID
+	pairs: i64
+	for sm.iterator_get_id(&walk, &id, &pairs) {
+		digest_word(h, id.ms)
+		digest_word(h, id.seq)
+		digest_word(h, u64(pairs))
+		for _ in 0 ..< pairs {
+			field, value := sm.iterator_get_field(&walk)
+			digest_text(h, field)
+			digest_text(h, value)
+		}
+	}
+}
+
+@(private = "file")
+digest_of_value :: proc(v: Slot_Value) -> Digest {
+	h: blake2b.Context
+	if v.type == .String || v.obj == nil {
+		digest_begin(&h, .String)
+		digest_text(&h, v.str)
+		return digest_close(&h)
+	}
+	#partial switch v.type {
 	case .List:
-		digest_u32(d, 1)
-		l := cast(lt.List)v.obj
-		it := lt.iterator(l, 0, .Tail)
-		entry: lt.List_Entry
-		for lt.iter_next(&it, &entry) {
-			buf: [24]u8
-			ev := lt.entry_value(&it, &entry)
-			digest_mix(d, lt.value_bytes(ev, cast(^[21]u8)&buf))
-		}
+		digest_begin(&h, .List)
+		digest_list(&h, cast(lt.List)v.obj)
 	case .Set:
-		digest_u32(d, 2)
-		acc: [20]u8
-		it := st.iterator(cast(st.Set)v.obj)
-		for {
-			member, more := st.next(&it)
-			if !more {
-				break
-			}
-			buf: [24]u8
-			digest_xor(&acc, st.value_bytes(member, cast(^[21]u8)&buf))
-		}
-		digest_mix(d, acc[:])
+		digest_begin(&h, .Set)
+		members := digest_set(cast(st.Set)v.obj)
+		blake2b.update(&h, members[:])
 	case .Zset:
-		digest_u32(d, 3)
-		acc: [20]u8
-		it := zt.iter_make(cast(zt.Zset)v.obj, false)
-		item: zt.Item
-		for zt.iter_next(&it, &item) {
-			elem: [20]u8
-			buf: [24]u8
-			digest_mix(&elem, zt.item_bytes(&item, cast(^[21]u8)&buf))
-			digest_score(&elem, item.score)
-			digest_xor(&acc, elem[:])
-		}
-		digest_mix(d, acc[:])
+		digest_begin(&h, .Zset)
+		members := digest_zset(cast(zt.Zset)v.obj)
+		blake2b.update(&h, members[:])
 	case .Hash:
-		digest_u32(d, 4)
-		acc: [20]u8
-		it := ht.iterator(cast(ht.Hash)v.obj)
-		for ht.next(&it) {
-			elem: [20]u8
-			fbuf, vbuf: [24]u8
-			digest_mix(&elem, ht.value_bytes(ht.current_field(&it), cast(^[21]u8)&fbuf))
-			digest_mix(&elem, ht.value_bytes(ht.current_value(&it), cast(^[21]u8)&vbuf))
-			if ht.current_expire(&it) != ht.NO_FIELD_DEADLINE && ht.current_expire(&it) != 0 {
-				ttl := ht.current_expire(&it)
-				tb: [8]u8
-				for i in 0 ..< 8 {
-					tb[i] = u8(ttl >> (8 * uint(i)))
-				}
-				digest_mix(&elem, tb[:])
-			}
-			digest_xor(&acc, elem[:])
-		}
-		digest_mix(d, acc[:])
+		digest_begin(&h, .Hash)
+		members := digest_hash(cast(ht.Hash)v.obj)
+		blake2b.update(&h, members[:])
 	case .Stream:
-		digest_u32(d, 6)
-		s := cast(sm.Stream)v.obj
-		si: sm.Iterator
-		sm.iterator_start(&si, s, nil, nil, false)
-		id: sm.ID
-		numfields: i64
-		for sm.iterator_get_id(&si, &id, &numfields) {
-			ib: [16]u8
-			for i in 0 ..< 8 {
-				ib[i] = u8(id.ms >> (8 * uint(7 - i)))
-				ib[8 + i] = u8(id.seq >> (8 * uint(7 - i)))
-			}
-			digest_mix(d, ib[:])
-			for _ in 0 ..< numfields {
-				field, value := sm.iterator_get_field(&si)
-				digest_mix(d, field)
-				digest_mix(d, value)
-			}
-		}
-		sm.iterator_stop(&si)
+		digest_begin(&h, .Stream)
+		digest_stream(&h, cast(sm.Stream)v.obj)
+	case:
+		blake2b.init(&h, DIGEST_BYTES)
 	}
+	return digest_close(&h)
 }
 
 @(private = "file")
-digest_object :: proc(db: ^Db, t: ^Table, i: int, d: ^[20]u8) {
-	kp := &t.slots[i].key
-	v := persist_slot_value(db, kp, &t.slots[i].val)
-	digest_value(v, d)
-	if t.slots[i].meta.expire_at != 0 {
-		digest_mix(d, transmute([]u8)string("!!expire!!"))
-	}
+digest_of_key :: proc(db: ^Db, t: ^Table, slot: int) -> Digest {
+	h: blake2b.Context
+	digest_begin(&h, .Key)
+	digest_word(&h, u64(db.id))
+	digest_text(&h, key_bytes(&t.slots[slot].key, &db.slab))
+	contents := digest_of_value(persist_slot_value(db, &t.slots[slot].key, &t.slots[slot].val))
+	blake2b.update(&h, contents[:])
+	expiring := [1]u8{1 if t.slots[slot].meta.expire_at != 0 else 0}
+	blake2b.update(&h, expiring[:])
+	return digest_close(&h)
 }
 
 @(private = "file")
@@ -1757,31 +1856,32 @@ reply_digest :: proc(c: ^Conn, d: ^[20]u8) {
 	reply_simple(c, string(hex[:]))
 }
 
+@(private = "file")
+digest_table :: proc(total: ^Digest, db: ^Db, t: ^Table) {
+	for g in 0 ..= t.gmask {
+		occupied := group_full(group_load(t.ctrl, g))
+		base := int(g) * GROUP_SLOTS
+		for occupied != 0 {
+			slot := base + int(intrinsics.count_trailing_zeros(occupied))
+			occupied &= occupied - 1
+			digest_accumulate(total, digest_of_key(db, t, slot))
+		}
+	}
+}
+
 persist_dataset_digest :: proc(final: ^[20]u8) {
-	final^ = {}
-	for &db, id in dbs {
+	total: Digest
+	for &db in dbs {
 		if db_size_of(&db) == 0 {
 			continue
 		}
-		digest_u32(final, u32(id))
-		for bank in 0 ..< persist_table_count(&db) {
-			t := &db.t[bank]
-			if !persist_table_ok(t) {
-				continue
-			}
-			for g: u64 = 0; g <= t.gmask; g += 1 {
-				bits := group_full(group_load(t.ctrl, g))
-				for bits != 0 {
-					i := int(g) * GROUP_SLOTS + int(intrinsics.count_trailing_zeros(bits))
-					bits &= bits - 1
-					aux: [20]u8
-					digest_mix(&aux, key_bytes(&t.slots[i].key, &db.slab))
-					digest_object(&db, t, i, &aux)
-					digest_xor(final, aux[:])
-				}
+		for &t in db.t[:persist_table_count(&db)] {
+			if persist_table_ok(&t) {
+				digest_table(&total, &db, &t)
 			}
 		}
 	}
+	final^ = total
 }
 
 @(private = "file")
@@ -1827,7 +1927,7 @@ persist_raw_digest_value :: proc(c: ^Conn, keys: [][]u8) {
 		db := c.db if c.db != nil else cur_db()
 		t, i := persist_raw_locate(db, key)
 		if i >= 0 {
-			digest_value(persist_slot_value(db, &t.slots[i].key, &t.slots[i].val), &d)
+			d = digest_of_value(persist_slot_value(db, &t.slots[i].key, &t.slots[i].val))
 		}
 		reply_digest(c, &d)
 	}

@@ -103,11 +103,11 @@ transcript_replies :: proc(t: ^testing.T) {
 	expect_reply(t, cmd("FLUSHALL"), "+OK\r\n", "flushall")
 	expect_reply(t, cmd("DEBUG", "DIGEST"), "+0000000000000000000000000000000000000000\r\n", "digest empty")
 	expect_reply(t, cmd("SET", "d", "hello"), "+OK\r\n", "set d")
-	expect_reply(t, cmd("DEBUG", "DIGEST"), "+955a851f78324ba95d6dbdea9ad1fa7b2b6091ff\r\n", "reference digest")
-	expect_reply(t, cmd("DEBUG", "DIGEST-VALUE", "d"), "*1\r\n+36b23a1456b2dce2c3ed252c456761301dba8060\r\n", "reference value digest")
-	expect_reply(t, cmd("DEBUG", "DIGEST-VALUE", "d", "nokey"), "*2\r\n+36b23a1456b2dce2c3ed252c456761301dba8060\r\n+0000000000000000000000000000000000000000\r\n", "missing key digest")
+	expect_reply(t, cmd("DEBUG", "DIGEST"), "+8100ef9eb5f4b99d168771e488280827fd561b2b\r\n", "string dataset digest")
+	expect_reply(t, cmd("DEBUG", "DIGEST-VALUE", "d"), "*1\r\n+a7c115232a1b69bbfc1db9ba0c174a5443318cf5\r\n", "string value digest")
+	expect_reply(t, cmd("DEBUG", "DIGEST-VALUE", "d", "nokey"), "*2\r\n+a7c115232a1b69bbfc1db9ba0c174a5443318cf5\r\n+0000000000000000000000000000000000000000\r\n", "missing key digest")
 	expect_reply(t, cmd("SET", "k1", "v"), "+OK\r\n", "set k1")
-	expect_reply(t, cmd("DEBUG", "DIGEST-VALUE", "k1"), "*1\r\n+d79ee9fe5d5ad902d7f6620efc3b07b75ddd742f\r\n", "reference k1 digest")
+	expect_reply(t, cmd("DEBUG", "DIGEST-VALUE", "k1"), "*1\r\n+a34649e05a376a4f682941f2c59b8dbf614593d5\r\n", "k1 value digest")
 	expect_reply(t, cmd("DEBUG", "SET-SKIP-CHECKSUM-VALIDATION", "1"), "+OK\r\n", "skip checksum")
 	testing.expect(t, j.pst.skip_checksum)
 	expect_reply(t, cmd("DEBUG", "SET-SKIP-CHECKSUM-VALIDATION", "0"), "+OK\r\n", "skip checksum off")
@@ -267,7 +267,7 @@ write_gate_and_retry :: proc(t: ^testing.T) {
 	j.pst.dirty = 5
 	j.persist_cron()
 	testing.expect_value(t, j.pst.child_pid, 0)
-	j.pst.lastbgsave_try = unix_ms() / 1000 - 10
+	j.pst.bgsave_attempt_at = unix_ms() / 1000 - 10
 	j.persist_cron()
 	testing.expect(t, j.pst.child_pid != 0)
 	testing.expect(t, wait_child())

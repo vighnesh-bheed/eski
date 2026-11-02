@@ -171,7 +171,7 @@ cmd_pfcount :: proc(c: ^Conn, argv: [][]u8) {
 
 cmd_pfmerge :: proc(c: ^Conn, argv: [][]u8) {
 	hll_regs = {}
-	use_dense := false
+	dense_wanted := false
 	for key in argv[1:] {
 		e, status := hll_lookup(key, false)
 		switch status {
@@ -183,7 +183,7 @@ cmd_pfmerge :: proc(c: ^Conn, argv: [][]u8) {
 		case .Ok:
 		}
 		if e.val[4] == hll.HLL_DENSE {
-			use_dense = true
+			dense_wanted = true
 		}
 		if hll.hll_merge_into(&hll_regs, e.val) != .None {
 			reply_error(c, hll.HLL_ERR_INVALIDOBJ)
@@ -194,7 +194,7 @@ cmd_pfmerge :: proc(c: ^Conn, argv: [][]u8) {
 	e, status := hll_lookup(dest, true)
 	exists := status == .Ok
 	scratch := hll_scratch_ready()
-	in_scratch, err := hll.pfmerge_apply(e.val if exists else nil, exists, &hll_regs, use_dense, scratch, hll_sparse_max_bytes)
+	in_scratch, err := hll.pfmerge_apply(e.val if exists else nil, exists, &hll_regs, dense_wanted, scratch, hll_sparse_max_bytes)
 	if err != .None {
 		hll_scratch_trim()
 		reply_error(c, hll.hll_error_message(err))

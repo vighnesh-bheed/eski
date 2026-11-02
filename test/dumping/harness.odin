@@ -61,7 +61,7 @@ fresh :: proc() -> ^eski.Conn {
 
 drop_migrate_cache :: proc() {
 	for cs in eski.migrate_cache {
-		cs.last_use = -(1 << 40)
+		cs.idle_since = -(1 << 40)
 	}
 	eski.migrate_cron()
 }

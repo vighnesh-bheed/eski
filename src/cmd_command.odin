@@ -1235,16 +1235,16 @@ keys_from_proc :: proc(p: Getkeys_Proc, argv: [][]u8, out: ^[dynamic]Key_Ref) {
 
 find_keys :: proc(s: ^Cmd_Spec, argv: [][]u8, out: ^[dynamic]Key_Ref) {
 	clear(out)
-	has_keyspec, has_varflags := false, false
+	any_key_spec, varying_flags := false, false
 	for &k in s.specs {
 		if .Not_Key not_in k.flags {
-			has_keyspec = true
+			any_key_spec = true
 		}
 		if .Variable_Flags in k.flags {
-			has_varflags = true
+			varying_flags = true
 		}
 	}
-	if has_keyspec && !has_varflags {
+	if any_key_spec && !varying_flags {
 		if keys_from_specs(s, argv, out) {
 			return
 		}
