@@ -13,87 +13,164 @@ id_str :: proc(id: st.ID) -> string {
 	return fmt.tprint(string(st.format_id(&buf, id)))
 }
 
-Id_Form :: enum u8 {
-	Sentinel,
-	Exact,
-	Xadd,
+Parse_Expect :: struct {
+	valid: bool,
+	id:    st.ID,
 }
 
-parse_in_form :: proc(s: []u8, form: Id_Form) -> (id: st.ID, given: bool, ok: bool) {
-	switch form {
-	case .Sentinel:
-		id, ok = st.parse_id_or_sentinel(s, 0)
-		given = true
-	case .Exact:
-		id, ok = st.parse_exact_id(s)
-		given = true
-	case .Xadd:
-		mode: st.Xadd_Id_Mode
-		id, mode, ok = st.parse_xadd_id(s)
-		given = mode != .Generated_Seq
+Id_Vector :: struct {
+	text:     string,
+	xadd:     Parse_Expect,
+	auto_seq: bool,
+	start:    Parse_Expect,
+	end:      Parse_Expect,
+	strict:   Parse_Expect,
+}
+
+TOP :: max(u64)
+
+id_ok :: proc(ms, seq: u64) -> Parse_Expect {
+	return {true, {ms, seq}}
+}
+
+ID_BAD :: Parse_Expect{}
+
+plain_id_vector :: proc(text: string, ms, seq: u64) -> Id_Vector {
+	return {text, id_ok(ms, seq), false, id_ok(ms, seq), id_ok(ms, seq), id_ok(ms, seq)}
+}
+
+partial_id_vector :: proc(text: string, ms: u64) -> Id_Vector {
+	return {text, id_ok(ms, 0), false, id_ok(ms, 0), id_ok(ms, TOP), id_ok(ms, 0)}
+}
+
+rejected_id_vector :: proc(text: string) -> Id_Vector {
+	return {text, ID_BAD, false, ID_BAD, ID_BAD, ID_BAD}
+}
+
+check_id_parse :: proc(what: string, text: string, want: Parse_Expect, got: st.ID, ok: bool) {
+	if !want.valid {
+		check(!ok, fmt.tprintf("%s rejects %q", what, text))
+		return
 	}
-	return
+	check(ok && got == want.id, fmt.tprintf("%s reads %q as %s, got ok=%v %s", what, text, id_str(want.id), ok, id_str(got)))
 }
 
 unit_ids :: proc() {
-	Case :: struct {
-		s:     string,
-		form:  Id_Form,
-		ok:    bool,
-		want:  st.ID,
-		given: bool,
+	padded_nul := make([]u8, 127)
+	padded_nul[0] = '5'
+	long_nul := make([]u8, 128)
+	long_nul[0] = '5'
+	zeros_127 := make([]u8, 127)
+	zeros_128 := make([]u8, 128)
+	for i in 0 ..< len(zeros_127) {
+		zeros_127[i] = '0'
 	}
-	MAX :: max(u64)
-	cases := [?]Case {
-		{"1-2", .Exact, true, {1, 2}, true},
-		{"5", .Exact, true, {5, 0}, true},
-		{"-", .Sentinel, true, {0, 0}, true},
-		{"+", .Sentinel, true, {MAX, MAX}, true},
-		{"-", .Exact, false, {}, true},
-		{"+", .Exact, false, {}, true},
-		{"007", .Exact, true, {7, 0}, true},
-		{" 7", .Exact, true, {7, 0}, true},
-		{"+7", .Exact, true, {7, 0}, true},
-		{"7 ", .Exact, false, {}, true},
-		{"-0", .Exact, false, {}, true},
-		{"0--05", .Exact, true, {0, MAX - 4}, true},
-		{"1--5", .Exact, false, {}, true},
-		{"18446744073709551615-18446744073709551615", .Exact, true, {MAX, MAX}, true},
-		{"18446744073709551616", .Exact, false, {}, true},
-		{"1-*", .Xadd, true, {1, 0}, false},
-		{"1-*", .Exact, false, {}, true},
-		{"*", .Xadd, true, {0, 0}, true},
-		{"*", .Exact, false, {}, true},
-		{"", .Exact, false, {}, true},
-		{"1-", .Exact, false, {}, true},
-		{"0x10", .Exact, false, {}, true},
-		{"1.5", .Exact, false, {}, true},
-		{"5\x00junk", .Exact, true, {5, 0}, true},
-		{"5-1\x00-9", .Exact, true, {5, 1}, true},
+	for i in 0 ..< len(zeros_128) {
+		zeros_128[i] = '0'
 	}
-	for c in cases {
-		id, given, ok := parse_in_form(b(c.s), c.form)
-		check(ok == c.ok, fmt.tprintf("parse %q ok=%v", c.s, ok))
-		if ok && c.ok {
-			check(id == c.want, fmt.tprintf("parse %q gave %s", c.s, id_str(id)))
-			check(given == c.given, fmt.tprintf("parse %q seq_given=%v", c.s, given))
+	zeros_127[126] = '5'
+	zeros_128[127] = '5'
+	vectors := [?]Id_Vector {
+		plain_id_vector("1-2", 1, 2),
+		partial_id_vector("5", 5),
+		{"-", ID_BAD, false, id_ok(0, 0), id_ok(0, 0), ID_BAD},
+		{"+", ID_BAD, false, id_ok(TOP, TOP), id_ok(TOP, TOP), ID_BAD},
+		partial_id_vector("007", 7),
+		partial_id_vector(" 7", 7),
+		partial_id_vector("+7", 7),
+		rejected_id_vector("7 "),
+		rejected_id_vector("-0"),
+		plain_id_vector("0--05", 0, TOP - 4),
+		rejected_id_vector("1--5"),
+		plain_id_vector("1--0", 1, 0),
+		plain_id_vector("0-+5", 0, 5),
+		plain_id_vector("+0-+5", 0, 5),
+		plain_id_vector("18446744073709551615-18446744073709551615", TOP, TOP),
+		rejected_id_vector("18446744073709551616"),
+		rejected_id_vector("18446744073709551615-18446744073709551616"),
+		{"1-*", id_ok(1, 0), true, ID_BAD, ID_BAD, ID_BAD},
+		rejected_id_vector("*"),
+		rejected_id_vector(""),
+		rejected_id_vector("1-"),
+		rejected_id_vector("-1"),
+		rejected_id_vector("-5-5"),
+		rejected_id_vector("1-2-3"),
+		rejected_id_vector("0x10"),
+		rejected_id_vector("1.5"),
+		partial_id_vector("5\x00junk", 5),
+		plain_id_vector("5-1\x00-9", 5, 1),
+		plain_id_vector("\t3-4", 3, 4),
+		plain_id_vector("3- 4", 3, 4),
+		plain_id_vector("3-+4", 3, 4),
+		partial_id_vector("9223372036854775808", 9223372036854775808),
+		rejected_id_vector("-9223372036854775808"),
+		plain_id_vector("1-18446744073709551615", 1, TOP),
+		plain_id_vector("0-00", 0, 0),
+		partial_id_vector(string(padded_nul), 5),
+		rejected_id_vector(string(long_nul)),
+		partial_id_vector(string(zeros_127), 5),
+		rejected_id_vector(string(zeros_128)),
+	}
+	for v in vectors {
+		got, mode, ok := st.parse_xadd_id(b(v.text))
+		explicit := ok && mode != .Generated
+		check_id_parse("XADD", v.text, v.xadd, got, explicit)
+		if explicit && v.xadd.valid {
+			seq_given := mode == .Explicit
+			check(seq_given != v.auto_seq, fmt.tprintf("XADD %q sequence given=%v", v.text, seq_given))
+		}
+		got, ok = st.parse_id_or_sentinel(b(v.text), 0)
+		check_id_parse("XRANGE start", v.text, v.start, got, ok)
+		got, ok = st.parse_id_or_sentinel(b(v.text), TOP)
+		check_id_parse("XRANGE end", v.text, v.end, got, ok)
+		got, ok = st.parse_exact_id(b(v.text))
+		check_id_parse("XDEL", v.text, v.strict, got, ok)
+	}
+	_, star_mode, star_ok := st.parse_xadd_id(b("*"))
+	check(star_ok && star_mode == .Generated, "XADD reads * as a generated id")
+	Step :: struct {
+		from:    st.ID,
+		to:      st.ID,
+		forward: bool,
+		ok:      bool,
+	}
+	steps := [?]Step {
+		{{1, TOP}, {2, 0}, true, true},
+		{{0, 0}, {0, 1}, true, true},
+		{{18446744073709551615, 18446744073709551614}, {TOP, TOP}, true, true},
+		{{2, 0}, {1, TOP}, false, true},
+		{{TOP, TOP}, {TOP, TOP - 1}, false, true},
+		{{9, 1}, {9, 0}, false, true},
+		{{TOP, TOP}, {}, true, false},
+		{{0, 0}, {}, false, false},
+	}
+	for s in steps {
+		moved := s.from
+		ok := st.incr_id(&moved) if s.forward else st.decr_id(&moved)
+		direction := "next" if s.forward else "previous"
+		if s.ok {
+			check(ok && moved == s.to, fmt.tprintf("%s of %s is %s, got %s", direction, id_str(s.from), id_str(s.to), id_str(moved)))
+		} else {
+			check(!ok, fmt.tprintf("%s of %s does not exist", direction, id_str(s.from)))
 		}
 	}
-	long := make([]u8, 128)
-	for i in 0 ..< len(long) {
-		long[i] = '1'
+	formats := [?]struct {
+		id:   st.ID,
+		text: string,
+	} {
+		{{TOP, TOP}, "18446744073709551615-18446744073709551615"},
+		{{1, TOP}, "1-18446744073709551615"},
+		{{9223372036854775808, 0}, "9223372036854775808-0"},
+		{{0, 18446744073709551611}, "0-18446744073709551611"},
+		{{0, 0}, "0-0"},
 	}
-	_, ok := st.parse_exact_id(long)
-	check(!ok, "128 byte id is rejected")
-	id := st.ID{5, max(u64)}
-	check(st.incr_id(&id) && id == st.ID{6, 0}, "incr carries into ms")
-	id = st.ID_MAX
-	check(!st.incr_id(&id) && id == st.ID_MIN, "incr of the max id wraps and fails")
-	id = st.ID{6, 0}
-	check(st.decr_id(&id) && id == st.ID{5, max(u64)}, "decr borrows from ms")
-	id = st.ID_MIN
-	check(!st.decr_id(&id) && id == st.ID_MAX, "decr of the min id wraps and fails")
-	check(id_str(st.ID{1700000000000, 42}) == "1700000000000-42", "id formatting")
+	for f in formats {
+		check(id_str(f.id) == f.text, fmt.tprintf("format %s", f.text))
+	}
+	delete(padded_nul)
+	delete(long_nul)
+	delete(zeros_127)
+	delete(zeros_128)
 }
 
 unit_stream :: proc() {
@@ -161,7 +238,7 @@ unit_groups :: proc() {
 		st.append_item(s, fv, &use, true, 0)
 	}
 	before := s.cg_mem
-	cg := st.create_cg(s, b("g"), st.ID_MIN, st.SCG_INVALID_ENTRIES_READ)
+	cg := st.create_cg(s, b("g"), st.ID_MIN, st.ENTRIES_READ_UNKNOWN)
 	check(cg != nil, "create a group")
 	check(st.create_cg(s, b("g"), st.ID_MIN, 0) == nil, "duplicate group")
 	lag, ok := st.cg_lag(s, cg)

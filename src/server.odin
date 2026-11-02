@@ -413,14 +413,20 @@ reject_client :: #force_no_inline proc(fd: linux.Fd) {
 
 @(cold)
 set_keepalive :: #force_no_inline proc(fd: linux.Fd, interval: i64) {
-	one: i32 = 1
-	linux.setsockopt(fd, linux.SOL_SOCKET, linux.Socket_Option.KEEPALIVE, &one)
-	idle := i32(clamp(interval, 1, i64(max(i32))))
-	intvl := max(idle / 3, 1)
-	cnt: i32 = 3
-	linux.setsockopt(fd, linux.SOL_TCP, linux.Socket_TCP_Option.KEEPIDLE, &idle)
-	linux.setsockopt(fd, linux.SOL_TCP, linux.Socket_TCP_Option.KEEPINTVL, &intvl)
-	linux.setsockopt(fd, linux.SOL_TCP, linux.Socket_TCP_Option.KEEPCNT, &cnt)
+	enable: i32 = 1
+	linux.setsockopt(fd, linux.SOL_SOCKET, linux.Socket_Option.KEEPALIVE, &enable)
+	first_probe := i32(clamp(interval, 1, i64(max(i32))))
+	tuning := [?]struct {
+		option: linux.Socket_TCP_Option,
+		value:  i32,
+	} {
+		{.KEEPIDLE, first_probe},
+		{.KEEPINTVL, max(first_probe / 3, 1)},
+		{.KEEPCNT, 3},
+	}
+	for &t in tuning {
+		linux.setsockopt(fd, linux.SOL_TCP, t.option, &t.value)
+	}
 }
 
 PROTECTED_MODE_REPLY: string : "-DENIED Redis is running in protected mode because protected mode is enabled and no password is set for the default user. In this mode connections are only accepted from the loopback interface. If you want to connect from external computers to Redis you may adopt one of the following solutions: 1) Just disable protected mode sending the command 'CONFIG SET protected-mode no' from the loopback interface by connecting to Redis from the same host the server is running, however MAKE SURE Redis is not publicly accessible from internet if you do so. Use CONFIG REWRITE to make this change permanent. 2) Alternatively you can just disable the protected mode by editing the Redis configuration file, and setting the protected mode option to 'no', and then restarting the server. 3) If you started the server manually just for testing, restart it with the '--protected-mode no' option. 4) Set up an authentication password for the default user. NOTE: You only need to do one of the above things in order for the server to start accepting connections from the outside.\r\n"
@@ -630,23 +636,25 @@ conn_flush :: proc(c: ^Conn) -> bool {
 
 obuf_normal_limited: bool
 
+@(private = "file")
+obuf_soft_breach_lasting :: proc(used: u64, limit: Obuf_Limit, since: ^i64) -> bool {
+	if limit.soft == 0 || used < limit.soft {
+		since^ = 0
+		return false
+	}
+	now_s := srv.now_ms / 1000
+	if since^ == 0 {
+		since^ = now_s
+		return false
+	}
+	return now_s - since^ > limit.seconds
+}
+
 obuf_class_over :: proc(c: ^Conn, class: Obuf_Class, soft_since: ^i64) -> bool {
 	used := ps_obuf_usage(c)
-	lim := obuf_limits[class]
-	hard := lim.hard != 0 && used >= lim.hard
-	soft := lim.soft != 0 && used >= lim.soft
-	if soft {
-		now := srv.now_ms / 1000
-		if soft_since^ == 0 {
-			soft_since^ = now
-			soft = false
-		} else if now - soft_since^ <= lim.seconds {
-			soft = false
-		}
-	} else {
-		soft_since^ = 0
-	}
-	return soft || hard
+	limit := obuf_limits[class]
+	lasting := obuf_soft_breach_lasting(used, limit, soft_since)
+	return lasting || (limit.hard != 0 && used >= limit.hard)
 }
 
 @(cold)
@@ -818,20 +826,40 @@ clients_replybuf_cron :: proc() {
 	}
 }
 
+QUERYBUF_IDLE_SHRINK_MS :: 2000
+QUERYBUF_RESIZE_THRESHOLD :: 32 * 1024
+
+@(private = "file")
+querybuf_cron_skips :: proc(c: ^Conn) -> bool {
+	if c == nil || c.kind != .Redis {
+		return true
+	}
+	in_flight := c.compute != nil || c.keyspace != nil || c.keyspace_ready
+	return in_flight || c.blocked != .None || c.held
+}
+
+@(private = "file")
+querybuf_target_capacity :: proc(c: ^Conn) -> (capacity: int, shrink: bool) {
+	if srv.now_ms - c.atime_ms >= QUERYBUF_IDLE_SHRINK_MS {
+		return c.rlen, c.rcap > c.rlen
+	}
+	recent := max(c.rwindow_peak, c.need, c.rlen)
+	if c.rcap <= QUERYBUF_RESIZE_THRESHOLD || c.rcap / 2 <= recent {
+		return c.rcap, false
+	}
+	return max(RBUF_INIT, recent), true
+}
+
 clients_querybuf_cron :: proc() {
 	for c in srv.conns {
-		if c == nil || c.kind != .Redis || c.compute != nil || c.keyspace != nil || c.keyspace_ready || c.blocked != .None || c.held {
+		if querybuf_cron_skips(c) {
 			continue
 		}
-		idle := srv.now_ms - c.atime_ms
-		if idle >= 2000 {
-			if c.rcap > c.rlen {
-				conn_read_resize(c, c.rlen)
-			}
-		} else if c.rcap > 32768 && c.rcap / 2 > max(c.rwindow_peak, max(c.need, c.rlen)) {
-			conn_read_resize(c, max(RBUF_INIT, max(c.rwindow_peak, max(c.need, c.rlen))))
-		}
+		capacity, shrink := querybuf_target_capacity(c)
 		c.rwindow_peak = c.rlen
+		if shrink {
+			conn_read_resize(c, capacity)
+		}
 	}
 }
 

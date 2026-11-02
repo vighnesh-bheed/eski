@@ -240,7 +240,7 @@ deep_loads_accept_what_the_reader_accepts :: proc(t: ^testing.T) {
 groups_survive_codec :: proc(t: ^testing.T) {
 	s := new_stream_from({{"XADD", "s", "1-1", "a", "1"}, {"XADD", "s", "2-2", "a", "2"}, {"XADD", "s", "3-3", "b", "3"}})
 	defer st.destroy(s)
-	g1 := st.create_cg(s, bytes_of("g1"), st.ID{0, 0}, st.SCG_INVALID_ENTRIES_READ)
+	g1 := st.create_cg(s, bytes_of("g1"), st.ID{0, 0}, st.ENTRIES_READ_UNKNOWN)
 	g2 := st.create_cg(s, bytes_of("12345"), st.ID{2, 2}, 2)
 	alice := st.create_consumer(s, g1, bytes_of("alice"), 1000)
 	bob := st.create_consumer(s, g1, bytes_of("-7"), 1100)

@@ -36,7 +36,7 @@ reply_nogroup :: proc(c: ^Conn, form: st.Nogroup_Form, key: []u8, group: []u8) {
 
 @(private = "file")
 reply_entries_read :: proc(c: ^Conn, cg: ^st.CG) {
-	if cg.entries_read == st.SCG_INVALID_ENTRIES_READ {
+	if cg.entries_read == st.ENTRIES_READ_UNKNOWN {
 		reply_null(c)
 	} else {
 		reply_int(c, cg.entries_read)
@@ -420,7 +420,7 @@ cmd_xgroup :: proc(c: ^Conn, argv: [][]u8) {
 	}
 	pst.dirty_explicit = true
 	mkstream := false
-	entries_read: i64 = st.SCG_INVALID_ENTRIES_READ
+	entries_read: i64 = st.ENTRIES_READ_UNKNOWN
 	if op == .Create || op == .Setid {
 		if op == .Create && len(argv) > st.XGROUP_CREATE_MAX_ARGS {
 			reply_subcommand_syntax_error(c, argv[1], "XGROUP")

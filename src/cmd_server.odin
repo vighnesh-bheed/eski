@@ -2,7 +2,6 @@ package main
 
 import "core:strconv"
 import "core:sys/linux"
-import "core:sys/posix"
 import "rdb"
 
 read_rss :: proc() -> i64 {
@@ -31,25 +30,56 @@ read_rss :: proc() -> i64 {
 
 cron_paused: bool
 
-debug_sleep :: proc(arg: []u8) {
-	secs: f64 = 0
-	for n := len(arg); n > 0; n -= 1 {
-		if v, ok := strconv.parse_f64(string(arg[:n])); ok {
-			secs = v
-			break
+@(private = "file")
+digit_run :: proc "contextless" (s: []u8) -> int {
+	n := 0
+	for n < len(s) && s[n] >= '0' && s[n] <= '9' {
+		n += 1
+	}
+	return n
+}
+
+@(private = "file")
+decimal_float_token :: proc "contextless" (arg: []u8) -> []u8 {
+	at := 0
+	for at < len(arg) && (arg[at] == ' ' || (arg[at] >= '\t' && arg[at] <= '\r')) {
+		at += 1
+	}
+	start := at
+	if at < len(arg) && (arg[at] == '+' || arg[at] == '-') {
+		at += 1
+	}
+	whole := digit_run(arg[at:])
+	at += whole
+	fraction := 0
+	if at < len(arg) && arg[at] == '.' {
+		fraction = digit_run(arg[at + 1:])
+		if whole + fraction > 0 {
+			at += 1 + fraction
 		}
 	}
-	scaled := secs * 1_000_000
-	if !(scaled >= 1 && scaled < 9.2e18) {
+	if whole + fraction == 0 {
+		return nil
+	}
+	if at < len(arg) && (arg[at] == 'e' || arg[at] == 'E') {
+		mark := at + 1
+		if mark < len(arg) && (arg[mark] == '+' || arg[mark] == '-') {
+			mark += 1
+		}
+		if exponent := digit_run(arg[mark:]); exponent > 0 {
+			at = mark + exponent
+		}
+	}
+	return arg[start:at]
+}
+
+debug_sleep :: proc(arg: []u8) {
+	seconds, _ := strconv.parse_f64(string(decimal_float_token(arg)))
+	micros := seconds * 1_000_000
+	if micros < 1 || !(micros < 9.2e18) {
 		return
 	}
-	us := i64(scaled)
-	ts := posix.timespec {
-		tv_sec  = auto_cast us / 1_000_000,
-		tv_nsec = auto_cast (us % 1_000_000) * 1000,
-	}
-	for posix.nanosleep(&ts, &ts) != .OK && posix.errno() == .EINTR {
-	}
+	sleep_microseconds(i64(micros))
 	update_clock()
 }
 

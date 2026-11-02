@@ -1,5 +1,7 @@
 package main
 
+import "base:intrinsics"
+
 @(private = "file")
 ERR_WRONGTYPE_GENERIC :: "WRONGTYPE Operation against a key holding the wrong kind of value"
 
@@ -49,23 +51,6 @@ Expire_Unit :: enum u8 {
 	Ms,
 	Unix_Sec,
 	Unix_Ms,
-}
-
-expire_to_abs_ms :: proc(v: i64, unit: Expire_Unit) -> (at: i64, ok: bool) {
-	ms := v
-	if unit == .Sec || unit == .Unix_Sec {
-		if v > I64_MAX / 1000 || v < I64_MIN / 1000 {
-			return 0, false
-		}
-		ms = v * 1000
-	}
-	if unit == .Sec || unit == .Ms {
-		if ms > I64_MAX - srv.now_ms {
-			return 0, false
-		}
-		ms += srv.now_ms
-	}
-	return ms, true
 }
 
 cmd_del :: proc(c: ^Conn, argv: [][]u8) {
@@ -119,96 +104,139 @@ cmd_type :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 @(private = "file")
-expire_parse_flags :: proc(c: ^Conn, argv: [][]u8) -> (nx, xx, gt, lt: bool, ok: bool) {
-	for i in 3 ..< len(argv) {
-		a := argv[i]
-		switch {
-		case eq_nocase(a, "nx"):
-			nx = true
-		case eq_nocase(a, "xx"):
-			xx = true
-		case eq_nocase(a, "gt"):
-			gt = true
-		case eq_nocase(a, "lt"):
-			lt = true
-		case:
-			generic_reply_error_arg(c, "ERR Unsupported option ", a)
-			return
+Expire_Condition :: enum u8 {
+	Nx,
+	Xx,
+	Gt,
+	Lt,
+}
+
+@(private = "file")
+Expire_Conditions :: bit_set[Expire_Condition;u8]
+
+@(private = "file")
+expire_condition_named :: proc(word: []u8) -> (cond: Expire_Condition, known: bool) {
+	spellings := [Expire_Condition]string {
+		.Nx = "nx",
+		.Xx = "xx",
+		.Gt = "gt",
+		.Lt = "lt",
+	}
+	for spelling, candidate in spellings {
+		if eq_nocase(word, spelling) {
+			return candidate, true
 		}
 	}
-	if nx && (xx || gt || lt) {
+	return
+}
+
+@(private = "file")
+expire_parse_flags :: proc(c: ^Conn, options: [][]u8) -> (conds: Expire_Conditions, ok: bool) {
+	for word in options {
+		cond, known := expire_condition_named(word)
+		if !known {
+			generic_reply_error_arg(c, "ERR Unsupported option ", word)
+			return
+		}
+		conds += {cond}
+	}
+	if .Nx in conds && conds != {.Nx} {
 		reply_error(c, "ERR NX and XX, GT or LT options at the same time are not compatible")
 		return
 	}
-	if gt && lt {
+	if .Gt in conds && .Lt in conds {
 		reply_error(c, "ERR GT and LT options at the same time are not compatible")
 		return
 	}
-	ok = true
-	return
+	return conds, true
+}
+
+@(private = "file")
+expire_conditions_met :: proc(conds: Expire_Conditions, current: i64, proposed: i64) -> bool {
+	persistent := current == 0
+	switch {
+	case .Nx in conds && !persistent:
+		return false
+	case .Xx in conds && persistent:
+		return false
+	case .Gt in conds && (persistent || proposed <= current):
+		return false
+	case .Lt in conds && !persistent && proposed >= current:
+		return false
+	}
+	return true
+}
+
+@(private = "file")
+Expire_Deadline_Error :: enum u8 {
+	None,
+	Not_Integer,
+	Out_Of_Range,
+}
+
+@(private = "file")
+expire_deadline :: proc(arg: []u8, unit: Expire_Unit) -> (at: i64, err: Expire_Deadline_Error) {
+	amount, numeric := parse_i64(arg)
+	if !numeric {
+		return 0, .Not_Integer
+	}
+	in_seconds := unit == .Sec || unit == .Unix_Sec
+	relative := unit == .Sec || unit == .Ms
+	scaled, scale_overflow := intrinsics.overflow_mul(amount, i64(1000) if in_seconds else 1)
+	if scale_overflow {
+		return 0, .Out_Of_Range
+	}
+	shifted, shift_overflow := intrinsics.overflow_add(scaled, srv.now_ms if relative else 0)
+	if shift_overflow {
+		return 0, .Out_Of_Range
+	}
+	return shifted, .None
+}
+
+@(private = "file")
+expire_install :: proc(c: ^Conn, e: ^Entry, key: []u8, at: i64) {
+	pst.dirty += 1
+	entry_set_expire(e, at)
+	reply_int(c, 1)
+	signal_key(key)
+	notify(.Generic, "expire", key)
+}
+
+@(private = "file")
+expire_delete_elapsed :: proc(c: ^Conn, key: []u8) {
+	pst.dirty += 1
+	db_remove(key)
+	signal_key(key)
+	notify(.Generic, "del", key)
+	reply_int(c, 1)
 }
 
 expire_generic :: proc(c: ^Conn, argv: [][]u8, unit: Expire_Unit, name: string) {
 	pst.dirty_explicit = true
-	nx, xx, gt, lt, flags_ok := expire_parse_flags(c, argv)
-	if !flags_ok {
+	key := argv[1]
+	conds, conds_ok := expire_parse_flags(c, argv[3:])
+	if !conds_ok {
 		return
 	}
-	when_ms, ok := parse_i64(argv[2])
-	if !ok {
+	at, problem := expire_deadline(argv[2], unit)
+	switch problem {
+	case .Not_Integer:
 		reply_error(c, ERR_NOT_INT)
 		return
-	}
-	if unit == .Sec || unit == .Unix_Sec {
-		if when_ms > I64_MAX / 1000 || when_ms < I64_MIN / 1000 {
-			reply_invalid_expire(c, name)
-			return
-		}
-		when_ms *= 1000
-	}
-	base: i64 = 0
-	if unit == .Sec || unit == .Ms {
-		base = srv.now_ms
-	}
-	if when_ms > I64_MAX - base {
+	case .Out_Of_Range:
 		reply_invalid_expire(c, name)
 		return
+	case .None:
 	}
-	when_ms += base
-	e := db_find(argv[1])
-	if e == nil {
+	e := db_find(key)
+	switch {
+	case e == nil || !expire_conditions_met(conds, e.expire_at, at):
 		reply_int(c, 0)
-		return
+	case at > expire_now():
+		expire_install(c, e, key, at)
+	case:
+		expire_delete_elapsed(c, key)
 	}
-	current := e.expire_at if e.expire_at != 0 else -1
-	if nx && current != -1 {
-		reply_int(c, 0)
-		return
-	}
-	if xx && current == -1 {
-		reply_int(c, 0)
-		return
-	}
-	if gt && (when_ms <= current || current == -1) {
-		reply_int(c, 0)
-		return
-	}
-	if lt && current != -1 && when_ms >= current {
-		reply_int(c, 0)
-		return
-	}
-	pst.dirty += 1
-	if when_ms <= expire_now() {
-		db_remove(argv[1])
-		signal_key(argv[1])
-		notify(.Generic, "del", argv[1])
-		reply_int(c, 1)
-		return
-	}
-	entry_set_expire(e, when_ms)
-	reply_int(c, 1)
-	signal_key(argv[1])
-	notify(.Generic, "expire", argv[1])
 }
 
 cmd_expire :: proc(c: ^Conn, argv: [][]u8) {
@@ -289,44 +317,53 @@ cmd_touch :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 @(private = "file")
+rename_relocate :: proc(c: ^Conn, src, dst: []u8, overwrite: bool) {
+	if overwrite {
+		db_remove(dst)
+	}
+	db_rename(src, dst)
+	pst.dirty += 1
+	hash_rename(dst)
+	block_note_removed()
+	moved := db_find_notouch(dst)
+	if moved != nil {
+		entry_access_init(moved)
+		block_signal_key(c.db, dst, entry_type(moved))
+	}
+}
+
+@(private = "file")
+rename_announce :: proc(src, dst: []u8) {
+	signal_key(src)
+	signal_key(dst)
+	notify(.Generic, "rename_from", src)
+	notify(.Generic, "rename_to", dst)
+}
+
+@(private = "file")
 rename_generic :: proc(c: ^Conn, argv: [][]u8, nx: bool) {
 	pst.dirty_explicit = true
-	same := bytes_eq(argv[1], argv[2])
-	if db_find(argv[1]) == nil {
+	src, dst := argv[1], argv[2]
+	if db_find(src) == nil {
 		reply_error(c, ERR_NO_KEY)
 		return
 	}
-	if same {
-		if nx {
-			reply_int(c, 0)
-		} else {
-			reply_ok(c)
+	moved := false
+	if !bytes_eq(src, dst) {
+		occupied := db_find(dst) != nil
+		if !(nx && occupied) {
+			rename_relocate(c, src, dst, occupied)
+			rename_announce(src, dst)
+			moved = true
 		}
-		return
 	}
-	if db_find(argv[2]) != nil {
-		if nx {
-			reply_int(c, 0)
-			return
-		}
-		db_remove(argv[2])
-	}
-	db_rename(argv[1], argv[2])
-	pst.dirty += 1
-	hash_rename(argv[2])
-	block_note_removed()
-	if e := db_find_notouch(argv[2]); e != nil {
-		entry_access_init(e)
-		block_signal_key(c.db, argv[2], entry_type(e))
-	}
-	signal_key(argv[1])
-	signal_key(argv[2])
-	notify(.Generic, "rename_from", argv[1])
-	notify(.Generic, "rename_to", argv[2])
-	if nx {
-		reply_int(c, 1)
-	} else {
+	switch {
+	case !nx:
 		reply_ok(c)
+	case moved:
+		reply_int(c, 1)
+	case:
+		reply_int(c, 0)
 	}
 }
 
@@ -432,45 +469,53 @@ cmd_keys :: proc(c: ^Conn, argv: [][]u8) {
 	}
 }
 
-scan_parse_cursor :: proc(arg: []u8) -> (cursor: u64, ok: bool) #no_bounds_check {
-	s := generic_cstr(arg)
-	if v, is_ll := parse_i64(s); is_ll {
-		if v < 0 {
-			return 0, false
-		}
-		return u64(v), true
-	}
-	n := len(s)
-	if n == 0 {
+@(private = "file")
+c_space :: #force_inline proc "contextless" (b: u8) -> bool {
+	return b == ' ' || (b >= '\t' && b <= '\r')
+}
+
+@(private = "file")
+decimal_magnitude :: proc "contextless" (digits: []u8) -> (value: u64, ok: bool) {
+	if len(digits) == 0 {
 		return 0, false
 	}
-	i := 0
-	for i < n && (s[i] == ' ' || (s[i] >= '\t' && s[i] <= '\r')) {
-		i += 1
-	}
-	neg := false
-	if i < n && (s[i] == '+' || s[i] == '-') {
-		neg = s[i] == '-'
-		i += 1
-	}
-	digits := 0
-	v: u64 = 0
-	for i < n && s[i] >= '0' && s[i] <= '9' {
-		d := u64(s[i] - '0')
-		if v > (max(u64) - d) / 10 {
+	for d in digits {
+		if d < '0' || d > '9' {
 			return 0, false
 		}
-		v = v * 10 + d
-		digits += 1
-		i += 1
+		times_ten, wide := intrinsics.overflow_mul(value, 10)
+		next, carry := intrinsics.overflow_add(times_ten, u64(d - '0'))
+		if wide || carry {
+			return 0, false
+		}
+		value = next
 	}
-	if digits == 0 || i != n {
+	return value, true
+}
+
+scan_parse_cursor :: proc(arg: []u8) -> (cursor: u64, ok: bool) {
+	text := generic_cstr(arg)
+	lead := 0
+	for lead < len(text) && c_space(text[lead]) {
+		lead += 1
+	}
+	body := text[lead:]
+	negative := false
+	if len(body) > 0 && (body[0] == '-' || body[0] == '+') {
+		negative = body[0] == '-'
+		body = body[1:]
+	}
+	magnitude, digits_ok := decimal_magnitude(body)
+	if !digits_ok {
 		return 0, false
 	}
-	if neg {
-		v = 0 - v
+	if !negative {
+		return magnitude, true
 	}
-	return v, true
+	if lead == 0 && body[0] != '0' && magnitude <= 1 << 63 {
+		return 0, false
+	}
+	return 0 - magnitude, true
 }
 
 obj_type_by_name :: proc(name: []u8) -> (t: Obj_Type, ok: bool) {
@@ -483,69 +528,88 @@ obj_type_by_name :: proc(name: []u8) -> (t: Obj_Type, ok: bool) {
 	return .String, false
 }
 
-cmd_scan :: proc(c: ^Conn, argv: [][]u8) #no_bounds_check {
-	cursor, cursor_ok := scan_parse_cursor(argv[1])
-	if !cursor_ok {
+@(private = "file")
+Scan_Request :: struct {
+	count:       i64,
+	pattern:     []u8,
+	use_pattern: bool,
+	typed:       bool,
+	type_known:  bool,
+	want:        Obj_Type,
+}
+
+@(private = "file")
+scan_read_options :: proc(c: ^Conn, options: [][]u8, req: ^Scan_Request) -> bool {
+	req.count = 10
+	rest := options
+	for len(rest) > 0 {
+		word := rest[0]
+		paired := len(rest) >= 2
+		switch {
+		case paired && eq_nocase(word, "count"):
+			n, numeric := parse_i64(rest[1])
+			if !numeric {
+				reply_error(c, ERR_NOT_INT)
+				return false
+			}
+			if n <= 0 {
+				reply_error(c, ERR_SYNTAX)
+				return false
+			}
+			req.count = n
+		case paired && eq_nocase(word, "match"):
+			req.pattern = rest[1]
+			req.use_pattern = !bytes_eq(req.pattern, transmute([]u8)string("*"))
+		case paired && eq_nocase(word, "type"):
+			req.typed = true
+			req.want, req.type_known = obj_type_by_name(rest[1])
+		case eq_nocase(word, "novalues"):
+			reply_error(c, "ERR NOVALUES option can only be used in HSCAN")
+			return false
+		case:
+			reply_error(c, ERR_SYNTAX)
+			return false
+		}
+		rest = rest[2:]
+	}
+	return true
+}
+
+@(private = "file")
+scan_filter_by_type :: proc(want: Obj_Type, known: bool) {
+	survivors := 0
+	for name in key_scratch {
+		found := db_find_read_notouch(transmute([]u8)name)
+		if found == nil || !known || entry_type(found) != want {
+			continue
+		}
+		key_scratch[survivors] = name
+		survivors += 1
+	}
+	resize(&key_scratch, survivors)
+}
+
+cmd_scan :: proc(c: ^Conn, argv: [][]u8) {
+	cursor, valid := scan_parse_cursor(argv[1])
+	if !valid {
 		reply_error(c, "ERR invalid cursor")
 		return
 	}
-	pat: []u8
-	use_pattern := false
-	count: i64 = 10
-	has_type := false
-	want: Obj_Type
-	known := false
-	i := 2
-	for i < len(argv) {
-		j := len(argv) - i
-		a := argv[i]
-		if eq_nocase(a, "count") && j >= 2 {
-			v, ok := parse_i64(argv[i + 1])
-			if !ok {
-				reply_error(c, ERR_NOT_INT)
-				return
-			}
-			if v < 1 {
-				reply_error(c, ERR_SYNTAX)
-				return
-			}
-			count = v
-			i += 2
-		} else if eq_nocase(a, "match") && j >= 2 {
-			pat = argv[i + 1]
-			use_pattern = !(len(pat) == 1 && pat[0] == '*')
-			i += 2
-		} else if eq_nocase(a, "type") && j >= 2 {
-			has_type = true
-			want, known = obj_type_by_name(argv[i + 1])
-			i += 2
-		} else if eq_nocase(a, "novalues") {
-			reply_error(c, "ERR NOVALUES option can only be used in HSCAN")
-			return
-		} else {
-			reply_error(c, ERR_SYNTAX)
-			return
-		}
+	req: Scan_Request
+	if !scan_read_options(c, argv[2:], &req) {
+		return
 	}
-	next := db_scan(cursor, count, pat, use_pattern, true)
-	if has_type {
-		kept := 0
-		for k in key_scratch {
-			e := db_find_read_notouch(transmute([]u8)k)
-			if known && e != nil && entry_type(e) == want {
-				key_scratch[kept] = k
-				kept += 1
-			}
-		}
-		resize(&key_scratch, kept)
+	next := db_scan(cursor, req.count, req.pattern, req.use_pattern, true)
+	if req.typed {
+		scan_filter_by_type(req.want, req.type_known)
 	}
 	reply_array(c, 2)
-	reply_bulk_int(c, i64(next))
+	reply_bulk_int_u64(c, next)
 	reply_array(c, len(key_scratch))
-	for k in key_scratch {
-		reply_bulk_str(c, k)
+	for name in key_scratch {
+		reply_bulk_str(c, name)
 	}
-	db_scan_purge_expired(has_type)
+	db_scan_purge_expired(req.typed)
 }
 
 @(private = "file")
@@ -627,20 +691,8 @@ cmd_object :: proc(c: ^Conn, argv: [][]u8) {
 
 @(private = "file")
 wait_timeout_ok :: proc(c: ^Conn, arg: []u8) -> bool {
-	v, ok := parse_i64(arg)
-	if !ok {
-		reply_error(c, "ERR timeout is not an integer or out of range")
-		return false
-	}
-	if v < 0 {
-		reply_error(c, "ERR timeout is negative")
-		return false
-	}
-	if v > 0 && v > I64_MAX - srv.now_ms {
-		reply_error(c, "ERR timeout is out of range")
-		return false
-	}
-	return true
+	_, accepted := parse_timeout_deadline(c, arg)
+	return accepted
 }
 
 cmd_wait :: proc(c: ^Conn, argv: [][]u8) {
