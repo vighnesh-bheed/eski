@@ -153,7 +153,7 @@ mem_init :: proc() {
 }
 
 mem_aof_buffer :: #force_inline proc "contextless" () -> int {
-	return cap(aof.buf) if aof.state != .Off else 0
+	return cap(aof.buf) if aof.state != .Disabled else 0
 }
 
 mem_keyspace :: #force_inline proc "contextless" () -> int {

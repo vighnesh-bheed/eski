@@ -55,12 +55,12 @@ expire_now_tracks_loading :: proc(t: ^testing.T) {
 	j.aof.loading = true
 	testing.expect_value(t, j.expire_now(), 0)
 	j.aof.loading = false
-	j.aof.state = .Off
+	j.aof.state = .Disabled
 	j.aof.fd = -1
 	j.aof_update_feed()
 	testing.expect(t, !j.aof.feed)
-	j.aof.state = .Wait_Rewrite
+	j.aof.state = .Awaiting_Base
 	j.aof_update_feed()
 	testing.expect(t, !j.aof.feed)
-	j.aof.state = .Off
+	j.aof.state = .Disabled
 }

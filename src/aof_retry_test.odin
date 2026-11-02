@@ -13,7 +13,7 @@ aof_retry_refusal_is_reported_once_after_automatic_eligibility :: proc(t: ^testi
 	if err != .NONE { return }
 	defer linux.close(fd)
 	log_fd = fd
-	aof = Aof{state = .On, fd = -1, rewrite_start = -1, disable_auto_gc = true}
+	aof = Aof{state = .Enabled, fd = -1, rewrite_start = -1, disable_auto_gc = true}
 	pst.child_pid = 0
 	pst.progress = nil
 	pst.loading = false

@@ -305,7 +305,7 @@ aof_staging_wraps_multiple_writes :: proc(t: ^testing.T) {
 	testing.expect(t, open_err == .NONE)
 	saved_state := j.aof.state
 	j.aof.fd = fd
-	j.aof.state = .On
+	j.aof.state = .Enabled
 	j.aof.loading = false
 	j.aof.selected_db = -1
 	j.aof.in_cmd = false

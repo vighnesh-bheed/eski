@@ -6,7 +6,7 @@ import "core:testing"
 private_plain_set_publisher_keeps_immutable_command_and_passive_expiry_order :: proc(t: ^testing.T) {
 	saved_aof := aof
 	defer aof = saved_aof
-	aof = Aof{feed = true, state = .On, in_tx = true, selected_db = -1}
+	aof = Aof{feed = true, state = .Enabled, in_tx = true, selected_db = -1}
 	defer { delete(aof.stage); delete(aof.buf) }
 	db := Db{id = 3}
 	argv := [][]u8{transmute([]u8)string("set"), transmute([]u8)string("key"), transmute([]u8)string("value")}

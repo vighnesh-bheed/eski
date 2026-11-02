@@ -1281,7 +1281,7 @@ config_rewrite_users :: proc(rs: ^Rewrite_State) {
 		for u in acl_users {
 			b := rewrite_line_buf(rs)
 			sb_str(&b, "user ")
-			sb_bytes(&b, u.name)
+			sb_bytes(&b, u.username)
 			sb_byte(&b, ' ')
 			acl_describe_user(&b, u)
 			config_rewrite_line(rs, "user", string(b[:]), true)
@@ -2084,7 +2084,7 @@ config_percentiles_rewrite :: proc(rs: ^Rewrite_State, cf: ^Config) {
 }
 
 config_appendonly_value :: proc() -> bool {
-	return aof.state != .Off if aof.started else aof.wanted
+	return aof.state != .Disabled if aof.started else aof.wanted
 }
 
 config_appendonly_set :: proc(args: [][]u8) -> (bool, string) {
@@ -2117,11 +2117,11 @@ config_apply_appendonly :: proc() -> string {
 	if !aof.started {
 		return ""
 	}
-	if aof.wanted && aof.state == .Off {
+	if aof.wanted && aof.state == .Disabled {
 		if !aof_start() {
 			return "Unable to turn on AOF. Check server logs."
 		}
-	} else if !aof.wanted && aof.state != .Off {
+	} else if !aof.wanted && aof.state != .Disabled {
 		aof_stop()
 	}
 	return ""
