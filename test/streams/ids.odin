@@ -131,24 +131,24 @@ id_generation_rules :: proc(t: ^testing.T) {
 	s := st.create()
 	defer st.destroy(s)
 	fv := args_of("f", "v")
-	id, res := st.append_item(s, fv, nil, true, 1000)
+	id, res := st.append_entry(s, fv, .Generated, {}, 1000)
 	testing.expect(t, res == .Ok && id == st.ID{1000, 0})
-	id, res = st.append_item(s, fv, nil, true, 999)
+	id, res = st.append_entry(s, fv, .Generated, {}, 999)
 	testing.expect(t, res == .Ok && id == st.ID{1000, 1})
 	partial := st.ID{1000, 0}
-	id, res = st.append_item(s, fv, &partial, false, 0)
+	id, res = st.append_entry(s, fv, .Generated_Seq, partial, 0)
 	testing.expect(t, res == .Ok && id == st.ID{1000, 2})
 	partial = st.ID{999, 0}
-	_, res = st.append_item(s, fv, &partial, false, 0)
+	_, res = st.append_entry(s, fv, .Generated_Seq, partial, 0)
 	testing.expect(t, res == .Id_Not_Greater)
 	partial = st.ID{2000, 0}
-	id, res = st.append_item(s, fv, &partial, false, 0)
+	id, res = st.append_entry(s, fv, .Generated_Seq, partial, 0)
 	testing.expect(t, res == .Ok && id == st.ID{2000, 0})
 	explicit := st.ID{2000, 0}
-	_, res = st.append_item(s, fv, &explicit, true, 0)
+	_, res = st.append_entry(s, fv, .Explicit, explicit, 0)
 	testing.expect(t, res == .Id_Not_Greater)
 	explicit = st.ID{MAXU, MAXU}
-	id, res = st.append_item(s, fv, &explicit, true, 0)
+	id, res = st.append_entry(s, fv, .Explicit, explicit, 0)
 	testing.expect(t, res == .Ok && id == st.ID_MAX)
 	args: st.Xadd_Spec
 	_, err := st.xadd_apply(s, &args, fv, 0)
@@ -158,18 +158,18 @@ id_generation_rules :: proc(t: ^testing.T) {
 	_, err = st.xadd_apply(s, &args, fv, 0)
 	testing.expect(t, err == .Id_Exhausted)
 	testing.expect_value(t, st.length(s), 5)
-	testing.expect_value(t, s.entries_added, 5)
-	testing.expect(t, s.first_id == st.ID{1000, 0})
+	testing.expect_value(t, s.added, 5)
+	testing.expect(t, s.head == st.ID{1000, 0})
 	e := st.create()
 	defer st.destroy(e)
 	zero := st.ID{0, 0}
-	id, res = st.append_item(e, fv, &zero, false, 0)
+	id, res = st.append_entry(e, fv, .Generated_Seq, zero, 0)
 	testing.expect(t, res == .Ok && id == st.ID{0, 1})
 	seqmax := st.ID{3, MAXU}
-	id, res = st.append_item(e, fv, &seqmax, true, 0)
+	id, res = st.append_entry(e, fv, .Explicit, seqmax, 0)
 	testing.expect(t, res == .Ok && id == seqmax)
 	again := st.ID{3, 0}
-	_, res = st.append_item(e, fv, &again, false, 0)
+	_, res = st.append_entry(e, fv, .Generated_Seq, again, 0)
 	testing.expect(t, res == .Id_Not_Greater)
 }
 

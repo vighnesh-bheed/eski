@@ -2111,31 +2111,31 @@ aof_xrg_parse :: proc(argv: [][]u8) -> (x: Aof_Xrg, ok: bool) {
 }
 
 @(private = "file")
-aof_group_of :: proc(db: ^Db, key: []u8, group: []u8) -> (sm.Stream, ^sm.CG) {
+aof_group_of :: proc(db: ^Db, key: []u8, group: []u8) -> (sm.Stream, ^sm.Group) {
 	s := aof_stream_of(db, key)
 	if s == nil {
 		return nil, nil
 	}
-	return s, sm.lookup_cg(s, group)
+	return s, sm.find_group(s, group)
 }
 
 aof_consumer_exists :: proc(db: ^Db, key: []u8, group: []u8, consumer: []u8) -> bool {
 	_, cg := aof_group_of(db, key, group)
-	return cg != nil && sm.lookup_consumer(cg, consumer) != nil
+	return cg != nil && sm.find_member(cg, consumer) != nil
 }
 
-aof_nack_of :: proc(cg: ^sm.CG, id: sm.ID) -> ^sm.NACK {
-	if cg == nil || cg.pel == nil {
+aof_nack_of :: proc(cg: ^sm.Group, id: sm.ID) -> ^sm.Delivery {
+	if cg == nil || cg.pending == nil {
 		return nil
 	}
 	key: [16]u8
 	sm.encode_id(&key, id)
 	it: rx.Iterator
-	rx.start(&it, cg.pel)
+	rx.start(&it, cg.pending)
 	rx.seek(&it, ">=", key[:])
-	found: ^sm.NACK
+	found: ^sm.Delivery
 	if rx.next(&it) && bytes_eq(rx.key(&it), key[:]) {
-		found = (^sm.NACK)(it.data)
+		found = (^sm.Delivery)(it.data)
 	}
 	rx.stop(&it)
 	return found
@@ -2163,10 +2163,10 @@ aof_claim_snapshot :: proc(c: ^Conn, argv: [][]u8, with_ids: bool) {
 	_, cg := aof_group_of(db, argv[1], argv[2])
 	aof_snap.valid = true
 	aof_snap.group_found = cg != nil
-	aof_snap.existed = cg != nil && sm.lookup_consumer(cg, argv[3]) != nil
+	aof_snap.existed = cg != nil && sm.find_member(cg, argv[3]) != nil
 	if cg != nil {
-		aof_snap.last_id = cg.last_id
-		aof_snap.entries = cg.entries_read
+		aof_snap.last_id = cg.delivered
+		aof_snap.entries = cg.reads
 	}
 	clear(&aof_snap_pel)
 	if !with_ids {
@@ -2661,21 +2661,19 @@ aof_tr_blmove :: proc(c: ^Conn, argv: [][]u8, reply: []u8, plain: bool) {
 
 aof_trim_threshold :: proc(s: sm.Stream, minid: bool, dst: ^[sm.ID_TEXT_MAX]u8) -> []u8 {
 	if !minid {
-		n := format_i64(&dst[0], i64(s.length))
+		n := format_i64(&dst[0], i64(s.live))
 		return dst[:n]
 	}
-	if s.length > 0 {
-		si: sm.Iterator
-		sm.iterator_start(&si, s, nil, nil, false)
-		id: sm.ID
-		fields: i64
-		found := sm.iterator_get_id(&si, &id, &fields)
-		sm.iterator_stop(&si)
+	if s.live > 0 {
+		si: sm.Cursor
+		sm.cursor_open(&si, s, nil, nil, false)
+		id, _, found := sm.cursor_next(&si)
+		sm.cursor_close(&si)
 		if found {
 			return sm.format_id(dst, id)
 		}
 	}
-	next := s.last_id
+	next := s.top
 	sm.incr_id(&next)
 	return sm.format_id(dst, next)
 }
@@ -2771,7 +2769,7 @@ aof_tr_xadd :: proc(c: ^Conn, argv: [][]u8, reply: []u8) {
 		aof_write_argv(db.id, argv)
 		return
 	}
-	aof_emit_trimmed(db, argv, t, s, t.next, s.last_id)
+	aof_emit_trimmed(db, argv, t, s, t.next, s.top)
 }
 
 aof_tr_xtrim :: proc(c: ^Conn, argv: [][]u8, reply: []u8) {
@@ -2811,16 +2809,16 @@ aof_emit_xclaim :: proc(c: ^Conn, key: []u8, group: []u8, consumer: []u8, id: sm
 	aof_put_id(b, lastid)
 }
 
-aof_emit_setid :: proc(c: ^Conn, key: []u8, group: []u8, cg: ^sm.CG) {
+aof_emit_setid :: proc(c: ^Conn, key: []u8, group: []u8, cg: ^sm.Group) {
 	db := aof_db_of(c)
 	b := aof_sink(db.id, 7)
 	aof_put_str(b, "XGROUP")
 	aof_put_str(b, "SETID")
 	aof_put_arg(b, key)
 	aof_put_arg(b, group)
-	aof_put_id(b, cg.last_id)
+	aof_put_id(b, cg.delivered)
 	aof_put_str(b, "ENTRIESREAD")
-	aof_put_int(b, cg.entries_read)
+	aof_put_int(b, cg.reads)
 }
 
 aof_emit_createconsumer :: proc(c: ^Conn, key: []u8, group: []u8, consumer: []u8) {
@@ -2954,8 +2952,8 @@ aof_tr_xreadgroup :: proc(c: ^Conn, argv: [][]u8, reply: []u8) {
 						if nack == nil {
 							continue
 						}
-						last := cg.last_id if history else id
-						aof_emit_xclaim(c, key, x.group, x.consumer, id, nack.delivery_time, u64(nack.delivery_count), last)
+						last := cg.delivered if history else id
+						aof_emit_xclaim(c, key, x.group, x.consumer, id, nack.sent_ms, u64(nack.times), last)
 						claims += 1
 					}
 				}
@@ -2997,15 +2995,15 @@ aof_claim_common :: proc(c: ^Conn, argv: [][]u8, claimed: []sm.ID, deleted: []sm
 		if nack == nil {
 			continue
 		}
-		aof_emit_xclaim(c, key, group, consumer, id, nack.delivery_time, u64(nack.delivery_count), cg.last_id)
+		aof_emit_xclaim(c, key, group, consumer, id, nack.sent_ms, u64(nack.times), cg.delivered)
 		claims += 1
 	}
 	snap := aof_snap.valid && aof_snap_cmd != nil
 	if claims == 0 && snap {
-		if !aof_snap.existed && sm.lookup_consumer(cg, consumer) != nil {
+		if !aof_snap.existed && sm.find_member(cg, consumer) != nil {
 			aof_emit_createconsumer(c, key, group, consumer)
 		}
-		if aof_snap.group_found && sm.compare_id(cg.last_id, aof_snap.last_id) != 0 {
+		if aof_snap.group_found && sm.compare_id(cg.delivered, aof_snap.last_id) != 0 {
 			aof_emit_setid(c, key, group, cg)
 		}
 	}
@@ -3645,25 +3643,23 @@ aof_rewrite_hash :: proc(w: ^rdb.Writer, key: []u8, h: ht.Hash, now: u64) {
 }
 
 aof_rewrite_stream :: proc(w: ^rdb.Writer, key: []u8, s: sm.Stream) {
-	if s.length > 0 {
-		si: sm.Iterator
-		sm.iterator_start(&si, s, nil, nil, false)
-		id: sm.ID
-		numfields: i64
-		for sm.iterator_get_id(&si, &id, &numfields) {
+	if s.live > 0 {
+		si: sm.Cursor
+		sm.cursor_open(&si, s, nil, nil, false)
+		for id, numfields in sm.cursor_next(&si) {
 			aof_w_header(w, 3 + 2 * int(numfields))
 			aof_w_str(w, "XADD")
 			aof_w_arg(w, key)
 			aof_w_id(w, id)
 			for _ in 0 ..< numfields {
-				field, value := sm.iterator_get_field(&si)
+				field, value := sm.cursor_field(&si)
 				aof_w_arg(w, field)
 				aof_w_arg(w, value)
 			}
 		}
-		sm.iterator_stop(&si)
+		sm.cursor_close(&si)
 	} else {
-		first := s.last_id
+		first := s.top
 		if first.ms == 0 && first.seq == 0 {
 			first.seq = 1
 		}
@@ -3679,60 +3675,60 @@ aof_rewrite_stream :: proc(w: ^rdb.Writer, key: []u8, s: sm.Stream) {
 	aof_w_header(w, 7)
 	aof_w_str(w, "XSETID")
 	aof_w_arg(w, key)
-	aof_w_id(w, s.last_id)
+	aof_w_id(w, s.top)
 	aof_w_str(w, "ENTRIESADDED")
-	aof_w_int(w, i64(s.entries_added))
+	aof_w_int(w, i64(s.added))
 	aof_w_str(w, "MAXDELETEDID")
-	aof_w_id(w, s.max_deleted_entry_id)
-	if s.cgroups == nil {
+	aof_w_id(w, s.tomb)
+	if s.groups == nil {
 		return
 	}
 	gi: rx.Iterator
-	rx.start(&gi, s.cgroups)
+	rx.start(&gi, s.groups)
 	rx.seek(&gi, "^")
 	for rx.next(&gi) {
 		group := rx.key(&gi)
-		cg := (^sm.CG)(gi.data)
+		cg := (^sm.Group)(gi.data)
 		aof_w_header(w, 7)
 		aof_w_str(w, "XGROUP")
 		aof_w_str(w, "CREATE")
 		aof_w_arg(w, key)
 		aof_w_arg(w, group)
-		aof_w_id(w, cg.last_id)
+		aof_w_id(w, cg.delivered)
 		aof_w_str(w, "ENTRIESREAD")
-		aof_w_int(w, cg.entries_read)
-		if cg.pel != nil {
+		aof_w_int(w, cg.reads)
+		if cg.pending != nil {
 			pi: rx.Iterator
-			rx.start(&pi, cg.pel)
+			rx.start(&pi, cg.pending)
 			rx.seek(&pi, "^")
 			for rx.next(&pi) {
-				nack := (^sm.NACK)(pi.data)
-				if nack == nil || nack.consumer == nil {
+				nack := (^sm.Delivery)(pi.data)
+				if nack == nil || nack.owner == nil {
 					continue
 				}
 				aof_w_header(w, 12)
 				aof_w_str(w, "XCLAIM")
 				aof_w_arg(w, key)
 				aof_w_arg(w, group)
-				aof_w_arg(w, nack.consumer.name)
+				aof_w_arg(w, nack.owner.name)
 				aof_w_str(w, "0")
 				aof_w_id(w, sm.decode_id(rx.key(&pi)))
 				aof_w_str(w, "TIME")
-				aof_w_int(w, nack.delivery_time)
+				aof_w_int(w, nack.sent_ms)
 				aof_w_str(w, "RETRYCOUNT")
-				aof_w_int(w, i64(nack.delivery_count))
+				aof_w_int(w, i64(nack.times))
 				aof_w_str(w, "JUSTID")
 				aof_w_str(w, "FORCE")
 			}
 			rx.stop(&pi)
 		}
-		if cg.consumers != nil {
+		if cg.members != nil {
 			ci: rx.Iterator
-			rx.start(&ci, cg.consumers)
+			rx.start(&ci, cg.members)
 			rx.seek(&ci, "^")
 			for rx.next(&ci) {
-				consumer := (^sm.Consumer)(ci.data)
-				if consumer == nil || (consumer.pel != nil && consumer.pel.numele > 0) {
+				consumer := (^sm.Member)(ci.data)
+				if consumer == nil || (consumer.owned != nil && consumer.owned.numele > 0) {
 					continue
 				}
 				aof_w_header(w, 5)

@@ -170,7 +170,7 @@ xpending_xclaim_xautoclaim_parsing :: proc(t: ^testing.T) {
 	got := make([dynamic]st.ID, context.temp_allocator)
 	a, _, _ := st.parse_xclaim_args(argv_of("XCLAIM s g c -5 1-0 2-0 IDLE 5000 RETRYCOUNT 7 FORCE JUSTID LASTID 20-0"), T0, &got)
 	testing.expect(t, same_ids(got[:], ids({1, 0}, {2, 0})))
-	testing.expect(t, a.minidle == 0 && a.deliverytime == T0 - 5000 && a.retrycount == 7 && a.force && a.justid && a.last_id == id(20))
+	testing.expect(t, a.idle_floor == 0 && a.stamp == T0 - 5000 && a.tries == 7 && .Force in a.flags && .Ids_Only in a.flags && a.raise_to == id(20))
 	auto := []struct {
 		line: string,
 		err:  st.Error,
