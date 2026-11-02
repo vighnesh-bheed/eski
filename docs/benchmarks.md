@@ -105,3 +105,39 @@ The separate fill workload uses 10,000,000 generated keys of 64 bytes at pipelin
 | Redis | 10,000,001 | 166.46 | 163.44 | 166.06 | 919,163 | 1.479 | 3.535 |
 | Valkey | 10,000,001 | 138.65 | 134.93 | 138.11 | 877,642 | 2.495 | 4.927 |
 | Dragonfly | 10,000,001 | 106.79 | 101.70 | 106.46 | 716,687 | 1.215 | 2.335 |
+
+## Local relative measurement
+
+The recorded comparison above needs a dedicated machine and compares engines. A change to Eski itself is measured on the shared development machine with `bench/ab.py`, which reports the cost of a candidate build relative to its parent instead of absolute numbers. It reuses the pinned memtier image, the dataset of 100,000 keys of 64 B under one prefix and the server options of the test bed, and it complements the recorded comparison rather than replacing it.
+
+### Method
+
+Two lanes run at the same time on symmetric cores. Lane 1 places the server on CPU 1 and memtier on CPUs 10 and 11, lane 2 places the server on CPU 2 and memtier on CPUs 12 and 13, and the controller runs on CPU 14; each memtier instance uses two threads of 16 connections. Every round starts both servers fresh, preloads them, and for each workload runs a 5 second warmup and a 20 second measured run on both lanes together. Odd rounds put build A in lane 1 and even rounds swap the lanes.
+
+The primary metric is server CPU time per command: the task time of every server thread plus the irq and softirq time of the server CPU, divided by the commands processed in the measured window. Softirq time is included because loopback receive work triggered by the server lands there. A swap pair is an odd round and the following even round; its ratio is the geometric mean of the two B/A ratios, which cancels a constant difference between the lanes. A session reports the median and range of the clean swap-pair ratios per workload, with task time only, throughput, system calls and event-loop cycles per command as secondary figures. A workload with fewer than three clean pairs is insufficient and the session is repeated later instead of being topped up with extra rounds.
+
+The workloads are GET and SET of 64 B at pipeline 1 and 96,000 operations per second per lane, GET and SET at pipeline 16 and 640,000 operations per second, PING at pipeline 16 and 640,000 operations per second, GET at pipeline 1 and 32,000 operations per second, and unthrottled GET at pipeline 16. The fixed rates make both builds process the same offered load. The lanes share the last level cache and memory bandwidth, so ratios are slightly compressed toward 1, and throughput on this machine is limited by the load generator, so it is not claimed.
+
+### Noise rules
+
+A measured run is excluded when its lane delivers less than 98 percent of a fixed offered rate, when the server CPU carries more than 30 percent of foreign task time, when the machine runs on battery, or when the server core's own thermal throttle counter rises by more than 100 events per second of the window. Package throttle events are recorded but never exclude a run: under the performance governor the package counter of every CPU rises continuously, and swap-pair ratios stayed consistent through sustained core throttling of both lanes. A round is excluded when the two lanes differ by more than 5 points of server CPU foreign time or by more than 10 points of client CPU foreign time.
+
+Frequency is judged per swap pair, not per run. The B/A ratio of mean server core frequency is formed like the CPU ratio, which cancels the lane frequency difference, and the pair is excluded when that ratio differs from the median over the session's pairs for the workload by more than 20 percent. At a fixed rate the two cores settle on different clocks from round to round without changing the CPU ratio, and a cheaper candidate lets its own core clock down in both lanes; because the lanes swap every round, a frequency shift shared by every pair comes from the build and is not treated as noise. Every exclusion keeps its reasons in `summary.json` and the report.
+
+### Reference floor
+
+The floor comes from A/A session `aa-pcores-20261102-2` of one release build against itself (sha256 `9d5541264d25`) on 2026-11-02: Intel(R) Core(TM) Ultra 7 265H, kernel 7.2.10-200.fc44.x86_64, governor performance with energy preference performance, servers on CPUs 1 and 2, 8 rounds of 20 seconds after 5 seconds of warmup, with a 1-minute load of 1.74 to 7.78. The floor of a workload is the half-width around 1 of its clean swap-pair range, rounded up to half a percent. A candidate median inside the floor is no measurable change. The floor applies to sessions on the same cores under the same governor; a change of machine, kernel, governor or compiler needs a new A/A session.
+
+| Workload | Clean swap pairs | A/A swap-pair median [min, max] | Floor |
+| --- | ---: | ---: | ---: |
+| get64-p1-r3k | 4 | 0.998 [0.985, 1.005] | 1.5% |
+| set64-p1-r3k | 4 | 0.997 [0.975, 1.037] | 4.0% |
+| get64-p16-r20k | 4 | 0.986 [0.974, 1.008] | 3.0% |
+| set64-p16-r20k | 4 | 1.010 [0.990, 1.026] | 3.0% |
+| ping-p16-r20k | 4 | 1.000 [0.979, 1.029] | 3.0% |
+| get64-p1-r1k | 4 | 0.973 [0.934, 1.001] | 7.0% |
+| get64-p16-max | 4 | 1.004 [0.995, 1.007] | 1.0% |
+
+### Commands
+
+Build the parent and the candidate with `./build.sh release` from paths of identical length, because the compiler embeds source paths, and copy each binary out with its sha256. Check that the 1-minute load is low and that no build or test run is active, then run `python3 -I bench/ab.py --a <parent> --b <candidate> --label <label> --out <results> --workloads <list> --max-load 3`; the defaults are concurrent mode, eight rounds, the lanes above and ports 39400 and 39401. Report with `python3 -I bench/ab_report.py <results>/<label>`, which reads `bench/ab_floor.json` and states for every workload whether the median lies within, below or above the floor; `--recompute` applies the current rules to an older session. Record a new floor with an A/A session of one build against itself and `python3 -I bench/ab_report.py <results>/<label> --write-floor bench/ab_floor.json`. The unit tests run with `python3 -I -B bench/test_ab.py`.

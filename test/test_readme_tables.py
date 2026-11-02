@@ -149,6 +149,25 @@ class Inputs(FixtureInputs, unittest.TestCase):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'run.root'):
                 tables.render_outputs(commands, self.baseline, self.observed, broken, skeleton())
 
+    def test_local_measurement_section_renders_the_recorded_floor(self):
+        commands = {'ping': {'group': 'connection', 'summary': 'Pings.'}}
+        floor = dict(schema=tables.AB_FLOOR_SCHEMA, session='aa-test', date='2026-11-02', binary_sha256='c' * 64, cpu_model='Test CPU', kernel='7.0',
+                     governor='performance', epp='performance', cpus=dict(server='1', server_b='2'), rounds=8, seconds=20, warmup=5, load=[1.5, 2.5],
+                     workloads={'get64-p16-max': dict(clean_pairs=4, median=1.002, min=0.994, max=1.012, floor=0.015),
+                                'ping-p16-r20k': dict(clean_pairs=0, median=None, min=None, max=None, floor=None)})
+        page = tables.render_outputs(commands, self.baseline, self.observed, self.dataset, skeleton(), floor)['docs/benchmarks.md']
+        self.assertIn('## Local relative measurement', page)
+        self.assertIn('| get64-p16-max | 4 | 1.002 [0.994, 1.012] | 1.5% |', page)
+        self.assertIn('| ping-p16-r20k | 0 | insufficient | — |', page)
+        self.assertIn('A/A session `aa-test` of one release build against itself (sha256 `cccccccccccc`)', page)
+        self.assertIn('with a 1-minute load of 1.50 to 2.50', page)
+        missing = tables.render_outputs(commands, self.baseline, self.observed, self.dataset, skeleton())['docs/benchmarks.md']
+        self.assertIn('No reference floor is recorded.', missing)
+        for broken in (dict(floor, schema='other'), dict(floor, workloads={}), dict(floor, workloads={'x': dict(clean_pairs=-1)}),
+                       dict(floor, workloads={'x': dict(clean_pairs=1, floor=float('nan'))}), {k: v for k, v in floor.items() if k != 'cpus'}):
+            with self.subTest(broken=sorted(broken)), self.assertRaises(ValueError):
+                tables.render_outputs(commands, self.baseline, self.observed, self.dataset, skeleton(), broken)
+
     def test_default_run_is_the_latest_finished_recorded_run(self):
         self.assertEqual(tables.published_run(ROOT), (ROOT/'bench/testbed/runs/comparison-v1/dataset.json').resolve())
         with tempfile.TemporaryDirectory() as directory:
