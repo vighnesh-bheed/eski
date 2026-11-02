@@ -2,8 +2,6 @@ package bitmap
 
 PROTO_MAX_BULK_LEN :: i64(512 * 1024 * 1024)
 
-LONG_STR_SIZE :: 21
-
 Unit :: enum u8 {
 	Byte,
 	Bit,

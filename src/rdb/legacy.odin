@@ -406,57 +406,54 @@ dup_add :: proc "contextless" (d: ^Dup_Set, s: []u8) -> bool {
 }
 
 @(private)
-Lp_Dup_Ctx :: struct {
-	tuple_len:     int,
-	count:         int,
-	set:           Dup_Set,
-	last_expireat: i64,
+Pack_Audit :: struct {
+	width:      int,
+	visited:    int,
+	names:      Dup_Set,
+	floor:      i64,
+	open_ended: bool,
 }
 
 @(private)
-lp_dup_cb :: proc(p: [^]u8, head_count: u32, userdata: rawptr) -> bool {
-	ctx := (^Lp_Dup_Ctx)(userdata)
-	position := ctx.count % ctx.tuple_len
-	ctx.count += 1
-	if position == 0 {
-		buf: [lp.LP_INTBUF_SIZE]u8
-		return dup_add(&ctx.set, lp.lp_get_bytes(p, &buf))
+audit_deadline :: proc(audit: ^Pack_Audit, at: [^]u8) -> bool {
+	deadline: i64
+	if !lp.lp_get_integer_value(at, &deadline) || deadline < 0 || u64(deadline) > FIELD_DEADLINE_MAX {
+		return false
 	}
-	if ctx.tuple_len == 3 && position == 2 {
-		ttl: i64
-		if !lp.lp_get_integer_value(p, &ttl) {
-			return false
-		}
-		if ttl < 0 || u64(ttl) > FIELD_DEADLINE_MAX {
-			return false
-		}
-		if ttl == 0 {
-			ctx.last_expireat = -1
-			return true
-		}
-		if ctx.last_expireat < 0 || ttl < ctx.last_expireat {
-			return false
-		}
-		ctx.last_expireat = ttl
+	if deadline == 0 {
+		audit.open_ended = true
+		return true
 	}
+	if audit.open_ended || deadline < audit.floor {
+		return false
+	}
+	audit.floor = deadline
 	return true
 }
 
+@(private)
+audit_element :: proc(at: [^]u8, declared_count: u32, state: rawptr) -> bool {
+	audit := (^Pack_Audit)(state)
+	column := audit.visited % audit.width
+	audit.visited += 1
+	if column == 0 {
+		scratch: [lp.DECIMAL_BUFFER_BYTES]u8
+		return dup_add(&audit.names, lp.lp_get_bytes(at, &scratch))
+	}
+	return column != 2 || audit.width != 3 || audit_deadline(audit, at)
+}
+
 lp_validate_dups :: proc(blob: []u8, deep: bool, tuple_len: int) -> bool {
-	if len(blob) == 0 || tuple_len < 1 {
+	if tuple_len < 1 || len(blob) == 0 {
 		return false
 	}
+	pack, size := raw_data(blob), u64(len(blob))
 	if !deep {
-		return lp.lp_validate_integrity(raw_data(blob), u64(len(blob)), false, nil, nil)
+		return lp.lp_validate_integrity(pack, size, false, nil, nil)
 	}
-	ctx := Lp_Dup_Ctx {
-		tuple_len = tuple_len,
-	}
-	defer dup_destroy(&ctx.set)
-	if !lp.lp_validate_integrity(raw_data(blob), u64(len(blob)), true, lp_dup_cb, &ctx) {
-		return false
-	}
-	return ctx.count % tuple_len == 0
+	audit := Pack_Audit{width = tuple_len}
+	defer dup_destroy(&audit.names)
+	return lp.lp_validate_integrity(pack, size, true, audit_element, &audit) && audit.visited % tuple_len == 0
 }
 
 lp_copy :: proc "contextless" (blob: []u8) -> [^]u8 {
@@ -482,7 +479,7 @@ ziplist_to_listpack :: proc(blob: []u8, pairs: bool) -> ([^]u8, bool) {
 	if out == nil {
 		return nil, false
 	}
-	batch: [64]lp.Entry
+	batch: [64]lp.Element
 	pending := 0
 	index := 0
 	e: Zl_Entry

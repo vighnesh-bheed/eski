@@ -2,8 +2,8 @@ package listpack
 
 import "core:testing"
 
-test_pack :: proc(entries: []Entry) -> [^]u8 {
-	total := LP_HDR_SIZE + 1
+test_pack :: proc(entries: []Element) -> [^]u8 {
+	total := PACK_HEADER_BYTES + 1
 	for entry in entries {
 		plan, valid := plan_entry(entry)
 		if !valid || plan.encoded_bytes > max(int) - total {
@@ -17,7 +17,7 @@ test_pack :: proc(entries: []Entry) -> [^]u8 {
 	}
 	lp_set_total_bytes(lp, u64(total))
 	lp_set_num_elements(lp, u64(len(entries)))
-	cursor := LP_HDR_SIZE
+	cursor := PACK_HEADER_BYTES
 	for entry in entries {
 		plan, valid := plan_entry(entry)
 		if !valid || !write_entry(lp[cursor:cursor + plan.encoded_bytes], plan) {
@@ -26,13 +26,13 @@ test_pack :: proc(entries: []Entry) -> [^]u8 {
 		}
 		cursor += plan.encoded_bytes
 	}
-	lp[total - 1] = LP_EOF
+	lp[total - 1] = PACK_END
 	return lp
 }
 
 @(test)
 logical_traversal_seek_endpoints_and_extreme_indices :: proc(t: ^testing.T) {
-	entries := []Entry{
+	entries := []Element{
 		entry_from_bytes(nil),
 		entry_from_int(0),
 		entry_from_int(-1),
@@ -49,7 +49,7 @@ logical_traversal_seek_endpoints_and_extreme_indices :: proc(t: ^testing.T) {
 	}
 	positions: [7][^]u8
 	for unknown in 0..<2 {
-		lp_set_num_elements(lp, u64(len(entries)) if unknown == 0 else LP_HDR_NUMELE_UNKNOWN)
+		lp_set_num_elements(lp, u64(len(entries)) if unknown == 0 else COUNT_UNTRACKED)
 		cursor := lp_first(lp)
 		for index in 0..<len(entries) {
 			testing.expect(t, cursor != nil)
@@ -58,9 +58,9 @@ logical_traversal_seek_endpoints_and_extreme_indices :: proc(t: ^testing.T) {
 			}
 			positions[index] = cursor
 			actual := lp_get_entry(cursor)
-			testing.expect(t, (actual.sval == nil) == (entries[index].sval == nil))
-			buffer: [LP_INTBUF_SIZE]u8
-			expected_buffer: [LP_INTBUF_SIZE]u8
+			testing.expect(t, (actual.text == nil) == (entries[index].text == nil))
+			buffer: [DECIMAL_BUFFER_BYTES]u8
+			expected_buffer: [DECIMAL_BUFFER_BYTES]u8
 			testing.expect(t, string(lp_get_bytes(cursor, &buffer)) == string(entry_bytes(entries[index], &expected_buffer)))
 			cursor = lp_next(lp, cursor)
 		}
@@ -77,7 +77,7 @@ logical_traversal_seek_endpoints_and_extreme_indices :: proc(t: ^testing.T) {
 		}
 		testing.expect(t, lp_seek(lp, i64(len(entries))) == nil && lp_seek(lp, -i64(len(entries)) - 1) == nil)
 		testing.expect(t, lp_seek(lp, min(i64)) == nil && lp_seek(lp, max(i64)) == nil)
-		testing.expect(t, lp_get_num_elements(lp) == u32(len(entries)) if unknown == 0 else lp_get_num_elements(lp) == LP_HDR_NUMELE_UNKNOWN)
+		testing.expect(t, lp_get_num_elements(lp) == u32(len(entries)) if unknown == 0 else lp_get_num_elements(lp) == COUNT_UNTRACKED)
 	}
 	empty := lp_new(0)
 	defer lp_free(empty)
@@ -91,8 +91,8 @@ borrowed_getters_respect_nonminimal_stored_strings_and_integer_buffers :: proc(t
 	testing.expect(t, lp_validate_integrity(raw_data(wire[:]), u64(len(wire)), true, nil, nil))
 	p := lp_last(raw_data(wire[:]))
 	entry := lp_get_entry(p)
-	testing.expect(t, entry.sval == raw_data(wire[11:]) && entry.slen == 1)
-	buffer: [LP_INTBUF_SIZE]u8
+	testing.expect(t, entry.text == raw_data(wire[11:]) && entry.text_len == 1)
+	buffer: [DECIMAL_BUFFER_BYTES]u8
 	for index in 0..<len(buffer) {
 		buffer[index] = 238
 	}

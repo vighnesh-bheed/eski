@@ -16,11 +16,11 @@ item_from_lp :: proc "contextless" (p: [^]u8) -> Item {
 		return it
 	}
 	e := lp.lp_get_entry(p)
-	if e.sval == nil {
+	if e.text == nil {
 		it.is_int = true
-		it.ival = e.lval
+		it.ival = e.number
 	} else {
-		it.str = e.sval[:int(e.slen)]
+		it.str = e.text[:int(e.text_len)]
 	}
 	return it
 }
@@ -32,7 +32,7 @@ item_from_node :: proc "contextless" (n: ^Node) -> Item {
 	return Item{str = node_member(n), score = n.score}
 }
 
-item_bytes :: proc "contextless" (it: ^Item, buf: ^[lp.LP_INTBUF_SIZE]u8) -> []u8 {
+item_bytes :: proc "contextless" (it: ^Item, buf: ^[lp.DECIMAL_BUFFER_BYTES]u8) -> []u8 {
 	if it.is_int {
 		n := lp.ll2string(raw_data(buf[:]), it.ival)
 		return buf[:n]
@@ -42,18 +42,18 @@ item_bytes :: proc "contextless" (it: ^Item, buf: ^[lp.LP_INTBUF_SIZE]u8) -> []u
 
 zzl_score :: proc "contextless" (sptr: [^]u8) -> f64 {
 	e := lp.lp_get_entry(sptr)
-	if e.sval == nil {
-		return f64(e.lval)
+	if e.text == nil {
+		return f64(e.number)
 	}
-	return score_from_lp_string(e.sval[:int(e.slen)])
+	return score_from_lp_string(e.text[:int(e.text_len)])
 }
 
-zzl_member :: proc "contextless" (eptr: [^]u8, buf: ^[lp.LP_INTBUF_SIZE]u8) -> []u8 {
+zzl_member :: proc "contextless" (eptr: [^]u8, buf: ^[lp.DECIMAL_BUFFER_BYTES]u8) -> []u8 {
 	return lp.lp_get_bytes(eptr, buf)
 }
 
 zzl_compare :: proc "contextless" (eptr: [^]u8, s: []u8) -> int {
-	buf: [lp.LP_INTBUF_SIZE]u8
+	buf: [lp.DECIMAL_BUFFER_BYTES]u8
 	return member_cmp(zzl_member(eptr, &buf), s)
 }
 
@@ -133,12 +133,12 @@ zzl_last_in_range :: proc(zl: [^]u8, r: ^Range_Spec) -> [^]u8 {
 }
 
 zzl_lex_gte_min :: proc "contextless" (p: [^]u8, r: ^Lex_Spec) -> bool {
-	buf: [lp.LP_INTBUF_SIZE]u8
+	buf: [lp.DECIMAL_BUFFER_BYTES]u8
 	return lex_gte_min(zzl_member(p, &buf), r)
 }
 
 zzl_lex_lte_max :: proc "contextless" (p: [^]u8, r: ^Lex_Spec) -> bool {
-	buf: [lp.LP_INTBUF_SIZE]u8
+	buf: [lp.DECIMAL_BUFFER_BYTES]u8
 	return lex_lte_max(zzl_member(p, &buf), r)
 }
 
@@ -197,18 +197,18 @@ zzl_delete :: proc(zl: [^]u8, eptr: [^]u8) -> [^]u8 {
 
 zzl_insert_at :: proc(zl: [^]u8, eptr: [^]u8, member: []u8, score: f64) -> [^]u8 {
 	buf: [D2STRING_MAX]u8
-	value: lp.Entry
+	value: lp.Element
 	if integer, exact := double2ll(score); exact {
 		value = lp.entry_from_int(integer)
 	} else {
 		n := d2string(buf[:], score)
 		value = lp.entry_from_bytes(buf[:n])
 	}
-	entries := [2]lp.Entry{lp.entry_from_bytes(member), value}
+	entries := [2]lp.Element{lp.entry_from_bytes(member), value}
 	if eptr == nil {
 		return lp.lp_batch_append(zl, entries[:])
 	}
-	return lp.lp_batch_insert(zl, eptr, lp.LP_BEFORE, entries[:], nil)
+	return lp.lp_batch_insert(zl, eptr, lp.Placement.Before, entries[:], nil)
 }
 
 zzl_insert :: proc(zl: [^]u8, member: []u8, score: f64) -> [^]u8 {

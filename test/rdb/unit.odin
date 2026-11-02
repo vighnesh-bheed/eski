@@ -259,7 +259,7 @@ test_lengths :: proc() {
 		check(len(b) == sizes[i], fmt.tprintf("length %d uses %d bytes", v, sizes[i]))
 		r: rdb.Reader
 		rdb.reader_init_mem(&r, b, false)
-		check(rdb.get_len(&r) == v || v == max(u64), fmt.tprintf("length %d round trips", v))
+		check(rdb.get_len(&r) == v && rdb.ok(&r), fmt.tprintf("length %d round trips", v))
 		rdb.writer_destroy(&w)
 	}
 	ints := [?]i64{0, -1, 127, -128, 128, -129, 32767, -32768, 32768, -32769, 2147483647, -2147483648, 2147483648, -2147483649, max(i64), min(i64)}

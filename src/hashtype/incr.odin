@@ -44,7 +44,7 @@ incrby :: proc(h: Hash, field: []u8, incr: i64, now: u64) -> (result: i64, err: 
 		return 0, .Increment_Overflow
 	}
 	result = old + incr
-	buf: [lp.LP_INTBUF_SIZE]u8
+	buf: [lp.DECIMAL_BUFFER_BYTES]u8
 	value := value_bytes(Value{ival = result, is_int = true}, &buf)
 	set(h, field, value, true)
 	return result, .None

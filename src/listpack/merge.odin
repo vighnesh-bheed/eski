@@ -1,70 +1,100 @@
 package listpack
 
+Merge_Shape :: struct {
+	left_bytes:   int,
+	right_bytes:  int,
+	left_payload: int,
+	joined_bytes: int,
+	joined_count: u64,
+}
+
+measure_merge :: proc(left, right: [^]u8) -> (shape: Merge_Shape, ok: bool) {
+	smallest :: PACK_HEADER_BYTES + 1
+	if left == nil || right == nil || left == right {
+		return
+	}
+	shape.left_bytes = lp_bytes(left)
+	shape.right_bytes = lp_bytes(right)
+	if min(shape.left_bytes, shape.right_bytes) < smallest {
+		return
+	}
+	shape.left_payload = shape.left_bytes - smallest
+	if shape.right_bytes > PACK_SIZE_CEILING - shape.left_payload {
+		return
+	}
+	shape.joined_bytes = shape.left_payload + shape.right_bytes
+	left_count := merge_count(left) or_return
+	right_count := merge_count(right) or_return
+	shape.joined_count = left_count + right_count
+	return shape, true
+}
+
+resize_for_merge :: proc(pack: [^]u8, size: int) -> [^]u8 {
+	if lp_malloc_size(pack) == size {
+		return pack
+	}
+	return lp_realloc(pack, size)
+}
+
+append_payload :: proc(host, donor: [^]u8, shape: Merge_Shape) {
+	tail := host[shape.left_bytes - 1:shape.joined_bytes]
+	copy(tail, donor[PACK_HEADER_BYTES:shape.right_bytes])
+}
+
+prepend_payload :: proc(host, donor: [^]u8, shape: Merge_Shape) {
+	body := host[PACK_HEADER_BYTES:shape.joined_bytes]
+	copy(body[shape.left_payload:], host[PACK_HEADER_BYTES:shape.right_bytes])
+	copy(body[:shape.left_payload], donor[PACK_HEADER_BYTES:shape.left_bytes - 1])
+}
+
 merge_packs :: proc(first, second: [^]u8, keep_first: bool) -> [^]u8 {
-	first_size, second_size := lp_bytes(first), lp_bytes(second)
-	if first == nil || second == nil || first == second || first_size < LP_HDR_SIZE + 1 || second_size < LP_HDR_SIZE + 1 {
+	shape, measured := measure_merge(first, second)
+	if !measured {
 		return nil
 	}
-	first_payload := first_size - LP_HDR_SIZE - 1
-	if first_payload > LISTPACK_MAX_SAFETY_SIZE - second_size {
+	left_marks := capture_header_dependencies(first)
+	right_marks := capture_header_dependencies(second)
+	for &mark in right_marks.entries[:right_marks.count] {
+		mark.start += shape.left_payload
+	}
+	host := resize_for_merge(first if keep_first else second, shape.joined_bytes)
+	if host == nil {
 		return nil
-	}
-	first_dependencies := capture_header_dependencies(first)
-	second_dependencies := capture_header_dependencies(second)
-	for index in 0..<second_dependencies.count {
-		second_dependencies.entries[index].start += first_payload
-	}
-	total := first_payload + second_size
-	first_count, first_count_valid := merge_count(first)
-	second_count, second_count_valid := merge_count(second)
-	if !first_count_valid || !second_count_valid {
-		return nil
-	}
-	count := min(first_count + second_count, LP_HDR_NUMELE_UNKNOWN)
-	target := first if keep_first else second
-	if total != lp_malloc_size(target) {
-		target = lp_realloc(target, total)
-		if target == nil {
-			return nil
-		}
 	}
 	if keep_first {
-		copy(target[first_size - 1:total], second[LP_HDR_SIZE:second_size])
+		append_payload(host, second, shape)
 		lp_free(second)
 	} else {
-		copy(target[LP_HDR_SIZE + first_payload:total], target[LP_HDR_SIZE:second_size])
-		copy(target[LP_HDR_SIZE:LP_HDR_SIZE + first_payload], first[LP_HDR_SIZE:first_size - 1])
+		prepend_payload(host, first, shape)
 		lp_free(first)
 	}
-	lp_set_total_bytes(target, u64(total))
-	lp_set_num_elements(target, count)
-	repair_header_dependencies(target, first_dependencies)
-	repair_header_dependencies(target, second_dependencies)
-	return target
+	lp_set_total_bytes(host, u64(shape.joined_bytes))
+	lp_set_num_elements(host, shape.joined_count)
+	repair_header_dependencies(host, left_marks)
+	repair_header_dependencies(host, right_marks)
+	return host
 }
 
 lp_merge :: proc(first: ^[^]u8, second: ^[^]u8) -> [^]u8 {
-	if first == nil || second == nil || first == second || first^ == nil || second^ == nil || first^ == second^ {
+	if first == nil || second == nil || first == second {
 		return nil
 	}
-	keep_first := lp_bytes(first^) >= lp_bytes(second^)
-	result := merge_packs(first^, second^, keep_first)
-	if result == nil {
+	left, right := first^, second^
+	if left == nil || right == nil || left == right {
 		return nil
 	}
-	if keep_first {
-		first^ = result
-		second^ = nil
-	} else {
-		first^ = nil
-		second^ = result
+	into_left := lp_bytes(left) >= lp_bytes(right)
+	joined := merge_packs(left, right, into_left)
+	if joined != nil {
+		first^ = joined if into_left else nil
+		second^ = nil if into_left else joined
 	}
-	return result
+	return joined
 }
 
 merge_count :: proc(lp: [^]u8) -> (u64, bool) {
 	cached := lp_get_num_elements(lp)
-	if cached != LP_HDR_NUMELE_UNKNOWN {
+	if cached != COUNT_UNTRACKED {
 		return u64(cached), true
 	}
 	data := lp_view(lp)

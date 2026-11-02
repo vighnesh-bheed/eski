@@ -134,7 +134,7 @@ entry_selectors_and_signed_decimal_boundaries :: proc(t: ^testing.T) {
 		{min(i64), "-9223372036854775808"},
 	}
 	for fixture in fixtures {
-		storage: [LP_INTBUF_SIZE + 2]u8
+		storage: [DECIMAL_BUFFER_BYTES + 2]u8
 		for index in 0..<len(storage) {
 			storage[index] = 238
 		}
@@ -145,19 +145,19 @@ entry_selectors_and_signed_decimal_boundaries :: proc(t: ^testing.T) {
 		testing.expect(t, string(storage[1:length + 1]) == fixture.decimal && sdigits10(fixture.value) == u32(length))
 		value := i64(123)
 		testing.expect(t, lp_string_to_int64(storage[1:length + 1], &value) && value == fixture.value)
-		buffer: [LP_INTBUF_SIZE]u8
+		buffer: [DECIMAL_BUFFER_BYTES]u8
 		entry := entry_from_int(fixture.value)
-		testing.expect(t, entry.sval == nil && string(entry_bytes(entry, &buffer)) == fixture.decimal)
+		testing.expect(t, entry.text == nil && string(entry_bytes(entry, &buffer)) == fixture.decimal)
 	}
 	invalid := []string{"", "+1", "01", "-0", "-01", " 1", "1 ", "9223372036854775808", "-9223372036854775809"}
 	for text in invalid {
 		value := i64(123)
 		testing.expect(t, !lp_string_to_int64(transmute([]u8)text, &value) && value == 123)
 	}
-	buffer: [LP_INTBUF_SIZE]u8
+	buffer: [DECIMAL_BUFFER_BYTES]u8
 	empty := entry_from_bytes(nil)
-	testing.expect(t, empty.sval != nil && empty.slen == 0 && len(entry_bytes(empty, &buffer)) == 0)
+	testing.expect(t, empty.text != nil && empty.text_len == 0 && len(entry_bytes(empty, &buffer)) == 0)
 	binary := [3]u8{0, 128, 255}
 	entry := entry_from_bytes(binary[:])
-	testing.expect(t, entry.sval == raw_data(binary[:]) && entry.slen == 3)
+	testing.expect(t, entry.text == raw_data(binary[:]) && entry.text_len == 3)
 }

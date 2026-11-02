@@ -246,7 +246,7 @@ member_for :: proc "contextless" (s: Stream, g: ^Group, name: []u8, now: i64) ->
 }
 
 drop_member :: proc "contextless" (s: Stream, g: ^Group, m: ^Member) -> u64 {
-	dropped := m.owned.numele
+	dropped := m.owned.stored
 	it: rx.Iterator
 	rx.start(&it, m.owned)
 	rx.seek(&it, "^")
@@ -575,7 +575,7 @@ autoclaim :: proc(s: Stream, g: ^Group, name: []u8, minidle: i64, start: ID, cou
 }
 
 pel_first_last :: proc "contextless" (r: ^rx.Rax) -> (first: ID, last: ID, ok: bool) {
-	if r == nil || r.numele == 0 {
+	if r == nil || r.stored == 0 {
 		return
 	}
 	it: rx.Iterator

@@ -18,7 +18,7 @@ b :: #force_inline proc(s: string) -> []u8 {
 }
 
 vstr :: proc(v: ht.Value) -> string {
-	buf: [lp.LP_INTBUF_SIZE]u8
+	buf: [lp.DECIMAL_BUFFER_BYTES]u8
 	return strings.clone(string(ht.value_bytes(v, &buf)), context.temp_allocator)
 }
 

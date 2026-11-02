@@ -4,7 +4,7 @@ import "core:mem"
 import "base:intrinsics"
 import integer "../integer"
 
-entry_from_bytes :: proc "contextless" (s: []u8) -> Entry {
+entry_from_bytes :: proc "contextless" (s: []u8) -> Element {
 	if u64(len(s)) > u64(max(u32)) {
 		intrinsics.trap()
 	}
@@ -12,18 +12,18 @@ entry_from_bytes :: proc "contextless" (s: []u8) -> Entry {
 	if selector == nil {
 		selector = cast([^]u8)&empty_string_byte
 	}
-	return {sval = selector, slen = u32(len(s))}
+	return {text = selector, text_len = u32(len(s))}
 }
 
-entry_from_int :: proc "contextless" (v: i64) -> Entry {
-	return {lval = v}
+entry_from_int :: proc "contextless" (v: i64) -> Element {
+	return {number = v}
 }
 
-entry_bytes :: proc "contextless" (e: Entry, buf: ^[LP_INTBUF_SIZE]u8) -> []u8 {
-	if e.sval != nil {
-		return e.sval[:int(e.slen)]
+entry_bytes :: proc "contextless" (e: Element, buf: ^[DECIMAL_BUFFER_BYTES]u8) -> []u8 {
+	if e.text != nil {
+		return e.text[:int(e.text_len)]
 	}
-	length := ll2string(raw_data(buf[:]), e.lval)
+	length := ll2string(raw_data(buf[:]), e.number)
 	return buf[:length]
 }
 

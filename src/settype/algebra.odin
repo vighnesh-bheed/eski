@@ -21,17 +21,7 @@ sort_by_cardinality :: proc(sets: []Set) {
 	}
 }
 
-sort_by_rev_cardinality :: proc(sets: []Set) {
-	for i in 1 ..< len(sets) {
-		j := i
-		for j > 0 && size(sets[j]) > size(sets[j - 1]) {
-			sets[j], sets[j - 1] = sets[j - 1], sets[j]
-			j -= 1
-		}
-	}
-}
-
-in_all_others :: proc(sets: []Set, v: Value) -> bool {
+in_all_others :: proc(sets: []Set, v: Member) -> bool {
 	for s in sets {
 		if s == nil || !is_member_aux(s, v) {
 			return false
@@ -40,7 +30,7 @@ in_all_others :: proc(sets: []Set, v: Value) -> bool {
 	return true
 }
 
-inter_collect :: proc(sets: []Set, out: ^[dynamic]Value) -> int {
+inter_collect :: proc(sets: []Set, out: ^[dynamic]Member) -> int {
 	if len(sets) == 0 {
 		return 0
 	}
@@ -83,27 +73,26 @@ inter_card :: proc(sets: []Set, limit: int) -> int {
 }
 
 inter_store :: proc(sets: []Set) -> Set {
-	if len(sets) == 0 {
-		return create_intset()
+	smallest: Set
+	if len(sets) > 0 {
+		sort_by_cardinality(sets)
+		smallest = sets[0]
 	}
-	sort_by_cardinality(sets)
-	result := create_intset() if sets[0] == nil || sets[0].encoding == .Intset else create_listpack()
-	all_integers := true
-	it := iterator(sets[0])
-	for {
-		v, ok := next(&it)
-		if !ok {
-			break
+	others := sets[min(1, len(sets)):]
+	shared := create_listpack() if smallest != nil && smallest.encoding != .Intset else create_intset()
+	numeric := true
+	walk := iterator(smallest)
+	for candidate in next(&walk) {
+		if !in_all_others(others, candidate) {
+			continue
 		}
-		if in_all_others(sets[1:], v) {
-			all_integers = all_integers && (v.is_int || lp.lp_string_to_int64(v.str, nil))
-			add_aux(result, v)
-		}
+		add_aux(shared, candidate)
+		numeric = numeric && (candidate.numeric || lp.lp_string_to_int64(candidate.text, nil))
 	}
-	if all_integers && size(result) > 0 {
-		maybe_convert_to_intset(result)
+	if numeric && size(shared) > 0 {
+		maybe_convert_to_intset(shared)
 	}
-	return result
+	return shared
 }
 
 union_diff :: proc(sets: []Set, op: Op) -> Set {

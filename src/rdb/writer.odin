@@ -230,49 +230,58 @@ put_lzf_blob :: proc "contextless" (w: ^Writer, data: []u8, uncompressed_len: in
 }
 
 @(private)
-LZF_MIN_INPUT :: 21
+COMPRESS_FROM_BYTES :: 21
 
 @(private)
-LZF_MIN_SAVING :: 4
+COMPRESS_HEADROOM :: 4
 
 @(private)
-put_lzf_string :: proc "contextless" (w: ^Writer, s: []u8) -> bool {
-	n := len(s)
-	if n < LZF_MIN_INPUT {
-		return false
-	}
-	limit := n - LZF_MIN_SAVING
-	if w.lzf_cap < limit {
+lzf_scratch :: proc "contextless" (w: ^Writer, room: int) -> []u8 {
+	if room > w.lzf_cap {
 		if w.lzf_buf != nil {
 			runtime.heap_free(w.lzf_buf)
 		}
-		w.lzf_cap = max(limit, 4096)
+		w.lzf_cap = max(room, 4096)
 		w.lzf_buf = w_alloc(w.lzf_cap)
 	}
-	packed := lzf_compress_with_context(&w.lzf_context, s, w.lzf_buf[:limit])
-	if packed == 0 {
+	return w.lzf_buf[:room]
+}
+
+@(private)
+put_lzf_string :: proc "contextless" (w: ^Writer, s: []u8) -> bool {
+	if len(s) < COMPRESS_FROM_BYTES {
 		return false
 	}
-	put_lzf_blob(w, w.lzf_buf[:packed], n)
-	return true
+	out := lzf_scratch(w, len(s) - COMPRESS_HEADROOM)
+	packed := lzf_compress_with_context(&w.lzf_context, s, out)
+	if packed > 0 {
+		put_lzf_blob(w, out[:packed], len(s))
+	}
+	return packed > 0
+}
+
+@(private)
+put_short_integer :: proc "contextless" (w: ^Writer, s: []u8) -> bool {
+	if len(s) == 0 || len(s) > 11 {
+		return false
+	}
+	value, numeric := string2ll(s)
+	if !numeric {
+		return false
+	}
+	packed: [5]u8
+	width := encode_integer(value, &packed)
+	if width > 0 {
+		put_raw(w, packed[:width])
+	}
+	return width > 0
 }
 
 put_string :: proc "contextless" (w: ^Writer, s: []u8) {
-	if len(s) <= 11 && len(s) > 0 {
-		if v, is_int := string2ll(s); is_int {
-			enc: [5]u8
-			n := encode_integer(v, &enc)
-			if n > 0 {
-				put_raw(w, enc[:n])
-				return
-			}
-		}
+	if !put_short_integer(w, s) && !(w.compress && put_lzf_string(w, s)) {
+		put_len(w, u64(len(s)))
+		put_raw(w, s)
 	}
-	if w.compress && put_lzf_string(w, s) {
-		return
-	}
-	put_len(w, u64(len(s)))
-	put_raw(w, s)
 }
 
 put_ll_string :: proc "contextless" (w: ^Writer, v: i64) {
@@ -308,7 +317,7 @@ put_header :: proc "contextless" (w: ^Writer, ctime: i64, used_mem: i64, aof_bas
 		version /= 10
 	}
 	put_raw(w, magic[:])
-	put_aux(w, "redis-ver", transmute([]u8)string(REDIS_VERSION))
+	put_aux(w, "redis-ver", transmute([]u8)string(WRITER_VERSION_TEXT))
 	put_aux_int(w, "redis-bits", 64)
 	put_aux_int(w, "ctime", ctime)
 	put_aux_int(w, "used-mem", used_mem)

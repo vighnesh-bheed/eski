@@ -20,7 +20,7 @@ million_sequential_ids :: proc(t: ^testing.T) {
 			return
 		}
 	}
-	testing.expect_value(t, r.numele, u64(N))
+	testing.expect_value(t, r.stored, u64(N))
 	per_key := f64(rx.memory(r)) / f64(N)
 	testing.expectf(t, per_key < 30, "bytes per key %.1f", per_key)
 	testing.expect_value(t, shared, rx.memory(r))
@@ -90,7 +90,7 @@ million_sequential_ids :: proc(t: ^testing.T) {
 			return
 		}
 	}
-	testing.expect_value(t, r.numele, u64(0))
+	testing.expect_value(t, r.stored, u64(0))
 	testing.expect_value(t, rx.memory(r), baseline)
 	rx.destroy(r)
 	testing.expect_value(t, shared, 0)
@@ -114,8 +114,8 @@ random_ids_bulk :: proc(t: ^testing.T) {
 			inserted += 1
 		}
 	}
-	testing.expect_value(t, r.numele, u64(inserted))
-	per_key := f64(rx.memory(r)) / f64(r.numele)
+	testing.expect_value(t, r.stored, u64(inserted))
+	per_key := f64(rx.memory(r)) / f64(r.stored)
 	testing.expectf(t, per_key < 45, "bytes per random key %.1f", per_key)
 	order := make([]int, N)
 	defer delete(order)
@@ -182,7 +182,7 @@ keys_longer_than_page :: proc(t: ^testing.T) {
 		ref_insert(&ref, k, uintptr(1000 + i))
 	}
 	free_all(context.temp_allocator)
-	testing.expect_value(t, r.numele, u64(len(ref.items)))
+	testing.expect_value(t, r.stored, u64(len(ref.items)))
 	check_walks(t, r, &ref, "long keys")
 	for e in ref.items {
 		v, found := rx.find(r, bytes_of(e.key))
@@ -267,7 +267,7 @@ stream_access_patterns :: proc(t: ^testing.T) {
 			head += 1
 			rx.seek(&it, ">=", rx.key(&it))
 		}
-		testing.expect_value(t, r.numele, u64(tail - head))
+		testing.expect_value(t, r.stored, u64(tail - head))
 		testing.expect_value(t, shared, rx.memory(r))
 	}
 	for tail > head {

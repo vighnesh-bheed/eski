@@ -21,12 +21,6 @@ Where :: enum u8 {
 	Tail,
 }
 
-Conversion :: enum u8 {
-	Auto,
-	Growing,
-	Shrinking,
-}
-
 List_Object :: struct {
 	lp:       [^]u8,
 	ql:       ^Quicklist,
@@ -43,16 +37,16 @@ Value :: struct {
 }
 
 Iterator :: struct {
-	l:         List,
-	encoding:  Encoding,
-	direction: Where,
-	lpi:       [^]u8,
-	qi:        Iter,
+	l:            List,
+	encoding:     Encoding,
+	direction:    Where,
+	pack_cursor:  [^]u8,
+	chain_cursor: Iter,
 }
 
 List_Entry :: struct {
-	lpe: [^]u8,
-	qe:  Entry,
+	pack_at:  [^]u8,
+	chain_at: Entry,
 }
 
 Quicklist_Info :: struct {
@@ -77,7 +71,7 @@ value_from_lp :: proc "contextless" (p: [^]u8) -> Value {
 	return v
 }
 
-value_bytes :: proc "contextless" (v: Value, buf: ^[lp.LP_INTBUF_SIZE]u8) -> []u8 {
+value_bytes :: proc "contextless" (v: Value, buf: ^[lp.DECIMAL_BUFFER_BYTES]u8) -> []u8 {
 	if !v.is_int {
 		return v.str
 	}
@@ -194,70 +188,66 @@ node_listpacks :: proc(l: List, out: ^[dynamic][]u8, plain: ^[dynamic]bool) {
 	}
 }
 
-try_convert_listpack :: proc(l: List, add_bytes: int, add_length: int) {
+halve_limit :: proc "contextless" (limit: int) -> int {
+	return limit if limit == NO_LIMIT else limit / 2
+}
+
+widen_if_needed :: proc(l: List, add_bytes: int, add_length: int) {
 	if l.encoding != .Listpack {
 		return
 	}
-	n := length(l)
-	bytes := lp.lp_bytes(l.lp)
-	if add_bytes <= max(int)-bytes && add_length <= max(int)-n && !node_exceeds_limit(list_max_listpack_size, bytes+add_bytes, n+add_length) {
+	bytes, items := lp.lp_bytes(l.lp), length(l)
+	overflow := add_bytes > max(int) - bytes || add_length > max(int) - items
+	if !overflow && !node_exceeds_limit(list_max_listpack_size, bytes + add_bytes, items + add_length) {
 		return
 	}
-	q := ql_new(list_max_listpack_size, list_compress_depth)
-	append_listpack(q, l.lp)
-	l.lp = nil
-	l.ql = q
+	chain := ql_new(list_max_listpack_size, list_compress_depth)
+	append_listpack(chain, l.lp)
 	l.encoding = .Quicklist
+	l.ql = chain
+	l.lp = nil
 }
 
-try_convert_quicklist :: proc(l: List, shrinking: bool) {
-	if l.encoding != .Quicklist || l.ql.len != 1 || l.ql.head.plain {
+demote_if_small :: proc(l: List, halve: bool) {
+	if l.encoding != .Quicklist {
 		return
 	}
-	n := l.ql.head
-	szlimit, countlimit := node_limit(list_max_listpack_size)
-	if shrinking {
-		if szlimit != NO_LIMIT {
-			szlimit /= 2
-		}
-		if countlimit != NO_LIMIT {
-			countlimit /= 2
-		}
-	}
-	if n.sz > szlimit || n.count > countlimit {
+	chain := l.ql
+	only := chain.head
+	if chain.len != 1 || only.plain {
 		return
 	}
-	l.lp = n.entry
-	n.entry = nil
-	ql_release(l.ql)
-	l.ql = nil
+	byte_cap, count_cap := node_limit(list_max_listpack_size)
+	if halve {
+		byte_cap, count_cap = halve_limit(byte_cap), halve_limit(count_cap)
+	}
+	if only.sz > byte_cap || only.count > count_cap {
+		return
+	}
 	l.encoding = .Listpack
+	l.lp, only.entry = only.entry, nil
+	l.ql = nil
+	ql_release(chain)
 }
 
-try_conversion :: proc(l: List, lct: Conversion) {
+narrow_if_possible :: proc(l: List) {
+	demote_if_small(l, true)
+}
+
+settle_encoding :: proc(l: List) {
 	if l.encoding == .Listpack {
-		if lct != .Shrinking {
-			try_convert_listpack(l, 0, 0)
-		}
-	} else if lct != .Growing {
-		try_convert_quicklist(l, lct == .Shrinking)
+		widen_if_needed(l, 0, 0)
+	} else {
+		demote_if_small(l, false)
 	}
 }
 
-try_conversion_append :: proc(l: List, add_bytes: int, add_length: int) {
-	try_convert_listpack(l, add_bytes, add_length)
-}
-
-try_conversion_append_values :: proc(l: List, values: [][]u8) {
-	total := 0
+widen_for_values :: proc(l: List, values: [][]u8) {
+	incoming := 0
 	for v in values {
-		if len(v) > max(int)-total {
-			total = max(int)
-			break
-		}
-		total += len(v)
+		incoming = max(int) if len(v) > max(int) - incoming else incoming + len(v)
 	}
-	try_convert_listpack(l, total, len(values))
+	widen_if_needed(l, incoming, len(values))
 }
 
 push :: proc(l: List, value: []u8, where_: Where) {
@@ -305,49 +295,49 @@ pop_discard :: proc(l: List, where_: Where) {
 iterator :: proc(l: List, index: int, direction: Where) -> Iterator {
 	it := Iterator{l = l, encoding = l.encoding, direction = direction}
 	if l.encoding == .Listpack {
-		it.lpi = lp.lp_seek(l.lp, i64(index))
+		it.pack_cursor = lp.lp_seek(l.lp, i64(index))
 	} else {
 		dir := Direction.Start_Head
 		if direction == .Head {
 			dir = .Start_Tail
 		}
-		it.qi, _ = get_iterator_at_idx(l.ql, dir, index)
+		it.chain_cursor, _ = get_iterator_at_idx(l.ql, dir, index)
 	}
 	return it
 }
 
 iter_next :: proc(it: ^Iterator, e: ^List_Entry) -> bool {
 	if it.encoding == .Quicklist {
-		return next(&it.qi, &e.qe)
+		return next(&it.chain_cursor, &e.chain_at)
 	}
-	if it.lpi == nil {
+	if it.pack_cursor == nil {
 		return false
 	}
-	e.lpe = it.lpi
+	e.pack_at = it.pack_cursor
 	if it.direction == .Tail {
-		it.lpi = lp.lp_next(it.l.lp, it.lpi)
+		it.pack_cursor = lp.lp_next(it.l.lp, it.pack_cursor)
 	} else {
-		it.lpi = lp.lp_prev(it.l.lp, it.lpi)
+		it.pack_cursor = lp.lp_prev(it.l.lp, it.pack_cursor)
 	}
 	return true
 }
 
 entry_value :: proc "contextless" (it: ^Iterator, e: ^List_Entry) -> Value {
 	if it.encoding == .Listpack {
-		return value_from_lp(e.lpe)
+		return value_from_lp(e.pack_at)
 	}
-	q := &e.qe
-	if q.node.plain || q.value != nil {
-		return Value{str = q.value[:q.sz]}
+	q := &e.chain_at
+	if q.node.plain || q.text != nil {
+		return Value{str = q.text[:q.text_len]}
 	}
-	return Value{ival = q.longval, is_int = true}
+	return Value{ival = q.number, is_int = true}
 }
 
 entry_equal :: proc(it: ^Iterator, e: ^List_Entry, s: []u8) -> bool {
 	if it.encoding == .Listpack {
-		return lp.lp_compare(e.lpe, s)
+		return lp.lp_compare(e.pack_at, s)
 	}
-	return compare(&e.qe, s)
+	return compare(&e.chain_at, s)
 }
 
 lp_pointer_index :: proc(l: List, p: [^]u8) -> int {
@@ -366,43 +356,43 @@ lp_pointer_index :: proc(l: List, p: [^]u8) -> int {
 
 entry_insert :: proc(it: ^Iterator, e: ^List_Entry, value: []u8, where_: Where) {
 	if it.encoding == .Quicklist {
-		insert(&it.qi, &e.qe, value, where_ == .Tail)
+		insert(&it.chain_cursor, &e.chain_at, value, where_ == .Tail)
 		return
 	}
-	nextidx := lp_pointer_index(it.l, it.lpi)
-	at := lp_pointer_index(it.l, e.lpe)
-	how := lp.LP_BEFORE
+	nextidx := lp_pointer_index(it.l, it.pack_cursor)
+	at := lp_pointer_index(it.l, e.pack_at)
+	how := lp.Placement.Before
 	if where_ == .Tail {
-		how = lp.LP_AFTER
+		how = lp.Placement.After
 		at += 1
 	}
-	it.l.lp = lp.lp_insert_string(it.l.lp, value, e.lpe, how, nil)
+	it.l.lp = lp.lp_insert_string(it.l.lp, value, e.pack_at, how, nil)
 	if nextidx >= 0 {
 		if at <= nextidx {
 			nextidx += 1
 		}
-		it.lpi = lp.lp_seek(it.l.lp, i64(nextidx))
+		it.pack_cursor = lp.lp_seek(it.l.lp, i64(nextidx))
 	} else {
-		it.lpi = nil
+		it.pack_cursor = nil
 	}
 	e^ = {}
 }
 
 entry_delete :: proc(it: ^Iterator, e: ^List_Entry) {
 	if it.encoding == .Quicklist {
-		del_entry(&it.qi, &e.qe)
+		del_entry(&it.chain_cursor, &e.chain_at)
 		return
 	}
-	nextidx := lp_pointer_index(it.l, it.lpi)
-	at := lp_pointer_index(it.l, e.lpe)
-	it.l.lp = lp.lp_delete(it.l.lp, e.lpe, nil)
+	nextidx := lp_pointer_index(it.l, it.pack_cursor)
+	at := lp_pointer_index(it.l, e.pack_at)
+	it.l.lp = lp.lp_delete(it.l.lp, e.pack_at, nil)
 	if nextidx >= 0 {
 		if at < nextidx {
 			nextidx -= 1
 		}
-		it.lpi = lp.lp_seek(it.l.lp, i64(nextidx))
+		it.pack_cursor = lp.lp_seek(it.l.lp, i64(nextidx))
 	} else {
-		it.lpi = nil
+		it.pack_cursor = nil
 	}
 	e^ = {}
 }
@@ -481,7 +471,7 @@ pop_range_bounds :: proc(l: List, where_: Where, count: int) -> (start: int, ran
 }
 
 linsert :: proc(l: List, after: bool, pivot: []u8, value: []u8) -> bool {
-	try_conversion_append(l, len(value), 1)
+	widen_if_needed(l, len(value), 1)
 	it := iterator(l, 0, .Tail)
 	e: List_Entry
 	for iter_next(&it, &e) {
@@ -498,11 +488,11 @@ linsert :: proc(l: List, after: bool, pivot: []u8, value: []u8) -> bool {
 }
 
 lset :: proc(l: List, idx: int, value: []u8) -> bool {
-	try_conversion_append(l, len(value), 1)
+	widen_if_needed(l, len(value), 1)
 	if !replace_index(l, int(i32(idx)), value) {
 		return false
 	}
-	try_conversion(l, .Shrinking)
+	narrow_if_possible(l)
 	return true
 }
 
@@ -563,7 +553,7 @@ lrem :: proc(l: List, toremove: int, ele: []u8) -> int {
 		}
 	}
 	if removed != 0 {
-		try_conversion(l, .Shrinking)
+		narrow_if_possible(l)
 	}
 	return removed
 }
@@ -579,7 +569,7 @@ ltrim :: proc(l: List, start: int, end: int) -> (ltrim: int, rtrim: int) {
 	rtrim = n-e-1
 	delete_range(l, e+1, rtrim)
 	delete_range(l, 0, ltrim)
-	try_conversion(l, .Shrinking)
+	narrow_if_possible(l)
 	return
 }
 

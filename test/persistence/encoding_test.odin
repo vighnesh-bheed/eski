@@ -67,7 +67,7 @@ length_encoding_rejections :: proc(t: ^testing.T) {
 		r: rdb.Reader
 		rdb.reader_init_mem(&r, data, false)
 		v := rdb.get_len(&r)
-		testing.expect_value(t, v, rdb.LENERR)
+		testing.expect_value(t, v, 0)
 		testing.expect_value(t, r.status, rdb.Status.Corrupt)
 		if b == 0x9B {
 			testing.expect_value(t, rdb.reader_reason(&r), "Unknown length encoding 155 while reading a length")
@@ -77,7 +77,7 @@ length_encoding_rejections :: proc(t: ^testing.T) {
 		fd, err := linux.open(cstr(path), {})
 		testing.expect_value(t, err, linux.Errno.NONE)
 		rdb.reader_init_file(&r, fd, false)
-		testing.expect_value(t, rdb.get_len(&r), rdb.LENERR)
+		testing.expect_value(t, rdb.get_len(&r), 0)
 		testing.expect_value(t, r.status, rdb.Status.Corrupt)
 		if b == 0x82 {
 			testing.expect_value(t, rdb.reader_reason(&r), "Unknown length encoding 130 while reading a length")
@@ -95,7 +95,7 @@ length_encoding_rejections :: proc(t: ^testing.T) {
 	for data in truncated {
 		r: rdb.Reader
 		rdb.reader_init_mem(&r, data, false)
-		testing.expect_value(t, rdb.get_len(&r), rdb.LENERR)
+		testing.expect_value(t, rdb.get_len(&r), 0)
 		testing.expect_value(t, r.status, rdb.Status.Short_Read)
 		rdb.reader_destroy(&r)
 	}

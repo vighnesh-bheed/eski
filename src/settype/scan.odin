@@ -1,20 +1,17 @@
 package settype
 
-scan_reverse :: proc "contextless" (value: u64) -> u64 {
-	input := value
-	output := u64(0)
-	for _ in 0 ..< 64 {
-		output = (output << 1) | (input & 1)
-		input >>= 1
+reverse_increment :: proc "contextless" (cursor: u64, mask: u64) -> u64 {
+	position := cursor & mask
+	for bit := mask ~ (mask >> 1); bit != 0; bit >>= 1 {
+		if position & bit == 0 {
+			return position | bit
+		}
+		position &~= bit
 	}
-	return output
+	return 0
 }
 
-cursor_next :: proc "contextless" (v: u64, mask: u64) -> u64 {
-	return scan_reverse(scan_reverse(v | ~mask) + 1)
-}
-
-slots_scan_bucket :: proc(slots: [^]Slot, cap: int, bucket: u64, out: ^[dynamic]Value) -> (sampled: int) {
+slots_scan_bucket :: proc(slots: [^]Slot, cap: int, bucket: u64, out: ^[dynamic]Member) -> (sampled: int) {
 	if cap == 0 {
 		return 0
 	}
@@ -26,7 +23,7 @@ slots_scan_bucket :: proc(slots: [^]Slot, cap: int, bucket: u64, out: ^[dynamic]
 			break
 		}
 		if blob_live(slot.blob) && slot.hash & mask == bucket & mask {
-			append(out, Value{str = blob_bytes(slot.blob)})
+			append(out, Member{text = blob_bytes(slot.blob)})
 			sampled += 1
 		}
 		index = (index + 1) & (cap - 1)
@@ -34,60 +31,66 @@ slots_scan_bucket :: proc(slots: [^]Slot, cap: int, bucket: u64, out: ^[dynamic]
 	return
 }
 
-scan_bucket :: proc(t: ^Table, v: u64, out: ^[dynamic]Value) -> (next: u64, sampled: int) {
-	if t.cap == 0 || t.count == 0 {
-		return 0, 0
-	}
-	if t.resize == nil {
-		sampled = slots_scan_bucket(t.slots, t.cap, v & u64(t.cap - 1), out)
-		return cursor_next(v, u64(t.cap - 1)), sampled
-	}
-	small, small_cap := t.slots, t.cap
-	large, large_cap := t.resize.old_slots, t.resize.old_cap
-	if small_cap > large_cap {
-		small, large = large, small
-		small_cap, large_cap = large_cap, small_cap
-	}
-	small_mask := u64(small_cap - 1)
-	large_mask := u64(large_cap - 1)
-	sampled = slots_scan_bucket(small, small_cap, v & small_mask, out)
-	cursor := v
-	for {
-		sampled += slots_scan_bucket(large, large_cap, cursor & large_mask, out)
-		cursor = cursor_next(cursor, large_mask)
-		if cursor & (small_mask ~ large_mask) == 0 {
-			break
-		}
-	}
-	return cursor, sampled
+Bank :: struct {
+	slots: [^]Slot,
+	cap:   int,
 }
 
-scan :: proc(s: Set, cursor: u64, count: int, out: ^[dynamic]Value) -> u64 {
-	if s == nil || size(s) == 0 {
+bank_mask :: proc "contextless" (bank: Bank) -> u64 {
+	return u64(bank.cap - 1)
+}
+
+bank_collect :: proc(bank: Bank, bucket: u64, out: ^[dynamic]Member) -> int {
+	return slots_scan_bucket(bank.slots, bank.cap, bucket & bank_mask(bank), out)
+}
+
+scan_bucket :: proc(t: ^Table, v: u64, out: ^[dynamic]Member) -> (next: u64, sampled: int) {
+	if t.count == 0 || t.cap == 0 {
+		return 0, 0
+	}
+	current := Bank{t.slots, t.cap}
+	if t.resize == nil {
+		sampled = bank_collect(current, v, out)
+		return reverse_increment(v, bank_mask(current)), sampled
+	}
+	coarse, fine := current, Bank{t.resize.old_slots, t.resize.old_cap}
+	if coarse.cap > fine.cap {
+		coarse, fine = fine, coarse
+	}
+	sampled = bank_collect(coarse, v, out)
+	spread := bank_mask(coarse) ~ bank_mask(fine)
+	next = v
+	for {
+		sampled += bank_collect(fine, next, out)
+		next = reverse_increment(next, bank_mask(fine))
+		if next & spread == 0 {
+			return
+		}
+	}
+}
+
+scan :: proc(s: Set, cursor: u64, count: int, out: ^[dynamic]Member) -> u64 {
+	if size(s) == 0 {
 		return 0
 	}
 	if s.encoding != .Hashtable {
-		it := iterator(s)
-		for {
-			value, ok := next(&it)
-			if !ok {
-				break
-			}
-			append(out, value)
+		walk := iterator(s)
+		for member in next(&walk) {
+			append(out, member)
 		}
 		return 0
 	}
-	limit := max(0, count)
-	budget := max(int) if limit > max(int) / 10 else max(1, limit * 10)
-	current := cursor
-	collected := 0
-	for _ in 0 ..< budget {
-		n: int
-		current, n = scan_bucket(s.table, current, out)
-		collected += n
-		if current == 0 || collected >= limit {
+	wanted := max(count, 0)
+	visits := max(int) if wanted > max(int) / 10 else max(wanted * 10, 1)
+	position := cursor
+	gathered := 0
+	for ; visits > 0; visits -= 1 {
+		found: int
+		position, found = scan_bucket(s.table, position, out)
+		gathered += found
+		if position == 0 || gathered >= wanted {
 			break
 		}
 	}
-	return current
+	return position
 }

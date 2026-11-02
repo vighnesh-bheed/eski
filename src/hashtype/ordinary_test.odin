@@ -1232,9 +1232,9 @@ ordinary_packed_length_unknown_cache :: proc(t: ^testing.T) {
 		if extended {
 			convert_to_ex(h)
 		}
-		lp.lp_set_num_elements(h.lp, lp.LP_HDR_NUMELE_UNKNOWN)
+		lp.lp_set_num_elements(h.lp, lp.COUNT_UNTRACKED)
 		testing.expect_value(t, length(h), 27)
-		lp.lp_set_num_elements(h.lp, lp.LP_HDR_NUMELE_UNKNOWN)
+		lp.lp_set_num_elements(h.lp, lp.COUNT_UNTRACKED)
 		testing.expect(t, set(h, ordinary_bytes("3"), ordinary_bytes("replacement")))
 		testing.expect_value(t, length(h), 27)
 		value, _, found := get_raw(h, ordinary_bytes("3"))

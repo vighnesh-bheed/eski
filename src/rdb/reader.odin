@@ -314,7 +314,7 @@ get_type :: proc "contextless" (r: ^Reader) -> int {
 get_len_enc :: proc "contextless" (r: ^Reader) -> (v: u64, encoded: bool, good: bool) {
 	first, got := get_u8(r)
 	if !got {
-		return LENERR, false, false
+		return 0, false, false
 	}
 	switch first >> 6 {
 	case LEN_6BIT:
@@ -322,7 +322,7 @@ get_len_enc :: proc "contextless" (r: ^Reader) -> (v: u64, encoded: bool, good: 
 	case LEN_14BIT:
 		second, more := get_u8(r)
 		if !more {
-			return LENERR, false, false
+			return 0, false, false
 		}
 		return u64(first & 63) << 8 | u64(second), false, true
 	case ENCVAL:
@@ -335,11 +335,11 @@ get_len_enc :: proc "contextless" (r: ^Reader) -> (v: u64, encoded: bool, good: 
 		width = 8
 	} else {
 		corrupt(r, "Unknown length encoding ", u64(first), true, " while reading a length")
-		return LENERR, false, false
+		return 0, false, false
 	}
 	bytes, more := take(r, width)
 	if !more {
-		return LENERR, false, false
+		return 0, false, false
 	}
 	for b in bytes {
 		v = v << 8 | u64(b)
@@ -348,10 +348,7 @@ get_len_enc :: proc "contextless" (r: ^Reader) -> (v: u64, encoded: bool, good: 
 }
 
 get_len :: proc "contextless" (r: ^Reader) -> u64 {
-	v, _, good := get_len_enc(r)
-	if !good {
-		return LENERR
-	}
+	v, _, _ := get_len_enc(r)
 	return v
 }
 

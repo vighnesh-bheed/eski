@@ -2,20 +2,20 @@ package settype
 
 import lp "../listpack"
 
-INTSET_ENC_INT16 :: 2
-INTSET_ENC_INT32 :: 4
-INTSET_ENC_INT64 :: 8
+INTSET_BYTES_16 :: 2
+INTSET_BYTES_32 :: 4
+INTSET_BYTES_64 :: 8
 INTSET_HDR_SIZE :: 8
-INTSET_MAX_ENTRIES_CAP :: 1 << 30
+INTSET_ENTRY_CEILING :: 1 << 30
 
 intset_value_encoding :: proc "contextless" (v: i64) -> u32 {
 	if v >= i64(min(i16)) && v <= i64(max(i16)) {
-		return INTSET_ENC_INT16
+		return INTSET_BYTES_16
 	}
 	if v >= i64(min(i32)) && v <= i64(max(i32)) {
-		return INTSET_ENC_INT32
+		return INTSET_BYTES_32
 	}
-	return INTSET_ENC_INT64
+	return INTSET_BYTES_64
 }
 
 intset_read_le :: proc "contextless" (p: [^]u8, width: int) -> u64 {
@@ -52,11 +52,11 @@ intset_set_len :: proc "contextless" (is: [^]u8, n: int) {
 intset_get_encoded :: proc "contextless" (is: [^]u8, pos: int, enc: u32) -> i64 {
 	bits := intset_read_le(lp.padd(is, INTSET_HDR_SIZE + pos * int(enc)), int(enc))
 	switch enc {
-	case INTSET_ENC_INT16:
+	case INTSET_BYTES_16:
 		return i64(i16(u16(bits)))
-	case INTSET_ENC_INT32:
+	case INTSET_BYTES_32:
 		return i64(i32(u32(bits)))
-	case INTSET_ENC_INT64:
+	case INTSET_BYTES_64:
 		return i64(bits)
 	}
 	resize_require(false)
@@ -75,7 +75,7 @@ intset_put :: proc "contextless" (is: [^]u8, pos: int, v: i64) {
 intset_new :: proc "contextless" () -> [^]u8 {
 	is := lp.lp_malloc(INTSET_HDR_SIZE)
 	resize_require(is != nil)
-	intset_set_encoding(is, INTSET_ENC_INT16)
+	intset_set_encoding(is, INTSET_BYTES_16)
 	intset_set_len(is, 0)
 	return is
 }
@@ -196,5 +196,5 @@ intset_dup :: proc "contextless" (is: [^]u8) -> [^]u8 {
 }
 
 intset_max_entries :: proc "contextless" () -> int {
-	return min(max(0, set_max_intset_entries), INTSET_MAX_ENTRIES_CAP)
+	return clamp(set_max_intset_entries, 0, INTSET_ENTRY_CEILING)
 }

@@ -233,7 +233,7 @@ run_compare :: proc(dir: string, server := false) -> bool {
 	}
 	saved_size := lt.list_max_listpack_size
 	saved_depth := lt.list_compress_depth
-	saved_threshold := lt.packed_threshold
+	saved_threshold := lt.plain_node_threshold
 	cs := Compare_State {
 		m     = model_make(),
 		stats = make(map[string]Stat),
@@ -302,7 +302,7 @@ run_compare :: proc(dir: string, server := false) -> bool {
 	delete(redis)
 	lt.list_max_listpack_size = saved_size
 	lt.list_compress_depth = saved_depth
-	lt.packed_threshold = saved_threshold
+	lt.plain_node_threshold = saved_threshold
 	return cs.mismatches == 0
 }
 

@@ -250,7 +250,7 @@ remove_current_then_seek_successor :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, len(reseeks), 3)
 	testing.expect(t, reseeks[0] == 4 && reseeks[1] == 8 && reseeks[2] == 0)
-	testing.expect_value(t, r.numele, u64(7))
+	testing.expect_value(t, r.stored, u64(7))
 	ref: Reference
 	defer ref_destroy(&ref)
 	for i in ([?]u64{1, 2, 4, 5, 6, 8, 9}) {
@@ -300,7 +300,7 @@ remove_reseek_pattern_large :: proc(t: ^testing.T) {
 			}
 		}
 		testing.expect_value(t, count, 20_000)
-		testing.expect_value(t, r.numele, u64(20_000 - removed))
+		testing.expect_value(t, r.stored, u64(20_000 - removed))
 		rx.stop(&it)
 		check_walks(t, r, &ref, "after random trims")
 		rx.destroy(r)
@@ -481,7 +481,7 @@ mutation_while_positioned_stays_consistent :: proc(t: ^testing.T) {
 			}
 		}
 		rx.stop(&it)
-		testing.expect_value(t, r.numele, u64(len(ref.items)))
+		testing.expect_value(t, r.stored, u64(len(ref.items)))
 		check_walks(t, r, &ref, "after mutation walk")
 		rx.destroy(r)
 		ref_destroy(&ref)
@@ -526,7 +526,7 @@ long_key_iteration_and_aliasing :: proc(t: ^testing.T) {
 			testing.expect(t, rx.eof(&it))
 		}
 	}
-	testing.expect_value(t, r.numele, u64(0))
+	testing.expect_value(t, r.stored, u64(0))
 	free_all(context.temp_allocator)
 }
 

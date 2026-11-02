@@ -6,8 +6,8 @@ import "core:testing"
 merge_storage_kernel_preserves_left_to_right_values_for_either_target :: proc(t: ^testing.T) {
 	for target in 0..<2 {
 		for empty in 0..<3 {
-			left_entries := []Entry{entry_from_bytes(transmute([]u8)string("left")), entry_from_int(min(i64))}
-			right_entries := []Entry{entry_from_bytes(nil), entry_from_bytes(transmute([]u8)string("right")), entry_from_int(4096)}
+			left_entries := []Element{entry_from_bytes(transmute([]u8)string("left")), entry_from_int(min(i64))}
+			right_entries := []Element{entry_from_bytes(nil), entry_from_bytes(transmute([]u8)string("right")), entry_from_int(4096)}
 			expected := []string{"left", "-9223372036854775808", "", "right", "4096"}
 			if empty == 1 {
 				left_entries = nil
@@ -30,10 +30,10 @@ merge_recounts_unknown_sources_and_selects_owner_using_logical_size :: proc(t: ^
 		left := api_observed_pack()
 		right := api_observed_pack()
 		if unknown_side != 1 {
-			lp_set_num_elements(left, LP_HDR_NUMELE_UNKNOWN)
+			lp_set_num_elements(left, COUNT_UNTRACKED)
 		}
 		if unknown_side != 0 {
-			lp_set_num_elements(right, LP_HDR_NUMELE_UNKNOWN)
+			lp_set_num_elements(right, COUNT_UNTRACKED)
 		}
 		result := lp_merge(&left, &right)
 		testing.expect(t, result == left && right == nil && lp_get_num_elements(result) == 12)

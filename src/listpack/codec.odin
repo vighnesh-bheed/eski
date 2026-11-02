@@ -161,31 +161,31 @@ write_string :: proc "contextless" (data: []u8, value: []u8) -> (int, bool) {
 }
 
 Entry_Plan :: struct {
-	value:        Entry,
+	value:        Element,
 	body_bytes:   int,
 	encoded_bytes: int,
 }
 
-plan_entry :: proc "contextless" (entry: Entry) -> (Entry_Plan, bool) {
+plan_entry :: proc "contextless" (entry: Element) -> (Entry_Plan, bool) {
 	value := entry
-	if value.sval != nil && value.slen <= 20 {
+	if value.text != nil && value.text_len <= 20 {
 		integer_value := i64(0)
-		if lp_string_to_int64(value.sval[:int(value.slen)], &integer_value) {
+		if lp_string_to_int64(value.text[:int(value.text_len)], &integer_value) {
 			value = entry_from_int(integer_value)
 		}
 	}
 	length := 0
-	if value.sval == nil {
-		length = integer_body_size(value.lval)
+	if value.text == nil {
+		length = integer_body_size(value.number)
 	} else {
-		wide_length := u64(string_header_size(value.slen)) + u64(value.slen)
+		wide_length := u64(string_header_size(value.text_len)) + u64(value.text_len)
 		if wide_length > u64(max(int)) || wide_length > u64(max(u32)) {
 			return {}, false
 		}
 		length = int(wide_length)
 	}
 	back := backlen_width(u64(length))
-	if length > max(int) - back || u64(length) + u64(back) + LP_HDR_SIZE + 1 > u64(max(u32)) {
+	if length > max(int) - back || u64(length) + u64(back) + PACK_HEADER_BYTES + 1 > u64(max(u32)) {
 		return {}, false
 	}
 	return {value = value, body_bytes = length, encoded_bytes = length + back}, true
@@ -199,10 +199,10 @@ write_entry :: proc "contextless" (data: []u8, plan: Entry_Plan) -> bool {
 		return false
 	}
 	valid := false
-	if plan.value.sval == nil {
-		_, valid = write_integer(data[:plan.body_bytes], plan.value.lval)
+	if plan.value.text == nil {
+		_, valid = write_integer(data[:plan.body_bytes], plan.value.number)
 	} else {
-		_, valid = write_string(data[:plan.body_bytes], plan.value.sval[:int(plan.value.slen)])
+		_, valid = write_string(data[:plan.body_bytes], plan.value.text[:int(plan.value.text_len)])
 	}
 	if !valid {
 		return false

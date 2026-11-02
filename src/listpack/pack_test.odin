@@ -44,10 +44,10 @@ signed_safety_deltas_are_checked_mathematically :: proc(t: ^testing.T) {
 		{-1, false, true},
 		{0, true, true},
 		{1, true, true},
-		{LISTPACK_MAX_SAFETY_SIZE - 7, true, true},
-		{LISTPACK_MAX_SAFETY_SIZE - 6, true, false},
-		{LISTPACK_MAX_SAFETY_SIZE, true, false},
-		{LISTPACK_MAX_SAFETY_SIZE + 1, false, false},
+		{PACK_SIZE_CEILING - 7, true, true},
+		{PACK_SIZE_CEILING - 6, true, false},
+		{PACK_SIZE_CEILING, true, false},
+		{PACK_SIZE_CEILING + 1, false, false},
 		{max(int), false, false},
 	}
 	for fixture in fixtures {

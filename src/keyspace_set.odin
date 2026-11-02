@@ -71,10 +71,10 @@ keyspace_set_execute :: proc(job: ^ks.Job) {
 			if task.results[0] == nil { task.failed = true; return }; task.bulk = true; return
 		}
 		n := min(requested, i64(st.size(s))) if requested >= 0 else (-requested if s != nil else 0)
-		if n > i64(max(int) / (2 * size_of(st.Value) + 64)) { task.failed = true; return }
-		charge := (int(n) + st.size(s)) * 2 * size_of(st.Value)
+		if n > i64(max(int) / (2 * size_of(st.Member) + 64)) { task.failed = true; return }
+		charge := (int(n) + st.size(s)) * 2 * size_of(st.Member)
 		if !ks.reserve_external(&keyspace_pool, charge) { task.failed = true; return }; defer ks.release_external(&keyspace_pool, charge)
-		values := make([dynamic]st.Value, 0, int(n)); defer delete(values)
+		values := make([dynamic]st.Member, 0, int(n)); defer delete(values)
 		if n > 0 {
 			if requested >= 0 { st.random_unique(s, int(n), &values) } else { st.random_with_repeats(s, int(n), &values) }
 		}
@@ -152,9 +152,9 @@ keyspace_set_scan :: proc(task: ^Keyspace_Task, s: st.Set, cursor: u64) {
 		opts, err = set_scan_options(task.argv[3:])
 		if err != .None { task.failed = true; return }
 	}
-	charge := st.size(s) * 2 * size_of(st.Value) + len(task.argv) * size_of([]u8)
+	charge := st.size(s) * 2 * size_of(st.Member) + len(task.argv) * size_of([]u8)
 	if !ks.reserve_external(&keyspace_pool, charge) { task.failed = true; return }; defer ks.release_external(&keyspace_pool, charge)
-	values := make([dynamic]st.Value, 0, st.size(s)); defer delete(values)
+	values := make([dynamic]st.Member, 0, st.size(s)); defer delete(values)
 	next: u64
 	if s != nil { next = st.scan(s, cursor, opts.count, &values) }
 	if opts.use_pattern {
@@ -233,7 +233,7 @@ keyspace_set_algebra :: proc(task: ^Keyspace_Task) {
 	if op == .Sintercard { task.integer = i64(st.inter_card(sources, int(limit))); return }
 	intersection := op == .Sinter || op == .Sinterstore
 	if intersection && !store {
-		values := make([dynamic]st.Value, 0, keyspace_object_length(.Set, records[0].object)); defer delete(values)
+		values := make([dynamic]st.Member, 0, keyspace_object_length(.Set, records[0].object)); defer delete(values)
 		st.inter_collect(sources, &values)
 		b := keyspace_object_builder(task, .Set, records[0].object); defer ks.free(&keyspace_pool, b.bytes)
 		if b.failed { return }

@@ -43,7 +43,7 @@ validate_against_model :: proc(t: ^testing.T, z: Zset, model: []Member_Model) {
 			}
 			m := model[order[i]]
 			testing.expect(t, iter_next(&it, &item))
-			buf: [lp.LP_INTBUF_SIZE]u8
+			buf: [lp.DECIMAL_BUFFER_BYTES]u8
 			testing.expect(t, member_eq(item_bytes(&item, &buf), m.key[:m.len]))
 			testing.expect(t, item.score == m.score)
 			r, v, found := rank(z, m.key[:m.len], reverse)
@@ -248,7 +248,7 @@ flags_and_aliases :: proc(t: ^testing.T) {
 		o, _, ok = add(z, F64_NAN, []u8{'b'}, {})
 		testing.expect(t, !ok && o == {.Nan} && length(z) == 1)
 		item := peek(z, false)
-		buf: [lp.LP_INTBUF_SIZE]u8
+		buf: [lp.DECIMAL_BUFFER_BYTES]u8
 		alias := item_bytes(&item, &buf)
 		o, _, ok = add(z, 17, alias, {})
 		testing.expect(t, ok && o == {.Updated})
@@ -607,7 +607,7 @@ nil_member_storage :: proc(t: ^testing.T) {
 		value, found = score(copy_z, empty)
 		testing.expect(t, found && value == 12.5 && length(copy_z) == 1)
 		item := peek(copy_z, false)
-		buf: [lp.LP_INTBUF_SIZE]u8
+		buf: [lp.DECIMAL_BUFFER_BYTES]u8
 		testing.expect(t, len(item_bytes(&item, &buf)) == 0 && item.score == 12.5)
 		testing.expect(t, del(copy_z, empty) && length(copy_z) == 0)
 		testing.expect(t, !del(copy_z, empty))

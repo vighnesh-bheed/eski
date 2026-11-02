@@ -99,7 +99,7 @@ setop_compute :: proc(srcs: []Source, op: Setop, agg: Aggregate, count_only: boo
 		}
 		it := iter_make(src.z, false)
 		item: Item
-		buf: [lp.LP_INTBUF_SIZE]u8
+		buf: [lp.DECIMAL_BUFFER_BYTES]u8
 		for iter_next(&it, &item) {
 			member := item_bytes(&item, &buf)
 			if _, seen := score(visited, member); seen {

@@ -47,11 +47,11 @@ captured_integer_bytes_and_decimal_sentinels :: proc(t: ^testing.T) {
 		testing.expect(t, valid && length == len(expected) - 8)
 		width := lp_encode_backlen(padd(lp, 6 + length), u64(length))
 		testing.expect(t, width == 1)
-		lp[len(expected) - 1] = LP_EOF
+		lp[len(expected) - 1] = PACK_END
 		for byte, index in expected {
 			testing.expect(t, lp[index] == byte)
 		}
-		storage: [LP_INTBUF_SIZE]u8
+		storage: [DECIMAL_BUFFER_BYTES]u8
 		for index in 0..<len(storage) {
 			storage[index] = 238
 		}

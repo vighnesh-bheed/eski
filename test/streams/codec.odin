@@ -257,9 +257,9 @@ groups_survive_codec :: proc(t: ^testing.T) {
 	defer st.destroy(back)
 	testing.expect(t, string(dump_payload(back, context.temp_allocator)) == string(payload))
 	cg := st.find_group(back, bytes_of("g1"))
-	testing.expect(t, cg != nil && cg.pending.numele == 3 && cg.members.numele == 2)
+	testing.expect(t, cg != nil && cg.pending.stored == 3 && cg.members.stored == 2)
 	a := st.find_member(cg, bytes_of("alice"))
-	testing.expect(t, a != nil && a.owned.numele == 2 && a.seen_ms == 1000 && a.active_ms == 2200)
+	testing.expect(t, a != nil && a.owned.stored == 2 && a.seen_ms == 1000 && a.active_ms == 2200)
 	testing.expect(t, st.find_group(back, bytes_of("12345")).delivered == st.ID{2, 2})
 	key: [16]u8
 	st.encode_id(&key, st.ID{2, 2})

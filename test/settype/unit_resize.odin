@@ -125,13 +125,13 @@ unit_resize_views :: proc() {
 	pointers: map[string]uintptr
 	it := st.iterator(s)
 	for v in st.next(&it) {
-		pointers[string(v.str)] = uintptr(raw_data(v.str))
+		pointers[string(v.text)] = uintptr(raw_data(v.text))
 	}
 	work := st.table_step(t, 64, 4)
 	check(work.scanned <= 64 && work.moved == 4, "initial two-bank migration grant")
 	it = st.iterator(s)
 	for v in st.next(&it) {
-		check(pointers[string(v.str)] == uintptr(raw_data(v.str)), "pure Slot migration preserves borrowed member addresses")
+		check(pointers[string(v.text)] == uintptr(raw_data(v.text)), "pure Slot migration preserves borrowed member addresses")
 	}
 	delete(pointers)
 	d := st.dup(s)
@@ -193,7 +193,7 @@ unit_resize_random_pop :: proc() {
 	lp.lp_srand(0x76B04611)
 	for _ in 0 ..< 30000 {
 		v := st.random_element(s)
-		i, ok := strconv.parse_int(string(v.str)[7:])
+		i, ok := strconv.parse_int(string(v.text)[7:])
 		check(ok && i >= 0 && i < 60, "random sampling returns a member from either bank")
 		hits[i] += 1
 	}
@@ -201,13 +201,13 @@ unit_resize_random_pop :: proc() {
 		check(hit > 350 && hit < 650, "bank weighting preserves equal member probability")
 	}
 	for count in ([?]int{20, 21, 59}) {
-		out: [dynamic]st.Value
+		out: [dynamic]st.Member
 		st.random_unique(s, count, &out)
 		check(len(out) == count, "both unique strategies return requested count")
 		seen: map[string]bool
 		for v in out {
-			member := string(v.str)
-			check(member not_in seen && st.is_member(s, v.str), "unique sample uses member identity across banks")
+			member := string(v.text)
+			check(member not_in seen && st.is_member(s, v.text), "unique sample uses member identity across banks")
 			seen[member] = true
 		}
 		delete(seen)
@@ -223,13 +223,13 @@ unit_resize_random_pop :: proc() {
 		seen: map[string]bool
 		for i in 0 ..< st.popped_len(&popped) {
 			v := st.popped_get(&popped, i)
-			check(string(v.str) not_in seen, "popped copies are unique")
-			seen[string(v.str)] = true
+			check(string(v.text) not_in seen, "popped copies are unique")
+			seen[string(v.text)] = true
 		}
 		it := st.iterator(remaining)
 		for v in st.next(&it) {
-			check(string(v.str) not_in seen, "remaining members do not alias popped membership")
-			seen[string(v.str)] = true
+			check(string(v.text) not_in seen, "remaining members do not alias popped membership")
+			seen[string(v.text)] = true
 		}
 		for i in 0 ..< 60 {
 			check(fmt.tprintf("pop\x00:%d", i) in seen, "SPOP preserves every binary member across copied/deleted banks")
@@ -252,7 +252,7 @@ unit_resize_algebra :: proc() {
 	}
 	st.table_resize(b.table, b.table.cap * 2)
 	sources := [2]st.Set{a, b}
-	out: [dynamic]st.Value
+	out: [dynamic]st.Member
 	check(st.inter_collect(sources[:], &out) == 30 && len(out) == 30, "intersection reads both banks")
 	check(st.inter_card(sources[:], 7) == 7, "intersection cardinality preserves LIMIT")
 	inter := st.inter_store(sources[:])
@@ -301,14 +301,14 @@ unit_resize_scan :: proc() {
 		}
 		st.table_resize(s.table, s.table.cap / 2 if shrink else s.table.cap * 2)
 		cursor: u64
-		out: [dynamic]st.Value
+		out: [dynamic]st.Member
 		seen: map[string]bool
 		pages := 0
 		for {
 			clear(&out)
 			cursor = st.scan(s, cursor, 1, &out)
 			for v in out {
-				seen[string(v.str)] = true
+				seen[string(v.text)] = true
 			}
 			pages += 1
 			if cursor == 0 {

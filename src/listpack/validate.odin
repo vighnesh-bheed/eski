@@ -27,12 +27,12 @@ decode_entry_extent :: proc "contextless" (data: []u8, offset, limit: int) -> (E
 	return {body = body, end = end, back_bytes = width}, true
 }
 
-walk_entries :: proc(data: []u8, header: Header, entry_cb: Validate_Entry_Cb, userdata: rawptr) -> (u64, bool) {
-	if len(data) < LP_HDR_SIZE + 1 || u64(header.bytes) != u64(len(data)) || data[len(data) - 1] != LP_EOF {
+walk_entries :: proc(data: []u8, header: Header, entry_cb: Element_Visitor, userdata: rawptr) -> (u64, bool) {
+	if len(data) < PACK_HEADER_BYTES + 1 || u64(header.bytes) != u64(len(data)) || data[len(data) - 1] != PACK_END {
 		return 0, false
 	}
 	count := u64(0)
-	cursor := LP_HDR_SIZE
+	cursor := PACK_HEADER_BYTES
 	limit := len(data) - 1
 	for cursor < limit {
 		extent, valid := decode_entry_extent(data, cursor, limit)
@@ -45,7 +45,7 @@ walk_entries :: proc(data: []u8, header: Header, entry_cb: Validate_Entry_Cb, us
 		}
 		cursor = extent.end
 	}
-	return count, header.count == LP_HDR_NUMELE_UNKNOWN || count == u64(header.count)
+	return count, header.count == COUNT_UNTRACKED || count == u64(header.count)
 }
 
 lp_length :: proc(lp: [^]u8) -> u64 {
@@ -53,7 +53,7 @@ lp_length :: proc(lp: [^]u8) -> u64 {
 		return 0
 	}
 	cached := lp_get_num_elements(lp)
-	if cached != LP_HDR_NUMELE_UNKNOWN {
+	if cached != COUNT_UNTRACKED {
 		return u64(cached)
 	}
 	data := lp_view(lp)
@@ -65,14 +65,14 @@ lp_length :: proc(lp: [^]u8) -> u64 {
 	if !valid {
 		return 0
 	}
-	if count < LP_HDR_NUMELE_UNKNOWN {
+	if count < COUNT_UNTRACKED {
 		lp_set_num_elements(lp, count)
 	}
 	return count
 }
 
-lp_validate_integrity :: proc(lp: [^]u8, size: u64, deep: bool, entry_cb: Validate_Entry_Cb, cb_userdata: rawptr) -> bool {
-	if lp == nil || size < LP_HDR_SIZE + 1 || size > u64(max(int)) || size > u64(max(u32)) {
+lp_validate_integrity :: proc(lp: [^]u8, size: u64, deep: bool, entry_cb: Element_Visitor, cb_userdata: rawptr) -> bool {
+	if lp == nil || size < PACK_HEADER_BYTES + 1 || size > u64(max(int)) || size > u64(max(u32)) {
 		return false
 	}
 	data := lp[:int(size)]
@@ -88,14 +88,14 @@ lp_validate_integrity :: proc(lp: [^]u8, size: u64, deep: bool, entry_cb: Valida
 }
 
 lp_validate_first :: proc "contextless" (lp: [^]u8) -> [^]u8 {
-	if lp == nil || lp_bytes(lp) <= LP_HDR_SIZE + 1 || lp[LP_HDR_SIZE] == LP_EOF {
+	if lp == nil || lp_bytes(lp) <= PACK_HEADER_BYTES + 1 || lp[PACK_HEADER_BYTES] == PACK_END {
 		return nil
 	}
-	return padd(lp, LP_HDR_SIZE)
+	return padd(lp, PACK_HEADER_BYTES)
 }
 
 lp_validate_next :: proc "contextless" (lp: [^]u8, pp: ^[^]u8, lpbytes: u64) -> bool {
-	if lp == nil || pp == nil || pp^ == nil || lpbytes < LP_HDR_SIZE + 1 || lpbytes > u64(max(int)) || lpbytes > u64(max(u32)) {
+	if lp == nil || pp == nil || pp^ == nil || lpbytes < PACK_HEADER_BYTES + 1 || lpbytes > u64(max(int)) || lpbytes > u64(max(u32)) {
 		return false
 	}
 	base, address := uintptr(lp), uintptr(pp^)
@@ -105,11 +105,11 @@ lp_validate_next :: proc "contextless" (lp: [^]u8, pp: ^[^]u8, lpbytes: u64) -> 
 	offset := int(address - base)
 	limit := int(lpbytes) - 1
 	data := lp[:int(lpbytes)]
-	if offset == limit && data[offset] == LP_EOF {
+	if offset == limit && data[offset] == PACK_END {
 		pp^ = nil
 		return true
 	}
-	if offset < LP_HDR_SIZE {
+	if offset < PACK_HEADER_BYTES {
 		return false
 	}
 	extent, valid := decode_entry_extent(data, offset, limit)

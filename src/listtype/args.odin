@@ -277,7 +277,7 @@ parse_memory :: proc "contextless" (s: []u8) -> (u64, bool) {
 
 parse_packed_threshold :: proc "contextless" (s: []u8) -> Error {
 	n, ok := parse_memory(s)
-	if !ok || !set_packed_threshold(n) {
+	if !ok || !set_plain_node_threshold(n) {
 		return .Packed_Threshold
 	}
 	return .None

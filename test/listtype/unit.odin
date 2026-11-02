@@ -10,7 +10,7 @@ b :: #force_inline proc(s: string) -> []u8 {
 }
 
 vstr :: proc(v: lt.Value) -> string {
-	buf: [lp.LP_INTBUF_SIZE]u8
+	buf: [lp.DECIMAL_BUFFER_BYTES]u8
 	return strings.clone(string(lt.value_bytes(v, &buf)), context.temp_allocator)
 }
 
@@ -113,27 +113,27 @@ unit_conversion_limits :: proc() {
 	l := lt.create()
 	defer lt.destroy(l)
 	for v in ([?]string{"a", "b", "c"}) {
-		lt.try_conversion_append(l, 1, 1)
+		lt.widen_if_needed(l, 1, 1)
 		lt.push(l, b(v), .Tail)
 	}
 	check(l.encoding == .Listpack, "three entries stay listpack at fill 3")
-	lt.try_conversion_append(l, 1, 1)
+	lt.widen_if_needed(l, 1, 1)
 	lt.push(l, b("d"), .Tail)
 	check(l.encoding == .Quicklist, "fourth entry converts")
 	lt.pop_discard(l, .Tail)
-	lt.try_conversion(l, .Shrinking)
+	lt.narrow_if_possible(l)
 	check(l.encoding == .Quicklist, "three entries above half the limit stay quicklist")
 	lt.pop_discard(l, .Tail)
-	lt.try_conversion(l, .Shrinking)
+	lt.narrow_if_possible(l)
 	check(l.encoding == .Quicklist, "two entries above half of three stay quicklist")
 	lt.pop_discard(l, .Tail)
-	lt.try_conversion(l, .Shrinking)
+	lt.narrow_if_possible(l)
 	check(l.encoding == .Listpack, "one entry converts back")
 	invariants(l, "conversion")
 	lt.list_max_listpack_size = -2
 	big := lt.create()
 	defer lt.destroy(big)
-	lt.try_conversion_append(big, 9000, 1)
+	lt.widen_if_needed(big, 9000, 1)
 	lt.push(big, b(strings.repeat("x", 9000, context.temp_allocator)), .Tail)
 	check(big.encoding == .Quicklist && big.ql.head.plain, "large element becomes a plain node")
 	invariants(big, "plain node")
@@ -145,10 +145,10 @@ unit_random :: proc(seed: u64, ops: int) {
 	r := Rng{s = seed}
 	fills := [?]int{-2, -1, 1, 2, 3, 4, 8, -5}
 	saved_fill := lt.list_max_listpack_size
-	saved_thr := lt.packed_threshold
+	saved_thr := lt.plain_node_threshold
 	defer {
 		lt.list_max_listpack_size = saved_fill
-		lt.packed_threshold = saved_thr
+		lt.plain_node_threshold = saved_thr
 	}
 	l := lt.create()
 	ref := make(Ref_List)
@@ -161,7 +161,7 @@ unit_random :: proc(seed: u64, ops: int) {
 	for i in 0 ..< ops {
 		if i % 500 == 0 {
 			lt.list_max_listpack_size = fills[rng_below(&r, len(fills))]
-			lt.packed_threshold = thresholds[rng_below(&r, len(thresholds))]
+			lt.plain_node_threshold = thresholds[rng_below(&r, len(thresholds))]
 		}
 		v: string
 		switch rng_below(&r, 4) {
@@ -179,7 +179,7 @@ unit_random :: proc(seed: u64, ops: int) {
 		case 0, 1:
 			where_ := lt.Where.Head if rng_chance(&r, 50) else lt.Where.Tail
 			reps := 1 + rng_below(&r, 12)
-			lt.try_conversion_append(l, len(v) * reps, reps)
+			lt.widen_if_needed(l, len(v) * reps, reps)
 			for _ in 0 ..< reps {
 				lt.push(l, b(v), where_)
 				if where_ == .Head {
@@ -201,7 +201,7 @@ unit_random :: proc(seed: u64, ops: int) {
 				} else {
 					pop(&ref)
 				}
-				lt.try_conversion(l, .Shrinking)
+				lt.narrow_if_possible(l)
 			}
 			what = "pop"
 		case 3:
@@ -253,7 +253,7 @@ unit_random :: proc(seed: u64, ops: int) {
 				}
 			}
 			check(removed == want, "lrem count")
-			lt.try_conversion(l, .Shrinking)
+			lt.narrow_if_possible(l)
 			what = "lrem"
 		case 6:
 			s := rng_below(&r, 8) - 3
@@ -270,7 +270,7 @@ unit_random :: proc(seed: u64, ops: int) {
 			} else {
 				clear(&ref)
 			}
-			lt.try_conversion(l, .Shrinking)
+			lt.narrow_if_possible(l)
 			what = "ltrim"
 		case 7:
 			target := pool[rng_below(&r, len(pool))]
@@ -299,7 +299,7 @@ unit_random :: proc(seed: u64, ops: int) {
 						pop(&ref)
 					}
 				}
-				lt.try_conversion(l, .Shrinking)
+				lt.narrow_if_possible(l)
 			}
 			what = "delete range"
 		case 9:
@@ -357,7 +357,7 @@ unit_args :: proc() {
 	sz, ok := lt.parse_memory(b("4kb"))
 	check(ok && sz == 4096, "memory units")
 	check(lt.parse_packed_threshold(b("5gb")) == .Packed_Threshold, "packed threshold limit")
-	check(lt.parse_packed_threshold(b("0")) == .None && lt.packed_threshold == 0, "packed threshold reset")
+	check(lt.parse_packed_threshold(b("0")) == .None && lt.plain_node_threshold == 0, "packed threshold reset")
 	check(crc64(b("123456789")) == 0xe9c6d914c4b8d9ca, "crc64 jones check value")
 }
 

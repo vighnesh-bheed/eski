@@ -104,8 +104,8 @@ model_run :: proc(t: ^testing.T, seed: u64, kinds: []Key_Kind, ops: int, check_e
 		clear(&last_buf)
 		append(&last_buf, ..bytes_of(key))
 		last = string(last_buf[:])
-		if r.numele != u64(len(ref.items)) {
-			testing.expectf(t, false, "%s: numele %d want %d", where_, r.numele, len(ref.items))
+		if r.stored != u64(len(ref.items)) {
+			testing.expectf(t, false, "%s: stored %d want %d", where_, r.stored, len(ref.items))
 			ok = false
 		}
 		if shared - (1 << 40) != rx.memory(r) || rx.memory(r) < baseline {
@@ -147,7 +147,7 @@ model_run :: proc(t: ^testing.T, seed: u64, kinds: []Key_Kind, ops: int, check_e
 		ref_remove(&ref, k)
 	}
 	if ok {
-		testing.expect_value(t, r.numele, u64(0))
+		testing.expect_value(t, r.stored, u64(0))
 		testing.expect_value(t, rx.memory(r), baseline)
 	}
 	rx.destroy(r)

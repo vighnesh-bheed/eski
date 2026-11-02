@@ -7,7 +7,7 @@ import "core:testing"
 empty_tree_behaviour :: proc(t: ^testing.T) {
 	r := rx.create()
 	defer rx.destroy(r)
-	testing.expect_value(t, r.numele, u64(0))
+	testing.expect_value(t, r.stored, u64(0))
 	v, found := rx.find(r, bytes_of("a"))
 	testing.expect(t, v == nil && !found)
 	old := rawptr(uintptr(99))
@@ -31,10 +31,10 @@ insert_overwrite_and_try_insert :: proc(t: ^testing.T) {
 	defer rx.destroy(r)
 	old: rawptr
 	testing.expect(t, rx.insert(r, bytes_of("abc"), rawptr(uintptr(1))))
-	testing.expect_value(t, r.numele, u64(1))
+	testing.expect_value(t, r.stored, u64(1))
 	testing.expect(t, !rx.insert(r, bytes_of("abc"), rawptr(uintptr(2)), &old))
 	testing.expect_value(t, uintptr(old), uintptr(1))
-	testing.expect_value(t, r.numele, u64(1))
+	testing.expect_value(t, r.stored, u64(1))
 	v, found := rx.find(r, bytes_of("abc"))
 	testing.expect(t, found && uintptr(v) == 2)
 	old = nil
@@ -43,7 +43,7 @@ insert_overwrite_and_try_insert :: proc(t: ^testing.T) {
 	v, found = rx.find(r, bytes_of("abc"))
 	testing.expect(t, found && uintptr(v) == 2)
 	testing.expect(t, rx.try_insert(r, bytes_of("abd"), rawptr(uintptr(4))))
-	testing.expect_value(t, r.numele, u64(2))
+	testing.expect_value(t, r.stored, u64(2))
 	testing.expect(t, !rx.try_insert(r, bytes_of("abd"), rawptr(uintptr(5))))
 	testing.expect(t, rx.insert(r, nil, rawptr(uintptr(5))))
 	v, found = rx.find(r, nil)
@@ -63,13 +63,13 @@ insert_overwrite_and_try_insert :: proc(t: ^testing.T) {
 	old = nil
 	testing.expect(t, rx.remove(r, bytes_of("abc"), &old))
 	testing.expect_value(t, uintptr(old), uintptr(2))
-	testing.expect_value(t, r.numele, u64(3))
+	testing.expect_value(t, r.stored, u64(3))
 	old = rawptr(uintptr(77))
 	testing.expect(t, !rx.remove(r, bytes_of("abc"), &old))
 	testing.expect_value(t, uintptr(old), uintptr(77))
 	testing.expect(t, rx.remove(r, bytes_of(""), &old))
 	testing.expect_value(t, uintptr(old), uintptr(5))
-	testing.expect_value(t, r.numele, u64(2))
+	testing.expect_value(t, r.stored, u64(2))
 	ref_remove(&ref, "abc")
 	ref_remove(&ref, "")
 	check_walks(t, r, &ref, "after removals")
@@ -100,7 +100,7 @@ byte_order_with_prefixes :: proc(t: ^testing.T) {
 		testing.expect(t, rx.insert(r, bytes_of(k), rawptr(uintptr(i + 1))))
 		ref_insert(&ref, k, uintptr(i + 1))
 	}
-	testing.expect_value(t, r.numele, u64(len(keys)))
+	testing.expect_value(t, r.stored, u64(len(keys)))
 	expected := [?]string{
 		"",
 		"\x00",
@@ -157,7 +157,7 @@ prefix_split_and_deletion_boundaries :: proc(t: ^testing.T) {
 			testing.expect_value(t, uintptr(old), uintptr(len(s.key)))
 			ref_remove(&ref, s.key)
 		}
-		testing.expect_value(t, r.numele, u64(len(ref.items)))
+		testing.expect_value(t, r.stored, u64(len(ref.items)))
 		if !check_walks(t, r, &ref, s.key) {
 			return
 		}
@@ -234,7 +234,7 @@ memory_accounting_and_shared_counter :: proc(t: ^testing.T) {
 			break
 		}
 	}
-	per_key := f64(rx.memory(r)) / f64(r.numele)
+	per_key := f64(rx.memory(r)) / f64(r.stored)
 	testing.expectf(t, per_key < 30, "bytes per sequential id key %.1f", per_key)
 	for i in 0 ..< 5000 {
 		k := id_key(1_700_000_000_000 + u64(i) * 1000, 0)
@@ -244,7 +244,7 @@ memory_accounting_and_shared_counter :: proc(t: ^testing.T) {
 			break
 		}
 	}
-	testing.expect_value(t, r.numele, u64(0))
+	testing.expect_value(t, r.stored, u64(0))
 	testing.expect_value(t, rx.memory(r), baseline)
 	names := [?]string{"alice", "bob", "carol", "dave", "erin"}
 	for n, i in names {
@@ -267,9 +267,9 @@ dense_sequential_ids_are_compact :: proc(t: ^testing.T) {
 		k := id_key(1_700_000_000_000 + u64(i) * 7, u64(i % 3))
 		rx.insert(r, k[:], rawptr(uintptr(i + 1)))
 	}
-	per_key := f64(rx.memory(r)) / f64(r.numele)
+	per_key := f64(rx.memory(r)) / f64(r.stored)
 	testing.expectf(t, per_key < 30, "bytes per key %.1f", per_key)
-	testing.expect(t, r.numnodes < r.numele / 20)
+	testing.expect(t, r.nodes < r.stored / 20)
 	it: rx.Iterator
 	rx.start(&it, r)
 	defer rx.stop(&it)

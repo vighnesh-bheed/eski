@@ -6,6 +6,8 @@ import eski "../../src"
 import lp "../../src/listpack"
 import st "../../src/settype"
 
+SPOP_KEEP_FACTOR :: 5
+
 Key_Kind :: enum u8 {
 	String,
 	Set,
@@ -36,7 +38,7 @@ Model :: struct {
 	db:       map[string]Key,
 	resp:     int,
 	out:      [dynamic]u8,
-	vals:     [dynamic]st.Value,
+	vals:     [dynamic]st.Member,
 	srcs:     [dynamic]st.Set,
 	unstable: bool,
 	random:   bool,
@@ -326,7 +328,7 @@ set_members :: proc(s: st.Set, allocator := context.temp_allocator) -> [dynamic]
 		if !ok {
 			break
 		}
-		buf: [lp.LP_INTBUF_SIZE]u8
+		buf: [lp.DECIMAL_BUFFER_BYTES]u8
 		b := st.value_bytes(v, &buf)
 		c := make([]u8, len(b), allocator)
 		copy(c, b)
@@ -359,8 +361,8 @@ model_sources :: proc(m: ^Model) -> []st.Set {
 	return out
 }
 
-value_is_integer :: proc(v: st.Value) -> bool {
-	return v.is_int || lp.lp_string_to_int64(v.str, nil)
+value_is_integer :: proc(v: st.Member) -> bool {
+	return v.numeric || lp.lp_string_to_int64(v.text, nil)
 }
 
 order_sensitive :: proc(m: ^Model, r: st.Set) -> bool {
@@ -532,7 +534,7 @@ spop_apply :: proc(m: ^Model, key: []u8, popped: [][]u8, count: int) {
 	size := st.size(s)
 	remaining := size - count
 	k := model_note(m, key)
-	if count > 0 && count < size && remaining <= count / st.SPOP_MOVE_STRATEGY_MUL {
+	if count > 0 && count < size && remaining * SPOP_KEEP_FACTOR <= count {
 		uncertain := s.encoding == .Hashtable || k.tainted || k.ambiguous
 		gone := make(map[string]bool, len(popped), context.temp_allocator)
 		for p in popped {
@@ -545,7 +547,7 @@ spop_apply :: proc(m: ^Model, key: []u8, popped: [][]u8, count: int) {
 			if !ok {
 				break
 			}
-			buf: [lp.LP_INTBUF_SIZE]u8
+			buf: [lp.DECIMAL_BUFFER_BYTES]u8
 			if string(st.value_bytes(v, &buf)) in gone {
 				continue
 			}

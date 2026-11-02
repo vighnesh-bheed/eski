@@ -68,7 +68,7 @@ field_get_set_every_width :: proc(t: ^testing.T) {
 				testing.expect_value(t, got, u64(want))
 				sgot := bm.get_signed_bitfield(view, offset, u64(bits))
 				testing.expect_value(t, sgot, ref_get_field(mirror, offset, bits, true))
-				op := bm.Bitfield_Op{offset = offset, bits = u8(bits), signed = signed}
+				op := bm.Field_Command{offset = offset, bits = u8(bits), signed = signed}
 				testing.expect_value(t, bm.bitfield_get(view, op), ref_get_field(mirror, offset, bits, signed))
 				if offset + u64(bits) <= u64(n) * 8 {
 					value := rand.uint64()
@@ -216,49 +216,60 @@ field_programs_match_reference :: proc(t: ^testing.T) {
 
 @(test)
 overflow_rules_at_field_limits :: proc(t: ^testing.T) {
-	r, s := bm.check_signed_bitfield_overflow(min(i64), 0, 8, .Sat)
-	testing.expect_value(t, r, 1)
-	testing.expect_value(t, s, 127)
-	r, s = bm.check_signed_bitfield_overflow(-9223372036854775681, 0, 8, .Sat)
-	testing.expect_value(t, r, 1)
-	testing.expect_value(t, s, 127)
-	r, s = bm.check_signed_bitfield_overflow(-9223372036854775680, 0, 8, .Sat)
-	testing.expect_value(t, r, -1)
-	testing.expect_value(t, s, -128)
-	r, s = bm.check_signed_bitfield_overflow(min(i64), 0, 63, .Sat)
-	testing.expect_value(t, r, 1)
-	testing.expect_value(t, s, 4611686018427387903)
-	r, s = bm.check_signed_bitfield_overflow(min(i64), 0, 1, .Sat)
-	testing.expect_value(t, r, 1)
-	testing.expect_value(t, s, 0)
-	r, s = bm.check_signed_bitfield_overflow(-9223372036854775807, 0, 1, .Sat)
-	testing.expect_value(t, r, -1)
-	testing.expect_value(t, s, -1)
-	r, s = bm.check_signed_bitfield_overflow(127, 1, 8, .Wrap)
-	testing.expect_value(t, r, 1)
-	testing.expect_value(t, s, -128)
-	r, _ = bm.check_signed_bitfield_overflow(-5, -3, 64, .Fail)
-	testing.expect_value(t, r, 0)
-	r, s = bm.check_signed_bitfield_overflow(max(i64), 1, 64, .Sat)
-	testing.expect_value(t, r, 1)
-	testing.expect_value(t, s, max(i64))
-	r, s = bm.check_signed_bitfield_overflow(min(i64), -1, 64, .Wrap)
-	testing.expect_value(t, r, -1)
-	testing.expect_value(t, s, max(i64))
-	u, l := bm.check_unsigned_bitfield_overflow(max(u64), 0, 8, .Sat)
-	testing.expect_value(t, u, 1)
-	testing.expect_value(t, l, 255)
-	u, l = bm.check_unsigned_bitfield_overflow(0, -1, 63, .Sat)
-	testing.expect_value(t, u, -1)
-	testing.expect_value(t, l, 0)
-	u, l = bm.check_unsigned_bitfield_overflow(9223372036854775807, min(i64), 63, .Wrap)
-	testing.expect_value(t, u, -1)
-	testing.expect_value(t, l, 9223372036854775807)
-	u, _ = bm.check_unsigned_bitfield_overflow(9223372036854775807, -9223372036854775807, 63, .Fail)
-	testing.expect_value(t, u, 0)
-	u, l = bm.check_unsigned_bitfield_overflow(250, 10, 8, .Wrap)
-	testing.expect_value(t, u, 1)
-	testing.expect_value(t, l, 4)
+	Signed_Case :: struct {
+		value, incr: i64,
+		bits:        u64,
+		mode:        bm.Overflow,
+		bound:       bm.Field_Bound,
+		stored:      i64,
+		ok:          bool,
+	}
+	signed_cases := []Signed_Case{
+		{min(i64), 0, 8, .Sat, .Above, 127, true},
+		{-9223372036854775681, 0, 8, .Sat, .Above, 127, true},
+		{-9223372036854775680, 0, 8, .Sat, .Below, -128, true},
+		{min(i64), 0, 63, .Sat, .Above, 4611686018427387903, true},
+		{min(i64), 0, 1, .Sat, .Above, 0, true},
+		{-9223372036854775807, 0, 1, .Sat, .Below, -1, true},
+		{127, 1, 8, .Wrap, .Above, -128, true},
+		{-5, -3, 64, .Fail, .Within, -8, true},
+		{max(i64), 1, 64, .Sat, .Above, max(i64), true},
+		{max(i64), 1, 64, .Fail, .Above, max(i64), false},
+		{min(i64), -1, 64, .Wrap, .Below, max(i64), true},
+	}
+	for c in signed_cases {
+		testing.expect_value(t, bm.signed_bound(c.value, c.incr, c.bits), c.bound)
+		stored, ok := bm.signed_settle(c.value, c.incr, c.bits, c.mode)
+		testing.expect_value(t, ok, c.ok)
+		if ok {
+			testing.expect_value(t, stored, c.stored)
+		}
+	}
+	Unsigned_Case :: struct {
+		value:  u64,
+		incr:   i64,
+		bits:   u64,
+		mode:   bm.Overflow,
+		bound:  bm.Field_Bound,
+		stored: u64,
+		ok:     bool,
+	}
+	unsigned_cases := []Unsigned_Case{
+		{max(u64), 0, 8, .Sat, .Above, 255, true},
+		{0, -1, 63, .Sat, .Below, 0, true},
+		{9223372036854775807, min(i64), 63, .Wrap, .Below, 9223372036854775807, true},
+		{9223372036854775807, -9223372036854775807, 63, .Fail, .Within, 0, true},
+		{250, 10, 8, .Wrap, .Above, 4, true},
+		{250, 10, 8, .Fail, .Above, 0, false},
+	}
+	for c in unsigned_cases {
+		testing.expect_value(t, bm.unsigned_bound(c.value, c.incr, c.bits), c.bound)
+		stored, ok := bm.unsigned_settle(c.value, c.incr, c.bits, c.mode)
+		testing.expect_value(t, ok, c.ok)
+		if ok {
+			testing.expect_value(t, stored, c.stored)
+		}
+	}
 	testing.expect_value(t, bm.unsigned_wrap(3, -5, 4), 14)
 	testing.expect_value(t, bm.signed_wrap(min(i64), 0, 1), 0)
 	testing.expect_value(t, bm.signed_wrap(100, 100, 8), -56)
@@ -345,13 +356,13 @@ bitfield_parse_errors_and_order :: proc(t: ^testing.T) {
 	testing.expect_value(t, prog.ops[0].offset, 8)
 	testing.expect_value(t, parse_words(&prog, "SET u8 120 1", false, 16), bm.Error.None)
 	testing.expect_value(t, parse_words(&prog, "SET u8 121 1", false, 16), bm.Error.None)
-	testing.expect_value(t, prog.highest_write_offset, 128)
+	testing.expect_value(t, prog.last_written_bit, 128)
 	testing.expect_value(t, parse_words(&prog, "SET u8 128 1", false, 16), bm.Error.Bit_Offset)
 	testing.expect_value(t, parse_words(&prog, "GET u8 127", false, 16), bm.Error.None)
 	testing.expect_value(t, parse_words(&prog, "GET u8 128", false, 16), bm.Error.Bit_Offset)
 	testing.expect_value(t, parse_words(&prog, "SET u8 3 7 INCRBY i16 #2 -1 GET u4 0"), bm.Error.None)
 	testing.expect_value(t, prog.readonly, false)
-	testing.expect_value(t, prog.highest_write_offset, 47)
+	testing.expect_value(t, prog.last_written_bit, 47)
 	testing.expect_value(t, len(prog.ops), 3)
 	testing.expect_value(t, prog.ops[1].offset, 32)
 	testing.expect_value(t, prog.ops[1].signed, true)

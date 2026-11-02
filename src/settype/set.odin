@@ -28,10 +28,10 @@ Set_Object :: struct {
 
 Set :: ^Set_Object
 
-Value :: struct {
-	str:    []u8,
-	ival:   i64,
-	is_int: bool,
+Member :: struct {
+	text:    []u8,
+	number:  i64,
+	numeric: bool,
 }
 
 Iterator :: struct {
@@ -41,18 +41,18 @@ Iterator :: struct {
 	bank: int,
 }
 
-value_from_entry :: proc "contextless" (e: lp.Entry) -> Value {
-	if e.sval == nil {
-		return {ival = e.lval, is_int = true}
+value_from_entry :: proc "contextless" (e: lp.Element) -> Member {
+	if e.text == nil {
+		return {number = e.number, numeric = true}
 	}
-	return {str = e.sval[:int(e.slen)]}
+	return {text = e.text[:int(e.text_len)]}
 }
 
-value_bytes :: proc "contextless" (v: Value, buf: ^[lp.LP_INTBUF_SIZE]u8) -> []u8 {
-	if !v.is_int {
-		return v.str
+value_bytes :: proc "contextless" (v: Member, buf: ^[lp.DECIMAL_BUFFER_BYTES]u8) -> []u8 {
+	if !v.numeric {
+		return v.text
 	}
-	n := lp.ll2string(raw_data(buf[:]), v.ival)
+	n := lp.ll2string(raw_data(buf[:]), v.number)
 	return buf[:n]
 }
 
@@ -94,12 +94,20 @@ create_table :: proc "contextless" (expected: int) -> Set {
 	return s
 }
 
-create :: proc "contextless" (first: []u8, size_hint: int) -> Set {
+initial_encoding :: proc "contextless" (first: []u8, size_hint: int) -> Encoding {
 	if size_hint <= set_max_intset_entries && lp.lp_string_to_int64(first, nil) {
-		return create_intset()
+		return .Intset
 	}
-	if size_hint <= set_max_listpack_entries {
+	return .Listpack if size_hint <= set_max_listpack_entries else .Hashtable
+}
+
+create :: proc "contextless" (first: []u8, size_hint: int) -> Set {
+	switch initial_encoding(first, size_hint) {
+	case .Intset:
+		return create_intset()
+	case .Listpack:
 		return create_listpack()
+	case .Hashtable:
 	}
 	return create_table(size_hint)
 }
@@ -167,14 +175,14 @@ iterator :: proc "contextless" (s: Set) -> Iterator {
 	return {s = s}
 }
 
-next :: proc(it: ^Iterator) -> (v: Value, ok: bool) {
+next :: proc(it: ^Iterator) -> (v: Member, ok: bool) {
 	if it.s == nil || it.idx < 0 {
 		return {}, false
 	}
 	switch it.s.encoding {
 	case .Intset:
 		if it.idx < intset_len(it.s.data) {
-			v = {ival = intset_get(it.s.data, it.idx), is_int = true}
+			v = {number = intset_get(it.s.data, it.idx), numeric = true}
 			it.idx += 1
 			return v, true
 		}
@@ -192,7 +200,7 @@ next :: proc(it: ^Iterator) -> (v: Value, ok: bool) {
 				b := slots[it.idx].blob
 				it.idx += 1
 				if blob_live(b) {
-					return {str = blob_bytes(b)}, true
+					return {text = blob_bytes(b)}, true
 				}
 			}
 			it.bank += 1
@@ -225,18 +233,18 @@ convert_and_expand :: proc(s: Set, enc: Encoding, cap: int) {
 		}
 		switch enc {
 		case .Intset:
-			integer := v.ival
-			resize_require(v.is_int || lp.lp_string_to_int64(v.str, &integer))
+			integer := v.number
+			resize_require(v.numeric || lp.lp_string_to_int64(v.text, &integer))
 			replacement.data, _ = intset_add(replacement.data, integer)
 		case .Listpack:
-			if v.is_int {
-				replacement.data = lp.lp_append_integer(replacement.data, v.ival)
+			if v.numeric {
+				replacement.data = lp.lp_append_integer(replacement.data, v.number)
 			} else {
-				replacement.data = lp.lp_append(replacement.data, v.str)
+				replacement.data = lp.lp_append(replacement.data, v.text)
 			}
 			resize_require(replacement.data != nil)
 		case .Hashtable:
-			buf: [lp.LP_INTBUF_SIZE]u8
+			buf: [lp.DECIMAL_BUFFER_BYTES]u8
 			table_add_new(replacement.table, value_bytes(v, &buf))
 		}
 	}
@@ -252,16 +260,9 @@ convert :: proc(s: Set, enc: Encoding) {
 }
 
 maybe_convert :: proc(s: Set, size_hint: int) {
-	switch s.encoding {
-	case .Intset:
-		if size_hint > set_max_intset_entries {
-			convert_and_expand(s, .Hashtable, size_hint)
-		}
-	case .Listpack:
-		if size_hint > set_max_listpack_entries {
-			convert_and_expand(s, .Hashtable, size_hint)
-		}
-	case .Hashtable:
+	ceiling := set_max_intset_entries if s.encoding == .Intset else set_max_listpack_entries
+	if s.encoding != .Hashtable && size_hint > ceiling {
+		convert_and_expand(s, .Hashtable, size_hint)
 	}
 }
 
@@ -272,29 +273,32 @@ maybe_convert_intset :: proc(s: Set) {
 }
 
 maybe_convert_to_intset :: proc(s: Set) {
-	if s.encoding != .Intset && size(s) <= intset_max_entries() {
-		convert(s, .Intset)
+	if s.encoding == .Intset || size(s) > intset_max_entries() {
+		return
 	}
+	convert(s, .Intset)
+}
+
+intset_listpack_estimate :: proc "contextless" (is: [^]u8) -> (bytes: int, fits: bool) {
+	members := intset_len(is)
+	if members == 0 {
+		return lp.PACK_HEADER_BYTES + 1, true
+	}
+	low, high := intset_min(is), intset_max(is)
+	if int(max(lp.sdigits10(low), lp.sdigits10(high))) > set_max_listpack_value {
+		return 0, false
+	}
+	per_low := lp.lp_estimate_bytes_repeated_integer(low, u64(members))
+	per_high := lp.lp_estimate_bytes_repeated_integer(high, u64(members))
+	return max(per_low, per_high), true
 }
 
 intset_can_append_listpack :: proc "contextless" (is: [^]u8, member: []u8) -> bool {
-	count := intset_len(is)
-	if count >= set_max_listpack_entries || len(member) > set_max_listpack_value {
+	if len(member) > set_max_listpack_value || intset_len(is) >= set_max_listpack_entries {
 		return false
 	}
-	total := lp.LP_HDR_SIZE + 1
-	if count > 0 {
-		minimum := intset_min(is)
-		maximum := intset_max(is)
-		if int(lp.sdigits10(minimum)) > set_max_listpack_value || int(lp.sdigits10(maximum)) > set_max_listpack_value {
-			return false
-		}
-		total = max(lp.lp_estimate_bytes_repeated_integer(minimum, u64(count)), lp.lp_estimate_bytes_repeated_integer(maximum, u64(count)))
-	}
-	if len(member) > max(int) - total {
-		return false
-	}
-	return lp.lp_safe_to_add(nil, total + len(member))
+	estimate := intset_listpack_estimate(is) or_return
+	return len(member) <= max(int) - estimate && lp.lp_safe_to_add(nil, estimate + len(member))
 }
 
 set_convert_and_add :: proc(s: Set, enc: Encoding, member: []u8) -> bool {
@@ -303,63 +307,67 @@ set_convert_and_add :: proc(s: Set, enc: Encoding, member: []u8) -> bool {
 	copy(owned[:len(member)], member)
 	defer lp.lp_mem_free(owned)
 	convert(s, enc)
-	return add_aux(s, {str = owned[:len(member)]})
+	return add_aux(s, {text = owned[:len(member)]})
 }
 
 add :: proc(s: Set, m: []u8) -> bool {
-	return add_aux(s, {str = m})
+	return add_aux(s, {text = m})
 }
 
-add_aux :: proc(s: Set, v: Value) -> bool {
-	buf: [lp.LP_INTBUF_SIZE]u8
-	member := value_bytes(v, &buf)
-	switch s.encoding {
-	case .Intset:
-		integer := v.ival
-		if v.is_int || lp.lp_string_to_int64(member, &integer) {
-			inserted: bool
-			s.data, inserted = intset_add(s.data, integer)
-			if inserted {
-				maybe_convert_intset(s)
-			}
-			return inserted
-		}
-		enc := Encoding.Hashtable
-		if intset_can_append_listpack(s.data, member) {
-			enc = .Listpack
-		}
-		return set_convert_and_add(s, enc, member)
-	case .Listpack:
-		if lp.lp_find(s.data, lp.lp_first(s.data), member, 0) != nil {
-			return false
-		}
-		if size(s) >= set_max_listpack_entries || len(member) > set_max_listpack_value || !lp.lp_safe_to_add(s.data, len(member)) {
-			return set_convert_and_add(s, .Hashtable, member)
-		}
-		if v.is_int {
-			s.data = lp.lp_append_integer(s.data, v.ival)
-		} else {
-			s.data = lp.lp_append(s.data, member)
-		}
-		resize_require(s.data != nil)
-		return true
-	case .Hashtable:
+add_to_intset :: proc(s: Set, v: Member, member: []u8) -> bool {
+	number := v.number
+	if !v.numeric && !lp.lp_string_to_int64(member, &number) {
+		target := Encoding.Listpack if intset_can_append_listpack(s.data, member) else Encoding.Hashtable
+		return set_convert_and_add(s, target, member)
+	}
+	inserted: bool
+	s.data, inserted = intset_add(s.data, number)
+	if !inserted {
+		return false
+	}
+	maybe_convert_intset(s)
+	return true
+}
+
+listpack_has_room :: proc(s: Set, member: []u8) -> bool {
+	return size(s) < set_max_listpack_entries && len(member) <= set_max_listpack_value && lp.lp_safe_to_add(s.data, len(member))
+}
+
+add_to_listpack :: proc(s: Set, v: Member, member: []u8) -> bool {
+	if lp.lp_find(s.data, lp.lp_first(s.data), member, 0) != nil {
+		return false
+	}
+	if !listpack_has_room(s, member) {
+		return set_convert_and_add(s, .Hashtable, member)
+	}
+	s.data = lp.lp_append_integer(s.data, v.number) if v.numeric else lp.lp_append(s.data, member)
+	resize_require(s.data != nil)
+	return true
+}
+
+add_aux :: proc(s: Set, v: Member) -> bool {
+	scratch: [lp.DECIMAL_BUFFER_BYTES]u8
+	member := value_bytes(v, &scratch)
+	if s.encoding == .Hashtable {
 		return table_add(s.table, member)
 	}
-	return false
+	if s.encoding == .Intset {
+		return add_to_intset(s, v, member)
+	}
+	return add_to_listpack(s, v, member)
 }
 
 remove :: proc(s: Set, m: []u8) -> bool {
-	return remove_aux(s, {str = m})
+	return remove_aux(s, {text = m})
 }
 
-remove_aux :: proc(s: Set, v: Value) -> bool {
-	buf: [lp.LP_INTBUF_SIZE]u8
+remove_aux :: proc(s: Set, v: Member) -> bool {
+	buf: [lp.DECIMAL_BUFFER_BYTES]u8
 	member := value_bytes(v, &buf)
 	switch s.encoding {
 	case .Intset:
-		integer := v.ival
-		if !v.is_int && !lp.lp_string_to_int64(member, &integer) {
+		integer := v.number
+		if !v.numeric && !lp.lp_string_to_int64(member, &integer) {
 			return false
 		}
 		removed: bool
@@ -379,16 +387,16 @@ remove_aux :: proc(s: Set, v: Value) -> bool {
 }
 
 is_member :: proc(s: Set, m: []u8) -> bool {
-	return is_member_aux(s, {str = m})
+	return is_member_aux(s, {text = m})
 }
 
-is_member_aux :: proc(s: Set, v: Value) -> bool {
-	buf: [lp.LP_INTBUF_SIZE]u8
+is_member_aux :: proc(s: Set, v: Member) -> bool {
+	buf: [lp.DECIMAL_BUFFER_BYTES]u8
 	member := value_bytes(v, &buf)
 	switch s.encoding {
 	case .Intset:
-		integer := v.ival
-		if !v.is_int && !lp.lp_string_to_int64(member, &integer) {
+		integer := v.number
+		if !v.numeric && !lp.lp_string_to_int64(member, &integer) {
 			return false
 		}
 		return intset_find(s.data, integer)
@@ -416,7 +424,7 @@ dup :: proc(s: Set) -> Set {
 			if !ok {
 				break
 			}
-			table_add_new(copy.table, v.str)
+			table_add_new(copy.table, v.text)
 		}
 	}
 	return copy
