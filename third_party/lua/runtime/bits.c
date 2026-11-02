@@ -21,7 +21,8 @@ static void es_sha_block(uint32_t state[5], const unsigned char block[64]) {
 
 int es_sha1hex(lua_State *L) {
     if (lua_gettop(L) != 1) { lua_pushliteral(L, "wrong number of arguments"); return lua_error(L); }
-    size_t len; const unsigned char *text = (const unsigned char *)luaL_checklstring(L, 1, &len);
+    size_t len = 0; const unsigned char *text = (const unsigned char *)lua_tolstring(L, 1, &len);
+    if (!text) { text = (const unsigned char *)""; len = 0; }
     uint32_t state[5] = {UINT32_C(0x67452301),UINT32_C(0xefcdab89),UINT32_C(0x98badcfe),UINT32_C(0x10325476),UINT32_C(0xc3d2e1f0)};
     size_t pos = 0;
     while (len - pos >= 64) { es_sha_block(state, text + pos); pos += 64; }

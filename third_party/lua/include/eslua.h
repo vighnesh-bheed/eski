@@ -31,6 +31,7 @@ typedef struct eslua_result {
     int32_t forwarded_error;
     eslua_error_event *errors;
     size_t error_count;
+    int32_t rejected;
 } eslua_result;
 
 enum eslua_status {
@@ -69,6 +70,8 @@ typedef void (*eslua_log_fn)(void *opaque, int32_t level, size_t argc, const esl
 
 typedef eslua_result (*eslua_acl_fn)(void *opaque, size_t argc, const eslua_arg *args);
 typedef int32_t (*eslua_propagation_fn)(void *opaque, int32_t mask);
+
+typedef size_t (*eslua_number_fn)(double value, int32_t argument, unsigned char *out, size_t capacity);
 
 typedef eslua_result (*eslua_debug_read_fn)(void *opaque);
 typedef int32_t (*eslua_debug_write_fn)(void *opaque, eslua_arg frame);
@@ -117,5 +120,7 @@ eslua_stats eslua_functions_stats(void);
 eslua_stats eslua_functions_active_stats(void);
 eslua_stats eslua_eval_stats(void);
 size_t eslua_detached_memory(void);
+void eslua_set_number_format(eslua_number_fn format);
+void eslua_set_load_log(eslua_log_fn log);
 
 #endif

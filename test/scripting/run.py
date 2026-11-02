@@ -440,7 +440,283 @@ class Compatibility(Fixture):
         self.actual_inner_tracking('EVAL_RO')
 
 
+class Parity(Fixture):
+    portable = True
+
+    def raw(self, *arguments, client=None):
+        client = client or self.client
+        client.send(*arguments)
+        prefix = client.take(1)
+        if prefix in (b'$', b'='):
+            length = int(client.line())
+            return prefix, client.take(length+2)[:-2] if length >= 0 else None
+        return prefix, client.line()
+
+    def test_numbers_passed_to_commands_use_integer_or_shortest_round_trip_text(self):
+        cases = (('0.1', b'0.1'), ('1.5', b'1.5'), ('3.0', b'3'), ('1e20', b'1e+20'), ('-0.0', b'0'), ('1/3', b'0.3333333333333333'),
+                 ('2^53', b'9007199254740992'), ('2^63', b'9223372036854776000'), ('-2^63', b'-9223372036854776000'),
+                 ('0/0', b'-nan'), ('-(0/0)', b'nan'), ('1/0', b'inf'), ('-1/0', b'-inf'), ('123456789012345678', b'123456789012345680'),
+                 ('1e17', b'100000000000000000'), ('1e18', b'1000000000000000000'), ('1e19', b'1e+19'), ('2^62', b'4611686018427387904'),
+                 ('2^62+2048', b'4611686018427390000'), ('1e-5', b'0.00001'), ('1e-6', b'0.000001'), ('1e-7', b'1e-7'), ('1.5e-7', b'1.5e-7'),
+                 ('0.000123', b'0.000123'), ('5e-324', b'5e-324'), ('1.7976931348623157e308', b'1.7976931348623157e+308'), ('4.35', b'4.35'),
+                 ('1234567.891', b'1234567.891'), ('12345678901234567890', b'12345678901234567000'), ('0.1+0.2', b'0.30000000000000004'))
+        for literal, expected in cases:
+            with self.subTest(literal=literal):
+                source = "redis.call('SET',KEYS[1],%s) return redis.call('GET',KEYS[1])" % literal
+                self.assertEqual(self.client.call('EVAL', source, 1, 'parity:number'), expected)
+
+    def test_double_replies_use_shortest_round_trip_text_in_both_protocols(self):
+        cases = (('0.1', b'0.1'), ('1/3', b'0.3333333333333333'), ('1e300', b'1e+300'), ('3.0', b'3'), ('-0.0', b'-0'),
+                 ('0/0', b'nan'), ('1e17', b'100000000000000000'), ('2^63', b'9223372036854776000'), ('5e-324', b'5e-324'), ('-1/0', b'-inf'))
+        self.client.call('ZADD', 'parity:scores', 0.1, 'm')
+        for protocol in (2, 3):
+            self.client.call('HELLO', protocol)
+            marker = b'$' if protocol == 2 else b','
+            for literal, expected in cases:
+                with self.subTest(protocol=protocol, literal=literal):
+                    self.assertEqual(self.raw('EVAL', 'redis.setresp(3) return {double=%s}' % literal, 0), (marker, expected))
+            with self.subTest(protocol=protocol, relayed='ZSCORE'):
+                self.assertEqual(self.raw('EVAL', "redis.setresp(3) return redis.call('ZSCORE',KEYS[1],'m')", 1, 'parity:scores'), (marker, b'0.1'))
+        self.client.call('HELLO', 2)
+
+    def test_helper_argument_errors_use_reference_texts(self):
+        cases = (("redis.setresp()", 'ERR redis.setresp() requires one argument. script:'),
+                 ("redis.setresp(4)", 'ERR RESP version must be 2 or 3. script:'),
+                 ("redis.setresp('a')", 'ERR RESP version must be 2 or 3. script:'),
+                 ("redis.setresp(2,3)", 'ERR redis.setresp() requires one argument. script:'),
+                 ("redis.set_repl()", 'ERR redis.set_repl() requires one argument. script:'),
+                 ("redis.set_repl(99)", 'ERR Invalid replication flags. Use REPL_AOF, REPL_REPLICA, REPL_ALL or REPL_NONE. script:'),
+                 ("redis.set_repl(1,2)", 'ERR redis.set_repl() requires one argument. script:'),
+                 ("redis.log()", 'ERR redis.log() requires two arguments or more. script:'),
+                 ("redis.log(1)", 'ERR redis.log() requires two arguments or more. script:'),
+                 ("redis.log(redis.LOG_WARNING)", 'ERR redis.log() requires two arguments or more. script:'),
+                 ("redis.log(99,'x')", 'ERR Invalid log level. script:'),
+                 ("redis.log(-1,'x')", 'ERR Invalid log level. script:'),
+                 ("redis.log('a','b')", 'ERR First argument must be a number (log level). script:'),
+                 ("return redis.acl_check_cmd()", 'ERR Please specify at least one argument for this redis lib call script:'),
+                 ("return redis.acl_check_cmd('get',{})", 'ERR Lua redis lib command arguments must be strings or integers script:'))
+        for source, expected in cases:
+            with self.subTest(source=source):
+                self.assertTrue(str(self.error(('EVAL', source, 0))).startswith(expected))
+        for source in ("redis.set_repl('a')", "redis.set_repl({})", "redis.setresp('3')", "redis.setresp(2.9)", "redis.log(1,{})", "redis.log(1,nil)", "redis.log('1','b')", "redis.log(1.5,'x')"):
+            with self.subTest(source=source):
+                self.assertIsNone(self.client.call('EVAL', source, 0))
+        self.healthy()
+
+    def test_sha1hex_hashes_non_string_arguments_as_empty_input(self):
+        empty = hashlib.sha1(b'').hexdigest().encode()
+        for argument in ('{}', 'nil', 'true', 'function() end'):
+            with self.subTest(argument=argument):
+                self.assertEqual(self.client.call('EVAL', 'return redis.sha1hex(%s)' % argument, 0), empty)
+        self.assertEqual(self.client.call('EVAL', 'return redis.sha1hex(12)', 0), hashlib.sha1(b'12').hexdigest().encode())
+
+    def test_error_replies_drop_trailing_line_breaks(self):
+        cases = (("return redis.error_reply('my err\\r\\n')", 'my err'), ("return redis.error_reply('my err\\n')", 'my err'),
+                 ("return redis.error_reply('my err \\r\\n')", 'my err '), ("return redis.error_reply('\\r\\n')", 'ERR '),
+                 ("return redis.error_reply('a\\r\\nb\\r\\n')", 'ERR a  b'), ("return redis.error_reply('-x\\r\\n')", 'ERR x'),
+                 ("return {err='x\\r\\n'}", 'x'), ("return {err='x\\n\\r'}", 'x'), ("return {err='x\\r\\n\\0y'}", 'x'),
+                 ("return redis.error_reply('\\r\\nmy err')", '  my err'))
+        for protocol in (2, 3):
+            self.client.call('HELLO', protocol)
+            for source, expected in cases:
+                with self.subTest(protocol=protocol, source=source):
+                    self.assertEqual(str(self.error(('EVAL', source, 0))), expected)
+            nested = self.client.call('EVAL', "return {1,{err='y\\r\\n'}}", 0)
+            self.assertEqual(str(nested[1]), 'y')
+        self.client.call('HELLO', 2)
+        self.assertEqual(self.client.call('EVAL', "local e=redis.error_reply('x\\r\\n') return e.err", 0), b'ERR x')
+        self.assertEqual(self.client.call('EVAL', "return redis.status_reply('OK\\r\\n')", 0), 'OK  ')
+        self.assertTrue(str(self.error(('EVAL', "error({err='E1\\r\\n'})", 0))).startswith('E1   script:'))
+        self.assertTrue(str(self.error(('EVAL', "error(redis.error_reply('E2\\r\\n'))", 0))).startswith('ERR E2 script:'))
+
+    def test_malformed_verbatim_tables_fall_back_and_pad_or_truncate_format(self):
+        self.client.call('HELLO', 3)
+        cases = (("{verbatim_string={format='toolong',string='x'}}", (b'=', b'too:x')), ("{verbatim_string={format='tx',string='x'}}", (b'=', b'tx :x')),
+                 ("{verbatim_string={format='',string='x'}}", (b'=', b'   :x')), ("{verbatim_string={format='txt'}}", (b'*', b'0')),
+                 ("{verbatim_string={string='x'}}", (b'*', b'0')), ("{verbatim_string={format=123,string='x'}}", (b'*', b'0')),
+                 ("{verbatim_string={format='txt',string=123}}", (b'*', b'0')))
+        for source, expected in cases:
+            with self.subTest(source=source):
+                self.assertEqual(self.raw('EVAL', 'redis.setresp(3) return '+source, 0), expected)
+        self.assertEqual(self.client.call('EVAL', "redis.setresp(3) return {verbatim_string={format='txt'},5,6}", 0), [5, 6])
+        self.client.call('HELLO', 2)
+        self.assertEqual(self.raw('EVAL', "redis.setresp(3) return {verbatim_string={format='toolong',string='x'}}", 0), (b'$', b'x'))
+
+    def test_eval_shebang_errors_name_the_offending_text(self):
+        cases = (('#!lua flags=NO-WRITES\nreturn 1', 'ERR Unexpected flag in script shebang: NO-WRITES'),
+                 ('#!lua flags=bogus\nreturn 1', 'ERR Unexpected flag in script shebang: bogus'),
+                 ('#!lua flags=no-writes,\nreturn 1', 'ERR Unexpected flag in script shebang: '),
+                 ('#!lua name=x\nreturn 1', 'ERR Unknown lua shebang option: name=x'),
+                 ('#!lua FLAGS=no-writes\nreturn 1', 'ERR Unknown lua shebang option: FLAGS=no-writes'),
+                 ('#!foo\nreturn 1', 'ERR Unexpected engine in script shebang: #!foo'),
+                 ('#!LUA\nreturn 1', 'ERR Unexpected engine in script shebang: #!LUA'),
+                 ('#!lua flags="unterminated\nreturn 1', 'ERR Invalid engine in script shebang'),
+                 ('#!lua flags=no-writes', 'ERR Invalid script shebang'), ('#!lua', 'ERR Invalid script shebang'))
+        for source, expected in cases:
+            for command in (('EVAL', source, 0), ('SCRIPT', 'LOAD', source)):
+                with self.subTest(command=command):
+                    self.assertEqual(str(self.error(command)), expected)
+        self.assertEqual(self.client.call('EVAL', '#!lua flags=\nreturn 1', 0), 1)
+
+    def test_script_load_and_exists_neither_pin_nor_refresh_eval_scripts(self):
+        digest = lambda source: hashlib.sha1(source.encode()).hexdigest()
+        def fill(count, start):
+            self.assertEqual(len(self.client.pipeline([('EVAL', 'return %d' % (start+i), 0) for i in range(count)])), count)
+        self.client.call('CONFIG', 'RESETSTAT')
+        self.client.pipeline([('EVAL', 'return "a"', 0), ('EVAL', 'return "b"', 0), ('SCRIPT', 'LOAD', 'return "a"')])
+        fill(498, 100000)
+        self.assertEqual(self.client.call('SCRIPT', 'EXISTS', digest('return "a"'), digest('return "b"')), [1, 1])
+        fill(1, 200000)
+        self.assertEqual(self.client.call('SCRIPT', 'EXISTS', digest('return "a"'), digest('return "b"')), [0, 1])
+        self.assertEqual(int(info(self.client, 'stats')['evicted_scripts']), 1)
+        self.client.call('SCRIPT', 'FLUSH', 'SYNC')
+        self.client.pipeline([('EVAL', 'return "a"', 0), ('EVAL', 'return "b"', 0)])
+        fill(498, 300000)
+        self.client.call('SCRIPT', 'EXISTS', digest('return "a"'))
+        fill(1, 400000)
+        self.assertEqual(self.client.call('SCRIPT', 'EXISTS', digest('return "a"'), digest('return "b"')), [0, 1])
+        self.client.call('SCRIPT', 'FLUSH', 'SYNC')
+        self.client.pipeline([('EVAL', 'return "a"', 0), ('EVAL', 'return "b"', 0)])
+        fill(498, 500000)
+        self.client.call('EVALSHA', digest('return "a"'), 0)
+        fill(1, 600000)
+        self.assertEqual(self.client.call('SCRIPT', 'EXISTS', digest('return "a"'), digest('return "b"')), [1, 0])
+        self.client.call('SCRIPT', 'FLUSH', 'SYNC')
+        self.client.call('SCRIPT', 'LOAD', 'return "a"')
+        self.client.call('EVAL', 'return "a"', 0)
+        fill(510, 700000)
+        self.assertEqual(self.client.call('SCRIPT', 'EXISTS', digest('return "a"')), [1])
+
+    def test_acl_failures_inside_scripts_name_user_command_key_or_channel(self):
+        users = ('parity_cmd', 'parity_key', 'parity_chan')
+        for user in users:
+            self.client.call('ACL', 'DELUSER', user)
+            self.addCleanup(self.client.call, 'ACL', 'DELUSER', user)
+        self.client.call('ACL', 'SETUSER', 'parity_cmd', 'on', 'nopass', '+@all', '-set', '~*', '&*')
+        self.client.call('ACL', 'SETUSER', 'parity_key', 'on', 'nopass', '+@all', '~foo*', '&*')
+        self.client.call('ACL', 'SETUSER', 'parity_chan', 'on', 'nopass', '+@all', '~*', 'resetchannels', '&allowed')
+        cases = (('parity_cmd', "return redis.call('set','a','b')", "ERR ACL failure in script: User parity_cmd has no permissions to run the 'set' command script:"),
+                 ('parity_cmd', "return redis.pcall('SET','a','b')", "ERR ACL failure in script: User parity_cmd has no permissions to run the 'set' command"),
+                 ('parity_cmd', "return redis.call('client','kill','id','9999')", 'ERR This Redis command is not allowed from script script:'),
+                 ('parity_key', "return redis.call('get','bar')", 'ERR ACL failure in script: No permissions to access a key script:'),
+                 ('parity_key', "return redis.call('mget','foo1','bar')", 'ERR ACL failure in script: No permissions to access a key script:'),
+                 ('parity_chan', "return redis.call('publish','other','x')", 'ERR ACL failure in script: No permissions to access a channel script:'))
+        for user, source, expected in cases:
+            with self.subTest(user=user, source=source):
+                client = self.connection()
+                client.call('AUTH', user, 'unused')
+                self.assertTrue(str(self.error(('EVAL', source, 0), client=client)).startswith(expected))
+                client.close()
+        client = self.connection()
+        client.call('AUTH', 'parity_cmd', 'unused')
+        self.assertEqual(client.call('EVAL', "local r=redis.pcall('set','a','b') return r['err']", 0), b"ERR ACL failure in script: User parity_cmd has no permissions to run the 'set' command")
+        client.close()
+
+    def test_script_help_matches_reference_text(self):
+        self.assertEqual(self.client.call('SCRIPT', 'HELP'), [
+            'SCRIPT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:', 'DEBUG (YES|SYNC|NO)',
+            '    Set the debug mode for subsequent scripts executed.', 'EXISTS <sha1> [<sha1> ...]',
+            '    Return information about the existence of the scripts in the script cache.', 'FLUSH [ASYNC|SYNC]',
+            '    Flush the Lua scripts cache. Very dangerous on replicas.',
+            '    When called without the optional mode argument, the behavior is determined by the',
+            '    lazyfree-lazy-user-flush configuration directive. Valid modes are:',
+            '    * ASYNC: Asynchronously flush the scripts cache.', '    * SYNC: Synchronously flush the scripts cache.',
+            'KILL', '    Kill the currently executing Lua script.', 'LOAD <script>',
+            '    Load a script into the scripts cache without executing it.', 'HELP', '    Print this help.'])
+
+    def test_script_debug_inside_multi_is_rejected_at_exec(self):
+        self.assertEqual(self.client.pipeline([('MULTI',), ('SCRIPT', 'DEBUG', 'YES'), ('SCRIPT', 'DEBUG', 'bogus')]), ['OK', 'QUEUED', 'QUEUED'])
+        result = self.client.call('EXEC')
+        self.assertEqual([str(item) for item in result], ['ERR SCRIPT DEBUG must be called outside a pipeline']*2)
+        self.assertEqual(self.client.pipeline([('MULTI',), ('SCRIPT', 'DEBUG', 'NO'), ('EXEC',)])[2][0].__class__, ServerError)
+        self.assertEqual(self.client.call('EVAL', 'return 1', 0), 1)
+
+    def busy_text(self, error, kill):
+        text = str(error)
+        self.assertTrue(text.startswith('BUSY '), text)
+        self.assertTrue(text.endswith(' is busy running a script. You can only call %s or SHUTDOWN NOSAVE.' % kill), text)
+
+    def spinning(self, *command):
+        self.limit('busy-reply-threshold', '50')
+        source = self.connection()
+        source.send(*command)
+        control = self.connection()
+
+        def busy():
+            control.send('PING')
+            reply = control.reply()
+            return isinstance(reply, ServerError) and str(reply).startswith('BUSY ')
+
+        wait_for(busy, timeout=5, label='busy script')
+
+        def release():
+            for kill in (('SCRIPT', 'KILL'), ('FUNCTION', 'KILL')):
+                try:
+                    self.connection().call(*kill)
+                except (ServerError, OSError, EOFError):
+                    pass
+        self.addCleanup(release)
+        return source, control
+
+    def test_busy_eval_serves_reference_command_set_and_kill_text(self):
+        source, control = self.spinning('EVAL', 'local i = 0 while true do i = i + 1 end', 0)
+        self.busy_text(self.error(('GET', 'k'), client=control), 'SCRIPT KILL')
+        self.assertEqual(str(self.error(('NOSUCHCMD', 'x'), client=control)), "ERR unknown command 'NOSUCHCMD', with args beginning with: 'x' ")
+        self.assertEqual(str(self.error(('GET',), client=control)), "ERR wrong number of arguments for 'get' command")
+        self.assertEqual(str(self.error(('SCRIPT', 'KILL', 'x'), client=control)), "ERR wrong number of arguments for 'script|kill' command")
+        self.assertEqual(control.call('WATCH', 'k'), 'OK')
+        self.assertEqual(control.call('UNWATCH'), 'OK')
+        self.busy_text(self.error(('FUNCTION', 'STATS'), client=control), 'SCRIPT KILL')
+        self.busy_text(self.error(('FUNCTION', 'KILL'), client=control), 'SCRIPT KILL')
+        self.assertEqual(str(self.error(('SHUTDOWN', 'ABORT'), client=control)), 'ERR No shutdown in progress.')
+        self.assertEqual(str(self.error(('SHUTDOWN', 'NOSAVE', 'ABORT'), client=control)), 'ERR syntax error')
+        for command in (('SHUTDOWN',), ('SHUTDOWN', 'NOW'), ('SHUTDOWN', 'SAVE'), ('PING',), ('CONFIG', 'GET', 'hz')):
+            with self.subTest(command=command):
+                self.busy_text(self.error(command, client=control), 'SCRIPT KILL')
+        transaction = self.connection()
+        self.assertEqual(transaction.call('MULTI'), 'OK')
+        self.busy_text(self.error(('PING',), client=transaction), 'SCRIPT KILL')
+        self.assertEqual(transaction.call('FUNCTION', 'STATS'), 'QUEUED')
+        self.assertEqual(transaction.call('SCRIPT', 'KILL'), 'QUEUED')
+        self.assertTrue(str(self.error(('EXEC',), client=transaction)).startswith('EXECABORT Transaction discarded because of: BUSY '))
+        protocol3 = self.connection()
+        protocol3.call('HELLO', 3)
+        self.assertEqual(protocol3.call('RESET'), 'RESET')
+        quitting = self.connection()
+        self.assertEqual(quitting.call('QUIT'), 'OK')
+        self.assertEqual(control.call('SCRIPT', 'KILL'), 'OK')
+        killed = source.reply()
+        self.assertIsInstance(killed, ServerError)
+        self.assertEqual(str(killed), 'ERR Script killed by user with SCRIPT KILL... script: 3fcf51a9b854b8f66cb8685600b0d7df968f4398, on @user_script:1.')
+        self.assertEqual(source.call('PING'), 'PONG')
+
+    def test_busy_function_names_function_kill_and_reports_its_location(self):
+        self.client.call('FUNCTION', 'FLUSH', 'SYNC')
+        self.addCleanup(self.client.call, 'FUNCTION', 'FLUSH', 'SYNC')
+        self.client.call('FUNCTION', 'LOAD', "#!lua name=parity_spin\nredis.register_function('parity_spin', function() local i = 0 while true do i = i + 1 end end)")
+        source, control = self.spinning('FCALL', 'parity_spin', 0)
+        for command in (('GET', 'k'), ('SCRIPT', 'KILL'), ('EVAL', 'return 1', 0)):
+            with self.subTest(command=command):
+                self.busy_text(self.error(command, client=control), 'FUNCTION KILL')
+        stats = control.call('FUNCTION', 'STATS')
+        self.assertEqual(stats[1][:4], [b'name', b'parity_spin', b'command', [b'FCALL', b'parity_spin', b'0']])
+        self.assertEqual(control.call('FUNCTION', 'KILL'), 'OK')
+        killed = source.reply()
+        self.assertEqual(str(killed), 'ERR Script killed by user with SCRIPT KILL... script: parity_spin, on @user_function:2.')
+
+
 class Integration(Fixture):
+    def test_unseeded_random_starts_from_the_reference_default_state(self):
+        self.assertEqual(self.client.call('EVAL', 'return {math.random(1000000),math.random(1000000)}', 0), [396465, 840486])
+        self.assertEqual(self.client.call('EVAL', 'return math.random(1000000)', 0), 353337)
+        fresh = self.new_server()
+        client = fresh.client()
+        self.assertEqual(client.call('EVAL', 'return {tostring(math.random()),tostring(math.random()),tostring(math.random())}', 0), [b'0.39646477363839', b'0.84048536971234', b'0.35333609737146'])
+        client.call('SCRIPT', 'FLUSH', 'SYNC')
+        client.call('FUNCTION', 'LOAD', "#!lua name=random_stream\nredis.register_function('random_stream', function() return tostring(math.random()) end)")
+        self.assertEqual(client.call('EVAL', 'return tostring(math.random())', 0), b'0.44658343468168')
+        self.assertEqual(client.call('FCALL', 'random_stream', 0), b'0.31869277233197')
+
     def test_attributes_are_ignored_by_the_inner_resp3_parser(self):
         self.client.call('DEBUG', 'SET-DISABLE-DENY-SCRIPTS', 1)
         source = "redis.setresp(3);return redis.call('DEBUG','PROTOCOL','attrib')"
@@ -781,6 +1057,44 @@ class Busy(Fixture):
         self.assertIn('kill', str(result).casefold())
         self.healthy()
 
+    def test_slow_script_and_kill_log_lines_name_the_script(self):
+        source = 'local i = 0 while true do i = i + 1 end'
+        self.client.send('EVAL', source, 0)
+        control = self.busy_client()
+        self.kill(control)
+        self.client.call('FUNCTION', 'LOAD', "#!lua name=busy_log\nredis.register_function('busy_log', function() local i = 0 while true do i = i + 1 end end)")
+        self.client.send('FCALL', 'busy_log', 0)
+        control = self.busy_client()
+        self.assertEqual(control.call('FUNCTION', 'KILL'), 'OK')
+        self.assertTrue(str(self.client.reply()).startswith('ERR Script killed by user with SCRIPT KILL... script: busy_log'))
+        log = (self.server.directory/'server.log').read_text()
+        self.assertIn('# Slow script detected: still in execution after 1 milliseconds. You can try killing the script using the SCRIPT KILL command. Script name is: %s.' % hashlib.sha1(source.encode()).hexdigest(), log)
+        self.assertIn('# Slow script detected: still in execution after 1 milliseconds. You can try killing the script using the FUNCTION KILL command. Script name is: busy_log.', log)
+        self.assertEqual(log.count('* Lua script killed by user with SCRIPT KILL.'), 2)
+
+    def test_unkillable_texts_and_nosave_shutdown_remove_pid_file(self):
+        instance = Server(BINARY, workers=0)
+        self.addCleanup(instance.close)
+        pidfile = instance.directory/'busy.pid'
+        instance.arguments += ['--pidfile', str(pidfile), '--busy-reply-threshold', '1']
+        instance.start()
+        source = instance.client()
+        source.send('EVAL', "redis.call('SET','busy:written','1') while true do end", 0)
+        control = instance.client(timeout=5)
+        wait_for(lambda: self.is_busy(control), timeout=5, label='script BUSY threshold')
+        unkillable = 'UNKILLABLE Sorry the script already executed write commands against the dataset. You can either wait the script termination or kill the server in a hard way using the SHUTDOWN NOSAVE command.'
+        for command in (('SCRIPT', 'KILL'), ('FUNCTION', 'KILL')):
+            self.assertEqual(str(self.error(command, client=control)), unkillable)
+        self.assertEqual(str(self.error(('SHUTDOWN', 'NOW'), client=control)), 'BUSY Eski is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.')
+        self.assertTrue(pidfile.exists())
+        control.send('SHUTDOWN', 'NOSAVE', 'NOW')
+        self.assertEqual(instance.process.wait(timeout=5), 0)
+        log = (instance.directory/'server.log').read_text()
+        for line in ('User requested shutdown...', '* Removing the pid file.', 'Eski is now ready to exit, bye bye...'):
+            self.assertIn(line, log)
+        self.assertFalse(pidfile.exists())
+        instance.stop()
+
     def test_transaction_started_while_busy_discards_rejected_commands(self):
         self.client.call('SET', 'busy:transaction', 1)
         self.client.send('EVAL', 'while true do end', 0)
@@ -1036,7 +1350,7 @@ def main(argv=None):
         parser.error('positive timeout and an existing --server binary are required')
     if REFERENCE_PORT is not None and not 1 <= REFERENCE_PORT <= 65535:
         parser.error('--reference-port must be in 1..65535')
-    classes = (Compatibility,) if REFERENCE_PORT is not None else (Compatibility, Integration, Busy)
+    classes = (Compatibility, Parity) if REFERENCE_PORT is not None else (Compatibility, Parity, Integration, Busy)
     selected = [(cls, name) for cls in classes for name in unittest.defaultTestLoader.getTestCaseNames(cls)
                 if fnmatch.fnmatchcase(cls.__name__+'.'+name, args.case)]
     if not selected:

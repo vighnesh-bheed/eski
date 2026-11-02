@@ -3,13 +3,15 @@ package main
 import "base:intrinsics"
 import "base:runtime"
 import "core:c"
+import "core:fmt"
 import "core:sys/linux"
 import lr "lua_runtime"
 
 LUA_MAX_CALL_ARGS :: 1_048_576
 LUA_ERR_BUSY :: "BUSY Eski is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE."
+LUA_ERR_BUSY_FUNCTION :: "BUSY Eski is busy running a script. You can only call FUNCTION KILL or SHUTDOWN NOSAVE."
 LUA_ERR_NOSCRIPT :: "NOSCRIPT No matching script. Please use EVAL."
-LUA_ERR_UNKILLABLE :: "UNKILLABLE Sorry the script already executed write commands against the dataset. You can either wait the script termination or kill the server with SHUTDOWN NOSAVE."
+LUA_ERR_UNKILLABLE :: "UNKILLABLE Sorry the script already executed write commands against the dataset. You can either wait the script termination or kill the server in a hard way using the SHUTDOWN NOSAVE command."
 
 Lua_Invocation :: struct {
 	source: ^Conn,
@@ -35,6 +37,8 @@ Lua_Invocation :: struct {
 	allow_oom: bool,
 	loading: bool,
 	propagation: i32,
+	rejected: bool,
+	kill_logged: bool,
 }
 
 lua_active: ^Lua_Invocation
@@ -193,21 +197,30 @@ lua_source_plan :: proc(body: []u8) -> (text: []u8, flags: u32, flagged: bool, e
 	if len(body) < 2 || body[0] != '#' || body[1] != '!' {
 		return body, 0, false, ""
 	}
-	end := len(body)
+	end := -1
 	for byte, i in body {
 		if byte == '\n' {
 			end = i
 			break
 		}
 	}
+	if end < 0 {
+		return nil, 0, true, "ERR Invalid script shebang"
+	}
 	words: [dynamic][]u8
 	defer delete(words)
-	if !split_args(body[:end], &words, context.temp_allocator) || len(words) == 0 || string(words[0]) != "#!lua" {
-		return nil, 0, true, "ERR Unexpected engine in script shebang"
+	if !split_args(body[:end], &words, context.temp_allocator) || len(words) == 0 {
+		return nil, 0, true, "ERR Invalid engine in script shebang"
+	}
+	if string(words[0]) != "#!lua" {
+		return nil, 0, true, fmt.tprintf("ERR Unexpected engine in script shebang: %s", string(words[0]))
 	}
 	for word in words[1:] {
 		if len(word) < 6 || string(word[:6]) != "flags=" {
-			return nil, 0, true, "ERR Unknown lua shebang option"
+			return nil, 0, true, fmt.tprintf("ERR Unknown lua shebang option: %s", string(word))
+		}
+		if len(word) == 6 {
+			continue
 		}
 		start := 6
 		for i := 6; i <= len(word); i += 1 {
@@ -220,8 +233,7 @@ lua_source_plan :: proc(body: []u8) -> (text: []u8, flags: u32, flagged: bool, e
 			case "allow-stale": flags |= LUA_FLAG_ALLOW_STALE
 			case "no-cluster": flags |= LUA_FLAG_NO_CLUSTER
 			case "allow-cross-slot-keys": flags |= LUA_FLAG_CROSS_SLOT
-			case "":
-			case: return nil, 0, true, "ERR Unexpected flag in script shebang"
+			case: return nil, 0, true, fmt.tprintf("ERR Unexpected flag in script shebang: %s", string(word[start:i]))
 			}
 			start = i+1
 		}
@@ -237,7 +249,7 @@ lua_source_text :: proc(body: []u8) -> (text: []u8, readonly: bool, err: string)
 lua_source_compile :: proc(client: ^Conn, body: []u8) -> bool {
 	text, _, err := lua_source_text(body)
 	if err != "" {
-		reply_error(client, err)
+		lua_function_error(client, err)
 		return false
 	}
 	options := lua_options()
@@ -286,40 +298,48 @@ lua_mutation_returns_values :: proc(cmd: ^Command, argv: [][]u8) -> bool {
 	return false
 }
 
+lua_inner_reject :: proc(run: ^Lua_Invocation, text: string) {
+	reply_error(&run.capture, text)
+	run.rejected = true
+}
+
 lua_inner :: proc(run: ^Lua_Invocation, argv: [][]u8) {
 	client := &run.capture
 	slot := lookup_entry(argv[0])
 	if slot == nil {
-		reply_error(client, "ERR Unknown Redis command called from script")
+		lua_inner_reject(run, "ERR Unknown Redis command called from script")
 		return
 	}
 	cmd, hot := slot.cmd, slot.stats
 	spec := cmd_spec_lookup(cmd, argv)
 	if !arity_ok(cmd.arity, len(argv)) || (spec != nil && !arity_ok(int(spec.arity), len(argv))) {
-		reply_error(client, "ERR Wrong number of args calling Redis command from script")
+		lua_inner_reject(run, "ERR Wrong number of args calling Redis command from script")
 		stat_reject(hot, argv)
 		return
 	}
 	if !lua_handler_allowed(cmd, spec) {
-		reply_error(client, "ERR This command is not allowed from this script")
+		lua_inner_reject(run, "ERR This Redis command is not allowed from script")
 		stat_reject(hot, argv)
 		return
 	}
 	id := acl_command_id(spec.name)
 	if id < 0 {
-		reply_error(client, "ERR Script command has no ACL metadata")
+		lua_inner_reject(run, "ERR Script command has no ACL metadata")
 		return
 	}
 	permission, position := acl_check_user(run.source.user, int(id), argv)
 	if permission != .Allowed {
 		acl_log_add(run.source, permission, .Lua, argv, position, nil, transmute([]u8)spec.name if permission == .Command_Denied else nil)
-		reply_error(client, "ERR ACL failure in script: this user has no permissions to run the command or access its keys or channels")
+		message := make([dynamic]u8, context.temp_allocator)
+		sb_str(&message, "ERR ACL failure in script: ")
+		acl_error_message(&message, permission, run.source.user, spec.name, nil)
+		lua_inner_reject(run, string(message[:]))
 		stat_reject(hot, argv)
 		return
 	}
 	writing := lua_command_writes(cmd, spec, argv)
 	if run.readonly && writing {
-		reply_error(client, "ERR Write commands are not allowed from read-only scripts.")
+		lua_inner_reject(run, "ERR Write commands are not allowed from read-only scripts.")
 		stat_reject(hot, argv)
 		return
 	}
@@ -341,11 +361,12 @@ lua_inner :: proc(run: ^Lua_Invocation, argv: [][]u8) {
 		}
 	}
 	if .Denyoom in spec.flags && !run.wrote && !run.allow_oom && maxmemory_bytes > 0 && u64(max(0, mem_used()-mem_not_counted())) > maxmemory_bytes {
-		reply_error(client, ERR_OOM)
+		lua_inner_reject(run, ERR_OOM)
 		stat_reject(hot, argv)
 		return
 	}
 	if !run.loading && persist_gate(client, cmd, argv) {
+		run.rejected = true
 		stat_reject(hot, argv)
 		return
 	}
@@ -422,8 +443,9 @@ lua_command_callback :: proc "c" (opaque: rawptr, resp: i32, count: c.size_t, ar
 	copy(run.capture.addr[:], "lua")
 	run.capture.addr_len = 3
 	run.capture_limit = min(int(lua_max_output), int(lua_max_bridge_memory)-run.host_bytes-run.temporary_bytes)
+	run.rejected = false
 	lua_inner(run, argv)
-	result := lr.Result{data = run.capture.wbuf, len = c.size_t(run.capture.wlen), write_effect = 1 if run.wrote else 0}
+	result := lr.Result{data = run.capture.wbuf, len = c.size_t(run.capture.wlen), write_effect = 1 if run.wrote else 0, rejected = 1 if run.rejected else 0}
 	if run.capture.wbuf != nil {
 		run.retained = run.capture.wbuf[:run.capture.wcap]
 		run.host_bytes = run.capture.wcap
@@ -551,7 +573,7 @@ lua_eval_common :: proc(client: ^Conn, argv: [][]u8, digest_only, readonly: bool
 	if digest_only {
 		digest, ok := lua_digest_parse(argv[1])
 		if ok {
-			entry = lua_cache_find(digest)
+			entry = lua_cache_find(digest, true)
 		}
 		if entry == nil {
 			reply_error(client, LUA_ERR_NOSCRIPT)
@@ -569,7 +591,7 @@ lua_eval_common :: proc(client: ^Conn, argv: [][]u8, digest_only, readonly: bool
 	}
 	text, flags, flagged, header_err := lua_source_plan(entry.body)
 	if header_err != "" {
-		reply_error(client, header_err)
+		lua_function_error(client, header_err)
 		return
 	}
 	lua_invoke(client, argv, int(numkeys), text, readonly || flags & LUA_FLAG_NO_WRITES != 0, flags, flagged, nil, 0, entry.digest[:])
@@ -631,6 +653,9 @@ lua_invoke :: proc(client: ^Conn, argv: [][]u8, numkeys: int, text: []u8, readon
 	args := raw_data(arguments[numkeys:])
 	argument_count := len(arguments)-numkeys
 	result: lr.Result
+	if debug_mode == 2 {
+		plog(LOG_NOTICE, "Eski synchronous debugging eval session started")
+	}
 	if library == nil {
 		result = lr.eval(lua_arg(text), c.size_t(numkeys), keys, c.size_t(argument_count), args, i32(client.resp), &options, &callbacks)
 	} else {
@@ -645,7 +670,11 @@ lua_invoke :: proc(client: ^Conn, argv: [][]u8, numkeys: int, text: []u8, readon
 			lua_debug_flush(&run)
 		}
 		if debug_child {
+			plog(LOG_NOTICE, "Lua debugging session child exiting")
 			linux.exit_group(0)
+		}
+		if debug_mode == 2 {
+			plog(LOG_NOTICE, "Eski synchronous debugging eval session ended")
 		}
 		client.close_after = true
 	}
@@ -653,6 +682,11 @@ lua_invoke :: proc(client: ^Conn, argv: [][]u8, numkeys: int, text: []u8, readon
 
 lua_fcall_common :: proc(client: ^Conn, argv: [][]u8, readonly: bool) {
 	pst.dirty_explicit = true
+	library, index, info := lua_function_find(argv[1])
+	if library == nil {
+		reply_error(client, "ERR Function not found")
+		return
+	}
 	numkeys, valid := parse_i64(argv[2])
 	if !valid {
 		reply_error(client, "ERR Bad number of keys provided")
@@ -664,11 +698,6 @@ lua_fcall_common :: proc(client: ^Conn, argv: [][]u8, readonly: bool) {
 	}
 	if numkeys > i64(len(argv)-3) {
 		reply_error(client, "ERR Number of keys can't be greater than number of args")
-		return
-	}
-	library, index, info := lua_function_find(argv[1])
-	if library == nil {
-		reply_error(client, "ERR Function not found")
 		return
 	}
 	if readonly && info.flags & LUA_FLAG_NO_WRITES == 0 {
@@ -686,11 +715,17 @@ cmd_evalsha :: proc(client: ^Conn, argv: [][]u8) { lua_eval_common(client, argv,
 cmd_eval_ro :: proc(client: ^Conn, argv: [][]u8) { lua_eval_common(client, argv, false, true) }
 cmd_evalsha_ro :: proc(client: ^Conn, argv: [][]u8) { lua_eval_common(client, argv, true, true) }
 
-lua_script_kill :: proc(client: ^Conn) {
-	if lua_active == nil || lua_active.function {
+lua_busy_error :: proc "contextless" () -> string {
+	return LUA_ERR_BUSY_FUNCTION if lua_active != nil && lua_active.function else LUA_ERR_BUSY
+}
+
+lua_kill :: proc(client: ^Conn, function: bool) {
+	if lua_active == nil {
 		reply_error(client, "NOTBUSY No scripts in execution right now.")
 	} else if lua_active.wrote {
 		reply_error(client, LUA_ERR_UNKILLABLE)
+	} else if lua_active.function != function {
+		reply_error(client, lua_busy_error())
 	} else {
 		lua_active.killed = true
 		reply_ok(client)
@@ -698,12 +733,23 @@ lua_script_kill :: proc(client: ^Conn) {
 }
 
 lua_script_help := [?]string{
-	"SCRIPT <subcommand> [arguments]",
-	"LOAD <script> -- Compile and cache source without executing it.",
-	"EXISTS <sha1> [<sha1> ...] -- Return cache membership for each digest.",
-	"FLUSH [SYNC|ASYNC] -- Remove cached source programs.",
-	"KILL -- Stop a running script before it has performed writes.",
-	"HELP -- Return this help.",
+	"SCRIPT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+	"DEBUG (YES|SYNC|NO)",
+	"    Set the debug mode for subsequent scripts executed.",
+	"EXISTS <sha1> [<sha1> ...]",
+	"    Return information about the existence of the scripts in the script cache.",
+	"FLUSH [ASYNC|SYNC]",
+	"    Flush the Lua scripts cache. Very dangerous on replicas.",
+	"    When called without the optional mode argument, the behavior is determined by the",
+	"    lazyfree-lazy-user-flush configuration directive. Valid modes are:",
+	"    * ASYNC: Asynchronously flush the scripts cache.",
+	"    * SYNC: Synchronously flush the scripts cache.",
+	"KILL",
+	"    Kill the currently executing Lua script.",
+	"LOAD <script>",
+	"    Load a script into the scripts cache without executing it.",
+	"HELP",
+	"    Print this help.",
 }
 
 cmd_script :: proc(client: ^Conn, argv: [][]u8) {
@@ -712,6 +758,10 @@ cmd_script :: proc(client: ^Conn, argv: [][]u8) {
 	case eq_nocase(sub, "debug"):
 		if len(argv) != 3 {
 			reply_wrong_args(client, "script|debug")
+			return
+		}
+		if .Multi in client.txf {
+			reply_error(client, "ERR SCRIPT DEBUG must be called outside a pipeline")
 			return
 		}
 		switch {
@@ -763,7 +813,7 @@ cmd_script :: proc(client: ^Conn, argv: [][]u8) {
 			reply_wrong_args(client, "script|kill")
 			return
 		}
-		lua_script_kill(client)
+		lua_kill(client, false)
 	case eq_nocase(sub, "help"):
 		if len(argv) != 2 {
 			reply_wrong_args(client, "script|help")
@@ -791,4 +841,5 @@ lua_commands := [?]Command{
 @(init)
 register_lua_commands :: proc "contextless" () {
 	register_commands(lua_commands[:])
+	lr.set_load_log(lua_log_callback)
 }

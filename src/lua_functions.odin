@@ -166,6 +166,7 @@ lua_library_free :: proc(library: ^Lua_Library) {
 	}
 	lr.library_free(library.handle)
 	retirement := library.retirement
+	count := library.count
 	if library.accounted {
 		lua_library_host_bytes -= library.host_bytes
 	}
@@ -177,7 +178,7 @@ lua_library_free :: proc(library: ^Lua_Library) {
 	delete(library.code)
 	free(library)
 	if retirement != nil {
-		lazyfree_note_reaped(1)
+		lazyfree_note_reaped(count)
 		retirement.remaining -= 1
 		if retirement.remaining == 0 {
 			if retirement.engine {
@@ -248,21 +249,22 @@ lua_library_unlink :: proc(library: ^Lua_Library, asynchronous: bool) {
 
 lua_library_flush :: proc(asynchronous: bool, reset_engine: bool = true) {
 	retirement: ^Lua_Retirement
-	if asynchronous && lua_library_count > 0 {
+	deferred := asynchronous && lua_function_count > LAZYFREE_THRESHOLD
+	if deferred {
 		retirement = new(Lua_Retirement)
 		lua_retirement_count += 1
 		retirement.remaining = lua_library_count
 		retirement.engine = reset_engine
-		lazyfree_note_deferred(lua_library_count + (1 if reset_engine else 0))
+		lazyfree_note_deferred(lua_function_count + (1 if reset_engine else 0))
 	}
 	for lua_libraries != nil {
 		lua_libraries.retirement = retirement
-		lua_library_unlink(lua_libraries, asynchronous)
+		lua_library_unlink(lua_libraries, deferred)
 	}
 	if reset_engine {
 		lr.functions_reset()
 	}
-	if !asynchronous {
+	if !deferred {
 		lua_library_reap(max(int))
 	}
 }
@@ -271,31 +273,33 @@ lua_library_header :: proc(code: []u8) -> (name, body: []u8, err: string) {
 	if len(code) < 2 || code[0] != '#' || code[1] != '!' {
 		return nil, nil, "ERR Missing library metadata"
 	}
-	end := len(code)
+	end := -1
 	for byte, i in code {
 		if byte == '\n' {
 			end = i
 			break
 		}
 	}
+	if end < 0 {
+		return nil, nil, "ERR Invalid library metadata"
+	}
 	words: [dynamic][]u8
 	defer delete(words)
 	if !split_args(code[:end], &words, context.temp_allocator) || len(words) == 0 {
 		return nil, nil, "ERR Invalid library metadata"
 	}
-	if !eq_nocase(words[0], "#!lua") {
-		return nil, nil, fmt.tprintf("ERR Engine '%s' not found", string(words[0][2:]))
-	}
+	named := false
 	for word in words[1:] {
-		if len(word) < 5 || string(word[:5]) != "name=" {
+		if len(word) < 5 || !eq_nocase(word[:5], "name=") {
 			return nil, nil, fmt.tprintf("ERR Invalid metadata value given: %s", string(word))
 		}
-		if name != nil {
+		if named {
 			return nil, nil, "ERR Invalid metadata value, name argument was given multiple times"
 		}
+		named = true
 		name = word[5:]
 	}
-	if name == nil {
+	if !named {
 		return nil, nil, "ERR Library name was not given"
 	}
 	valid := len(name) > 0
@@ -304,6 +308,9 @@ lua_library_header :: proc(code: []u8) -> (name, body: []u8, err: string) {
 	}
 	if !valid {
 		return nil, nil, "ERR Library names can only contain letters, numbers, or underscores(_) and must be at least one character long"
+	}
+	if len(words[0]) < 2 || !eq_nocase(words[0][2:], "lua") {
+		return nil, nil, fmt.tprintf("ERR Engine '%s' not found", string(words[0][2:]) if len(words[0]) >= 2 else "")
 	}
 	return name, code[end:], ""
 }
@@ -418,17 +425,6 @@ lua_function_stats :: proc(client: ^Conn) {
 	reply_int(client, i64(lua_function_count))
 }
 
-lua_function_kill :: proc(client: ^Conn) {
-	if lua_active == nil || !lua_active.function {
-		reply_error(client, "NOTBUSY No scripts in execution right now.")
-	} else if lua_active.wrote {
-		reply_error(client, LUA_ERR_UNKILLABLE)
-	} else {
-		lua_active.killed = true
-		reply_ok(client)
-	}
-}
-
 lua_function_list :: proc(client: ^Conn, pattern: []u8, with_code: bool) {
 	count := 0
 	for library := lua_libraries; library != nil; library = library.next {
@@ -520,8 +516,12 @@ lua_function_restore :: proc(client: ^Conn, payload: []u8, policy: string) {
 	}
 	for reader.pos < reader.end {
 		kind, good := rdb.get_u8(&reader)
-		if !good || kind != rdb.OPCODE_FUNCTION2 {
+		if !good {
 			reply_error(client, "ERR Bad data format")
+			return
+		}
+		if kind != rdb.OPCODE_FUNCTION2 {
+			reply_error(client, "ERR Pre-GA function format not supported" if kind == rdb.OPCODE_FUNCTION_PRE_GA else "ERR given type is not a function")
 			return
 		}
 		code, valid := rdb.get_string(&reader, 0)
@@ -529,17 +529,29 @@ lua_function_restore :: proc(client: ^Conn, payload: []u8, policy: string) {
 			reply_error(client, "ERR Bad data format")
 			return
 		}
+		name, _, header_err := lua_library_header(code)
+		if header_err != "" {
+			lua_function_error(client, header_err)
+			return
+		}
+		if _, exists := staged_names[string(name)]; exists {
+			lua_function_error(client, fmt.tprintf("ERR Library '%s' already exists", string(name)))
+			return
+		}
 		library := lua_library_prepare(code, client)
 		if library == nil {
 			return
 		}
-		if _, exists := staged_names[string(library.name)]; exists {
-			lua_library_free(library)
-			reply_error(client, "ERR Library already exists in payload")
-			return
-		}
 		staged_names[string(library.name)] = library
 		append(&staged, library)
+		for entry in library.functions {
+			if staged_functions[string(entry.name)] {
+				info := lr.library_info(library.handle, c.size_t(entry.index))
+				reply_error_parts(client, "ERR Function ", string(info.name.data[:int(info.name.len)]), " already exists")
+				return
+			}
+			staged_functions[string(entry.name)] = true
+		}
 	}
 	for item in staged {
 		old := lua_library_find(item.name)
@@ -559,11 +571,6 @@ lua_function_restore :: proc(client: ^Conn, payload: []u8, policy: string) {
 					}
 				}
 			}
-			if staged_functions[string(entry.name)] {
-				reply_error_parts(client, "ERR Function ", string(name), " already exists")
-				return
-			}
-			staged_functions[string(entry.name)] = true
 		}
 	}
 	if policy == "flush" {
@@ -682,7 +689,7 @@ lua_function_dispatch :: proc(client: ^Conn, argv: [][]u8) {
 			reply_wrong_args(client, "function|kill")
 			return
 		}
-		lua_function_kill(client)
+		lua_kill(client, true)
 	case eq_nocase(sub, "dump"):
 		if len(argv) != 2 {
 			reply_wrong_args(client, "function|dump")

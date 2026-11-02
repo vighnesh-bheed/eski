@@ -4,11 +4,29 @@
 #include <strings.h>
 
 unsigned char es_null_token;
-static _Atomic uint64_t es_invocations;
 static _Atomic size_t es_detached_bytes;
 static _Thread_local uint64_t es_random_state;
 static _Thread_local int es_random_initialized;
+static eslua_number_fn es_number_hook;
+static eslua_log_fn es_load_log_hook;
 void es_module_bind(lua_State *L);
+
+void eslua_set_number_format(eslua_number_fn format) { es_number_hook = format; }
+void eslua_set_load_log(eslua_log_fn log) { es_load_log_hook = log; }
+
+size_t es_number_text(double value, int argument, char *out, size_t capacity) {
+    if (capacity < 64) return 0;
+    if (es_number_hook) {
+        size_t written = es_number_hook(value, argument, (unsigned char *)out, capacity);
+        if (written && written < capacity) return written;
+    }
+    int n;
+    if (isnan(value)) n = snprintf(out, capacity, "%snan", argument && signbit(value) ? "-" : "");
+    else if (isinf(value)) n = snprintf(out, capacity, "%sinf", value < 0 ? "-" : "");
+    else n = snprintf(out, capacity, "%.17g", argument && value == 0 ? 0.0 : value);
+    if (n < 0 || (size_t)n >= capacity) return 0;
+    return (size_t)n;
+}
 
 static uint64_t es_clock(void) {
     struct timespec now;
@@ -148,6 +166,26 @@ void es_byte(lua_State *L, es_buffer *out, unsigned char value) { es_append(L, o
 
 static void es_snapshot(es_context *ctx) { ctx->stats.elapsed_ns = es_clock() - ctx->started; }
 
+static void es_kill(lua_State *L) {
+    es_context *ctx = es_context_of(L);
+    const char *text = "Script killed by user with SCRIPT KILL...";
+    if (!ctx->options.identifier.len) { es_fail(L, ESLUA_KILLED, text); return; }
+    const char *source = ctx->library ? "@user_function" : "@user_script";
+    int line = 1;
+    lua_Debug frame;
+    for (int level = 0; lua_getstack(L, level, &frame); level++) {
+        lua_getinfo(L, "Sl", &frame);
+        if (frame.currentline > 0 && frame.what && strcmp(frame.what, "C")) { line = frame.currentline; if (frame.source) source = frame.source; break; }
+    }
+    size_t need = strlen(text) + strlen(source) + ctx->options.identifier.len + 64;
+    char *message = es_allocate(ctx, NULL, need);
+    if (!message) { es_fail(L, ESLUA_MEMORY, "script memory limit exceeded"); return; }
+    es_transient(ctx, message);
+    int n = snprintf(message, need, "%s script: %.*s, on %s:%d.", text, (int)ctx->options.identifier.len, (const char *)ctx->options.identifier.data, source, line);
+    if (n < 0) message[0] = 0;
+    es_fail(L, ESLUA_KILLED, message);
+}
+
 static void es_hook(lua_State *L, lua_Debug *debug) {
     es_context *ctx = es_context_of(L);
     if (debug->event == LUA_HOOKCOUNT) {
@@ -159,12 +197,12 @@ static void es_hook(lua_State *L, lua_Debug *debug) {
     if (ctx->options.instruction_limit && ctx->stats.instructions >= ctx->options.instruction_limit)
         es_fail(L, ESLUA_LIMIT, "script instruction limit exceeded");
     es_snapshot(ctx);
-    if (ctx->loading && ctx->stats.elapsed_ns / UINT64_C(1000000) >= (ctx->options.busy_threshold_ms ? ctx->options.busy_threshold_ms : 5000)) es_fail(L, ESLUA_LIMIT, "FUNCTION LOAD timeout");
+    if (ctx->loading && ctx->stats.elapsed_ns / UINT64_C(1000000) >= 500) es_fail(L, ESLUA_LIMIT, "FUNCTION LOAD timeout");
     if (!es_debug_active(L) && ctx->callbacks.busy && ctx->options.busy_threshold_ms &&
         ctx->stats.elapsed_ns / UINT64_C(1000000) >= ctx->options.busy_threshold_ms) {
         int32_t action = ctx->callbacks.busy(ctx->callbacks.opaque, ctx->wrote, &ctx->stats);
         if (action == ESLUA_ABORT) es_fail(L, ESLUA_KILLED, "script aborted by host policy");
-        if (action == ESLUA_KILL_READONLY && !ctx->wrote) es_fail(L, ESLUA_KILLED, "Script killed by user with SCRIPT KILL");
+        if (action == ESLUA_KILL_READONLY && !ctx->wrote) es_kill(L);
     }
 }
 
@@ -227,18 +265,12 @@ static eslua_arg *es_arguments(lua_State *L, int first, int *count) {
         int numeric = lua_type(L, first + i) == LUA_TNUMBER;
         if (numeric) {
             char text[64];
-            double value = lua_tonumber(L, first + i);
-            int written = snprintf(text, sizeof(text), "%.17g", value == 0 ? 0.0 : value);
-            if (written < 0 || (size_t)written >= sizeof(text)) luaL_error(L, "number conversion failed");
-            lua_pushlstring(L, text, (size_t)written);
+            size_t written = es_number_text(lua_tonumber(L, first + i), 1, text, sizeof(text));
+            if (!written) luaL_error(L, "number conversion failed");
+            lua_pushlstring(L, text, written);
             lua_replace(L, first + i);
         }
         args[i].data = (const unsigned char *)lua_tolstring(L, first + i, &args[i].len);
-        if (numeric && args[i].len >= 2 && args[i].data[args[i].len - 2] == '.' && args[i].data[args[i].len - 1] == '0')
-            args[i].len -= 2;
-        if (numeric && args[i].len == 2 && args[i].data[0] == '-' && args[i].data[1] == '0') {
-            args[i].data++; args[i].len = 1;
-        }
     }
     *count = n;
     return args;
@@ -285,8 +317,9 @@ static int es_call(lua_State *L) { return es_command(L, 0); }
 int es_debug_call(lua_State *L) { return es_command(L, 0); }
 static int es_command_pcall(lua_State *L) { return es_command(L, 1); }
 static int es_setresp(lua_State *L) {
-    lua_Integer resp = luaL_checkinteger(L, 1);
-    if (lua_gettop(L) != 1 || (resp != 2 && resp != 3)) return luaL_error(L, "RESP version must be 2 or 3");
+    if (lua_gettop(L) != 1) return es_command_error(L, 0, "redis.setresp() requires one argument.");
+    lua_Integer resp = lua_tointeger(L, 1);
+    if (resp != 2 && resp != 3) return es_command_error(L, 0, "RESP version must be 2 or 3.");
     es_context_of(L)->script_resp = (int32_t)resp;
     return 0;
 }
@@ -300,8 +333,11 @@ static int es_tagged_reply(lua_State *L, const char *key) {
     const char *zero=memchr(text,0,len);if(zero)len=(size_t)(zero-text);
     if(!strcmp(key,"err")&&len&&text[0]=='-'){text++;len--;}
     lua_newtable(L);
-    if(!strcmp(key,"err")&&!memchr(text,' ',len)) {
-        lua_pushliteral(L,"ERR ");lua_pushlstring(L,text,len);lua_concat(L,2);
+    if(!strcmp(key,"err")) {
+        int prefixed=!memchr(text,' ',len);
+        size_t trimmed=len;while(trimmed&&(text[trimmed-1]=='\r'||text[trimmed-1]=='\n'))trimmed--;
+        if(prefixed){lua_pushliteral(L,"ERR ");lua_pushlstring(L,text,trimmed);lua_concat(L,2);}
+        else lua_pushlstring(L,text,trimmed);
     } else lua_pushlstring(L, text, len);
     lua_setfield(L, -2, key);
     return 1;
@@ -311,13 +347,16 @@ static int es_error_reply(lua_State *L) { return es_tagged_reply(L, "err"); }
 static int es_replicate_commands(lua_State *L) { lua_pushboolean(L, 1); return 1; }
 static int es_set_repl(lua_State *L) {
     es_context *ctx = es_context_of(L);
-    int mask = luaL_checkint(L, 1);
-    if (lua_gettop(L) != 1 || mask < 0 || mask > 3) return luaL_error(L, "Invalid replication flags. Use REPL_AOF, REPL_REPLICA, REPL_ALL or REPL_NONE.");
-    if (ctx->callbacks.propagation && !ctx->callbacks.propagation(ctx->callbacks.opaque, mask)) return luaL_error(L, "Invalid replication flags");
+    if (lua_gettop(L) != 1) return es_command_error(L, 0, "redis.set_repl() requires one argument.");
+    lua_Integer mask = lua_tointeger(L, 1);
+    if (mask < 0 || mask > 3) return es_command_error(L, 0, "Invalid replication flags. Use REPL_AOF, REPL_REPLICA, REPL_ALL or REPL_NONE.");
+    if (ctx->callbacks.propagation && !ctx->callbacks.propagation(ctx->callbacks.opaque, (int32_t)mask)) return es_command_error(L, 0, "Invalid replication flags");
     return 0;
 }
 static int es_acl_check(lua_State *L) {
     es_context *ctx = es_context_of(L);
+    if (lua_gettop(L) < 1) return es_command_error(L, 0, "Please specify at least one argument for this redis lib call");
+    for (int i = 1; i <= lua_gettop(L); i++) if (lua_type(L, i) != LUA_TSTRING && lua_type(L, i) != LUA_TNUMBER) return es_command_error(L, 0, "Lua redis lib command arguments must be strings or integers");
     int count;
     eslua_arg *args = es_arguments(L, 1, &count);
     if (!ctx->callbacks.acl_check) return luaL_error(L, "ACL check is unavailable");
@@ -339,7 +378,7 @@ static int es_randomseed(lua_State *L) {
     return 0;
 }
 static int es_random(lua_State *L) {
-    if (!es_random_initialized) { es_random_state = ((es_clock() ^ atomic_fetch_add_explicit(&es_invocations, 1, memory_order_relaxed)) & UINT64_C(0xffffffff)) << 16 | 0x330e; es_random_initialized = 1; }
+    if (!es_random_initialized) { es_random_state = UINT64_C(0x1234abcd330e); es_random_initialized = 1; }
     es_random_state = (es_random_state * UINT64_C(0x5deece66d) + 11) & UINT64_C(0xffffffffffff);
     double r = (double)(es_random_state >> 17) / 2147483647.0;
     switch (lua_gettop(L)) {
@@ -406,51 +445,62 @@ static int es_internal_error_handler(lua_State *L) {
     return 1;
 }
 
+static uint32_t es_flag_bit(const char *flag, size_t len) {
+    const char *names[] = {"no-writes", "allow-oom", "allow-stale", "no-cluster", "allow-cross-slot-keys"};
+    for (int j = 0; j < 5; j++) if (strlen(names[j]) == len && !strncasecmp(flag, names[j], len)) return 1u << j;
+    return 0;
+}
+
+static int es_register_key(const char *key, size_t len) {
+    const char *names[] = {"function_name", "callback", "description", "flags"};
+    for (int j = 0; j < 4; j++) if (strlen(names[j]) == len && !strncasecmp(key, names[j], len)) return j;
+    return -1;
+}
+
 static int es_register(lua_State *L) {
     es_context *ctx = es_context_of(L);
     if (!ctx->loading || !ctx->library) return luaL_error(L, "redis.register_function can only be called on FUNCTION LOAD command");
     eslua_library *library = ctx->library;
-    int named = lua_type(L, 1) == LUA_TTABLE;
+    int argc = lua_gettop(L), named = 0;
     int name_index = 1, callback_index = 2, desc_index = 0;
     uint32_t flags = 0;
-    if (named) {
-        if (lua_gettop(L) != 1) return luaL_error(L, "wrong number of arguments to redis.register_function");
+    if (argc == 1) {
+        if (lua_type(L, 1) != LUA_TTABLE) return es_command_error(L, 0, "calling redis.register_function with a single argument is only applicable to Lua table (representing named arguments).");
+        named = 1;
+        lua_settop(L, 1);
+        for (int i = 0; i < 4; i++) lua_pushnil(L);
+        name_index = 2; callback_index = 3; desc_index = 4;
         lua_pushnil(L);
         while (lua_next(L, 1)) {
-            const char *key = lua_type(L, -2) == LUA_TSTRING ? lua_tostring(L, -2) : NULL;
-            if (!key || (strcmp(key, "function_name") && strcmp(key, "callback") && strcmp(key, "description") && strcmp(key, "flags"))) return luaL_error(L, "unknown argument given to redis.register_function");
-            lua_pop(L, 1);
+            size_t key_len = 0;
+            const char *key = lua_type(L, -2) == LUA_TSTRING ? lua_tolstring(L, -2, &key_len) : NULL;
+            int slot = key ? es_register_key(key, key_len) : -1;
+            if (slot < 0) return es_command_error(L, 0, "unknown argument given to redis.register_function");
+            lua_replace(L, 2 + slot);
         }
-        lua_getfield(L, 1, "function_name"); name_index = lua_gettop(L);
-        lua_getfield(L, 1, "callback"); callback_index = lua_gettop(L);
-        lua_getfield(L, 1, "description"); desc_index = lua_gettop(L);
-        if (!lua_isnil(L, desc_index) && lua_type(L, desc_index) != LUA_TSTRING) return luaL_error(L, "description argument given to redis.register_function must be a string");
-        lua_getfield(L, 1, "flags");
-        if (!lua_isnil(L, -1)) {
-            if (lua_type(L, -1) != LUA_TTABLE) return luaL_error(L, "flags argument to redis.register_function must be a table representing function flags");
-            size_t count = lua_objlen(L, -1);
+        if (!lua_isnil(L, desc_index) && !lua_isstring(L, desc_index)) return es_command_error(L, 0, "description argument given to redis.register_function must be a string");
+        if (!lua_isnil(L, 5)) {
+            if (lua_type(L, 5) != LUA_TTABLE) return es_command_error(L, 0, "flags argument to redis.register_function must be a table representing function flags");
+            size_t count = lua_objlen(L, 5);
             for (size_t i = 1; i <= count; i++) {
-                lua_rawgeti(L, -1, (int)i);
-                if (lua_type(L, -1) != LUA_TSTRING) return luaL_error(L, "unknown flag given");
-                const char *flag = lua_tostring(L, -1);
-                const char *names[] = {"no-writes", "allow-oom", "allow-stale", "no-cluster", "allow-cross-slot-keys"};
-                uint32_t bit = 0;
-                for (int j = 0; j < 5; j++) if (!strcmp(flag, names[j])) bit = 1u << j;
-                if (!bit) return luaL_error(L, "unknown flag given to redis.register_function");
+                lua_rawgeti(L, 5, (int)i);
+                size_t flag_len = 0;
+                const char *flag = lua_type(L, -1) == LUA_TSTRING ? lua_tolstring(L, -1, &flag_len) : NULL;
+                uint32_t bit = flag ? es_flag_bit(flag, flag_len) : 0;
+                if (!bit) return es_command_error(L, 0, "unknown flag given");
                 flags |= bit; lua_pop(L, 1);
             }
         }
-    } else if (lua_gettop(L) == 1) return luaL_error(L, "calling redis.register_function with a single argument is only applicable to Lua table");
-    else if (lua_gettop(L) != 2) return luaL_error(L, "wrong number of arguments to redis.register_function");
-    if (named && lua_isnil(L, name_index)) return luaL_error(L, "redis.register_function must get a function name argument");
-    if (named && lua_isnil(L, callback_index)) return luaL_error(L, "redis.register_function must get a callback argument");
-    if (lua_type(L, name_index) != LUA_TSTRING) return luaL_error(L, "%s", named ? "function_name argument given to redis.register_function must be a string" : "first argument to redis.register_function must be a string");
-    if (lua_type(L, callback_index) != LUA_TFUNCTION) return luaL_error(L, "%s", named ? "callback argument given to redis.register_function must be a function" : "second argument to redis.register_function must be a function");
+        if (lua_isnil(L, name_index)) return es_command_error(L, 0, "redis.register_function must get a function name argument");
+        if (lua_isnil(L, callback_index)) return es_command_error(L, 0, "redis.register_function must get a callback argument");
+    } else if (argc != 2) return es_command_error(L, 0, "wrong number of arguments to redis.register_function");
+    if (!lua_isstring(L, name_index)) return es_command_error(L, 0, named ? "function_name argument given to redis.register_function must be a string" : "first argument to redis.register_function must be a string");
+    if (lua_type(L, callback_index) != LUA_TFUNCTION) return es_command_error(L, 0, named ? "callback argument given to redis.register_function must be a function" : "second argument to redis.register_function must be a function");
     size_t len;
     const unsigned char *name = (const unsigned char *)lua_tolstring(L, name_index, &len);
-    if (!len) return luaL_error(L, "Library names can only contain letters, numbers, or underscores(_) and must be at least one character long");
-    for (size_t i = 0; i < len; i++) if (!((name[i] >= 'A' && name[i] <= 'Z') || (name[i] >= 'a' && name[i] <= 'z') || (name[i] >= '0' && name[i] <= '9') || name[i] == '_')) return luaL_error(L, "Library names can only contain letters, numbers, or underscores(_) and must be at least one character long");
-    for (size_t i = 0; i < library->count; i++) if (library->functions[i].info.name.len == len && !strncasecmp((const char *)library->functions[i].info.name.data, (const char *)name, len)) return luaL_error(L, "Function already exists in the library");
+    if (!len) return es_command_error(L, 0, "Library names can only contain letters, numbers, or underscores(_) and must be at least one character long");
+    for (size_t i = 0; i < len; i++) if (!((name[i] >= 'A' && name[i] <= 'Z') || (name[i] >= 'a' && name[i] <= 'z') || (name[i] >= '0' && name[i] <= '9') || name[i] == '_')) return es_command_error(L, 0, "Library names can only contain letters, numbers, or underscores(_) and must be at least one character long");
+    for (size_t i = 0; i < library->count; i++) if (library->functions[i].info.name.len == len && !strncasecmp((const char *)library->functions[i].info.name.data, (const char *)name, len)) return es_command_error(L, 0, "Function already exists in the library");
     if (library->count >= SIZE_MAX/sizeof(es_registered)-1) return es_fail(L, ESLUA_MEMORY, "too many functions");
     es_registered *grown = es_allocate(ctx, library->functions, (library->count+1)*sizeof(*grown));
     if (!grown) return es_fail(L, ESLUA_MEMORY, "script memory limit exceeded");
@@ -487,11 +537,24 @@ static void es_readonly(lua_State *L, int index) {
 static int es_log(lua_State *L) {
     es_context *ctx = es_context_of(L);
     es_check_abort(L);
-    int level = (int)luaL_checkinteger(L, 1);
-    if (level < 0 || level > 3) return luaL_error(L, "invalid log level");
-    int n;
-    eslua_arg *args = es_arguments(L, 2, &n);
-    if (ctx->callbacks.log) ctx->callbacks.log(ctx->callbacks.opaque, level, (size_t)n, args);
+    int argc = lua_gettop(L);
+    if (argc < 2) return es_command_error(L, 0, "redis.log() requires two arguments or more.");
+    if (!lua_isnumber(L, 1)) return es_command_error(L, 0, "First argument must be a number (log level).");
+    lua_Integer level = lua_tointeger(L, 1);
+    if (level < 0 || level > 3) return es_command_error(L, 0, "Invalid log level.");
+    eslua_log_fn log = ctx->callbacks.log ? ctx->callbacks.log : es_load_log_hook;
+    if (!log) return 0;
+    eslua_arg *args = es_allocate(ctx, NULL, (size_t)(argc - 1) * sizeof(*args));
+    if (!args) es_fail(L, ESLUA_MEMORY, "script allocation failed");
+    es_transient(ctx, args);
+    size_t n = 0;
+    for (int i = 2; i <= argc; i++) {
+        int type = lua_type(L, i);
+        if (type != LUA_TSTRING && type != LUA_TNUMBER) continue;
+        args[n].data = (const unsigned char *)lua_tolstring(L, i, &args[n].len);
+        n++;
+    }
+    log(ctx->callbacks.log ? ctx->callbacks.opaque : NULL, (int32_t)level, n, args);
     es_release(ctx, args);
     return 0;
 }
@@ -527,6 +590,9 @@ static void es_setup_load_environment(lua_State *L) {
         lua_newtable(L);
         int load_redis = lua_gettop(L);
         es_function(L, "register_function", es_register);
+        es_function(L, "log", es_log);
+        const char *levels[] = {"LOG_DEBUG", "LOG_VERBOSE", "LOG_NOTICE", "LOG_WARNING"};
+        for (int i = 0; i < 4; i++) { lua_pushinteger(L, i); lua_setfield(L, -2, levels[i]); }
         lua_pushliteral(L, "7.4.11"); lua_setfield(L, -2, "REDIS_VERSION");
         lua_pushinteger(L, 459787); lua_setfield(L, -2, "REDIS_VERSION_NUM");
         lua_newtable(L); es_function(L, "__index", es_global_read); lua_setmetatable(L, -2);
@@ -559,7 +625,8 @@ static void es_setup(lua_State *L) {
     es_function(L, "call", es_call); es_function(L, "pcall", es_command_pcall);
     es_function(L, "setresp", es_setresp); es_function(L, "status_reply", es_status_reply);
     es_function(L, "error_reply", es_error_reply); es_function(L, "sha1hex", es_sha1hex); es_function(L, "log", es_log);
-    es_function(L, "replicate_commands", es_replicate_commands); es_function(L, "set_repl", es_set_repl);
+    if (!ctx->library) es_function(L, "replicate_commands", es_replicate_commands);
+    es_function(L, "set_repl", es_set_repl);
     const char *levels[] = {"LOG_DEBUG", "LOG_VERBOSE", "LOG_NOTICE", "LOG_WARNING"};
     for (int i = 0; i < 4; i++) { lua_pushinteger(L, i); lua_setfield(L, -2, levels[i]); }
     es_function(L, "acl_check_cmd", es_acl_check);
@@ -661,7 +728,7 @@ static int es_run(lua_State *L) {
     lua_call(L, 0, ctx->loading ? 0 : 1);
     es_check_abort(L);
     if (ctx->loading) {
-        if (!ctx->library->count) return luaL_error(L, "No functions registered");
+        if (!ctx->library->count) { ctx->load_plain = 1; return luaL_error(L, "No functions registered"); }
         es_append(L, &ctx->output, "+OK\r\n", 5); return 0;
     }
     es_serialize(L, -1, ctx->client_resp, &ctx->output);
@@ -724,6 +791,7 @@ static void es_error_output(es_context *ctx,eslua_result *result,const char *err
     es_release(ctx,ctx->errors);ctx->errors=NULL;ctx->error_count=ctx->error_capacity=0;
     const char *header="";
     if(ctx->compile_failed&&result->status==ESLUA_ERROR){header=ctx->library?"Error compiling function: ":"Error compiling script (new function): ";passthrough=0;}
+    else if(ctx->loading&&!ctx->load_plain){header=passthrough&&len?"Error registering functions: ":"Error registering functions: ERR ";passthrough=0;}
     size_t head=strlen(header),prefix=passthrough&&len?1:5;
     if(head>SIZE_MAX-prefix-2 || len>SIZE_MAX-prefix-2-head || len+head+prefix+2>ctx->options.output_limit){
         result->status=ESLUA_LIMIT;error="script output limit exceeded";len=strlen(error);prefix=5;header="";head=0;
@@ -820,6 +888,7 @@ static eslua_result es_library_invoke(eslua_library *library) {
     ctx->sticky = ctx->wrote = ctx->host_error_origin = ctx->error_passthrough = ctx->forwarded_error = 0; ctx->failure = NULL;
     ctx->script_resp = 2;
     ctx->compile_failed = 0;
+    ctx->load_plain = 0;
     ctx->debug = NULL;
     es_module_bind(ctx->L);
     lua_settop(ctx->L, 0);

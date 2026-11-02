@@ -2,6 +2,7 @@ import argparse
 import fnmatch
 import os
 from pathlib import Path
+import struct
 import sys
 import time
 import unittest
@@ -14,6 +15,15 @@ from support import Client, Server, ServerError, info, wait_for
 BINARY = ROOT/'bin/eski'
 REFERENCE_PORT = None
 WORKERS = 0
+
+
+def crc64(data):
+    value = 0
+    for byte in data:
+        value ^= byte
+        for _ in range(8):
+            value = (value >> 1) ^ 0x95AC9329AC4BC9B5 if value & 1 else value >> 1
+    return value
 
 
 def mapping(value):
@@ -262,6 +272,126 @@ class Functions(unittest.TestCase):
         self.client.call('FUNCTION', 'FLUSH', 'SYNC')
         self.load('random_b', 'redis.register_function("random_draw",function()return math.random(1,1000000000)end)')
         self.assertEqual(self.client.call('FCALL', 'random_draw', 0), expected[2])
+
+    def test_registration_keys_and_flags_ignore_case(self):
+        self.load('upper', 'redis.register_function{FUNCTION_NAME="upper_fn", CALLBACK=function() return 1 end}')
+        self.load('mixed', 'redis.register_function{Function_Name="mixed_fn", Callback=function() return 2 end, Description="d", Flags={"No-Writes","ALLOW-OOM"}}')
+        self.assertEqual(self.client.call('FCALL', 'UPPER_FN', 0), 1)
+        self.assertEqual(self.client.call('FCALL_RO', 'mixed_fn', 0), 2)
+        function = mapping(mapping(self.client.call('FUNCTION', 'LIST', 'LIBRARYNAME', 'mixed')[0])[b'functions'][0])
+        self.assertEqual((function[b'description'], set(function[b'flags'])), (b'd', {'no-writes', 'allow-oom'}))
+        self.load('numeric', 'redis.register_function(1, function() return 3 end)\nredis.register_function{function_name=2, callback=function() return 4 end, description=5}')
+        self.assertEqual([self.client.call('FCALL', 1, 0), self.client.call('FCALL', 2, 0)], [3, 4])
+        functions = [mapping(item) for item in mapping(self.client.call('FUNCTION', 'LIST', 'LIBRARYNAME', 'numeric')[0])[b'functions']]
+        self.assertEqual(sorted((item[b'name'], item[b'description']) for item in functions), [(b'1', None), (b'2', b'5')])
+
+    def test_registration_errors_are_wrapped_with_reference_texts(self):
+        prefix = 'ERR Error registering functions: '
+        cases = (("redis.register_function('f')", 'ERR calling redis.register_function with a single argument is only applicable to Lua table (representing named arguments).'),
+                 ("redis.register_function{function_name='f', callback=function() end, flags={'bogus'}}", 'ERR unknown flag given'),
+                 ("redis.register_function{function_name='f', callback=function() end, flags={1}}", 'ERR unknown flag given'),
+                 ("redis.register_function{[1]='x'}", 'ERR unknown argument given to redis.register_function'),
+                 ("redis.register_function({}, function() end)", 'ERR first argument to redis.register_function must be a string'),
+                 ("redis.register_function{function_name={}, callback=function() end}", 'ERR function_name argument given to redis.register_function must be a string'),
+                 ("redis.register_function{function_name='f', callback=function() end, description=true}", 'ERR description argument given to redis.register_function must be a string'),
+                 ("redis.register_function('same', function() end)\nredis.register_function('same', function() end)", 'ERR Function already exists in the library'),
+                 ("redis.register_function('bad name', function() end)", 'ERR Library names can only contain letters, numbers, or underscores(_) and must be at least one character long'),
+                 ("redis.register_function()", 'ERR wrong number of arguments to redis.register_function'),
+                 ("error('boom')", "ERR user_function:2: Script attempted to access nonexistent global variable 'error'"),
+                 ("redis.call('ping')", "ERR user_function:2: Script attempted to access nonexistent global variable 'call'"))
+        for body, expected in cases:
+            with self.subTest(body=body):
+                self.assertEqual(str(self.error('FUNCTION', 'LOAD', code('wrapped', body))), prefix+expected)
+        self.assertEqual(str(self.error('FUNCTION', 'LOAD', code('compile', 'foo('))), "ERR Error compiling function: user_function:2: unexpected symbol near '<eof>'")
+        self.assertEqual(str(self.error('FUNCTION', 'LOAD', code('empty', 'return 1'))), 'ERR No functions registered')
+        self.assertEqual(self.client.call('FUNCTION', 'LIST'), [])
+
+    def test_load_environment_offers_logging_and_runtime_omits_replicate_commands(self):
+        self.load('logging', "redis.log(redis.LOG_WARNING, 'parity load log')\nlocal level = redis.LOG_NOTICE\nredis.register_function('logging', function() return {level, redis.LOG_DEBUG, redis.LOG_VERBOSE, redis.LOG_WARNING} end)")
+        self.assertEqual(self.client.call('FCALL', 'logging', 0), [2, 0, 1, 3])
+        self.load('replicating', "redis.register_function('replicating', function() return redis.replicate_commands() end)")
+        self.assertEqual(str(self.error('FCALL', 'replicating', 0)), "ERR user_function:2: attempt to call field 'replicate_commands' (a nil value) script: replicating, on @user_function:2.")
+        self.assertEqual(self.client.call('EVAL', 'return redis.replicate_commands()', 0), 1)
+
+    def test_library_shebang_metadata_is_parsed_before_engine_lookup(self):
+        body = "\nredis.register_function('f_%s', function() return 1 end)"
+        for header, expected in (('#!lua NAME=upper_name', b'upper_name'), ('#!lua Name=mixed_name', b'mixed_name'), ('#!Lua name=engine_case', b'engine_case')):
+            with self.subTest(header=header):
+                self.assertEqual(self.client.call('FUNCTION', 'LOAD', (header+body % expected.decode()).encode()), expected)
+        for source, expected in ((b'#!lua name=bare', 'ERR Invalid library metadata'), (b'#!foo', 'ERR Invalid library metadata'),
+                                 (b'#!foo badarg\nreturn 1', 'ERR Invalid metadata value given: badarg'),
+                                 (b'#!foo\nreturn 1', 'ERR Library name was not given'),
+                                 (b'#!foo name=a name=b\nreturn 1', 'ERR Invalid metadata value, name argument was given multiple times'),
+                                 (b'#!foo name=bad-name\nreturn 1', 'ERR Library names can only contain letters, numbers, or underscores(_) and must be at least one character long'),
+                                 (b'#! lua name=spaced\nreturn 1', 'ERR Invalid metadata value given: lua'),
+                                 (b'#!lua NAME=\nreturn 1', 'ERR Library names can only contain letters, numbers, or underscores(_) and must be at least one character long'),
+                                 (b'#!foo name=z\nreturn 1', "ERR Engine 'foo' not found")):
+            with self.subTest(source=source):
+                self.assertEqual(str(self.error('FUNCTION', 'LOAD', source)), expected)
+
+    def test_fcall_looks_up_the_function_before_key_count(self):
+        for arguments in (('FCALL', 'missing', 'abc'), ('FCALL', 'missing', '-1'), ('FCALL', 'missing', '5'), ('FCALL_RO', 'missing', 'abc')):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(str(self.error(*arguments)), 'ERR Function not found')
+        self.load('present', 'redis.register_function("present",function(k,a)return {#k,#a}end)')
+        self.assertEqual(str(self.error('FCALL', 'present', 'abc')), 'ERR Bad number of keys provided')
+        self.assertEqual(str(self.error('FCALL_RO', 'present', 5)), "ERR Number of keys can't be greater than number of args")
+
+    def dumped(self, name, function):
+        self.client.call('FUNCTION', 'FLUSH', 'SYNC')
+        self.load(name, 'redis.register_function("%s",function() return 1 end)' % function)
+        payload = self.client.call('FUNCTION', 'DUMP')
+        self.client.call('FUNCTION', 'FLUSH', 'SYNC')
+        return payload[:-10], payload[-10:-8]
+
+    def test_restore_reports_reference_texts_in_payload_order(self):
+        first, version = self.dumped('L1', 'f1')
+        other, _ = self.dumped('LX', 'f1')
+        changed, _ = self.dumped('L1', 'h1')
+        upper, _ = self.dumped('L2', 'F1')
+        seal = lambda body: body+version+struct.pack('<Q', crc64(body+version))
+        for payload, expected in ((seal(bytes([0])+first[1:]), 'ERR given type is not a function'),
+                                  (seal(bytes([2])+first[1:]), 'ERR given type is not a function'),
+                                  (seal(bytes([246])+first[1:]), 'ERR Pre-GA function format not supported'),
+                                  (seal(first+first), "ERR Library 'L1' already exists"),
+                                  (seal(first+changed), "ERR Library 'L1' already exists"),
+                                  (seal(other+first), 'ERR Function f1 already exists'),
+                                  (seal(first+upper), 'ERR Function F1 already exists')):
+            with self.subTest(payload=payload[:1]):
+                self.assertEqual(str(self.error('FUNCTION', 'RESTORE', payload)), expected)
+        self.assertEqual(self.client.call('FUNCTION', 'LIST'), [])
+        self.load('L1', 'redis.register_function("g1",function() return 1 end)')
+        self.assertEqual(str(self.error('FUNCTION', 'RESTORE', seal(other+first))), 'ERR Function f1 already exists')
+        self.assertEqual(str(self.error('FUNCTION', 'RESTORE', seal(changed))), 'ERR Library L1 already exists')
+        self.assertEqual(self.client.call('FUNCTION', 'RESTORE', seal(changed), 'REPLACE'), 'OK')
+
+    def test_async_flush_defers_only_more_than_64_functions(self):
+        def freed():
+            return int(info(self.client, 'memory')['lazyfreed_objects'])
+        def populate(libraries, functions):
+            self.client.call('FUNCTION', 'FLUSH', 'SYNC')
+            for index in range(libraries):
+                body = '\n'.join('redis.register_function("f%d_%d",function() return 1 end)' % (index, item) for item in range(functions))
+                self.load('lazy%d' % index, body)
+        for libraries, functions, expected in ((3, 2, 0), (32, 2, 0), (1, 64, 0), (33, 2, 67), (1, 65, 66), (10, 7, 71)):
+            with self.subTest(libraries=libraries, functions=functions):
+                populate(libraries, functions)
+                before = freed()
+                self.assertEqual(self.client.call('FUNCTION', 'FLUSH', 'ASYNC'), 'OK')
+                if expected:
+                    wait_for(lambda: freed()-before == expected, label='deferred function release')
+                else:
+                    time.sleep(0.05)
+                    self.assertEqual(freed()-before, 0)
+
+    def test_load_timeout_is_fixed_and_wrapped(self):
+        self.addCleanup(self.client.call, 'CONFIG', 'SET', 'busy-reply-threshold', '5000')
+        for threshold in ('5000', '200'):
+            with self.subTest(threshold=threshold):
+                self.client.call('CONFIG', 'SET', 'busy-reply-threshold', threshold)
+                start = time.monotonic()
+                self.assertEqual(str(self.error('FUNCTION', 'LOAD', code('endless', 'local i = 0 while true do i = i + 1 end'))), 'ERR Error registering functions: ERR FUNCTION LOAD timeout')
+                self.assertTrue(0.4 <= time.monotonic()-start < 2.5)
 
 
 class Persistence(Functions):

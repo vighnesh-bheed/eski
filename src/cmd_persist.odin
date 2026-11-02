@@ -1352,8 +1352,10 @@ persist_finish_shutdown :: proc(flags: Shutdown_Flags) -> bool {
 	compute_shutdown()
 	transport_close_listeners()
 	lua_debug_shutdown()
-	lua_library_flush(false)
-	lr.reset()
+	if lua_active == nil {
+		lua_library_flush(false)
+		lr.reset()
+	}
 	remove_pid_file()
 	plog(LOG_WARNING, "Eski is now ready to exit, bye bye...")
 	runtime_operations_shutdown()
@@ -1368,7 +1370,7 @@ persist_prepare_shutdown :: proc(flags_in: Shutdown_Flags) -> bool {
 		flags += {.Nosave}
 		flags -= {.Save}
 	}
-	plog(LOG_WARNING, "User requested shutdown...")
+	plog(LOG_NOTICE, "User requested shutdown...")
 	if aof.state == .Awaiting_Base && .Force not_in flags {
 		plog(LOG_WARNING, "Writing initial AOF, can't exit.")
 		return false

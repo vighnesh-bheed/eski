@@ -102,6 +102,9 @@ static int es_encode_value(lua_State *L, es_reply_frame *frame, int resp, es_buf
         lua_pop(L, 1);
         if (depth == 0) es_context_of(L)->forwarded_error = forwarded;
         size_t len; const char *s = lua_tolstring(L, -1, &len);
+        const char *zero = memchr(s, 0, len);
+        if (zero) len = (size_t)(zero - s);
+        while (len && (s[len - 1] == '\r' || s[len - 1] == '\n')) len--;
         es_record_error(L, out, s, len, forwarded);
         es_line(L, out, '-', s, len); lua_pop(L, 1); return 0;
     }
@@ -112,9 +115,9 @@ static int es_encode_value(lua_State *L, es_reply_frame *frame, int resp, es_buf
     lua_pop(L, 1);
     if (es_rawfield(L, index, "double") == LUA_TNUMBER) {
         double value = lua_tonumber(L, -1); char text[64];
-        int n = isnan(value) ? snprintf(text, sizeof(text), "nan") : isinf(value) ? snprintf(text, sizeof(text), "%sinf", value < 0 ? "-" : "") : snprintf(text, sizeof(text), "%.17g", value);
-        if (n < 0 || (size_t)n >= sizeof(text)) luaL_error(L, "invalid double reply");
-        if (resp == 3) es_line(L, out, ',', text, (size_t)n); else es_bulk(L, out, text, (size_t)n);
+        size_t n = es_number_text(value, 0, text, sizeof(text));
+        if (!n) luaL_error(L, "invalid double reply");
+        if (resp == 3) es_line(L, out, ',', text, n); else es_bulk(L, out, text, n);
         lua_pop(L, 1); return 0;
     }
     lua_pop(L, 1);
@@ -133,14 +136,17 @@ static int es_encode_value(lua_State *L, es_reply_frame *frame, int resp, es_buf
     if (es_rawfield(L, index, "verbatim_string") == LUA_TTABLE) {
         int table = lua_absindex(L, -1);
         es_rawfield(L, table, "format"); es_rawfield(L, table, "string");
-        if (lua_type(L, -2) != LUA_TSTRING || lua_type(L, -1) != LUA_TSTRING) luaL_error(L, "invalid verbatim reply");
-        size_t flen, len; const char *format = lua_tolstring(L, -2, &flen); const char *s = lua_tolstring(L, -1, &len);
-        if (flen != 3) luaL_error(L, "verbatim format must have three bytes");
-        if (resp == 3) {
-            if (len > INT64_MAX - 4) es_fail(L, ESLUA_LIMIT, "verbatim reply too large");
-            es_integer(L, out, '=', (int64_t)len + 4); es_append(L, out, format, 3); es_byte(L, out, ':'); es_append(L, out, s, len); es_append(L, out, "\r\n", 2);
-        } else es_bulk(L, out, s, len);
-        lua_pop(L, 3); return 0;
+        if (lua_type(L, -2) == LUA_TSTRING && lua_type(L, -1) == LUA_TSTRING) {
+            size_t flen, len; const char *format = lua_tolstring(L, -2, &flen); const char *s = lua_tolstring(L, -1, &len);
+            char kind[3] = {' ', ' ', ' '};
+            memcpy(kind, format, flen < 3 ? flen : 3);
+            if (resp == 3) {
+                if (len > INT64_MAX - 4) es_fail(L, ESLUA_LIMIT, "verbatim reply too large");
+                es_integer(L, out, '=', (int64_t)len + 4); es_append(L, out, kind, 3); es_byte(L, out, ':'); es_append(L, out, s, len); es_append(L, out, "\r\n", 2);
+            } else es_bulk(L, out, s, len);
+            lua_pop(L, 3); return 0;
+        }
+        lua_pop(L, 2);
     }
     lua_pop(L, 1);
     const char *tags[] = {"map", "set"};

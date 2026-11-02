@@ -1601,7 +1601,6 @@ acl_rejected :: proc(c: ^Conn, st: ^Cmd_Hot, argv: [][]u8) {
 	}
 }
 
-@(private = "file")
 acl_error_message :: proc(b: ^[dynamic]u8, res: Acl_Verdict, u: ^Acl_User, fullname: string, value: []u8) {
 	#partial switch res {
 	case .Command_Denied:

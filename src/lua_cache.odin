@@ -89,12 +89,14 @@ lua_lru_touch :: proc(entry: ^Lua_Source) {
 	lua_lru_head = entry
 }
 
-lua_cache_find :: proc(digest: [40]u8) -> ^Lua_Source {
+lua_cache_find :: proc(digest: [40]u8, touch := false) -> ^Lua_Source {
 	lookup := digest
 	entry := lua_sources[int(hash_bytes(lookup[:]) & (LUA_CACHE_BUCKETS-1))]
 	for entry != nil {
 		if entry.digest == digest {
-			lua_lru_touch(entry)
+			if touch {
+				lua_lru_touch(entry)
+			}
 			return entry
 		}
 		entry = entry.bucket_next
@@ -152,12 +154,7 @@ lua_cache_reap :: proc(limit: int) {
 
 lua_cache_store :: proc(body: []u8, pinned: bool) -> ^Lua_Source {
 	digest := lua_digest(body)
-	if entry := lua_cache_find(digest); entry != nil {
-		if pinned && !entry.pinned {
-			lua_lru_remove(entry)
-			entry.pinned = true
-			lua_eval_count -= 1
-		}
+	if entry := lua_cache_find(digest, !pinned); entry != nil {
 		return entry
 	}
 	if len(body) > max(int)-size_of(Lua_Source) {
