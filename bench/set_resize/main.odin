@@ -161,7 +161,7 @@ when HOST {
 		config_init()
 		update_clock()
 		db_init()
-		active_expire_enabled = false
+		expiry_sweep_on = false
 		st.set_hash_seed(0x738A0E43)
 		h := st.create_table(n - 1)
 		buf: [32]u8

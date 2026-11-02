@@ -70,13 +70,21 @@ evict_policy_parse :: proc(s: []u8) -> (Evict_Policy, bool) {
 }
 
 evict_policy_changed :: proc() {
-	lfu_policy = maxmemory_policy == .Volatile_Lfu || maxmemory_policy == .Allkeys_Lfu
-	evict_no_shared_ints = maxmemory_bytes != 0 && maxmemory_policy != .Noeviction && maxmemory_policy != .Volatile_Random && maxmemory_policy != .Allkeys_Random && maxmemory_policy != .Volatile_Ttl
+	counts_hits, ranks_by_access := false, false
+	switch maxmemory_policy {
+	case .Volatile_Lfu, .Allkeys_Lfu:
+		counts_hits, ranks_by_access = true, true
+	case .Volatile_Lru, .Allkeys_Lru:
+		ranks_by_access = true
+	case .Volatile_Random, .Volatile_Ttl, .Allkeys_Random, .Noeviction:
+	}
+	access_counts_hits = counts_hits
+	evict_no_shared_ints = ranks_by_access && maxmemory_bytes != 0
 }
 
 shared_int_ok :: #force_inline proc "contextless" (v: []u8) -> bool {
 	n, ok := parse_i64(v)
-	return !ok || n < 0 || n >= OBJ_SHARED_INTEGERS
+	return !ok || n < 0 || n >= SHARED_INTEGER_LIMIT
 }
 
 @(private = "file")

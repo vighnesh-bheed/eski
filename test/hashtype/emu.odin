@@ -122,7 +122,7 @@ model_make :: proc() -> Model {
 	inproc_clock(0)
 	inproc_command("FLUSHALL")
 	inproc_command("CONFIG", "SET", "rdbcompression", "no")
-	return Model{resp = int(inproc_conn.resp), active = eski.active_expire_enabled}
+	return Model{resp = int(inproc_conn.resp), active = eski.expiry_sweep_on}
 }
 
 model_views_clear :: proc(m: ^Model) {
@@ -156,7 +156,7 @@ model_delete_key :: proc(m: ^Model, key: []u8) -> bool {
 
 run_active_expire :: proc(m: ^Model) {
 	inproc_clock(i64(m.now))
-	m.active = eski.active_expire_enabled
+	m.active = eski.expiry_sweep_on
 	if !m.active {
 		return
 	}
