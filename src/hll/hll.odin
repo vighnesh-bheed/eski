@@ -186,14 +186,14 @@ pfadd_apply :: proc(cur: []u8, elems: [][]u8, scratch: ^[dynamic]u8, sparse_max_
 	return
 }
 
-pfmerge_apply :: proc(dst: []u8, dst_exists: bool, max_regs: ^[HLL_REGISTERS]u8, use_dense: bool, scratch: ^[dynamic]u8, sparse_max_bytes: int) -> (in_scratch: bool, err: Error) {
+pfmerge_apply :: proc(dst: []u8, dst_exists: bool, max_regs: ^[HLL_REGISTERS]u8, dense_wanted: bool, scratch: ^[dynamic]u8, sparse_max_bytes: int) -> (in_scratch: bool, err: Error) {
 	if dst_exists && dst[4] == HLL_DENSE {
 		dense_merge_registers(dst[HLL_HDR_SIZE:], max_regs)
 		hll_invalidate_cache(dst)
 		return false, .None
 	}
 	source := dst if dst_exists else HLL_EMPTY_SPARSE[:]
-	if use_dense {
+	if dense_wanted {
 		if convert_err := sparse_to_dense_into(source, scratch); convert_err != .None {
 			return false, convert_err
 		}
@@ -333,7 +333,7 @@ hll_count_union :: proc "contextless" (srcs: [][]u8) -> (card: u64, err: Error) 
 hll_store_registers :: proc(
 	dst: ^[]u8,
 	max_regs: ^[HLL_REGISTERS]u8,
-	use_dense: bool,
+	dense_wanted: bool,
 	sparse_max_bytes := HLL_SPARSE_MAX_BYTES_DEFAULT,
 	allocator := context.allocator,
 ) -> Error {
@@ -341,7 +341,7 @@ hll_store_registers :: proc(
 		return .Wrong_Type
 	}
 	scratch := make([dynamic]u8, 0, 0, allocator)
-	in_scratch, err := pfmerge_apply(dst^, true, max_regs, use_dense, &scratch, sparse_max_bytes)
+	in_scratch, err := pfmerge_apply(dst^, true, max_regs, dense_wanted, &scratch, sparse_max_bytes)
 	if in_scratch {
 		old := dst^
 		dst^ = dynamic_finish(&scratch)
@@ -360,13 +360,13 @@ hll_merge :: proc(
 	allocator := context.allocator,
 ) -> Error {
 	regs: [HLL_REGISTERS]u8
-	use_dense := false
+	dense_wanted := false
 	if dst_exists {
 		if !hll_is_valid(dst^) {
 			return .Wrong_Type
 		}
 		if dst[4] == HLL_DENSE {
-			use_dense = true
+			dense_wanted = true
 		}
 		if merge_err := hll_merge_into(&regs, dst^); merge_err != .None {
 			return merge_err
@@ -380,14 +380,14 @@ hll_merge :: proc(
 			return .Wrong_Type
 		}
 		if src[4] == HLL_DENSE {
-			use_dense = true
+			dense_wanted = true
 		}
 		if merge_err := hll_merge_into(&regs, src); merge_err != .None {
 			return merge_err
 		}
 	}
 	scratch := make([dynamic]u8, 0, 0, allocator)
-	in_scratch, err := pfmerge_apply(dst^ if dst_exists else nil, dst_exists, &regs, use_dense, &scratch, sparse_max_bytes)
+	in_scratch, err := pfmerge_apply(dst^ if dst_exists else nil, dst_exists, &regs, dense_wanted, &scratch, sparse_max_bytes)
 	if in_scratch {
 		old := dst^
 		dst^ = dynamic_finish(&scratch)

@@ -5,8 +5,6 @@ import st "settype"
 import ht "hashtype"
 import "core:fmt"
 
-ZSET_REPLY_CHUNK :: 1000
-
 zset_items: [dynamic]zt.Item
 
 zset_scores: [dynamic]f64
@@ -176,77 +174,105 @@ zadd_notify :: proc(key: []u8, added, updated: int, incr: bool) {
 	block_signal_key(cur_db(), key, .Zset)
 }
 
-zadd_generic :: proc(c: ^Conn, argv: [][]u8, incr_cmd: bool) {
-	pst.dirty_explicit = true
-	a, err := zt.parse_zadd(argv, incr_cmd)
-	if err != .None {
-		reply_zset_error(c, err)
-		return
-	}
+@(private = "file")
+Zadd_Tally :: struct {
+	inserted: int,
+	rescored: int,
+	last:     f64,
+	declined: bool,
+	invalid:  bool,
+}
+
+@(private = "file")
+zadd_read_scores :: proc(c: ^Conn, argv: [][]u8, first: int) -> bool {
 	clear(&zset_scores)
-	for i in 0 ..< a.elements {
-		v, good := zt.parse_score(argv[a.scoreidx + 2 * i])
-		if !good {
+	for at := first; at < len(argv); at += 2 {
+		score, numeric := zt.parse_score(argv[at])
+		if !numeric {
 			reply_zset_error(c, .Not_Float)
+			return false
+		}
+		append(&zset_scores, score)
+	}
+	return true
+}
+
+@(private = "file")
+zadd_merge :: proc(z: zt.Zset, members: [][]u8, flags: zt.Zadd_Flags) -> (tally: Zadd_Tally) {
+	defer pst.dirty += i64(tally.inserted + tally.rescored)
+	for score, n in zset_scores {
+		effect, now, defined := zt.add(z, score, members[2 * n], flags)
+		if !defined {
+			tally.invalid = true
 			return
 		}
-		append(&zset_scores, v)
+		tally.inserted += int(.Added in effect)
+		tally.rescored += int(.Updated in effect)
+		tally.declined = .Nop in effect
+		tally.last = now
 	}
-	key := argv[1]
-	e, z, wrong := zset_lookup(key, false)
-	if wrong {
-		reply_wrongtype(c)
-		return
-	}
-	if z == nil {
-		if .Xx in a.flags {
-			if .Incr in a.flags {
-				reply_null(c)
-			} else {
-				reply_int(c, 0)
-			}
-			return
+	return
+}
+
+@(private = "file")
+zadd_answer :: proc(c: ^Conn, opts: ^zt.Zadd_Args, tally: ^Zadd_Tally) {
+	if .Incr not_in opts.flags {
+		total := tally.inserted
+		if opts.ch {
+			total += tally.rescored
 		}
-		zset_seed()
-		z = zt.type_create(a.elements, len(argv[a.scoreidx + 1]))
-		e = zset_attach_new(key, z)
-	}
-	added, updated := 0, 0
-	nop := false
-	result: f64
-	for v, i in zset_scores {
-		out, value, good := zt.add(z, v, argv[a.scoreidx + i * 2 + 1], a.flags)
-		if !good {
-			zset_done(e, z)
-			reply_zset_error(c, .Nan_Result)
-			return
-		}
-		if .Added in out {
-			pst.dirty += 1
-			added += 1
-		}
-		if .Updated in out {
-			pst.dirty += 1
-			updated += 1
-		}
-		nop = .Nop in out
-		result = value
-	}
-	zset_done(e, z)
-	zadd_notify(key, added, updated, .Incr in a.flags)
-	if .Incr in a.flags {
-		if nop {
-			reply_null(c)
-		} else {
-			reply_double(c, result)
-		}
+		reply_int(c, i64(total))
+	} else if tally.declined {
+		reply_null(c)
 	} else {
-		reply_int(c, i64(a.ch ? added + updated : added))
+		reply_double(c, tally.last)
 	}
 }
 
+@(private = "file")
+zset_add_command :: proc(c: ^Conn, argv: [][]u8, zincrby: bool) {
+	pst.dirty_explicit = true
+	opts, refused := zt.parse_zadd(argv, zincrby)
+	if refused != .None {
+		reply_zset_error(c, refused)
+		return
+	}
+	if !zadd_read_scores(c, argv, opts.scoreidx) {
+		return
+	}
+	e, z, wrong := zset_lookup(argv[1], false)
+	switch {
+	case wrong:
+		reply_wrongtype(c)
+	case z == nil && .Xx in opts.flags:
+		untouched := Zadd_Tally{declined = true}
+		zadd_answer(c, &opts, &untouched)
+	case:
+		zadd_apply(c, argv, &opts, e, z)
+	}
+}
+
+@(private = "file")
+zadd_apply :: proc(c: ^Conn, argv: [][]u8, opts: ^zt.Zadd_Args, found: ^Entry, existing: zt.Zset) {
+	key := argv[1]
+	e, z := found, existing
+	if z == nil {
+		zset_seed()
+		z = zt.type_create(len(zset_scores), len(argv[opts.scoreidx + 1]))
+		e = zset_attach_new(key, z)
+	}
+	tally := zadd_merge(z, argv[opts.scoreidx + 1:], opts.flags)
+	zset_done(e, z)
+	if tally.invalid {
+		reply_zset_error(c, .Nan_Result)
+		return
+	}
+	zadd_notify(key, tally.inserted, tally.rescored, .Incr in opts.flags)
+	zadd_answer(c, opts, &tally)
+}
+
 cmd_zadd :: proc(c: ^Conn, argv: [][]u8) {
-	zadd_generic(c, argv, false)
+	zset_add_command(c, argv, false)
 }
 
 zset_zadd_command :: proc(c: ^Conn, argv: [][]u8) {
@@ -254,7 +280,7 @@ zset_zadd_command :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 cmd_zincrby :: proc(c: ^Conn, argv: [][]u8) {
-	zadd_generic(c, argv, true)
+	zset_add_command(c, argv, true)
 }
 
 zset_removed :: proc(key: []u8, e: ^Entry, z: zt.Zset, removed: int, event: string) {
@@ -323,49 +349,97 @@ zremrange_generic :: proc(c: ^Conn, argv: [][]u8, kind: zt.Range_Kind) {
 	reply_int(c, i64(n))
 }
 
-zrange_generic :: proc(c: ^Conn, argv: [][]u8, argc_start: int, store: bool, kind: zt.Range_Kind, dir: zt.Direction) {
-	if store { pst.dirty_explicit = true }
-	a, err := zt.parse_zrange(argv, argc_start, store, kind, dir)
-	if err != .None {
-		reply_zset_error(c, err)
-		return
-	}
-	key := argv[argc_start]
-	_, z, wrong := zset_lookup(key, true)
+@(private = "file")
+zset_for_read :: proc(c: ^Conn, key: []u8) -> (z: zt.Zset, ok: bool) {
+	_, found, wrong := zset_lookup(key, true)
 	if wrong {
 		reply_wrongtype(c)
+		return nil, false
+	}
+	return found, true
+}
+
+Zrange_Variant :: enum u8 {
+	Zrange,
+	Zrangestore,
+	Zrevrange,
+	Zrangebyscore,
+	Zrevrangebyscore,
+	Zrangebylex,
+	Zrevrangebylex,
+}
+
+@(private = "file")
+Zrange_Fixed :: struct {
+	kind: zt.Range_Kind,
+	dir:  zt.Direction,
+}
+
+@(private = "file")
+zrange_fixed := [Zrange_Variant]Zrange_Fixed {
+	.Zrange           = {.Auto, .Auto},
+	.Zrangestore      = {.Auto, .Auto},
+	.Zrevrange        = {.Rank, .Reverse},
+	.Zrangebyscore    = {.Score, .Forward},
+	.Zrevrangebyscore = {.Score, .Reverse},
+	.Zrangebylex      = {.Lex, .Forward},
+	.Zrevrangebylex   = {.Lex, .Reverse},
+}
+
+@(private = "file")
+zrange_select :: proc(z: zt.Zset, spec: ^zt.Zrange_Args, keep_scores: bool) {
+	#partial switch spec.kind {
+	case .Rank:
+		zt.rank_range(z, spec.start, spec.end, spec.reverse, &zset_items)
+	case .Score:
+		zt.score_range(z, &spec.srange, spec.offset, spec.limit, spec.reverse, &zset_items)
+	case .Lex:
+		zt.lex_range(z, &spec.lrange, spec.offset, spec.limit, spec.reverse, keep_scores, &zset_items)
+	}
+}
+
+@(private = "file")
+zrange_save_selection :: proc(c: ^Conn, dest: []u8) {
+	out := zset_new_skiplist(len(zset_items))
+	widest, bytes_total := 0, 0
+	for &picked in zset_items {
+		scratch: [21]u8
+		name := zt.item_bytes(&picked, &scratch)
+		widest = max(widest, len(name))
+		bytes_total += len(name)
+		_, _, _ = zt.add(out, picked.score, name, {})
+	}
+	zt.convert_to_listpack_if_needed(out, widest, bytes_total)
+	stored := zt.length(out)
+	zset_store_result(cur_db(), dest, out, "zrangestore")
+	reply_int(c, i64(stored))
+}
+
+zrange_command :: proc(c: ^Conn, argv: [][]u8, variant: Zrange_Variant) {
+	saving := variant == .Zrangestore
+	if saving {
+		pst.dirty_explicit = true
+	}
+	source := 2 if saving else 1
+	fixed := zrange_fixed[variant]
+	spec, refused := zt.parse_zrange(argv, source, saving, fixed.kind, fixed.dir)
+	if refused != .None {
+		reply_zset_error(c, refused)
+		return
+	}
+	z, readable := zset_for_read(c, argv[source])
+	if !readable {
 		return
 	}
 	clear(&zset_items)
+	defer clear(&zset_items)
 	if z != nil {
-		switch a.kind {
-		case .Rank:
-			zt.rank_range(z, a.start, a.end, a.reverse, &zset_items)
-		case .Score:
-			zt.score_range(z, &a.srange, a.offset, a.limit, a.reverse, &zset_items)
-		case .Lex:
-			zt.lex_range(z, &a.lrange, a.offset, a.limit, a.reverse, store, &zset_items)
-		case .Auto:
-		}
+		zrange_select(z, &spec, saving)
 	}
-	if store {
-		dst := zset_new_skiplist(len(zset_items))
-		maxlen, totlen := 0, 0
-		for &item in zset_items {
-			buf: [21]u8
-			member := zt.item_bytes(&item, &buf)
-			maxlen = max(maxlen, len(member))
-			totlen += len(member)
-			_, _, _ = zt.add(dst, item.score, member, {})
-		}
-		zt.convert_to_listpack_if_needed(dst, maxlen, totlen)
-		n := zt.length(dst)
-		clear(&zset_items)
-		zset_store_result(cur_db(), argv[1], dst, "zrangestore")
-		reply_int(c, i64(n))
+	if saving {
+		zrange_save_selection(c, argv[1])
 	} else {
-		reply_zset_items(c, zset_items[:], a.withscores)
-		clear(&zset_items)
+		reply_zset_items(c, zset_items[:], spec.withscores)
 	}
 }
 
@@ -489,31 +563,31 @@ cmd_zremrangebylex :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 cmd_zrange :: proc(c: ^Conn, argv: [][]u8) {
-	zrange_generic(c, argv, 1, false, .Auto, .Auto)
+	zrange_command(c, argv, .Zrange)
 }
 
 cmd_zrangestore :: proc(c: ^Conn, argv: [][]u8) {
-	zrange_generic(c, argv, 2, true, .Auto, .Auto)
+	zrange_command(c, argv, .Zrangestore)
 }
 
 cmd_zrevrange :: proc(c: ^Conn, argv: [][]u8) {
-	zrange_generic(c, argv, 1, false, .Rank, .Reverse)
+	zrange_command(c, argv, .Zrevrange)
 }
 
 cmd_zrangebyscore :: proc(c: ^Conn, argv: [][]u8) {
-	zrange_generic(c, argv, 1, false, .Score, .Forward)
+	zrange_command(c, argv, .Zrangebyscore)
 }
 
 cmd_zrevrangebyscore :: proc(c: ^Conn, argv: [][]u8) {
-	zrange_generic(c, argv, 1, false, .Score, .Reverse)
+	zrange_command(c, argv, .Zrevrangebyscore)
 }
 
 cmd_zrangebylex :: proc(c: ^Conn, argv: [][]u8) {
-	zrange_generic(c, argv, 1, false, .Lex, .Forward)
+	zrange_command(c, argv, .Zrangebylex)
 }
 
 cmd_zrevrangebylex :: proc(c: ^Conn, argv: [][]u8) {
-	zrange_generic(c, argv, 1, false, .Lex, .Reverse)
+	zrange_command(c, argv, .Zrevrangebylex)
 }
 
 cmd_zrank :: proc(c: ^Conn, argv: [][]u8) {
@@ -557,125 +631,191 @@ zset_free_temps :: proc() {
 	clear(&zset_temps)
 }
 
-setop_generic :: proc(c: ^Conn, argv: [][]u8, name: string, numkeys_index: int, op: zt.Setop, cardinality_only: bool) {
-	if numkeys_index == 2 { pst.dirty_explicit = true }
-	n, err := zt.parse_setop_numkeys(argv, numkeys_index)
-	if err != .None {
-		if err == .At_Least_One_Key {
-			reply_error_parts(c, "ERR at least 1 input key is needed for '", name, "' command")
-		} else {
-			reply_zset_error(c, err)
+Zset_Algebra_Output :: enum u8 {
+	Reply,
+	Store,
+	Count,
+}
+
+@(private = "file")
+zset_algebra_names := [zt.Setop][Zset_Algebra_Output]string {
+	.Union = {.Reply = "zunion", .Store = "zunionstore", .Count = "zunion"},
+	.Inter = {.Reply = "zinter", .Store = "zinterstore", .Count = "zintercard"},
+	.Diff  = {.Reply = "zdiff", .Store = "zdiffstore", .Count = "zdiff"},
+}
+
+@(private = "file")
+zset_algebra_inputs :: proc(keys: [][]u8) -> bool {
+	for key in keys {
+		z, origin, usable := zset_set_source(db_find_read(key))
+		if !usable {
+			return false
 		}
+		input := zt.source_make(z, 1)
+		input.id = origin
+		append(&zset_srcs, input)
+	}
+	return true
+}
+
+@(private = "file")
+zset_algebra_deliver :: proc(c: ^Conn, argv: [][]u8, name: string, output: Zset_Algebra_Output, opts: ^zt.Setop_Options, result: zt.Zset, card: int, widest: int, bytes_total: int) {
+	switch output {
+	case .Count:
+		reply_int(c, i64(card))
+	case .Store:
+		members := zt.length(result)
+		zt.convert_to_listpack_if_needed(result, widest, bytes_total)
+		zset_store_result(cur_db(), argv[1], result, name)
+		reply_int(c, i64(members))
+	case .Reply:
+		clear(&zset_items)
+		zt.rank_range(result, 0, -1, false, &zset_items)
+		reply_zset_items(c, zset_items[:], opts.withscores)
+		clear(&zset_items)
+		zt.destroy(result)
+	}
+}
+
+zset_algebra :: proc(c: ^Conn, argv: [][]u8, op: zt.Setop, output: Zset_Algebra_Output) {
+	storing := output == .Store
+	if storing {
+		pst.dirty_explicit = true
+	}
+	name := zset_algebra_names[op][output]
+	count_at := 2 if storing else 1
+	inputs, refused := zt.parse_setop_numkeys(argv, count_at)
+	if refused == .At_Least_One_Key {
+		reply_error_parts(c, "ERR at least 1 input key is needed for '", name, "' command")
 		return
 	}
-	store := numkeys_index == 2
-	clear(&zset_weights)
-	resize(&zset_weights, n)
+	if refused != .None {
+		reply_zset_error(c, refused)
+		return
+	}
 	clear(&zset_srcs)
 	clear(&zset_temps)
 	defer zset_free_temps()
-	for i in 0 ..< n {
-		e := db_find_read(argv[numkeys_index + 1 + i])
-		z, id, good := zset_set_source(e)
-		if !good {
-			reply_wrongtype(c)
-			return
-		}
-		src := zt.source_make(z, 1)
-		src.id = id
-		append(&zset_srcs, src)
-	}
-	o, option_err := zt.parse_setop_options(argv, numkeys_index + n + 1, n, op, store, cardinality_only, zset_weights[:])
-	if option_err != .None {
-		reply_zset_error(c, option_err)
+	if !zset_algebra_inputs(argv[count_at + 1:][:inputs]) {
+		reply_wrongtype(c)
 		return
 	}
-	for &src, i in zset_srcs {
-		src.weight = zset_weights[i]
+	resize(&zset_weights, inputs)
+	opts, bad_option := zt.parse_setop_options(argv, count_at + 1 + inputs, inputs, op, storing, output == .Count, zset_weights[:])
+	if bad_option != .None {
+		reply_zset_error(c, bad_option)
+		return
+	}
+	for &input, n in zset_srcs {
+		input.weight = zset_weights[n]
 	}
 	zset_seed()
-	dst, card, maxlen, totlen := zt.setop_compute(zset_srcs[:], op, o.aggregate, cardinality_only, int(o.limit))
-	if cardinality_only {
-		reply_int(c, i64(card))
-		return
-	}
-	card = zt.length(dst)
-	if store {
-		zt.convert_to_listpack_if_needed(dst, maxlen, totlen)
-		zset_store_result(cur_db(), argv[1], dst, name)
-		reply_int(c, i64(card))
-	} else {
-		clear(&zset_items)
-		zt.rank_range(dst, 0, -1, false, &zset_items)
-		reply_zset_items(c, zset_items[:], o.withscores)
-		clear(&zset_items)
-		zt.destroy(dst)
-	}
+	result, card, widest, bytes_total := zt.setop_compute(zset_srcs[:], op, opts.aggregate, output == .Count, int(opts.limit))
+	zset_algebra_deliver(c, argv, name, output, &opts, result, card, widest, bytes_total)
 }
 
-zpop_serve :: proc(c: ^Conn, key: []u8, e: ^Entry, z: zt.Zset, max_end: bool, emit_key: bool, count_in: i64, nested: bool) -> (deleted: bool) {
-	count := count_in < 0 ? 1 : int(min(count_in, i64(zt.length(z))))
-	if emit_key {
-		reply_array(c, count_in < 0 ? 3 : 2)
-		reply_bulk(c, key)
+Zpop_Shape :: enum u8 {
+	Pair,
+	Run,
+	Keyed_Pair,
+	Keyed_Run,
+}
+
+Zpop_Order :: struct {
+	shape: Zpop_Shape,
+	top:   bool,
+	count: i64,
+}
+
+Zpop_Probe :: enum u8 {
+	Empty,
+	Ready,
+	Wrong,
+}
+
+zpop_find_ready :: proc(keys: [][]u8) -> (key: []u8, e: ^Entry, z: zt.Zset, probe: Zpop_Probe) {
+	for candidate in keys {
+		entry, set, wrong := zset_lookup(candidate, false)
+		if wrong {
+			return candidate, entry, nil, .Wrong
+		}
+		if set != nil && zt.length(set) > 0 {
+			return candidate, entry, set, .Ready
+		}
 	}
-	if count_in < 0 && !emit_key {
+	return nil, nil, nil, .Empty
+}
+
+zpop_emit :: proc(c: ^Conn, key: []u8, e: ^Entry, z: zt.Zset, order: Zpop_Order) -> (emptied: bool) {
+	take := 1
+	grouped := false
+	switch order.shape {
+	case .Pair:
 		reply_array(c, 2)
+	case .Keyed_Pair:
+		reply_array(c, 3)
+		reply_bulk(c, key)
+	case .Run:
+		take = int(min(order.count, i64(zt.length(z))))
+		grouped = c.resp == 3
+		reply_array(c, take if grouped else 2 * take)
+	case .Keyed_Run:
+		take = int(min(order.count, i64(zt.length(z))))
+		grouped = true
+		reply_array(c, 2)
+		reply_bulk(c, key)
+		reply_array(c, take)
 	}
-	if count_in >= 0 {
-		width := nested || c.resp == 3 ? 1 : 2
-		reply_array(c, count * width)
-	}
-	for _ in 0 ..< count {
-		item := zt.peek(z, max_end)
-		if count_in >= 0 && (nested || c.resp == 3) {
+	for _ in 0 ..< take {
+		head := zt.peek(z, order.top)
+		if grouped {
 			reply_array(c, 2)
 		}
-		reply_zset_member(c, &item)
-		reply_double(c, item.score)
-		zt.pop(z, max_end)
+		reply_zset_member(c, &head)
+		reply_double(c, head.score)
+		zt.pop(z, order.top)
 	}
-	deleted = count > 0 && zt.length(z) == 0
-	zset_removed(key, e, z, count, max_end ? "zpopmax" : "zpopmin")
+	emptied = take > 0 && zt.length(z) == 0
+	zset_removed(key, e, z, take, "zpopmax" if order.top else "zpopmin")
 	return
 }
 
-zpop_generic :: proc(c: ^Conn, keys: [][]u8, max_end: bool, emit_key: bool, count: i64, nested: bool, nil_when_empty: bool) {
+@(private = "file")
+zpop_from_keys :: proc(c: ^Conn, keys: [][]u8, order: Zpop_Order) {
 	pst.dirty_explicit = true
-	for key in keys {
-		e, z, wrong := zset_lookup(key, false)
-		if wrong {
-			reply_wrongtype(c)
+	key, e, z, probe := zpop_find_ready(keys)
+	switch probe {
+	case .Wrong:
+		reply_wrongtype(c)
+	case .Ready:
+		zpop_emit(c, key, e, z, order)
+	case .Empty:
+		if order.shape == .Keyed_Run {
+			reply_null_array(c)
 			return
 		}
-		if z != nil && zt.length(z) > 0 {
-			_ = zpop_serve(c, key, e, z, max_end, emit_key, count, nested)
-			return
-		}
-	}
-	if nil_when_empty {
-		reply_null_array(c)
-	} else {
 		reply_array(c, 0)
 	}
 }
 
-zpopminmax :: proc(c: ^Conn, argv: [][]u8, max_end: bool) {
-	count, err := zt.parse_zpop_count(argv)
-	if err != .None {
-		reply_zset_error(c, err)
+@(private = "file")
+zpop_command :: proc(c: ^Conn, argv: [][]u8, top: bool) {
+	count, refused := zt.parse_zpop_count(argv)
+	if refused != .None {
+		reply_zset_error(c, refused)
 		return
 	}
-	zpop_generic(c, argv[1:2], max_end, false, count, false, false)
+	shape := Zpop_Shape.Pair if count < 0 else .Run
+	zpop_from_keys(c, argv[1:2], Zpop_Order{shape = shape, top = top, count = count})
 }
 
 cmd_zmpop :: proc(c: ^Conn, argv: [][]u8) {
-	a, err := zt.parse_zmpop(argv, 1)
-	if err != .None {
-		reply_zset_error(c, err)
+	spec, refused := zt.parse_zmpop(argv, 1)
+	if refused != .None {
+		reply_zset_error(c, refused)
 		return
 	}
-	zpop_generic(c, argv[2:2 + a.numkeys], a.max_end, true, a.count, true, true)
+	zpop_from_keys(c, argv[2:][:spec.numkeys], Zpop_Order{shape = .Keyed_Run, top = spec.max_end, count = spec.count})
 }
 
 reply_bulk_int_u64 :: proc(c: ^Conn, v: u64) {
@@ -728,34 +868,35 @@ cmd_zscan :: proc(c: ^Conn, argv: [][]u8) {
 	clear(&zset_items)
 }
 
-zrandmember_with_count :: proc(c: ^Conn, key: []u8, l: i64, withscores: bool) {
-	_, z, wrong := zset_lookup(key, true)
-	if wrong {
-		reply_wrongtype(c)
-		return
+@(private = "file")
+zrandmember_repeats :: proc(c: ^Conn, z: zt.Zset, picks: i64, withscores: bool) {
+	reply_array(c, int(picks) * (2 if withscores && c.resp != 3 else 1))
+	for _ in 0 ..< picks {
+		pick := zt.random_element(z)
+		reply_zset_pairs(c, ([^]zt.Item)(&pick)[:1], withscores)
 	}
-	if z == nil {
+}
+
+@(private = "file")
+zrandmember_distinct :: proc(c: ^Conn, z: zt.Zset, wanted: i64, withscores: bool) {
+	clear(&zset_items)
+	zt.random_unique(z, int(min(wanted, i64(zt.length(z)))), &zset_items)
+	reply_zset_items(c, zset_items[:], withscores)
+	clear(&zset_items)
+}
+
+@(private = "file")
+zrandmember_counted :: proc(c: ^Conn, key: []u8, count: i64, withscores: bool) {
+	z, readable := zset_for_read(c, key)
+	switch {
+	case !readable:
+	case z == nil:
 		reply_array(c, 0)
-		return
+	case count < 0:
+		zrandmember_repeats(c, z, -count, withscores)
+	case:
+		zrandmember_distinct(c, z, count, withscores)
 	}
-	n := l >= 0 ? min(l, i64(zt.length(z))) : -l
-	width := withscores && c.resp != 3 ? 2 : 1
-	reply_array(c, int(n) * width)
-	clear(&zset_items)
-	if l >= 0 {
-		zt.random_unique(z, int(n), &zset_items)
-		reply_zset_pairs(c, zset_items[:], withscores)
-	} else {
-		left := n
-		for left > 0 {
-			batch := min(left, ZSET_REPLY_CHUNK)
-			clear(&zset_items)
-			zt.random_with_repeats(z, int(batch), &zset_items)
-			reply_zset_pairs(c, zset_items[:], withscores)
-			left -= batch
-		}
-	}
-	clear(&zset_items)
 }
 
 cmd_zrandmember :: proc(c: ^Conn, argv: [][]u8) {
@@ -765,7 +906,7 @@ cmd_zrandmember :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	if len(argv) >= 3 {
-		zrandmember_with_count(c, argv[1], count, withscores)
+		zrandmember_counted(c, argv[1], count, withscores)
 		return
 	}
 	_, z, wrong := zset_lookup(argv[1], true)
@@ -803,22 +944,22 @@ zset_sort_input_len :: proc(e: ^Entry) -> i64 {
 	return i64(zt.length(cast(zt.Zset)entry_object(e, .Zset)))
 }
 
-zset_sort_load :: proc(e: ^Entry, dontsort: bool, desc: bool, start: i64, count: i64) -> bool {
+zset_sort_load :: proc(e: ^Entry, natural: bool, desc: bool, start: i64, count: i64) -> bool {
 	if e == nil || entry_type(e) != .Zset {
 		return false
 	}
 	z := cast(zt.Zset)entry_object(e, .Zset)
-	it := zt.iter_make(z, dontsort && desc)
+	it := zt.iter_make(z, natural && desc)
 	item: zt.Item
 	index: i64
 	for zt.iter_next(&it, &item) {
-		if !dontsort || index >= start && index - start < count {
+		if !natural || index >= start && index - start < count {
 			buf: [21]u8
 			sort_add_element(zt.item_bytes(&item, &buf))
 		}
 		index += 1
 	}
-	return dontsort
+	return natural
 }
 
 zset_resize_tick :: proc "contextless" () {
@@ -857,39 +998,39 @@ zset_resize_tick :: proc "contextless" () {
 }
 
 cmd_zunionstore :: proc(c: ^Conn, argv: [][]u8) {
-	setop_generic(c, argv, "zunionstore", 2, .Union, false)
+	zset_algebra(c, argv, .Union, .Store)
 }
 
 cmd_zinterstore :: proc(c: ^Conn, argv: [][]u8) {
-	setop_generic(c, argv, "zinterstore", 2, .Inter, false)
+	zset_algebra(c, argv, .Inter, .Store)
 }
 
 cmd_zdiffstore :: proc(c: ^Conn, argv: [][]u8) {
-	setop_generic(c, argv, "zdiffstore", 2, .Diff, false)
+	zset_algebra(c, argv, .Diff, .Store)
 }
 
 cmd_zunion :: proc(c: ^Conn, argv: [][]u8) {
-	setop_generic(c, argv, "zunion", 1, .Union, false)
+	zset_algebra(c, argv, .Union, .Reply)
 }
 
 cmd_zinter :: proc(c: ^Conn, argv: [][]u8) {
-	setop_generic(c, argv, "zinter", 1, .Inter, false)
+	zset_algebra(c, argv, .Inter, .Reply)
 }
 
 cmd_zdiff :: proc(c: ^Conn, argv: [][]u8) {
-	setop_generic(c, argv, "zdiff", 1, .Diff, false)
+	zset_algebra(c, argv, .Diff, .Reply)
 }
 
 cmd_zintercard :: proc(c: ^Conn, argv: [][]u8) {
-	setop_generic(c, argv, "zintercard", 1, .Inter, true)
+	zset_algebra(c, argv, .Inter, .Count)
 }
 
 cmd_zpopmin :: proc(c: ^Conn, argv: [][]u8) {
-	zpopminmax(c, argv, false)
+	zpop_command(c, argv, false)
 }
 
 cmd_zpopmax :: proc(c: ^Conn, argv: [][]u8) {
-	zpopminmax(c, argv, true)
+	zpop_command(c, argv, true)
 }
 
 @(private = "file")

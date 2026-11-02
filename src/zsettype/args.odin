@@ -107,12 +107,12 @@ parse_zadd :: proc "contextless" (argv: [][]u8, incr_cmd: bool) -> (a: Zadd_Args
 	return
 }
 
-parse_zrange :: proc "contextless" (argv: [][]u8, argc_start: int, store: bool, kind_in: Range_Kind, dir_in: Direction) -> (a: Zrange_Args, err: Error) {
+parse_zrange :: proc "contextless" (argv: [][]u8, key_at: int, store: bool, kind_in: Range_Kind, dir_in: Direction) -> (a: Zrange_Args, err: Error) {
 	a.kind = kind_in
 	a.reverse = dir_in == .Reverse
 	a.limit = -1
 	has_limit := false
-	for i := argc_start + 3; i < len(argv); i += 1 {
+	for i := key_at + 3; i < len(argv); i += 1 {
 		if keyword(argv[i], "withscores") && !store {
 			a.withscores = true
 		} else if keyword(argv[i], "limit") && i + 2 < len(argv) {
@@ -146,7 +146,7 @@ parse_zrange :: proc "contextless" (argv: [][]u8, argc_start: int, store: bool, 
 	if a.withscores && a.kind == .Lex {
 		return a, .Withscores_Lex
 	}
-	first, last := argv[argc_start + 1], argv[argc_start + 2]
+	first, last := argv[key_at + 1], argv[key_at + 2]
 	if a.kind == .Rank {
 		good: bool
 		a.start, good = parse_long(first)
@@ -177,26 +177,26 @@ parse_zrange :: proc "contextless" (argv: [][]u8, argc_start: int, store: bool, 
 	return
 }
 
-parse_setop_numkeys :: proc "contextless" (argv: [][]u8, numkeys_index: int) -> (setnum: int, err: Error) {
-	n, good := parse_long(argv[numkeys_index])
+parse_setop_numkeys :: proc "contextless" (argv: [][]u8, count_at: int) -> (setnum: int, err: Error) {
+	n, good := parse_long(argv[count_at])
 	if !good {
 		return 0, .Not_Integer
 	}
 	if n < 1 {
 		return 0, .At_Least_One_Key
 	}
-	if n > i64(len(argv) - numkeys_index - 1) {
+	if n > i64(len(argv) - count_at - 1) {
 		return 0, .Syntax
 	}
 	return int(n), .None
 }
 
-parse_setop_options :: proc "contextless" (argv: [][]u8, first: int, setnum: int, op: Setop, store: bool, cardinality_only: bool, weights: []f64) -> (o: Setop_Options, err: Error) {
+parse_setop_options :: proc "contextless" (argv: [][]u8, first: int, setnum: int, op: Setop, store: bool, count_only: bool, weights: []f64) -> (o: Setop_Options, err: Error) {
 	for &w in weights {
 		w = 1
 	}
 	for i := first; i < len(argv); i += 1 {
-		if cardinality_only && keyword(argv[i], "limit") && i + 1 < len(argv) {
+		if count_only && keyword(argv[i], "limit") && i + 1 < len(argv) {
 			n, good := parse_long(argv[i + 1])
 			if !good {
 				return o, .Limit_Negative
@@ -206,7 +206,7 @@ parse_setop_options :: proc "contextless" (argv: [][]u8, first: int, setnum: int
 			}
 			o.limit = n
 			i += 1
-		} else if !cardinality_only && op != .Diff && keyword(argv[i], "weights") && len(argv) - i > setnum {
+		} else if !count_only && op != .Diff && keyword(argv[i], "weights") && len(argv) - i > setnum {
 			for j in 0 ..< setnum {
 				v, good := parse_score(argv[i + j + 1])
 				if !good {
@@ -215,7 +215,7 @@ parse_setop_options :: proc "contextless" (argv: [][]u8, first: int, setnum: int
 				weights[j] = v
 			}
 			i += setnum
-		} else if !cardinality_only && op != .Diff && keyword(argv[i], "aggregate") && i + 1 < len(argv) {
+		} else if !count_only && op != .Diff && keyword(argv[i], "aggregate") && i + 1 < len(argv) {
 			i += 1
 			if keyword(argv[i], "sum") {
 				o.aggregate = .Sum
@@ -226,7 +226,7 @@ parse_setop_options :: proc "contextless" (argv: [][]u8, first: int, setnum: int
 			} else {
 				return o, .Syntax
 			}
-		} else if !cardinality_only && !store && keyword(argv[i], "withscores") {
+		} else if !count_only && !store && keyword(argv[i], "withscores") {
 			o.withscores = true
 		} else {
 			return o, .Syntax
