@@ -1,53 +1,34 @@
 package integer
 
-parse_i64 :: proc "contextless" (s: []u8) -> (i64, bool) {
-	n := len(s)
-	if n == 0 {
+DIGITS_MAX :: 19
+POSITIVE_CEILING :: u64(9_223_372_036_854_775_807)
+
+parse_i64 :: proc "contextless" (s: []u8) -> (i64, bool) #no_bounds_check {
+	if len(s) == 1 && s[0] == '0' {
+		return 0, true
+	}
+	body := s
+	ceiling := POSITIVE_CEILING
+	if len(body) > 0 && body[0] == '-' {
+		body = body[1:]
+		ceiling += 1
+	}
+	if len(body) == 0 || len(body) > DIGITS_MAX || body[0] == '0' {
 		return 0, false
 	}
-
-	#no_bounds_check {
-		if n == 1 {
-			c := s[0]
-			if c >= '0' && c <= '9' {
-				return i64(c - '0'), true
-			}
+	total: u64
+	for b in body {
+		digit := b - '0'
+		if digit > 9 {
 			return 0, false
 		}
-
-		negative := s[0] == '-'
-		start := 0
-		if negative {
-			start = 1
-		}
-
-		if n - start > 19 {
-			return 0, false
-		}
-
-		first := s[start]
-		if first < '1' || first > '9' {
-			return 0, false
-		}
-
-		magnitude := u64(first - '0')
-		for i := start + 1; i < n; i += 1 {
-			c := s[i]
-			if c < '0' || c > '9' {
-				return 0, false
-			}
-			magnitude = magnitude * 10 + u64(c - '0')
-		}
-
-		if negative {
-			if magnitude > 9223372036854775808 {
-				return 0, false
-			}
-			return -i64(magnitude - 1) - 1, true
-		}
-		if magnitude > 9223372036854775807 {
-			return 0, false
-		}
-		return i64(magnitude), true
+		total = total * 10 + u64(digit)
 	}
+	if total > ceiling {
+		return 0, false
+	}
+	if ceiling == POSITIVE_CEILING {
+		return i64(total), true
+	}
+	return cast(i64)(~total + 1), true
 }

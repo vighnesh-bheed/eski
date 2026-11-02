@@ -78,6 +78,7 @@ CONFIG_BIND_MAX :: 16
 CONFIG_DEFAULT_BIND :: "* -::*"
 CONFIG_MIN_HZ :: 1
 CONFIG_MAX_HZ :: 500
+DYNAMIC_HZ_CLIENTS_PER_TICK :: 200
 CONFIG_MIN_RESERVED_FDS :: 32
 OOM_SCORE_DEFAULTS :: [3]i64{0, 200, 800}
 
@@ -2498,17 +2499,15 @@ config_apply_hz :: proc() -> string {
 }
 
 config_update_dynamic_hz :: proc() {
-	hz := cfg.hz
+	effective := cfg.hz
 	if cfg.dynamic_hz {
-		for i64(srv.nconns) / hz > 200 {
-			hz *= 2
-			if hz > CONFIG_MAX_HZ {
-				hz = CONFIG_MAX_HZ
-				break
-			}
+		wanted := i64(srv.nconns) / (DYNAMIC_HZ_CLIENTS_PER_TICK + 1) + 1
+		for effective < wanted && effective < CONFIG_MAX_HZ {
+			effective <<= 1
 		}
+		effective = min(effective, CONFIG_MAX_HZ)
 	}
-	config_hz_current = hz
+	config_hz_current = effective
 }
 
 cron_interval_ms :: #force_inline proc() -> i64 {

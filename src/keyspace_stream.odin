@@ -288,98 +288,246 @@ keyspace_stream_read :: proc(task: ^Keyspace_Task, grouped: bool) {
 	}
 }
 
+keyspace_stream_entry_or_gap :: proc(task: ^Keyspace_Task, b: ^Keyspace_Builder, s: sm.Stream, id: sm.ID) -> bool {
+	probe := id
+	if keyspace_stream_range(task, b, s, &probe, &probe, 1, false, true) > 0 {
+		return true
+	}
+	keyspace_builder_integer(b, 2, '*')
+	keyspace_stream_id(b, id)
+	keyspace_builder_text(b, "_\r\n" if task.client.resp == RESP3 else "*-1\r\n")
+	return false
+}
+
 keyspace_stream_history :: proc(task: ^Keyspace_Task, b: ^Keyspace_Builder, s: sm.Stream, consumer: ^sm.Consumer, after: sm.ID, count: int) {
 	mark := b.used
-	emitted := 0
-	from := after
-	if sm.incr_id(&from) {
-		start: [16]u8; sm.encode_id(&start, from)
-		it: rx.Iterator
-		rx.start(&it, consumer.pel); rx.seek(&it, ">=", start[:])
-		for (count <= 0 || emitted < count) && rx.next(&it) {
-			id := sm.decode_id(rx.key(&it))
-			if keyspace_stream_range(task, b, s, &id, &id, 1, false, true) == 0 {
-				keyspace_builder_integer(b, 2, '*'); keyspace_stream_id(b, id); keyspace_builder_text(b, "_\r\n" if task.client.resp == RESP3 else "*-1\r\n")
-			} else { sm.pel_touch(consumer, id, task.now) }
-			emitted += 1
+	listed := 0
+	lowest := after
+	if sm.incr_id(&lowest) {
+		seek: [16]u8
+		sm.encode_id(&seek, lowest)
+		walk: rx.Iterator
+		rx.start(&walk, consumer.pel)
+		defer rx.stop(&walk)
+		rx.seek(&walk, ">=", seek[:])
+		for count <= 0 || listed < count {
+			if !rx.next(&walk) {
+				break
+			}
+			pending := sm.decode_id(rx.key(&walk))
+			if keyspace_stream_entry_or_gap(task, b, s, pending) {
+				sm.pel_touch(consumer, pending, task.now)
+			}
+			listed += 1
 		}
-		rx.stop(&it)
 	}
-	keyspace_builder_prefix(b, mark, '*', i64(emitted))
+	keyspace_builder_prefix(b, mark, '*', i64(listed))
 }
 
 keyspace_stream_claimed :: proc(task: ^Keyspace_Task, b: ^Keyspace_Builder, s: sm.Stream, id: sm.ID, justid: bool) {
-	if justid { keyspace_stream_id(b, id); return }
-	at := id
-	if keyspace_stream_range(task, b, s, &at, &at, 1, false, true) == 0 {
-		keyspace_builder_integer(b, 2, '*'); keyspace_stream_id(b, id); keyspace_builder_text(b, "_\r\n" if task.client.resp == RESP3 else "*-1\r\n")
+	if justid {
+		keyspace_stream_id(b, id)
+		return
 	}
+	_ = keyspace_stream_entry_or_gap(task, b, s, id)
+}
+
+@(private = "file")
+Keyspace_Pel_Verb :: enum u8 {
+	Pending,
+	Ack,
+	Claim,
+	Autoclaim,
+}
+
+@(private = "file")
+Keyspace_Pel_Request :: struct {
+	verb:    Keyspace_Pel_Verb,
+	pending: sm.Xpending_Args,
+	claim:   sm.Claim_Args,
+	auto:    sm.Autoclaim_Args,
+}
+
+@(private = "file")
+keyspace_pel_request :: proc(task: ^Keyspace_Task, ids: ^[dynamic]sm.ID) -> (request: Keyspace_Pel_Request, ok: bool) {
+	switch task.command_name {
+	case "xpending":
+		request.verb = .Pending
+		args, err := sm.parse_xpending_args(task.argv)
+		request.pending = args
+		return request, err == .None
+	case "xclaim":
+		request.verb = .Claim
+		args, _, err := sm.parse_xclaim_args(task.argv, task.now, ids)
+		request.claim = args
+		return request, err == .None
+	case "xautoclaim":
+		request.verb = .Autoclaim
+		args, err := sm.parse_xautoclaim_args(task.argv)
+		request.auto = args
+		return request, err == .None
+	}
+	request.verb = .Ack
+	return request, true
+}
+
+@(private = "file")
+keyspace_pel_exact_ids :: proc(words: [][]u8, ids: ^[dynamic]sm.ID) -> bool {
+	for word in words {
+		id, ok := sm.parse_exact_id(word)
+		if !ok {
+			return false
+		}
+		append(ids, id)
+	}
+	return true
+}
+
+@(private = "file")
+keyspace_pel_consumer :: proc(task: ^Keyspace_Task, r: ^ks.Record, s: sm.Stream, group: ^sm.CG, changes: ^int) -> ^sm.Consumer {
+	consumer, created := sm.lookup_or_create_consumer(s, group, task.argv[3], task.now)
+	consumer.seen_time = task.now
+	if created {
+		changes^ += 1
+		keyspace_notify(task, r, .Stream, "xgroup-createconsumer")
+	}
+	return consumer
+}
+
+@(private = "file")
+keyspace_pel_claim :: proc(task: ^Keyspace_Task, b: ^Keyspace_Builder, s: sm.Stream, group: ^sm.CG, consumer: ^sm.Consumer, ids: []sm.ID, args: ^sm.Claim_Args) -> int {
+	raised := sm.group_raise_last_id(group, args.last_id)
+	claimed, dropped := 0, 0
+	for id in ids {
+		#partial switch sm.claim_entry(s, group, consumer, id, args, task.now) {
+		case .Claimed:
+			keyspace_stream_claimed(task, b, s, id, args.justid)
+			claimed += 1
+		case .Deleted:
+			dropped += 1
+		}
+	}
+	keyspace_builder_prefix(b, 0, '*', i64(claimed))
+	bumped := 1 if raised && claimed == 0 else 0
+	return claimed + dropped + bumped
+}
+
+@(private = "file")
+keyspace_pel_autoclaim :: proc(task: ^Keyspace_Task, b: ^Keyspace_Builder, s: sm.Stream, group: ^sm.CG, consumer: ^sm.Consumer, args: ^sm.Autoclaim_Args) -> (stepped: int, ok: bool) {
+	backlog := int(group.pel.numele)
+	room := backlog * 2 * size_of(sm.Autoclaim_Step)
+	if !ks.reserve_external(&keyspace_pool, room) {
+		task.failed = true
+		return
+	}
+	defer ks.release_external(&keyspace_pool, room)
+	steps := make([dynamic]sm.Autoclaim_Step, 0, backlog)
+	defer delete(steps)
+	resume := sm.autoclaim_scan(s, group, consumer, args, task.now, &steps)
+	keyspace_builder_integer(b, 3, '*')
+	keyspace_stream_id(b, resume)
+	mark := b.used
+	claimed := 0
+	for step in steps {
+		if step.result != .Claimed {
+			continue
+		}
+		keyspace_stream_claimed(task, b, s, step.id, args.justid)
+		claimed += 1
+	}
+	keyspace_builder_prefix(b, mark, '*', i64(claimed))
+	keyspace_builder_integer(b, i64(len(steps) - claimed), '*')
+	for step in steps {
+		if step.result == .Deleted {
+			keyspace_stream_id(b, step.id)
+		}
+	}
+	return len(steps), true
 }
 
 keyspace_stream_pending :: proc(task: ^Keyspace_Task) {
 	argv := task.argv
-	name := task.command_name
-	ids := make([dynamic]sm.ID, 0, len(argv)); defer delete(ids)
+	ids := make([dynamic]sm.ID, 0, len(argv))
+	defer delete(ids)
 	charge := len(argv) * 2 * size_of(sm.ID)
-	if !ks.reserve_external(&keyspace_pool, charge) { task.failed = true; return }; defer ks.release_external(&keyspace_pool, charge)
-	pending: sm.Xpending_Args
-	claim: sm.Claim_Args
-	auto: sm.Autoclaim_Args
-	if name == "xpending" { args, err := sm.parse_xpending_args(argv); if err != .None { task.failed = true; return }; pending = args }
-	if name == "xclaim" { args, _, err := sm.parse_xclaim_args(argv, task.now, &ids); if err != .None { task.failed = true; return }; claim = args }
-	if name == "xautoclaim" { args, err := sm.parse_xautoclaim_args(argv); if err != .None { task.failed = true; return }; auto = args }
+	if !ks.reserve_external(&keyspace_pool, charge) {
+		task.failed = true
+		return
+	}
+	defer ks.release_external(&keyspace_pool, charge)
+	request, parsed := keyspace_pel_request(task, &ids)
+	if !parsed {
+		task.failed = true
+		return
+	}
 	r := task.records[0]
 	keyspace_expire(task, r)
-	if r.exists && r.kind != u8(Obj_Type.Stream) { task.failed = true; return }
+	if r.exists && r.kind != u8(Obj_Type.Stream) {
+		task.failed = true
+		return
+	}
 	keyspace_read(task, r)
 	s := cast(sm.Stream)r.object
 	cg := sm.lookup_cg(s, argv[2])
-	if cg == nil { if name != "xack" { task.failed = true }; return }
-	b := keyspace_stream_builder(task, s); defer ks.free(&keyspace_pool, b.bytes)
-	if b.failed { return }
-	if name == "xpending" { keyspace_stream_pending_reply(task, &b, cg, &pending); keyspace_builder_finish(task, &b); return }
-	if name == "xack" { for arg in argv[3:] { id, ok := sm.parse_exact_id(arg); if !ok { task.failed = true; return }; append(&ids, id) } }
-	work, ok := keyspace_object_work(task, r, .Stream)
-	if !ok { return }; defer keyspace_object_discard(&work)
-	candidate := cast(sm.Stream)work.object
-	group := sm.lookup_cg(candidate, argv[2])
-	changes := 0
-	if name == "xack" {
-		for id in ids { task.integer += i64(sm.ack(candidate, group, id)) }
-		if task.integer == 0 { return }; changes = int(task.integer)
-	} else {
-		consumer, created := sm.lookup_or_create_consumer(candidate, group, argv[3], task.now)
-		changes += int(created); consumer.seen_time = task.now
-		if created { keyspace_notify(task, r, .Stream, "xgroup-createconsumer") }
-		if name == "xclaim" {
-			raised := sm.group_raise_last_id(group, claim.last_id)
-			claimed, deleted := 0, 0
-			for id in ids {
-				switch sm.claim_entry(candidate, group, consumer, id, &claim, task.now) {
-				case .Claimed: keyspace_stream_claimed(task, &b, candidate, id, claim.justid); claimed += 1
-				case .Deleted: deleted += 1
-				case .Skipped:
-				}
-			}
-			keyspace_builder_prefix(&b, 0, '*', i64(claimed))
-			changes += claimed + deleted + int(raised && claimed == 0)
-		} else {
-			reservation := int(group.pel.numele) * 2 * size_of(sm.Autoclaim_Step)
-			if !ks.reserve_external(&keyspace_pool, reservation) { task.failed = true; return }; defer ks.release_external(&keyspace_pool, reservation)
-			steps := make([dynamic]sm.Autoclaim_Step, 0, int(group.pel.numele)); defer delete(steps)
-			next := sm.autoclaim_scan(candidate, group, consumer, &auto, task.now, &steps)
-			keyspace_builder_integer(&b, 3, '*'); keyspace_stream_id(&b, next)
-			mark := b.used; claimed := 0
-			for step in steps { if step.result == .Claimed { keyspace_stream_claimed(task, &b, candidate, step.id, auto.justid); claimed += 1 } }
-			keyspace_builder_prefix(&b, mark, '*', i64(claimed))
-			keyspace_builder_integer(&b, i64(len(steps) - claimed), '*')
-			for step in steps { if step.result == .Deleted { keyspace_stream_id(&b, step.id) } }
-			changes += len(steps)
-		}
-		if !keyspace_builder_finish(task, &b) { return }
+	if cg == nil {
+		task.failed = request.verb != .Ack
+		return
 	}
-	if !keyspace_object_commit(task, r, &work, true) { return }; task.dirty = i64(changes)
-	if changes > 0 { keyspace_invalidate(task, r) }
+	b := keyspace_stream_builder(task, s)
+	defer ks.free(&keyspace_pool, b.bytes)
+	if b.failed {
+		return
+	}
+	if request.verb == .Pending {
+		keyspace_stream_pending_reply(task, &b, cg, &request.pending)
+		keyspace_builder_finish(task, &b)
+		return
+	}
+	if request.verb == .Ack && !keyspace_pel_exact_ids(argv[3:], &ids) {
+		task.failed = true
+		return
+	}
+	work, ok := keyspace_object_work(task, r, .Stream)
+	if !ok {
+		return
+	}
+	defer keyspace_object_discard(&work)
+	held := cast(sm.Stream)work.object
+	group := sm.lookup_cg(held, argv[2])
+	changes := 0
+	#partial switch request.verb {
+	case .Ack:
+		for id in ids {
+			if sm.ack(held, group, id) { changes += 1 }
+		}
+		task.integer = i64(changes)
+		if changes == 0 {
+			return
+		}
+	case .Claim:
+		consumer := keyspace_pel_consumer(task, r, held, group, &changes)
+		changes += keyspace_pel_claim(task, &b, held, group, consumer, ids[:], &request.claim)
+		if !keyspace_builder_finish(task, &b) {
+			return
+		}
+	case .Autoclaim:
+		consumer := keyspace_pel_consumer(task, r, held, group, &changes)
+		stepped, fine := keyspace_pel_autoclaim(task, &b, held, group, consumer, &request.auto)
+		if !fine {
+			return
+		}
+		changes += stepped
+		if !keyspace_builder_finish(task, &b) {
+			return
+		}
+	}
+	if !keyspace_object_commit(task, r, &work, true) {
+		return
+	}
+	task.dirty = i64(changes)
+	if changes > 0 {
+		keyspace_invalidate(task, r)
+	}
 }
 
 keyspace_stream_pending_reply :: proc(task: ^Keyspace_Task, b: ^Keyspace_Builder, cg: ^sm.CG, args: ^sm.Xpending_Args) {

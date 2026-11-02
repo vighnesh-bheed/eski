@@ -322,7 +322,7 @@ when HOST {
 		config_init()
 		update_clock()
 		db_init()
-		active_expire_enabled = false
+		expiry_sweep_on = false
 		zt.set_seed(0x738A0E43)
 		h := make_initial(n)
 		h.acct = zt.memory_usage(h)

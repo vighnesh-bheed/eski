@@ -606,7 +606,7 @@ keyspace_try :: proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8) -> bool {
 	region := ks.allocate(&keyspace_pool, int(bytes))
 	if len(region) == 0 { keyspace_fallbacks += 1; keyspace_fence(); return false }
 	task := cast(^Keyspace_Task)raw_data(region)
-	task^ = Keyspace_Task{region = region, op = op, command_name = cmd.name, command = cmd, capture_poststate = aof.feed, access = memory_worker_access_snapshot(), now = expire_now(), limit = min(string_max_len(), i64(max(u32)) - 2 * SETRANGE_PREALLOC)}
+	task^ = Keyspace_Task{region = region, op = op, command_name = cmd.name, command = cmd, capture_poststate = aof.feed, access = memory_worker_access_snapshot(), now = expire_now(), limit = min(string_max_len(), i64(max(u32)) - 2 * STRING_DOUBLING_LIMIT)}
 	offset := size_of(Keyspace_Task)
 	task.argv = (cast([^][]u8)(&region[offset]))[:len(argv)]
 	offset += len(argv) * size_of([]u8)
@@ -655,7 +655,7 @@ keyspace_try :: proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8) -> bool {
 	task.start = start
 	task.stats = stats
 	task.suppressed = c.reply & {.Off, .Skip} != {}
-	task.job = ks.Job{op = .Custom, record = task.records[0], records = task.records, context_executor = keyspace_execute_context, clock = lru_clock(), touch = .No_Touch not_in c.flags, data = task}
+	task.job = ks.Job{op = .Custom, record = task.records[0], records = task.records, context_executor = keyspace_execute_context, clock = access_seconds_now, touch = .No_Touch not_in c.flags, data = task}
 	if !ks.submit(&keyspace_pool, &task.job) {
 		keyspace_task_free(task)
 		keyspace_fallbacks += 1
@@ -927,7 +927,7 @@ keyspace_execute :: proc "contextless" (job: ^ks.Job) {
 		n := ld.format_human(total, text[:])
 		if !keyspace_value(task, text[:n]) { return }
 		keyspace_save(task, r, task.values[0], r.expire_at)
-		r.encoding = u8(Obj_Encoding.Embstr if n <= EMBSTR_SIZE_LIMIT else Obj_Encoding.Raw)
+		r.encoding = u8(Obj_Encoding.Embstr if n <= EMBEDDED_STRING_MAX else Obj_Encoding.Raw)
 		task.dirty = 1; keyspace_bulk(task, r)
 		keyspace_changed(task, r, .String, "incrbyfloat")
 	case .Mget:

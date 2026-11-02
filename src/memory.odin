@@ -609,39 +609,39 @@ memory_worker_admissible :: proc() -> bool {
 }
 
 Memory_Worker_Access :: struct {
-	lfu: bool,
-	clock: u32,
-	minutes: u16,
-	log_factor, decay_time: int,
-	random: u64,
+	counts_hits:   bool,
+	seconds:       u32,
+	minute:        u16,
+	log_factor:    int,
+	decay_minutes: int,
+	draws:         u64,
 }
 
 memory_worker_access_snapshot :: proc "contextless" () -> Memory_Worker_Access {
-	return Memory_Worker_Access{lfu = lfu_policy, clock = lru_clock(), minutes = lfu_minutes(), log_factor = lfu_log_factor, decay_time = lfu_decay_time, random = rng_next() if lfu_policy else 0}
+	return Memory_Worker_Access{counts_hits = access_counts_hits, seconds = access_seconds_now, minute = access_minute_now(), log_factor = tally_log_factor, decay_minutes = tally_decay_minutes, draws = rng_next() if access_counts_hits else 0}
 }
 
-memory_worker_access_touch :: proc "contextless" (access: ^Memory_Worker_Access, clock: u32, created: bool = false) -> u32 {
-	if !access.lfu { return access.clock }
-	if created { return u32(access.minutes) << 8 | LFU_INIT_VAL }
-	counter := i64(u8(clock))
-	if access.decay_time > 0 {
-		last := i64(u16(clock >> 8))
-		now := i64(access.minutes)
-		elapsed := now - last if now >= last else LFU_TIME_MAX - last + now
-		periods := elapsed / i64(access.decay_time)
-		counter = max(0, counter - periods)
+memory_worker_draw :: proc "contextless" (state: ^u64) -> u64 {
+	state^ += 0x9E37_79B9_7F4A_7C15
+	mixed := state^
+	mixed = (mixed ~ (mixed >> 30)) * 0xBF58_476D_1CE4_E5B9
+	mixed = (mixed ~ (mixed >> 27)) * 0x94D0_49BB_1331_11EB
+	return mixed ~ (mixed >> 31)
+}
+
+memory_worker_access_touch :: proc "contextless" (access: ^Memory_Worker_Access, word: u32, created: bool = false) -> u32 {
+	if !access.counts_hits {
+		return transmute(u32)seconds_note(access.seconds)
 	}
-	if counter < 255 {
-		x := access.random
-		x ~= x << 13
-		x ~= x >> 7
-		x ~= x << 17
-		access.random = x
-		r := f64(x >> 11) / f64(u64(1) << 53)
-		base := max(f64(counter - LFU_INIT_VAL), 0)
-		if r < 1.0 / (base * f64(access.log_factor) + 1) { counter += 1 }
+	level := i64(TALLY_START)
+	if !created {
+		prior := transmute(Access_Note)word
+		level = lfu_value_of(prior.tally, prior.stamp, access.minute, access.decay_minutes)
+		if level < TALLY_CEILING && tally_climbs(level, unit_fraction(memory_worker_draw(&access.draws)), access.log_factor) {
+			level += 1
+		}
 	}
-	return u32(access.minutes) << 8 | u32(counter)
+	return transmute(u32)Access_Note{stamp = access.minute, tally = u8(level)}
 }
 
 conn_memory :: proc(c: ^Conn) -> int {

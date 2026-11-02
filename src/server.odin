@@ -122,7 +122,7 @@ update_clock :: #force_inline proc() {
 	ts, _ := linux.clock_gettime(.REALTIME)
 	srv.now_us = i64(ts.time_sec) * 1_000_000 + i64(ts.time_nsec / 1000)
 	srv.now_ms = i64(ts.time_sec) * 1000 + i64(ts.time_nsec / 1_000_000)
-	lru_now = u32(srv.now_ms / 1000) & LRU_CLOCK_MAX
+	access_seconds_now = u32(srv.now_ms / 1000) & SECONDS_STAMP_MASK
 }
 
 format_addr :: proc(dst: []u8, ip: [4]u8, port: int) -> int #no_bounds_check {

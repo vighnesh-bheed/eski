@@ -757,8 +757,8 @@ hash_ownership :: proc() {
 	check(h.table.resize.old_cap == 512 && reg.resize_count == 1 && reg.owner == db_cur, "hash fixture owns known source array and cold resize job")
 	db_swap(0, 1)
 	check(dbs[1].hreg == reg && reg.owner == &dbs[1] && dbs[0].hreg.owner == &dbs[0], "SWAPDB updates stable registry owners without walking hash jobs")
-	active_before := active_expire_enabled
-	active_expire_enabled = false
+	active_before := expiry_sweep_on
+	expiry_sweep_on = false
 	maxmemory_bytes = u64(mem_used() - 4096)
 	over, _ := memory_state_over()
 	check(over, "active source capacity is charged before migration completion")
@@ -768,7 +768,7 @@ hash_ownership :: proc() {
 		}
 		db_tick()
 	}
-	active_expire_enabled = active_before
+	expiry_sweep_on = active_before
 	over, _ = memory_state_over()
 	check(!over, "quiet member progress releases maxmemory charge with HFE disabled")
 	maxmemory_bytes = 0
@@ -990,8 +990,8 @@ zset_ownership :: proc() {
 	state_bytes := st_size(s.sl.resize)
 	db_swap(0, 1)
 	check(dbs[1].zctx == ctx && ctx.owner == &dbs[1] && dbs[0].zctx.owner == &dbs[0], "Zset SWAPDB updates two cold owners without walking jobs")
-	active_before := active_expire_enabled
-	active_expire_enabled = false
+	active_before := expiry_sweep_on
+	expiry_sweep_on = false
 	maxmemory_bytes = u64(mem_used() - 4096)
 	over, _ := memory_state_over()
 	check(over, "active Zset source capacity is charged")
@@ -1001,7 +1001,7 @@ zset_ownership :: proc() {
 		}
 		db_tick()
 	}
-	active_expire_enabled = active_before
+	expiry_sweep_on = active_before
 	over, _ = memory_state_over()
 	check(!over && s.sl.resize == nil && dbs[1].heap_bytes == before - 8192 - state_bytes, "quiet Zset service releases exact source bytes with expiry disabled")
 	maxmemory_bytes = 0
@@ -1035,8 +1035,8 @@ set_ownership :: proc() {
 	state_bytes := st_size(s.table.resize)
 	db_swap(0, 1)
 	check(dbs[1].sctx == ctx && ctx.owner == &dbs[1] && dbs[0].sctx.owner == &dbs[0], "Set SWAPDB updates two cold owners without walking jobs")
-	active_before := active_expire_enabled
-	active_expire_enabled = false
+	active_before := expiry_sweep_on
+	expiry_sweep_on = false
 	maxmemory_bytes = u64(mem_used() - 4096)
 	over, _ := memory_state_over()
 	check(over, "active Set source capacity is charged")
@@ -1046,7 +1046,7 @@ set_ownership :: proc() {
 		}
 		db_tick()
 	}
-	active_expire_enabled = active_before
+	expiry_sweep_on = active_before
 	over, _ = memory_state_over()
 	check(!over && s.table.resize == nil && dbs[1].heap_bytes == before - 8192 - state_bytes, "quiet Set service releases exact source bytes with expiry disabled")
 	maxmemory_bytes = 0

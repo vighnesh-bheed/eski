@@ -49,7 +49,7 @@ show_slot :: proc(t: ^Table, i: int) {
 	bytes := ([^]u8)(&k)[:7]
 	id, ok := strconv.parse_i64(string(bytes), 10)
 	assert(ok)
-	fmt.printf("%d:%d:%d:%d", id, t.slots[i].val.bits, t.slots[i].meta.expire_at, t.slots[i].meta.clock)
+	fmt.printf("%d:%d:%d:%d", id, t.slots[i].val.bits, t.slots[i].meta.expire_at, t.slots[i].meta.stamp)
 }
 show_table :: proc(t: ^Table) {
 	fmt.printf("%d,%d,%d,%d;", t.cap, t.live, t.tombs, t.growth)
@@ -57,7 +57,7 @@ show_table :: proc(t: ^Table) {
 		if i > 0 { fmt.print(",") }
 		switch t.ctrl[i] {
 		case CTRL_EMPTY: fmt.print("-")
-		case CTRL_DELETED: fmt.print("x"); assert(t.slots[i].meta.expire_at == 0 && t.slots[i].meta.clock == 0)
+		case CTRL_DELETED: fmt.print("x"); assert(t.slots[i].meta.expire_at == 0 && t.slots[i].meta.stamp == 0)
 		case: show_slot(t, i)
 		}
 	}
@@ -175,7 +175,7 @@ main :: proc() {
 				}
 				t.slots[i].key.bits = l.packed
 				t.slots[i].val.bits = unsigned(fields[3])
-				t.slots[i].meta = Slot_Meta{expire_at = unsigned(fields[4]), clock = u16(number(fields[5]))}
+				t.slots[i].meta = Slot_Meta{expire_at = unsigned(fields[4]), stamp = u16(number(fields[5]))}
 			}
 		case: panic("invalid trace")
 		}

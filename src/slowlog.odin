@@ -2,8 +2,8 @@ package main
 
 import "core:container/queue"
 
-SLOWLOG_ENTRY_MAX_ARGC :: 32
-SLOWLOG_ENTRY_MAX_STRING :: 128
+SLOWLOG_KEPT_ARGS :: 32
+SLOWLOG_KEPT_BYTES :: 128
 SLOWLOG_REDACTED :: "(redacted)"
 
 @(private = "file")
@@ -26,7 +26,7 @@ slowlog_buf: [dynamic]u8
 @(private = "file")
 slowlog_spans: [dynamic][2]int
 @(private = "file")
-slowlog_redact: [SLOWLOG_ENTRY_MAX_ARGC]bool
+slowlog_redact: [SLOWLOG_KEPT_ARGS]bool
 
 @(private = "file")
 slowlog_free :: proc(e: ^Slowlog_Entry) {
@@ -37,7 +37,7 @@ slowlog_free :: proc(e: ^Slowlog_Entry) {
 
 @(private = "file")
 slowlog_mark :: proc(i: int) {
-	if i >= 0 && i < SLOWLOG_ENTRY_MAX_ARGC {
+	if i >= 0 && i < SLOWLOG_KEPT_ARGS {
 		slowlog_redact[i] = true
 	}
 }
@@ -144,7 +144,7 @@ slowlog_push :: proc(c: ^Conn, st: ^Cmd_Stats, argv: [][]u8, us: i64) {
 		clear(&slowlog_buf)
 		clear(&slowlog_spans)
 		argc := len(argv)
-		n := min(argc, SLOWLOG_ENTRY_MAX_ARGC)
+		n := min(argc, SLOWLOG_KEPT_ARGS)
 		for j in 0 ..< n {
 			at := len(slowlog_buf)
 			if n != argc && j == n - 1 {
@@ -153,10 +153,10 @@ slowlog_push :: proc(c: ^Conn, st: ^Cmd_Stats, argv: [][]u8, us: i64) {
 				sb_str(&slowlog_buf, " more arguments)")
 			} else if slowlog_redact[j] {
 				sb_str(&slowlog_buf, SLOWLOG_REDACTED)
-			} else if len(argv[j]) > SLOWLOG_ENTRY_MAX_STRING {
-				sb_bytes(&slowlog_buf, argv[j][:SLOWLOG_ENTRY_MAX_STRING])
+			} else if len(argv[j]) > SLOWLOG_KEPT_BYTES {
+				sb_bytes(&slowlog_buf, argv[j][:SLOWLOG_KEPT_BYTES])
 				sb_str(&slowlog_buf, "... (")
-				sb_int(&slowlog_buf, i64(len(argv[j]) - SLOWLOG_ENTRY_MAX_STRING))
+				sb_int(&slowlog_buf, i64(len(argv[j]) - SLOWLOG_KEPT_BYTES))
 				sb_str(&slowlog_buf, " more bytes)")
 			} else {
 				sb_bytes(&slowlog_buf, argv[j])

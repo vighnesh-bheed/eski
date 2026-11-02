@@ -450,7 +450,7 @@ string_max_len :: #force_inline proc() -> i64 {
 }
 
 @(private = "file")
-STRING_STORE_LIMIT :: i64(max(u32)) - 2 * SETRANGE_PREALLOC
+STRING_STORE_LIMIT :: i64(max(u32)) - 2 * STRING_DOUBLING_LIMIT
 
 @(private = "file")
 string_length_ok :: #force_inline proc(size: i64, extra: int) -> bool {
@@ -658,7 +658,7 @@ cmd_incrbyfloat :: proc(c: ^Conn, argv: [][]u8) {
 		e, _ = db_upsert(key)
 	}
 	entry_assign(e, text)
-	entry_set_encoding(e, .Embstr if n <= EMBSTR_SIZE_LIMIT else .Raw)
+	entry_set_encoding(e, .Embstr if n <= EMBEDDED_STRING_MAX else .Raw)
 	signal_key(key)
 	notify(.String, "incrbyfloat", key)
 	reply_bulk(c, text)

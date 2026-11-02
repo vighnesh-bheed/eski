@@ -599,7 +599,7 @@ cmd_scan :: proc(c: ^Conn, argv: [][]u8) {
 	if !scan_read_options(c, argv[2:], &req) {
 		return
 	}
-	next := db_scan(cursor, req.count, req.pattern, req.use_pattern, true)
+	next := db_scan(cursor, req.count, req.pattern, req.use_pattern)
 	if req.typed {
 		scan_filter_by_type(req.want, req.type_known)
 	}
@@ -665,17 +665,17 @@ cmd_object :: proc(c: ^Conn, argv: [][]u8) {
 		if e == nil {
 			return
 		}
-		if !lfu_policy {
+		if !access_counts_hits {
 			reply_error(c, ERR_LFU_NOT_SELECTED)
 			return
 		}
-		reply_int(c, entry_lfu_value(e))
+		reply_int(c, entry_tally(e))
 	case eq_nocase(sub, "idletime"):
 		e := object_lookup(c, argv, "object|idletime")
 		if e == nil {
 			return
 		}
-		if lfu_policy {
+		if access_counts_hits {
 			reply_error(c, ERR_LFU_SELECTED)
 			return
 		}
