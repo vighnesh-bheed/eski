@@ -69,7 +69,7 @@ range_model :: proc(t: ^testing.T) {
 						n := lex ? sl_nth_in_lex_range(z.sl, &lr, i) : sl_nth_in_range(z.sl, &r, i)
 						reverse_n := lex ? sl_nth_in_lex_range(z.sl, &lr, i - expected) : sl_nth_in_range(z.sl, &r, i - expected)
 						testing.expect(t, n != nil && n == reverse_n)
-						buf: [lp.LP_INTBUF_SIZE]u8
+						buf: [lp.DECIMAL_BUFFER_BYTES]u8
 						testing.expect(t, member_eq(node_member(n), item_bytes(&items[i], &buf)))
 					}
 				}

@@ -115,7 +115,7 @@ redis_header_reverse_continuation_observations :: proc(t: ^testing.T) {
 		if fixture.accepted {
 			cursor := lp_first(lp)
 			for value in fixture.contents {
-				buffer: [LP_INTBUF_SIZE]u8
+				buffer: [DECIMAL_BUFFER_BYTES]u8
 				testing.expect(t, cursor != nil && string(lp_get_bytes(cursor, &buffer)) == value)
 				cursor = lp_next(lp, cursor)
 			}

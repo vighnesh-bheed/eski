@@ -5,7 +5,7 @@ import "base:runtime"
 
 RAW_HEAP_ALLOCATOR :: runtime.Allocator{procedure = raw_heap_allocator_proc, data = nil}
 
-SDS_MAX_PREALLOC :: 1024 * 1024
+GREEDY_GROWTH_LIMIT :: 1024 * 1024
 
 RAW_HEAP_MAX_ALIGN :: 16
 
@@ -93,36 +93,41 @@ free_bytes :: proc(buf: ^[]u8, allocator := RAW_HEAP_ALLOCATOR, capacity: ^int =
 	}
 }
 
+growth_target :: proc "contextless" (need: int, greedy: bool) -> int {
+	if !greedy {
+		return need
+	}
+	return need + min(need, GREEDY_GROWTH_LIMIT)
+}
+
+resize_block :: proc(allocator: runtime.Allocator, base: [^]u8, old_size: int, size: int) -> ([^]u8, bool) {
+	block, err := allocator.procedure(allocator.data, .Resize_Non_Zeroed, size, 1, base, old_size)
+	return raw_data(block), err == nil
+}
+
 grow_zero :: proc(buf: ^[]u8, need: int, allocator := RAW_HEAP_ALLOCATOR, capacity: ^int = nil) -> Error {
-	have := len(buf^)
-	if need <= have {
+	used := len(buf^)
+	if need <= used {
 		return .None
 	}
-	room := have
-	if capacity != nil && capacity^ > room {
-		room = capacity^
-	}
+	spare := used if capacity == nil else max(used, capacity^)
 	base := raw_data(buf^)
-	if need > room {
-		target := need
-		if capacity != nil {
-			target = need * 2 if need < SDS_MAX_PREALLOC else need + SDS_MAX_PREALLOC
+	if need > spare {
+		size := growth_target(need, capacity != nil)
+		fresh, resized := resize_block(allocator, base, spare, size)
+		if !resized && size > need {
+			size = need
+			fresh, resized = resize_block(allocator, base, spare, size)
 		}
-		mem, err := allocator.procedure(allocator.data, .Resize_Non_Zeroed, target, 1, base, room)
-		if err != nil && target > need {
-			target = need
-			mem, err = allocator.procedure(allocator.data, .Resize_Non_Zeroed, target, 1, base, room)
-		}
-		if err != nil || raw_data(mem) == nil {
+		if !resized || fresh == nil {
 			return .Out_Of_Memory
 		}
-		base = raw_data(mem)
-		room = target
+		base, spare = fresh, size
 	}
-	intrinsics.mem_zero(rawptr(uintptr(base) + uintptr(have)), need - have)
+	intrinsics.mem_zero(&base[used], need - used)
 	buf^ = base[:need]
 	if capacity != nil {
-		capacity^ = room
+		capacity^ = spare
 	}
 	return .None
 }

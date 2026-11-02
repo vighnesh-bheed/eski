@@ -200,7 +200,7 @@ ziplist_listpack_conversion :: proc(t: ^testing.T) {
 	testing.expect_value(t, lp.lp_length(packed), u64(6))
 	testing.expect(t, rdb.lp_validate_dups(lp.lp_view(packed), true, 2))
 	p := lp.lp_first(packed)
-	buf: [lp.LP_INTBUF_SIZE]u8
+	buf: [lp.DECIMAL_BUFFER_BYTES]u8
 	want := []string{"f1", "v1", "f2", "42", "f3", ""}
 	for w in want {
 		testing.expect(t, p != nil && string(lp.lp_get_bytes(p, &buf)) == w)

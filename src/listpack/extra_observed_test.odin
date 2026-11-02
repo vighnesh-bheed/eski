@@ -19,8 +19,8 @@ observed_large_repr_previews_raw_bytes_and_recounts_unknown_header :: proc(t: ^t
 		for _, index in payload {
 			payload[index] = u8(index)
 		}
-		lp := test_pack([]Entry{entry_from_bytes(payload)})
-		lp_set_num_elements(lp, LP_HDR_NUMELE_UNKNOWN)
+		lp := test_pack([]Element{entry_from_bytes(payload)})
+		lp_set_num_elements(lp, COUNT_UNTRACKED)
 		representation := lp_repr(lp)
 		normalized := normalize_repr_addresses(representation)
 		testing.expect(t, normalized == fixture.expected && lp_get_num_elements(lp) == 1)

@@ -15,7 +15,7 @@ expect_values :: proc(t: ^testing.T, lp: [^]u8, expected: []string) {
 		if cursor == nil {
 			return
 		}
-		buffer: [LP_INTBUF_SIZE]u8
+		buffer: [DECIMAL_BUFFER_BYTES]u8
 		testing.expect(t, string(lp_get_bytes(cursor, &buffer)) == value)
 		cursor = lp_next(lp, cursor)
 	}
@@ -26,7 +26,7 @@ expect_values :: proc(t: ^testing.T, lp: [^]u8, expected: []string) {
 		if cursor == nil {
 			return
 		}
-		buffer: [LP_INTBUF_SIZE]u8
+		buffer: [DECIMAL_BUFFER_BYTES]u8
 		testing.expect(t, string(lp_get_bytes(cursor, &buffer)) == expected[index])
 		cursor = lp_prev(lp, cursor)
 	}
@@ -41,11 +41,11 @@ mutation_transitions_preserve_order_selectors_and_returned_cursors :: proc(t: ^t
 	lp = lp_prepend(lp, transmute([]u8)string("01"))
 	lp = lp_append(lp, nil)
 	p: [^]u8
-	lp = lp_insert_integer(lp, max(i64), lp_seek(lp, 1), LP_AFTER, &p)
-	testing.expect(t, p == lp_seek(lp, 2) && lp_get_entry(p).lval == max(i64))
+	lp = lp_insert_integer(lp, max(i64), lp_seek(lp, 1), Placement.After, &p)
+	testing.expect(t, p == lp_seek(lp, 2) && lp_get_entry(p).number == max(i64))
 	expect_values(t, lp, []string{"01", "-4097", "9223372036854775807", ""})
 	lp = lp_replace(lp, &p, transmute([]u8)string("x\x00\xff"))
-	testing.expect(t, p == lp_seek(lp, 2) && lp_get_entry(p).sval != nil)
+	testing.expect(t, p == lp_seek(lp, 2) && lp_get_entry(p).text != nil)
 	expect_values(t, lp, []string{"01", "-4097", "x\x00\xff", ""})
 	lp = lp_delete(lp, lp_seek(lp, 1), &p)
 	testing.expect(t, p == lp_seek(lp, 1))
@@ -69,12 +69,12 @@ bulk_mutation_preserves_borrowed_payloads_across_tail_moves_and_growth :: proc(t
 	}
 	lp = lp_append(lp, payload)
 	borrowed := lp_get_entry(lp_first(lp))
-	entries := [4]Entry{borrowed, entry_from_int(min(i64)), borrowed, entry_from_bytes(nil)}
-	lp = lp_batch_insert(lp, lp_first(lp), LP_BEFORE, entries[:], nil)
+	entries := [4]Element{borrowed, entry_from_int(min(i64)), borrowed, entry_from_bytes(nil)}
+	lp = lp_batch_insert(lp, lp_first(lp), Placement.Before, entries[:], nil)
 	expect_values(t, lp, []string{string(payload), "-9223372036854775808", string(payload), "", string(payload)})
 	p := lp_first(lp)
 	borrowed = lp_get_entry(lp_last(lp))
-	lp = lp_replace(lp, &p, borrowed.sval[:int(borrowed.slen)])
+	lp = lp_replace(lp, &p, borrowed.text[:int(borrowed.text_len)])
 	expect_values(t, lp, []string{string(payload), "-9223372036854775808", string(payload), "", string(payload)})
 	deletions := [3][^]u8{lp_seek(lp, 0), lp_seek(lp, 2), lp_seek(lp, 4)}
 	lp = lp_batch_delete(lp, deletions[:])
@@ -83,7 +83,7 @@ bulk_mutation_preserves_borrowed_payloads_across_tail_moves_and_growth :: proc(t
 
 @(test)
 mutation_count_saturates_and_unknown_count_remains_unknown :: proc(t: ^testing.T) {
-	entries := make([]Entry, 65534)
+	entries := make([]Element, 65534)
 	defer delete(entries)
 	for _, index in entries {
 		entries[index] = entry_from_int(i64(index % 128))
@@ -93,12 +93,12 @@ mutation_count_saturates_and_unknown_count_remains_unknown :: proc(t: ^testing.T
 	lp = lp_batch_append(lp, entries)
 	testing.expect(t, lp_get_num_elements(lp) == 65534)
 	lp = lp_append_integer(lp, 1)
-	testing.expect(t, lp_get_num_elements(lp) == LP_HDR_NUMELE_UNKNOWN && lp_length(lp) == 65535)
+	testing.expect(t, lp_get_num_elements(lp) == COUNT_UNTRACKED && lp_length(lp) == 65535)
 	lp = lp_append_integer(lp, 2)
-	testing.expect(t, lp_get_num_elements(lp) == LP_HDR_NUMELE_UNKNOWN && lp_length(lp) == 65536)
+	testing.expect(t, lp_get_num_elements(lp) == COUNT_UNTRACKED && lp_length(lp) == 65536)
 	p := lp_first(lp)
 	lp = lp_delete_range_with_entry(lp, &p, 3)
-	testing.expect(t, lp_get_num_elements(lp) == LP_HDR_NUMELE_UNKNOWN)
+	testing.expect(t, lp_get_num_elements(lp) == COUNT_UNTRACKED)
 	testing.expect(t, lp_length(lp) == 65533 && lp_get_num_elements(lp) == 65533)
 	testing.expect(t, lp_validate_integrity(lp, u64(lp_bytes(lp)), true, nil, nil))
 }
@@ -125,7 +125,7 @@ mutation_sequence_matches_independent_dense_value_model :: proc(t: ^testing.T) {
 			if index < count {
 				cursor = lp_seek(lp, i64(index))
 			}
-			lp = lp_insert_string(lp, transmute([]u8)value, cursor, LP_BEFORE, &cursor)
+			lp = lp_insert_string(lp, transmute([]u8)value, cursor, Placement.Before, &cursor)
 			copy(model[index + 1:count + 1], model[index:count])
 			model[index] = value
 			count += 1
@@ -145,12 +145,12 @@ mutation_sequence_matches_independent_dense_value_model :: proc(t: ^testing.T) {
 			count -= removed
 			testing.expect(t, cursor == lp_seek(lp, i64(index)))
 		case 3:
-			batch := [3]Entry{entry_from_bytes(transmute([]u8)value), entry_from_int(-1), entry_from_bytes(nil)}
+			batch := [3]Element{entry_from_bytes(transmute([]u8)value), entry_from_int(-1), entry_from_bytes(nil)}
 			cursor := padd(lp, lp_bytes(lp) - 1)
 			if index < count {
 				cursor = lp_seek(lp, i64(index))
 			}
-			lp = lp_batch_insert(lp, cursor, LP_BEFORE, batch[:], &cursor)
+			lp = lp_batch_insert(lp, cursor, Placement.Before, batch[:], &cursor)
 			copy(model[index + 3:count + 3], model[index:count])
 			model[index], model[index + 1], model[index + 2] = value, "-1", ""
 			count += 3

@@ -105,7 +105,7 @@ bounded_integrity_rejects_sizes_and_announcements_without_allocating :: proc(t: 
 unknown_count_recache_at_u16_boundary :: proc(t: ^testing.T) {
 	counts := []int{65534, 65535, 65536}
 	for count in counts {
-		total := LP_HDR_SIZE + count * 2 + 1
+		total := PACK_HEADER_BYTES + count * 2 + 1
 		lp := lp_new(total)
 		defer lp_free(lp)
 		testing.expect(t, lp != nil)
@@ -113,14 +113,14 @@ unknown_count_recache_at_u16_boundary :: proc(t: ^testing.T) {
 			continue
 		}
 		lp_set_total_bytes(lp, u64(total))
-		lp_set_num_elements(lp, LP_HDR_NUMELE_UNKNOWN)
+		lp_set_num_elements(lp, COUNT_UNTRACKED)
 		for index in 0..<count {
-			lp[LP_HDR_SIZE + index * 2] = 0
-			lp[LP_HDR_SIZE + index * 2 + 1] = 1
+			lp[PACK_HEADER_BYTES + index * 2] = 0
+			lp[PACK_HEADER_BYTES + index * 2 + 1] = 1
 		}
-		lp[total - 1] = LP_EOF
+		lp[total - 1] = PACK_END
 		testing.expect(t, lp_length(lp) == u64(count))
-		testing.expect(t, lp_get_num_elements(lp) == u32(min(count, LP_HDR_NUMELE_UNKNOWN)))
+		testing.expect(t, lp_get_num_elements(lp) == u32(min(count, COUNT_UNTRACKED)))
 		testing.expect(t, lp_validate_integrity(lp, u64(total), true, nil, nil))
 	}
 }

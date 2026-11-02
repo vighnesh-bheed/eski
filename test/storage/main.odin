@@ -1399,7 +1399,7 @@ storage_sort_banks :: proc() {
 	defer delete(members)
 	it := st.iterator(s)
 	for member in st.next(&it) {
-		append(&members, string(member.str))
+		append(&members, string(member.text))
 	}
 	slice.sort(members[:])
 	expected: [dynamic]u8

@@ -12,12 +12,12 @@ Header_Dependencies :: struct {
 
 capture_header_dependencies :: proc "contextless" (lp: [^]u8) -> Header_Dependencies {
 	result: Header_Dependencies
-	limit := min(lp_bytes(lp) - 1, LP_HDR_SIZE + 4)
-	if limit <= LP_HDR_SIZE {
+	limit := min(lp_bytes(lp) - 1, PACK_HEADER_BYTES + 4)
+	if limit <= PACK_HEADER_BYTES {
 		return result
 	}
 	data := lp[:limit]
-	offset := LP_HDR_SIZE
+	offset := PACK_HEADER_BYTES
 	for offset < limit && result.count < len(result.entries) {
 		body, valid := decode_body(data, offset)
 		if !valid {
@@ -29,7 +29,7 @@ capture_header_dependencies :: proc "contextless" (lp: [^]u8) -> Header_Dependen
 			break
 		}
 		value, groups, back_valid := read_backlen(data, end - 1, 0)
-		if back_valid && value == u64(body.bytes) && end - groups < LP_HDR_SIZE {
+		if back_valid && value == u64(body.bytes) && end - groups < PACK_HEADER_BYTES {
 			result.entries[result.count] = {start = offset, body_bytes = body.bytes}
 			result.count += 1
 		}

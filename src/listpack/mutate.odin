@@ -1,6 +1,6 @@
 package listpack
 
-encode_entries :: proc(entries: []Entry, maximum: int) -> ([]u8, bool) {
+encode_entries :: proc(entries: []Element, maximum: int) -> ([]u8, bool) {
 	if maximum < 0 {
 		return nil, false
 	}
@@ -37,7 +37,7 @@ mutation_offset :: proc(lp, p: [^]u8) -> (int, bool) {
 		return 0, false
 	}
 	base, address := uintptr(lp), uintptr(p)
-	if address < base || address - base < LP_HDR_SIZE || address - base >= uintptr(lp_bytes(lp)) {
+	if address < base || address - base < PACK_HEADER_BYTES || address - base >= uintptr(lp_bytes(lp)) {
 		return 0, false
 	}
 	return int(address - base), true
@@ -45,21 +45,21 @@ mutation_offset :: proc(lp, p: [^]u8) -> (int, bool) {
 
 splice_bytes :: proc(lp: [^]u8, offset, removed_bytes: int, removed_count: u64, inserted: []u8, inserted_count: u64) -> [^]u8 {
 	old_size := lp_bytes(lp)
-	if offset < LP_HDR_SIZE || offset >= old_size || removed_bytes < 0 || removed_bytes > old_size - 1 - offset {
+	if offset < PACK_HEADER_BYTES || offset >= old_size || removed_bytes < 0 || removed_bytes > old_size - 1 - offset {
 		return nil
 	}
 	retained := old_size - removed_bytes
-	if retained > LISTPACK_MAX_SAFETY_SIZE || len(inserted) > LISTPACK_MAX_SAFETY_SIZE - retained {
+	if retained > PACK_SIZE_CEILING || len(inserted) > PACK_SIZE_CEILING - retained {
 		return nil
 	}
 	new_size := retained + len(inserted)
 	dependencies := map_spliced_dependencies(capture_header_dependencies(lp), offset, removed_bytes, len(inserted))
 	count := u64(lp_get_num_elements(lp))
-	if count != LP_HDR_NUMELE_UNKNOWN {
+	if count != COUNT_UNTRACKED {
 		if removed_count > count || inserted_count > max(u64) - (count - removed_count) {
 			return nil
 		}
-		count = min(count - removed_count + inserted_count, LP_HDR_NUMELE_UNKNOWN)
+		count = min(count - removed_count + inserted_count, COUNT_UNTRACKED)
 	}
 	result := lp
 	if new_size > lp_malloc_size(lp) {
@@ -79,32 +79,32 @@ splice_bytes :: proc(lp: [^]u8, offset, removed_bytes: int, removed_count: u64, 
 	return result
 }
 
-insert_entries :: proc(lp: [^]u8, p: [^]u8, where_: int, entries: []Entry, newp: ^[^]u8) -> [^]u8 {
+insert_entries :: proc(lp: [^]u8, p: [^]u8, where_: Placement, entries: []Element, newp: ^[^]u8) -> [^]u8 {
 	if len(entries) == 0 {
 		return lp
 	}
 	offset, valid := mutation_offset(lp, p)
-	if !valid || where_ < LP_BEFORE || where_ > LP_REPLACE {
+	if !valid || where_ > .Replace {
 		return nil
 	}
 	removed_bytes := 0
 	removed_count := u64(0)
-	if where_ != LP_BEFORE {
-		if p[0] == LP_EOF {
+	if where_ != Placement.Before {
+		if p[0] == PACK_END {
 			return nil
 		}
 		next := lp_skip(p)
 		if next == nil {
 			return nil
 		}
-		if where_ == LP_AFTER {
+		if where_ == Placement.After {
 			offset = pdiff(next, lp)
 		} else {
 			removed_bytes = pdiff(next, p)
 			removed_count = 1
 		}
 	}
-	encoded, encoded_valid := encode_entries(entries, LISTPACK_MAX_SAFETY_SIZE - (lp_bytes(lp) - removed_bytes))
+	encoded, encoded_valid := encode_entries(entries, PACK_SIZE_CEILING - (lp_bytes(lp) - removed_bytes))
 	if !encoded_valid {
 		return nil
 	}
@@ -117,23 +117,23 @@ insert_entries :: proc(lp: [^]u8, p: [^]u8, where_: int, entries: []Entry, newp:
 	return result
 }
 
-lp_batch_insert :: proc(lp: [^]u8, p: [^]u8, where_: int, entries: []Entry, newp: ^[^]u8) -> [^]u8 {
+lp_batch_insert :: proc(lp: [^]u8, p: [^]u8, where_: Placement, entries: []Element, newp: ^[^]u8) -> [^]u8 {
 	if len(entries) == 0 {
 		return lp
 	}
-	if where_ != LP_BEFORE && where_ != LP_AFTER {
+	if where_ != Placement.Before && where_ != Placement.After {
 		return nil
 	}
 	return insert_entries(lp, p, where_, entries, newp)
 }
 
-lp_insert_string :: proc(lp: [^]u8, s: []u8, p: [^]u8, where_: int, newp: ^[^]u8) -> [^]u8 {
-	entries := [1]Entry{entry_from_bytes(s)}
+lp_insert_string :: proc(lp: [^]u8, s: []u8, p: [^]u8, where_: Placement, newp: ^[^]u8) -> [^]u8 {
+	entries := [1]Element{entry_from_bytes(s)}
 	return insert_entries(lp, p, where_, entries[:], newp)
 }
 
-lp_insert_integer :: proc(lp: [^]u8, lval: i64, p: [^]u8, where_: int, newp: ^[^]u8) -> [^]u8 {
-	entries := [1]Entry{entry_from_int(lval)}
+lp_insert_integer :: proc(lp: [^]u8, lval: i64, p: [^]u8, where_: Placement, newp: ^[^]u8) -> [^]u8 {
+	entries := [1]Element{entry_from_int(lval)}
 	return insert_entries(lp, p, where_, entries[:], newp)
 }
 
@@ -141,49 +141,49 @@ lp_append :: proc(lp: [^]u8, s: []u8) -> [^]u8 {
 	if lp == nil {
 		return nil
 	}
-	return lp_insert_string(lp, s, padd(lp, lp_bytes(lp) - 1), LP_BEFORE, nil)
+	return lp_insert_string(lp, s, padd(lp, lp_bytes(lp) - 1), Placement.Before, nil)
 }
 
 lp_append_integer :: proc(lp: [^]u8, lval: i64) -> [^]u8 {
 	if lp == nil {
 		return nil
 	}
-	return lp_insert_integer(lp, lval, padd(lp, lp_bytes(lp) - 1), LP_BEFORE, nil)
+	return lp_insert_integer(lp, lval, padd(lp, lp_bytes(lp) - 1), Placement.Before, nil)
 }
 
 lp_prepend :: proc(lp: [^]u8, s: []u8) -> [^]u8 {
 	if lp == nil {
 		return nil
 	}
-	return lp_insert_string(lp, s, padd(lp, LP_HDR_SIZE), LP_BEFORE, nil)
+	return lp_insert_string(lp, s, padd(lp, PACK_HEADER_BYTES), Placement.Before, nil)
 }
 
 lp_prepend_integer :: proc(lp: [^]u8, lval: i64) -> [^]u8 {
 	if lp == nil {
 		return nil
 	}
-	return lp_insert_integer(lp, lval, padd(lp, LP_HDR_SIZE), LP_BEFORE, nil)
+	return lp_insert_integer(lp, lval, padd(lp, PACK_HEADER_BYTES), Placement.Before, nil)
 }
 
-lp_batch_append :: proc(lp: [^]u8, entries: []Entry) -> [^]u8 {
+lp_batch_append :: proc(lp: [^]u8, entries: []Element) -> [^]u8 {
 	if lp == nil {
 		return nil
 	}
-	return lp_batch_insert(lp, padd(lp, lp_bytes(lp) - 1), LP_BEFORE, entries, nil)
+	return lp_batch_insert(lp, padd(lp, lp_bytes(lp) - 1), Placement.Before, entries, nil)
 }
 
 lp_replace :: proc(lp: [^]u8, p: ^[^]u8, s: []u8) -> [^]u8 {
 	if p == nil {
 		return nil
 	}
-	return lp_insert_string(lp, s, p^, LP_REPLACE, p)
+	return lp_insert_string(lp, s, p^, Placement.Replace, p)
 }
 
 lp_replace_integer :: proc(lp: [^]u8, p: ^[^]u8, lval: i64) -> [^]u8 {
 	if p == nil {
 		return nil
 	}
-	return lp_insert_integer(lp, lval, p^, LP_REPLACE, p)
+	return lp_insert_integer(lp, lval, p^, Placement.Replace, p)
 }
 
 lp_delete_range_with_entry :: proc(lp: [^]u8, p: ^[^]u8, num: u64) -> [^]u8 {
@@ -196,7 +196,7 @@ lp_delete_range_with_entry :: proc(lp: [^]u8, p: ^[^]u8, num: u64) -> [^]u8 {
 	}
 	end := p^
 	removed_count := u64(0)
-	for end[0] != LP_EOF && removed_count < num {
+	for end[0] != PACK_END && removed_count < num {
 		end = lp_skip(end)
 		if end == nil {
 			return nil
@@ -206,7 +206,7 @@ lp_delete_range_with_entry :: proc(lp: [^]u8, p: ^[^]u8, num: u64) -> [^]u8 {
 	result := splice_bytes(lp, offset, pdiff(end, p^), removed_count, nil, 0)
 	if result != nil {
 		p^ = padd(result, offset)
-		if p^[0] == LP_EOF {
+		if p^[0] == PACK_END {
 			p^ = nil
 		}
 	}
@@ -260,7 +260,7 @@ lp_batch_delete :: proc(lp: [^]u8, ps: [][^]u8) -> [^]u8 {
 	defer delete(offsets)
 	for p, index in ps {
 		offset, valid := mutation_offset(lp, p)
-		if !valid || p[0] == LP_EOF {
+		if !valid || p[0] == PACK_END {
 			return nil
 		}
 		offsets[index] = offset
@@ -304,7 +304,7 @@ lp_batch_delete :: proc(lp: [^]u8, ps: [][^]u8) -> [^]u8 {
 		removed_bytes += pdiff(next, p)
 	}
 	count := u64(lp_get_num_elements(lp))
-	if count != LP_HDR_NUMELE_UNKNOWN && u64(unique) > count {
+	if count != COUNT_UNTRACKED && u64(unique) > count {
 		return nil
 	}
 	write_offset := offsets[0]
@@ -318,7 +318,7 @@ lp_batch_delete :: proc(lp: [^]u8, ps: [][^]u8) -> [^]u8 {
 		write_offset += end - read_offset
 	}
 	lp_set_total_bytes(lp, u64(old_size - removed_bytes))
-	if count != LP_HDR_NUMELE_UNKNOWN {
+	if count != COUNT_UNTRACKED {
 		lp_set_num_elements(lp, count - u64(unique))
 	}
 	repair_header_dependencies(lp, mapped_dependencies)

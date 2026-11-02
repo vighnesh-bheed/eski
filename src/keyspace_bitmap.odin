@@ -16,7 +16,7 @@ keyspace_bitmap_execute :: proc(job: ^ks.Job) {
 	position_args: bm.Bitpos_Args
 	program: bm.Bitfield_Program
 	defer bm.bitfield_program_destroy(&program)
-	parse_charge := (len(argv) + 1) * 4 * (size_of(bm.Bitfield_Op) + size_of(bm.Bitfield_Reply))
+	parse_charge := (len(argv) + 1) * 4 * (size_of(bm.Field_Command) + size_of(bm.Bitfield_Reply))
 	if !ks.reserve_external(&keyspace_pool, parse_charge) { task.failed = true; return }
 	defer ks.release_external(&keyspace_pool, parse_charge)
 	err: bm.Error

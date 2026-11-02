@@ -121,14 +121,14 @@ unit_scan_guarantee :: proc() {
 			st.add(s, transmute([]u8)fmt.tprintf("%d", i))
 		}
 		seen := make(map[string]bool, 16, context.temp_allocator)
-		out := make([dynamic]st.Value, context.temp_allocator)
+		out := make([dynamic]st.Member, context.temp_allocator)
 		cursor: u64 = 0
 		iter := 0
 		for {
 			clear(&out)
 			cursor = st.scan(s, cursor, 1 + u_below(12), &out)
 			for v in out {
-				seen[strings.clone(string(v.str), context.temp_allocator)] = true
+				seen[strings.clone(string(v.text), context.temp_allocator)] = true
 			}
 			iter += 1
 			if iter == 3 {
@@ -196,8 +196,8 @@ unit_encodings :: proc() {
 	check(s.encoding == .Hashtable, "wide integers in the intset rule out the listpack")
 	st.destroy(s)
 	s = st.create_listpack()
-	st.add_aux(s, st.Value{ival = 7, is_int = true})
-	st.add_aux(s, st.Value{str = transmute([]u8)string("8")})
+	st.add_aux(s, st.Member{number = 7, numeric = true})
+	st.add_aux(s, st.Member{text = transmute([]u8)string("8")})
 	st.maybe_convert_to_intset(s)
 	check(s.encoding == .Intset && st.size(s) == 2, "integer only listpack converts to intset")
 	d := st.dup(s)
@@ -315,10 +315,10 @@ unit_random :: proc() {
 			}
 			before := members_sorted(s)
 			count := 1 + u_below(n - 1)
-			out := make([dynamic]st.Value, context.temp_allocator)
+			out := make([dynamic]st.Member, context.temp_allocator)
 			st.random_unique(s, count, &out)
 			seen := make(map[string]bool, 16, context.temp_allocator)
-			buf: [lp.LP_INTBUF_SIZE]u8
+			buf: [lp.DECIMAL_BUFFER_BYTES]u8
 			for v in out {
 				seen[strings.clone(string(st.value_bytes(v, &buf)), context.temp_allocator)] = true
 			}

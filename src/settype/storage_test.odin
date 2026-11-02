@@ -22,8 +22,8 @@ drain_maintenance :: proc() {
 	}
 }
 
-integer_member_bytes :: proc(n: i64, buffer: ^[lp.LP_INTBUF_SIZE]u8) -> []u8 {
-	return value_bytes({ival = n, is_int = true}, buffer)
+integer_member_bytes :: proc(n: i64, buffer: ^[lp.DECIMAL_BUFFER_BYTES]u8) -> []u8 {
+	return value_bytes({number = n, numeric = true}, buffer)
 }
 
 @(test)
@@ -87,26 +87,26 @@ encodings_and_configuration :: proc(t: ^testing.T) {
 	first, _ := next(&it)
 	second, _ := next(&it)
 	third, _ := next(&it)
-	testing.expect(t, first.is_int && first.ival == -2 && second.is_int && second.ival == 1)
-	testing.expect(t, set_bytes_equal(third.str, string_bytes("x")))
+	testing.expect(t, first.numeric && first.number == -2 && second.numeric && second.number == 1)
+	testing.expect(t, set_bytes_equal(third.text, string_bytes("x")))
 	set_max_listpack_entries = 0
 	set_max_listpack_value = 0
 	testing.expect(t, !add(s, string_bytes("x")))
 	testing.expect_value(t, s.encoding, .Listpack)
-	testing.expect(t, add_aux(s, {ival = 3, is_int = true}))
+	testing.expect(t, add_aux(s, {number = 3, numeric = true}))
 	testing.expect_value(t, s.encoding, .Hashtable)
-	testing.expect(t, remove_aux(s, {ival = -2, is_int = true}))
+	testing.expect(t, remove_aux(s, {number = -2, numeric = true}))
 	testing.expect_value(t, s.encoding, .Hashtable)
 	set_max_intset_entries = 2
 	ints := create_intset()
 	defer destroy(ints)
 	for value in ([]i64{1, 2, 3}) {
-		testing.expect(t, add_aux(ints, {ival = value, is_int = true}))
+		testing.expect(t, add_aux(ints, {number = value, numeric = true}))
 	}
 	testing.expect_value(t, ints.encoding, .Hashtable)
 	testing.expect_value(t, size(ints), 3)
 	set_max_intset_entries = max(int)
-	testing.expect_value(t, intset_max_entries(), INTSET_MAX_ENTRIES_CAP)
+	testing.expect_value(t, intset_max_entries(), INTSET_ENTRY_CEILING)
 	set_max_intset_entries = -1
 	testing.expect_value(t, intset_max_entries(), 0)
 }
@@ -141,7 +141,7 @@ binary_conversion_and_copy :: proc(t: ^testing.T) {
 	drain_maintenance()
 	ints := create_listpack()
 	for value in ([]i64{5, -9, 1, min(i64), max(i64)}) {
-		add_aux(ints, {ival = value, is_int = true})
+		add_aux(ints, {number = value, numeric = true})
 	}
 	maybe_convert_to_intset(ints)
 	testing.expect_value(t, ints.encoding, .Intset)
@@ -163,7 +163,7 @@ model_and_iterator :: proc(t: ^testing.T) {
 	for operation in 0 ..< 10000 {
 		state = state * 6364136223846793005 + 1442695040888963407
 		index := int((state >> 24) % len(model))
-		buffer: [lp.LP_INTBUF_SIZE]u8
+		buffer: [lp.DECIMAL_BUFFER_BYTES]u8
 		member := integer_member_bytes(i64(index - 128), &buffer)
 		if operation % 3 == 0 {
 			removed := remove(s, member)
@@ -178,7 +178,7 @@ model_and_iterator :: proc(t: ^testing.T) {
 			count := 0
 			for expected, j in model {
 				count += int(expected)
-				probe_buffer: [lp.LP_INTBUF_SIZE]u8
+				probe_buffer: [lp.DECIMAL_BUFFER_BYTES]u8
 				testing.expect_value(t, is_member(s, integer_member_bytes(i64(j - 128), &probe_buffer)), expected)
 			}
 			testing.expect_value(t, size(s), count)
@@ -192,8 +192,8 @@ model_and_iterator :: proc(t: ^testing.T) {
 		if !ok {
 			break
 		}
-		integer := v.ival
-		testing.expect(t, v.is_int || lp.lp_string_to_int64(v.str, &integer))
+		integer := v.number
+		testing.expect(t, v.numeric || lp.lp_string_to_int64(v.text, &integer))
 		index := int(integer) + 128
 		testing.expect(t, index >= 0 && index < len(model))
 		testing.expect(t, model[index] && !seen[index])
@@ -212,7 +212,7 @@ resize_accounting_lifetimes :: proc(t: ^testing.T) {
 	set_hash_seed(88)
 	s := create_table(300)
 	for number in 0 ..< 160 {
-		buffer: [lp.LP_INTBUF_SIZE]u8
+		buffer: [lp.DECIMAL_BUFFER_BYTES]u8
 		add(s, integer_member_bytes(i64(number), &buffer))
 	}
 	tab := s.table
@@ -283,7 +283,7 @@ retirement_and_aliasing :: proc(t: ^testing.T) {
 	it := iterator(pack)
 	value, _ := next(&it)
 	set_max_listpack_entries = 1
-	testing.expect(t, add(pack, value.str[:3]))
+	testing.expect(t, add(pack, value.text[:3]))
 	testing.expect_value(t, pack.encoding, .Hashtable)
 	testing.expect(t, is_member(pack, string_bytes("abc")) && is_member(pack, string_bytes("abcdef")))
 	destroy(pack)
@@ -344,11 +344,11 @@ conversion_boundaries :: proc(t: ^testing.T) {
 probe_holes_and_shrink :: proc(t: ^testing.T) {
 	set_hash_seed(0x8877)
 	s := create_table(40)
-	members: [6][lp.LP_INTBUF_SIZE]u8
+	members: [6][lp.DECIMAL_BUFFER_BYTES]u8
 	lengths: [6]int
 	found := 0
 	for candidate in 0 ..< 10000 {
-		buffer: [lp.LP_INTBUF_SIZE]u8
+		buffer: [lp.DECIMAL_BUFFER_BYTES]u8
 		member := integer_member_bytes(i64(candidate), &buffer)
 		if hash_member(member) & u64(s.table.cap - 1) != u64(s.table.cap - 1) {
 			continue
@@ -375,7 +375,7 @@ probe_holes_and_shrink :: proc(t: ^testing.T) {
 	drain_maintenance()
 	shrink := create_table(40)
 	for index in 0 ..< 10 {
-		buffer: [lp.LP_INTBUF_SIZE]u8
+		buffer: [lp.DECIMAL_BUFFER_BYTES]u8
 		add(shrink, integer_member_bytes(i64(index), &buffer))
 	}
 	testing.expect_value(t, shrink.table.cap, 64)
@@ -423,13 +423,13 @@ iterator_and_integer_values :: proc(t: ^testing.T) {
 		empty := iterator(s)
 		_, exists := next(&empty)
 		testing.expect(t, !exists)
-		add_aux(s, {ival = min(i64), is_int = true})
+		add_aux(s, {number = min(i64), numeric = true})
 		_, exists = next(&empty)
 		testing.expect(t, !exists)
 		it := iterator(s)
 		value, ok := next(&it)
 		testing.expect(t, ok)
-		buffer: [lp.LP_INTBUF_SIZE]u8
+		buffer: [lp.DECIMAL_BUFFER_BYTES]u8
 		testing.expect(t, set_bytes_equal(value_bytes(value, &buffer), string_bytes("-9223372036854775808")))
 		for _ in 0 ..< 4 {
 			_, exists = next(&it)
@@ -440,7 +440,7 @@ iterator_and_integer_values :: proc(t: ^testing.T) {
 		testing.expect_value(t, duplicate.acct, 0)
 		testing.expect_value(t, s.acct, 157)
 		destroy(s)
-		testing.expect(t, is_member_aux(duplicate, {ival = min(i64), is_int = true}))
+		testing.expect(t, is_member_aux(duplicate, {number = min(i64), numeric = true}))
 		destroy(duplicate)
 	}
 	drain_maintenance()
@@ -449,7 +449,7 @@ iterator_and_integer_values :: proc(t: ^testing.T) {
 @(test)
 configured_hints_and_sizing_guard :: proc(t: ^testing.T) {
 	defer reset_set_limits()
-	large_hint :: INTSET_MAX_ENTRIES_CAP + 1
+	large_hint :: INTSET_ENTRY_CEILING + 1
 	set_max_intset_entries = large_hint
 	s := create(string_bytes("1"), large_hint)
 	testing.expect_value(t, s.encoding, .Intset)
@@ -473,14 +473,14 @@ configured_hints_and_sizing_guard :: proc(t: ^testing.T) {
 		is, _ = intset_add(is, value)
 	}
 	storage: [1]u8
-	maximum_member_length :: lp.LISTPACK_MAX_SAFETY_SIZE - 37
+	maximum_member_length :: lp.PACK_SIZE_CEILING - 37
 	boundary := raw_data(storage[:])[:maximum_member_length]
 	testing.expect(t, intset_can_append_listpack(is, boundary))
 	testing.expect(t, !intset_can_append_listpack(is, raw_data(storage[:])[:maximum_member_length + 1]))
 	testing.expect(t, !intset_can_append_listpack(is, raw_data(storage[:])[:max(int)]))
 	lp.lp_mem_free(is)
 	empty := intset_new()
-	empty_boundary :: lp.LISTPACK_MAX_SAFETY_SIZE - 7
+	empty_boundary :: lp.PACK_SIZE_CEILING - 7
 	testing.expect(t, intset_can_append_listpack(empty, raw_data(storage[:])[:empty_boundary]))
 	testing.expect(t, !intset_can_append_listpack(empty, raw_data(storage[:])[:empty_boundary + 1]))
 	lp.lp_mem_free(empty)

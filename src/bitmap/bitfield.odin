@@ -12,7 +12,7 @@ Bitfield_Opcode :: enum u8 {
 	Incrby,
 }
 
-Bitfield_Op :: struct {
+Field_Command :: struct {
 	offset:   u64,
 	value:    i64,
 	opcode:   Bitfield_Opcode,
@@ -27,10 +27,10 @@ Bitfield_Reply :: struct {
 }
 
 Bitfield_Program :: struct {
-	ops:                  [dynamic]Bitfield_Op,
-	replies:              [dynamic]Bitfield_Reply,
-	readonly:             bool,
-	highest_write_offset: u64,
+	ops:              [dynamic]Field_Command,
+	replies:          [dynamic]Bitfield_Reply,
+	readonly:         bool,
+	last_written_bit: u64,
 }
 
 bitfield_program_destroy :: proc(prog: ^Bitfield_Program) {
@@ -148,79 +148,74 @@ signed_wrap :: proc "contextless" (value: i64, incr: i64, bits: u64) -> i64 {
 	return i64(sum << pad) >> pad
 }
 
-check_unsigned_bitfield_overflow :: proc "contextless" (
-	value: u64,
-	incr: i64,
-	bits: u64,
-	overflow: Overflow,
-) -> (
-	result: int,
-	limit: u64,
-) {
-	top := field_mask(bits)
-	switch {
-	case value > top || (incr > 0 && u64(incr) > top - value):
-		result = 1
-	case incr < 0 && u64(0) - u64(incr) > value:
-		result = -1
-	case:
-		return 0, 0
-	}
-	switch overflow {
-	case .Wrap:
-		limit = unsigned_wrap(value, incr, bits)
-	case .Sat:
-		limit = top if result > 0 else 0
-	case .Fail:
-		limit = 0
-	}
-	return
+Field_Bound :: enum i8 {
+	Below = -1,
+	Within = 0,
+	Above = 1,
 }
 
-check_signed_bitfield_overflow :: proc "contextless" (
-	value: i64,
-	incr: i64,
-	bits: u64,
-	overflow: Overflow,
-) -> (
-	result: int,
-	limit: i64,
-) {
-	top := max(i64)
-	if bits > 0 && bits < 64 {
-		top = i64((u64(1) << (bits - 1)) - 1)
+unsigned_bound :: proc "contextless" (value: u64, incr: i64, bits: u64) -> Field_Bound {
+	top := field_mask(bits)
+	if value > top {
+		return .Above
 	}
-	bottom := -top - 1
-	if bits >= 64 || bits == 0 {
-		switch {
-		case value >= 0 && incr > 0 && incr > top - value:
-			result = 1
-		case value < 0 && incr < 0 && incr < bottom - value:
-			result = -1
-		case:
-			return 0, 0
+	total := i128(value) + i128(incr)
+	if total > i128(top) {
+		return .Above
+	}
+	return .Below if total < 0 else .Within
+}
+
+wrapped_gap :: proc "contextless" (limit, value: i64) -> i64 {
+	return i64(u64(limit) - u64(value))
+}
+
+signed_bound :: proc "contextless" (value: i64, incr: i64, bits: u64) -> Field_Bound {
+	if bits == 0 || bits >= 64 {
+		total := i128(value) + i128(incr)
+		if total > i128(max(i64)) {
+			return .Above
 		}
-	} else {
-		headroom := i64(u64(top) - u64(value))
-		floor_room := i64(u64(bottom) - u64(value))
-		switch {
-		case value > top || incr > headroom:
-			result = 1
-		case value < bottom || incr < floor_room:
-			result = -1
-		case:
-			return 0, 0
-		}
+		return .Below if total < i128(min(i64)) else .Within
 	}
-	switch overflow {
-	case .Wrap:
-		limit = signed_wrap(value, incr, bits)
-	case .Sat:
-		limit = top if result > 0 else bottom
-	case .Fail:
-		limit = 0
+	top := i64(field_mask(bits - 1))
+	bottom := ~top
+	if value > top || incr > wrapped_gap(top, value) {
+		return .Above
 	}
-	return
+	if value < bottom || incr < wrapped_gap(bottom, value) {
+		return .Below
+	}
+	return .Within
+}
+
+unsigned_settle :: proc "contextless" (value: u64, incr: i64, bits: u64, mode: Overflow) -> (stored: u64, ok: bool) {
+	if mode == .Wrap {
+		return unsigned_wrap(value, incr, bits), true
+	}
+	switch unsigned_bound(value, incr, bits) {
+	case .Within:
+		return value + u64(incr), true
+	case .Above:
+		return field_mask(bits), mode == .Sat
+	case .Below:
+	}
+	return 0, mode == .Sat
+}
+
+signed_settle :: proc "contextless" (value: i64, incr: i64, bits: u64, mode: Overflow) -> (stored: i64, ok: bool) {
+	if mode == .Wrap {
+		return signed_wrap(value, incr, bits), true
+	}
+	top := max(i64) if bits == 0 || bits >= 64 else i64(field_mask(bits - 1))
+	switch signed_bound(value, incr, bits) {
+	case .Within:
+		return value + incr, true
+	case .Above:
+		return top, mode == .Sat
+	case .Below:
+	}
+	return ~top, mode == .Sat
 }
 
 parse_overflow :: proc "contextless" (s: []u8) -> (overflow: Overflow, err: Error) {
@@ -245,7 +240,7 @@ bitfield_parse :: proc(
 	clear(&prog.ops)
 	clear(&prog.replies)
 	prog.readonly = true
-	prog.highest_write_offset = 0
+	prog.last_written_bit = 0
 	mode := Overflow.Wrap
 	writes := false
 	i := 0
@@ -269,7 +264,7 @@ bitfield_parse :: proc(
 		}
 		signed, bits := parse_bitfield_type(args[i + 1]) or_return
 		offset := parse_bit_offset(args[i + 2], true, bits, max_bulk_len) or_return
-		op := Bitfield_Op {
+		op := Field_Command {
 			offset   = offset,
 			opcode   = opcode,
 			overflow = mode,
@@ -281,7 +276,7 @@ bitfield_parse :: proc(
 		} else {
 			op.value = parse_integer(args[i + 3]) or_return
 			writes = true
-			prog.highest_write_offset = max(prog.highest_write_offset, offset + u64(bits) - 1)
+			prog.last_written_bit = max(prog.last_written_bit, offset + u64(bits) - 1)
 			i += 4
 		}
 		append(&prog.ops, op)
@@ -295,14 +290,14 @@ bitfield_parse :: proc(
 	return .None
 }
 
-bitfield_get :: proc "contextless" (data: []u8, op: Bitfield_Op) -> i64 #no_bounds_check {
+bitfield_get :: proc "contextless" (data: []u8, op: Field_Command) -> i64 #no_bounds_check {
 	if op.signed {
 		return get_signed_bitfield(data, op.offset, u64(op.bits))
 	}
 	return i64(get_unsigned_bitfield(data, op.offset, u64(op.bits)))
 }
 
-bitfield_apply :: proc "contextless" (data: []u8, op: Bitfield_Op, grown: bool) -> (reply: Bitfield_Reply, counted: bool) {
+bitfield_apply :: proc "contextless" (data: []u8, op: Field_Command, grown: bool) -> (reply: Bitfield_Reply, counted: bool) {
 	bits := u64(op.bits)
 	if op.signed {
 		old := get_signed_bitfield(data, op.offset, bits)
@@ -310,18 +305,9 @@ bitfield_apply :: proc "contextless" (data: []u8, op: Bitfield_Op, grown: bool) 
 		if op.opcode == .Incrby {
 			value, incr = old, op.value
 		}
-		next: i64
-		if op.overflow == .Wrap {
-			next = signed_wrap(value, incr, bits)
-		} else {
-			direction, limit := check_signed_bitfield_overflow(value, incr, bits, op.overflow)
-			if direction == 0 {
-				next = value + incr
-			} else if op.overflow == .Sat {
-				next = limit
-			} else {
-				return {null = true}, false
-			}
+		next, stored := signed_settle(value, incr, bits, op.overflow)
+		if !stored {
+			return {null = true}, false
 		}
 		set_signed_bitfield(data, op.offset, bits, next)
 		if op.opcode == .Set {
@@ -334,18 +320,9 @@ bitfield_apply :: proc "contextless" (data: []u8, op: Bitfield_Op, grown: bool) 
 	if op.opcode == .Incrby {
 		value, incr = old, op.value
 	}
-	next: u64
-	if op.overflow == .Wrap {
-		next = unsigned_wrap(value, incr, bits)
-	} else {
-		direction, limit := check_unsigned_bitfield_overflow(value, incr, bits, op.overflow)
-		if direction == 0 {
-			next = value + u64(incr)
-		} else if op.overflow == .Sat {
-			next = limit
-		} else {
-			return {null = true}, false
-		}
+	next, stored := unsigned_settle(value, incr, bits, op.overflow)
+	if !stored {
+		return {null = true}, false
 	}
 	set_unsigned_bitfield(data, op.offset, bits, next)
 	if op.opcode == .Set {

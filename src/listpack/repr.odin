@@ -77,7 +77,7 @@ lp_repr :: proc(lp: [^]u8, allocator := context.allocator) -> string {
 			append(&output, '|')
 		}
 		repr_text(&output, "\n\t[str]")
-		buffer: [LP_INTBUF_SIZE]u8
+		buffer: [DECIMAL_BUFFER_BYTES]u8
 		bytes := lp_get_bytes(cursor, &buffer)
 		append(&output, ..bytes[:min(40, len(bytes))])
 		if len(bytes) > 40 {

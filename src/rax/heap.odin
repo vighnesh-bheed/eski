@@ -44,12 +44,12 @@ block_free :: proc "contextless" (r: ^Rax, p: rawptr) {
 
 node_alloc :: proc "contextless" (r: ^Rax, size: int) -> (^Node, int) {
 	p := block_alloc(r, size)
-	r.numnodes += 1
+	r.nodes += 1
 	return cast(^Node)p, usable_size(p)
 }
 
 node_release :: proc "contextless" (r: ^Rax, n: ^Node) {
-	r.numnodes -= 1
+	r.nodes -= 1
 	block_free(r, n)
 }
 

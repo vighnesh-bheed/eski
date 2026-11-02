@@ -4,7 +4,7 @@ import "base:intrinsics"
 import "base:runtime"
 
 @(private)
-ITER_KEY_INLINE :: 128
+ITER_INLINE_KEY_BYTES :: 128
 @(private)
 ITER_PATH_INLINE :: 8
 
@@ -45,7 +45,7 @@ Iterator :: struct {
 	version:     u32,
 	state:       Iter_State,
 	partial:     bool,
-	key_inline:  [ITER_KEY_INLINE]u8,
+	key_inline:  [ITER_INLINE_KEY_BYTES]u8,
 	path_inline: [ITER_PATH_INLINE]Iter_Step,
 }
 
@@ -107,10 +107,10 @@ iter_path :: #force_inline proc "contextless" (it: ^Iterator) -> [^]Iter_Step {
 @(private)
 iter_reserve_key :: proc "contextless" (it: ^Iterator, length: int) -> [^]u8 {
 	if it.key_heap == nil {
-		if length <= ITER_KEY_INLINE {
+		if length <= ITER_INLINE_KEY_BYTES {
 			return &it.key_inline[0]
 		}
-		capacity := max(length, 2 * ITER_KEY_INLINE)
+		capacity := max(length, 2 * ITER_INLINE_KEY_BYTES)
 		p := cast([^]u8)runtime.heap_alloc(capacity, false)
 		if p == nil {
 			return nil

@@ -125,7 +125,7 @@ set_missing_errors_and_scan :: proc(t: ^testing.T) {
 @(test)
 set_scratch_retention_limits :: proc(t: ^testing.T) {
 	defer set_test_cleanup()
-	set_vals = make([dynamic]st.Value, 0, 65536)
+	set_vals = make([dynamic]st.Member, 0, 65536)
 	set_srcs = make([dynamic]st.Set, 0, 1)
 	set_pop.arena = make([dynamic]u8, 0, 1 << 20)
 	set_pop.items = make([dynamic]st.Popped_Item, 0, 65536)
@@ -136,7 +136,7 @@ set_scratch_retention_limits :: proc(t: ^testing.T) {
 	delete(set_vals)
 	delete(set_pop.arena)
 	delete(set_pop.items)
-	set_vals = make([dynamic]st.Value, 0, 65537)
+	set_vals = make([dynamic]st.Member, 0, 65537)
 	set_pop.arena = make([dynamic]u8, 0, (1 << 20) + 1)
 	set_pop.items = make([dynamic]st.Popped_Item, 0, 65537)
 	set_scratch_trim()
@@ -292,7 +292,7 @@ set_intset_boundary_pop_order :: proc(t: ^testing.T) {
 		position = end + 2
 		value, valid := parse_i64(raw_data(reply)[position:position + int(length)])
 		testing.expect(t, valid && value > previous)
-		testing.expect(t, !st.is_member_aux(remaining, {ival = value, is_int = true}))
+		testing.expect(t, !st.is_member_aux(remaining, {number = value, numeric = true}))
 		previous = value
 		position += int(length) + 2
 	}

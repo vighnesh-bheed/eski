@@ -150,7 +150,7 @@ listpack_strings :: proc(b: []u8) -> (out: [dynamic]string, ok: bool) {
 		return out, false
 	}
 	p := lp.lp_first(raw_data(b))
-	buf: [lp.LP_INTBUF_SIZE]u8
+	buf: [lp.DECIMAL_BUFFER_BYTES]u8
 	for p != nil {
 		e := lp.lp_get_entry(p)
 		append(&out, strings.clone(string(lp.entry_bytes(e, &buf)), context.temp_allocator))
@@ -377,7 +377,7 @@ compare_spop :: proc(cs: ^Compare_State, idx: int, args: [][]u8, rr: Reply) {
 	count, _ := spop_count_arg(args[2])
 	size := st.size(k.set)
 	got, ok, why := check_popped(rr, k, int(count), true, .Set if cs.m.resp >= 3 else .Array)
-	if ok && k.set.encoding == .Intset && (size - int(count)) * st.SPOP_MOVE_STRATEGY_MUL <= int(count) {
+	if ok && k.set.encoding == .Intset && (size - int(count)) * SPOP_KEEP_FACTOR <= int(count) {
 		for i in 1 ..< len(got) {
 			a, _ := strconv.parse_i64(got[i - 1])
 			b, _ := strconv.parse_i64(got[i])

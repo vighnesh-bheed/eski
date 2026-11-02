@@ -123,7 +123,7 @@ convert_to_skiplist :: proc(z: Zset, expected: int) {
 		return
 	}
 	sl := sl_create(max(expected, zzl_length(z.lp)))
-	buf: [lp.LP_INTBUF_SIZE]u8
+	buf: [lp.DECIMAL_BUFFER_BYTES]u8
 	for p := lp.lp_first(z.lp); p != nil; {
 		s := lp.lp_next(z.lp, p)
 		member := zzl_member(p, &buf)
@@ -384,7 +384,7 @@ lex_range :: proc(z: Zset, r: ^Lex_Spec, offset_in, limit: i64, reverse: bool, w
 	left := limit
 	it := iter_make(z, reverse)
 	item: Item
-	buf: [lp.LP_INTBUF_SIZE]u8
+	buf: [lp.DECIMAL_BUFFER_BYTES]u8
 	for iter_next(&it, &item) {
 		member := item_bytes(&item, &buf)
 		if !lex_gte_min(member, r) || !lex_lte_max(member, r) {
@@ -419,7 +419,7 @@ count_in_range :: proc(z: Zset, r: ^Range_Spec) -> int {
 lex_count :: proc(z: Zset, r: ^Lex_Spec) -> int {
 	it := iter_make(z, false)
 	item: Item
-	buf: [lp.LP_INTBUF_SIZE]u8
+	buf: [lp.DECIMAL_BUFFER_BYTES]u8
 	count := 0
 	for iter_next(&it, &item) {
 		member := item_bytes(&item, &buf)

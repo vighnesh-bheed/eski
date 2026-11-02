@@ -3,23 +3,23 @@ package listtype
 import lp "../listpack"
 import "base:intrinsics"
 
-SIZE_SAFETY_LIMIT :: 8192
+NODE_BYTES_CAP :: 8192
 
-SIZE_ESTIMATE_OVERHEAD :: 8
+INSERT_SLACK_BYTES :: 8
 
-FILL_MAX :: (1 << 15) - 1
+FILL_CEILING :: (1 << 15) - 1
 
-FILL_MIN :: -5
+FILL_FLOOR :: -5
 
-COMPRESS_MAX :: (1 << 16) - 1
+COMPRESS_DEPTH_CEILING :: (1 << 16) - 1
 
-PACKED_THRESHOLD_LIMIT :: u64(1 << 32) - u64(1 << 20)
+PLAIN_THRESHOLD_CEILING :: u64(1 << 32) - u64(1 << 20)
 
 NO_LIMIT :: max(int)
 
 OPTIMIZATION_LEVEL := [5]int{4096, 8192, 16384, 32768, 65536}
 
-packed_threshold: int
+plain_node_threshold: int
 
 Direction :: enum u8 {
 	Start_Head,
@@ -46,21 +46,21 @@ Quicklist :: struct {
 }
 
 Iter :: struct {
-	ql:        ^Quicklist,
-	current:   ^Node,
-	zi:        [^]u8,
-	offset:    int,
-	direction: Direction,
+	list:     ^Quicklist,
+	node:     ^Node,
+	element:  [^]u8,
+	position: int,
+	heading:  Direction,
 }
 
 Entry :: struct {
-	ql:      ^Quicklist,
-	node:    ^Node,
-	zi:      [^]u8,
-	value:   [^]u8,
-	longval: i64,
-	sz:      int,
-	offset:  int,
+	list:     ^Quicklist,
+	node:     ^Node,
+	element:  [^]u8,
+	text:     [^]u8,
+	number:   i64,
+	text_len: int,
+	position: int,
 }
 
 out_of_memory :: proc "contextless" () -> ! {
@@ -85,16 +85,16 @@ bytes_dup :: proc "contextless" (src: [^]u8, n: int) -> [^]u8 {
 	return p
 }
 
-set_packed_threshold :: proc "contextless" (sz: u64) -> bool {
-	if sz > PACKED_THRESHOLD_LIMIT {
+set_plain_node_threshold :: proc "contextless" (sz: u64) -> bool {
+	if sz > PLAIN_THRESHOLD_CEILING {
 		return false
 	}
-	packed_threshold = int(sz)
+	plain_node_threshold = int(sz)
 	return true
 }
 
 clamp_fill :: proc "contextless" (fill: int) -> int {
-	return clamp(fill, FILL_MIN, FILL_MAX)
+	return clamp(fill, FILL_FLOOR, FILL_CEILING)
 }
 
 ql_new :: proc "contextless" (fill: int, compress: int) -> ^Quicklist {
@@ -102,7 +102,7 @@ ql_new :: proc "contextless" (fill: int, compress: int) -> ^Quicklist {
 	if q == nil {
 		out_of_memory()
 	}
-	q^ = Quicklist{fill = clamp_fill(fill), compress = clamp(compress, 0, COMPRESS_MAX)}
+	q^ = Quicklist{fill = clamp_fill(fill), compress = clamp(compress, 0, COMPRESS_DEPTH_CEILING)}
 	q.mem = usable(q)
 	return q
 }
@@ -194,22 +194,22 @@ node_limit :: proc "contextless" (fill: int) -> (size: int, count: int) {
 
 node_exceeds_limit :: proc "contextless" (fill: int, new_sz: int, new_count: int) -> bool {
 	sz, n := node_limit(fill)
-	return new_sz > sz || new_count > n || (fill >= 0 && new_sz > SIZE_SAFETY_LIMIT)
+	return new_sz > sz || new_count > n || (fill >= 0 && new_sz > NODE_BYTES_CAP)
 }
 
 is_large_element :: proc "contextless" (sz: int, fill: int) -> bool {
-	if packed_threshold != 0 {
-		return sz >= packed_threshold
+	if plain_node_threshold != 0 {
+		return sz >= plain_node_threshold
 	}
 	limit, _ := node_limit(fill)
 	if fill >= 0 {
-		limit = SIZE_SAFETY_LIMIT
+		limit = NODE_BYTES_CAP
 	}
 	return sz > limit
 }
 
 node_allow_insert :: proc "contextless" (n: ^Node, fill: int, sz: int) -> bool {
-	return n != nil && !n.plain && !is_large_element(sz, fill) && sz <= max(int)-n.sz-SIZE_ESTIMATE_OVERHEAD && !node_exceeds_limit(fill, n.sz+sz+SIZE_ESTIMATE_OVERHEAD, n.count+1)
+	return n != nil && !n.plain && !is_large_element(sz, fill) && sz <= max(int)-n.sz-INSERT_SLACK_BYTES && !node_exceeds_limit(fill, n.sz+sz+INSERT_SLACK_BYTES, n.count+1)
 }
 
 node_allow_merge :: proc "contextless" (a: ^Node, b: ^Node, fill: int) -> bool {
@@ -350,37 +350,37 @@ node_start_index :: proc "contextless" (ql: ^Quicklist, node: ^Node) -> int {
 }
 
 iter_global_index :: proc "contextless" (it: ^Iter) -> int {
-	if it.current == nil {
-		if it.direction == .Start_Tail {
+	if it.node == nil {
+		if it.heading == .Start_Tail {
 			return -1
 		}
-		return it.ql.count
+		return it.list.count
 	}
-	return node_start_index(it.ql, it.current)+it.offset
+	return node_start_index(it.list, it.node)+it.position
 }
 
 iter_seek_absolute :: proc "contextless" (it: ^Iter, idx_arg: int) {
 	idx := idx_arg
-	it.current = nil
-	it.zi = nil
-	it.offset = 0
-	if idx < 0 || idx >= it.ql.count {
+	it.node = nil
+	it.element = nil
+	it.position = 0
+	if idx < 0 || idx >= it.list.count {
 		return
 	}
-	n := it.ql.head
+	n := it.list.head
 	for idx >= n.count {
 		idx -= n.count
 		n = n.next
 	}
-	it.current = n
-	it.offset = idx
+	it.node = n
+	it.position = idx
 }
 
 del_entry :: proc(it: ^Iter, entry: ^Entry) {
 	nextidx := iter_global_index(it)
-	idx := node_start_index(it.ql, entry.node)+entry.offset
-	p := entry.zi
-	del_index(it.ql, entry.node, &p)
+	idx := node_start_index(it.list, entry.node)+entry.position
+	p := entry.element
+	del_index(it.list, entry.node, &p)
 	if idx < nextidx {
 		nextidx -= 1
 	}
@@ -389,7 +389,7 @@ del_entry :: proc(it: ^Iter, entry: ^Entry) {
 }
 
 reset_iterator :: proc "contextless" (it: ^Iter) {
-	it.zi = nil
+	it.element = nil
 }
 
 listpack_merge :: proc(ql: ^Quicklist, a: ^Node, b: ^Node) -> ^Node {
@@ -443,25 +443,25 @@ split_node :: proc(ql: ^Quicklist, node: ^Node, offset: int, after: bool) -> ^No
 }
 
 insert :: proc(it: ^Iter, entry: ^Entry, value: []u8, after: bool) {
-	ql := it.ql
+	ql := it.list
 	n := entry.node
 	nextidx := iter_global_index(it)
-	insertidx := node_start_index(ql, n)+entry.offset
+	insertidx := node_start_index(ql, n)+entry.position
 	if after {
 		insertidx += 1
 	}
 	if !n.plain && node_allow_insert(n, ql.fill, len(value)) {
 		old := usable(n.entry)
-		how := lp.LP_BEFORE
+		how := lp.Placement.Before
 		if after {
-			how = lp.LP_AFTER
+			how = lp.Placement.After
 		}
-		p := lp.lp_insert_string(n.entry, value, lp.lp_seek(n.entry, i64(entry.offset)), how, nil)
+		p := lp.lp_insert_string(n.entry, value, lp.lp_seek(n.entry, i64(entry.position)), how, nil)
 		node_set_entry(ql, n, old, p)
 		n.count += 1
 		ql.count += 1
 	} else {
-		cut := entry.offset
+		cut := entry.position
 		if after {
 			cut += 1
 		}
@@ -499,13 +499,13 @@ insert :: proc(it: ^Iter, entry: ^Entry, value: []u8, after: bool) {
 }
 
 replace_entry :: proc(it: ^Iter, entry: ^Entry, data: []u8) {
-	ql := it.ql
+	ql := it.list
 	n := entry.node
 	nextidx := iter_global_index(it)
-	idx := node_start_index(ql, n)+entry.offset
+	idx := node_start_index(ql, n)+entry.position
 	if !n.plain && !is_large_element(len(data), ql.fill) {
 		old := usable(n.entry)
-		p := lp.lp_seek(n.entry, i64(entry.offset))
+		p := lp.lp_seek(n.entry, i64(entry.position))
 		pack := lp.lp_replace(n.entry, &p, data)
 		node_set_entry(ql, n, old, pack)
 	} else if n.plain && is_large_element(len(data), ql.fill) {
@@ -585,13 +585,13 @@ del_range :: proc(ql: ^Quicklist, start_arg: int, count: int) -> bool {
 
 compare :: proc(entry: ^Entry, s: []u8) -> bool {
 	if entry.node.plain {
-		return string(entry.value[:entry.sz]) == string(s)
+		return string(entry.text[:entry.text_len]) == string(s)
 	}
-	return lp.lp_compare(entry.zi, s)
+	return lp.lp_compare(entry.element, s)
 }
 
 get_iterator :: proc "contextless" (ql: ^Quicklist, direction: Direction) -> Iter {
-	it := Iter{ql = ql, direction = direction}
+	it := Iter{list = ql, heading = direction}
 	idx := 0
 	if direction == .Start_Tail {
 		idx = ql.count-1
@@ -605,9 +605,9 @@ get_iterator_at_idx :: proc "contextless" (ql: ^Quicklist, direction: Direction,
 	if idx < 0 {
 		idx += ql.count
 	}
-	it := Iter{ql = ql, direction = direction}
+	it := Iter{list = ql, heading = direction}
 	iter_seek_absolute(&it, idx)
-	return it, it.current != nil
+	return it, it.node != nil
 }
 
 get_iterator_entry_at_idx :: proc(ql: ^Quicklist, idx: int) -> (it: Iter, entry: Entry, ok: bool) {
@@ -619,38 +619,38 @@ get_iterator_entry_at_idx :: proc(ql: ^Quicklist, idx: int) -> (it: Iter, entry:
 }
 
 next :: proc(it: ^Iter, entry: ^Entry) -> bool {
-	n := it.current
-	for n != nil && (it.offset < 0 || it.offset >= n.count) {
-		if it.direction == .Start_Head {
+	n := it.node
+	for n != nil && (it.position < 0 || it.position >= n.count) {
+		if it.heading == .Start_Head {
 			n = n.next
-			it.offset = 0
+			it.position = 0
 		} else {
 			n = n.prev
 			if n != nil {
-				it.offset = n.count-1
+				it.position = n.count-1
 			}
 		}
 	}
-	it.current = n
+	it.node = n
 	if n == nil {
 		return false
 	}
-	entry^ = Entry{ql = it.ql, node = n, offset = it.offset}
+	entry^ = Entry{list = it.list, node = n, position = it.position}
 	if n.plain {
-		entry.value = n.entry
-		entry.sz = n.sz
-		entry.zi = n.entry
+		entry.text = n.entry
+		entry.text_len = n.sz
+		entry.element = n.entry
 	} else {
-		entry.zi = lp.lp_seek(n.entry, i64(it.offset))
+		entry.element = lp.lp_seek(n.entry, i64(it.position))
 		slen: u32
-		entry.value = lp.lp_get_value(entry.zi, &slen, &entry.longval)
-		entry.sz = int(slen)
+		entry.text = lp.lp_get_value(entry.element, &slen, &entry.number)
+		entry.text_len = int(slen)
 	}
-	it.zi = entry.zi
-	if it.direction == .Start_Head {
-		it.offset += 1
+	it.element = entry.element
+	if it.heading == .Start_Head {
+		it.position += 1
 	} else {
-		it.offset -= 1
+		it.position -= 1
 	}
 	return true
 }

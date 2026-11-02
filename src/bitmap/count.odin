@@ -8,12 +8,12 @@ Bitcount_Args :: struct {
 }
 
 Bitpos_Args :: struct {
-	start:     i64,
-	end:       i64,
-	unit:      Unit,
-	bit:       bool,
-	ranged:    bool,
-	end_given: bool,
+	start:   i64,
+	end:     i64,
+	unit:    Unit,
+	bit:     bool,
+	ranged:  bool,
+	has_end: bool,
 }
 
 parse_bitcount_args :: proc "contextless" (args: [][]u8) -> (a: Bitcount_Args, err: Error) {
@@ -55,7 +55,7 @@ parse_bitpos_args :: proc "contextless" (args: [][]u8) -> (a: Bitpos_Args, err: 
 	}
 	if len(args) >= 3 {
 		a.end = parse_integer(args[2]) or_return
-		a.end_given = true
+		a.has_end = true
 	}
 	return a, .None
 }
@@ -121,7 +121,7 @@ bitpos :: proc "contextless" (
 	bit: bool,
 	start_in, end_in: i64,
 	unit: Unit,
-	end_given: bool,
+	has_end: bool,
 ) -> i64 #no_bounds_check {
 	n := i64(len(buf))
 	total := n * 8 if unit == .Bit else n
@@ -135,7 +135,7 @@ bitpos :: proc "contextless" (
 		hi = end * 8 + 7
 	}
 	r := find_bit_range(raw_data(buf), bit, lo, hi)
-	if r < 0 && !bit && !end_given {
+	if r < 0 && !bit && !has_end {
 		return hi + 1
 	}
 	return r
@@ -148,6 +148,6 @@ bitpos_args :: proc "contextless" (buf: []u8, exists: bool, a: Bitpos_Args) -> i
 	if !a.ranged {
 		return bitpos_all(buf, a.bit)
 	}
-	end := a.end if a.end_given else -1
-	return bitpos(buf, a.bit, a.start, end, a.unit, a.end_given)
+	end := a.end if a.has_end else -1
+	return bitpos(buf, a.bit, a.start, end, a.unit, a.has_end)
 }

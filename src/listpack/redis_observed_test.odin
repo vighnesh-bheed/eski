@@ -97,7 +97,7 @@ redis_canonical_format_recipes_match_expected_wires :: proc(t: ^testing.T) {
 		if !field_valid || !value_valid {
 			continue
 		}
-		total := LP_HDR_SIZE + 1 + field_plan.encoded_bytes + value_plan.encoded_bytes
+		total := PACK_HEADER_BYTES + 1 + field_plan.encoded_bytes + value_plan.encoded_bytes
 		testing.expect(t, total == fixture.total)
 		lp := lp_new(total)
 		defer lp_free(lp)
@@ -110,21 +110,21 @@ redis_canonical_format_recipes_match_expected_wires :: proc(t: ^testing.T) {
 		testing.expect(t, write_entry(lp[6:6 + field_plan.encoded_bytes], field_plan))
 		start := 6 + field_plan.encoded_bytes
 		testing.expect(t, write_entry(lp[start:total - 1], value_plan))
-		lp[total - 1] = LP_EOF
+		lp[total - 1] = PACK_END
 		testing.expect(t, string(lp[:total]) == string(expected))
 		testing.expect(t, lp_validate_integrity(lp, u64(total), true, nil, nil))
 		first := lp_first(lp)
 		last := lp_last(lp)
 		testing.expect(t, first == padd(lp, 6) && last == padd(lp, start) && lp_next(lp, first) == last)
 		testing.expect(t, lp_prev(lp, last) == first && lp_next(lp, last) == nil && lp_prev(lp, first) == nil)
-		value_buffer: [LP_INTBUF_SIZE]u8
+		value_buffer: [DECIMAL_BUFFER_BYTES]u8
 		testing.expect(t, string(lp_get_bytes(last, &value_buffer)) == string(input))
 		body, valid := decode_body(lp[:total - 1], start)
 		testing.expect(t, valid)
 		if body.is_string {
 			testing.expect(t, string(lp[body.string_offset:body.string_offset + body.string_length]) == string(input))
 		} else {
-			buffer: [LP_INTBUF_SIZE]u8
+			buffer: [DECIMAL_BUFFER_BYTES]u8
 			length := ll2string(raw_data(buffer[:]), body.value)
 			testing.expect(t, string(buffer[:length]) == string(input))
 		}

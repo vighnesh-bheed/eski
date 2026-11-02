@@ -62,7 +62,7 @@ lp_next :: proc(lp: [^]u8, p: [^]u8) -> [^]u8 {
 		return nil
 	}
 	next := lp_skip(p)
-	if next == nil || next[0] == LP_EOF {
+	if next == nil || next[0] == PACK_END {
 		return nil
 	}
 	return next
@@ -73,7 +73,7 @@ lp_prev :: proc(lp: [^]u8, p: [^]u8) -> [^]u8 {
 		return nil
 	}
 	base, address := uintptr(lp), uintptr(p)
-	if address <= base || address - base <= LP_HDR_SIZE || address - base >= uintptr(lp_bytes(lp)) {
+	if address <= base || address - base <= PACK_HEADER_BYTES || address - base >= uintptr(lp_bytes(lp)) {
 		return nil
 	}
 	offset := int(address - base)
@@ -82,14 +82,14 @@ lp_prev :: proc(lp: [^]u8, p: [^]u8) -> [^]u8 {
 		return nil
 	}
 	width := backlen_width(length)
-	if length + u64(width) > u64(offset - LP_HDR_SIZE) {
+	if length + u64(width) > u64(offset - PACK_HEADER_BYTES) {
 		return nil
 	}
 	return padd(lp, offset - int(length) - width)
 }
 
 lp_last :: proc(lp: [^]u8) -> [^]u8 {
-	if lp == nil || lp_bytes(lp) <= LP_HDR_SIZE + 1 {
+	if lp == nil || lp_bytes(lp) <= PACK_HEADER_BYTES + 1 {
 		return nil
 	}
 	return lp_prev(lp, padd(lp, lp_bytes(lp) - 1))
@@ -110,7 +110,7 @@ lp_seek :: proc(lp: [^]u8, index: i64) -> [^]u8 {
 		return nil
 	}
 	count := u64(lp_get_num_elements(lp))
-	known := count != LP_HDR_NUMELE_UNKNOWN
+	known := count != COUNT_UNTRACKED
 	if index >= 0 {
 		target := u64(index)
 		if known {
@@ -135,43 +135,40 @@ lp_seek :: proc(lp: [^]u8, index: i64) -> [^]u8 {
 	return seek_steps(lp, lp_last(lp), magnitude - 1, true)
 }
 
-lp_get_entry :: proc "contextless" (p: [^]u8) -> Entry {
+lp_get_entry :: proc "contextless" (p: [^]u8) -> Element {
 	body, valid := owned_body(p)
 	if !valid {
 		return {}
 	}
 	if body.is_string {
-		return {sval = padd(p, body.string_offset), slen = u32(body.string_length)}
+		return {text = padd(p, body.string_offset), text_len = u32(body.string_length)}
 	}
 	return entry_from_int(body.value)
 }
 
-lp_get_bytes :: proc "contextless" (p: [^]u8, intbuf: ^[LP_INTBUF_SIZE]u8) -> []u8 {
+lp_get_bytes :: proc "contextless" (p: [^]u8, intbuf: ^[DECIMAL_BUFFER_BYTES]u8) -> []u8 {
 	return entry_bytes(lp_get_entry(p), intbuf)
 }
 
 lp_get :: proc "contextless" (p: [^]u8, count: ^i64, intbuf: [^]u8) -> [^]u8 {
-	body, valid := owned_body(p)
-	if !valid {
+	body, decoded := owned_body(p)
+	text: [^]u8
+	measure := i64(body.string_length)
+	switch {
+	case !decoded:
 		return nil
-	}
-	if body.is_string {
-		if count != nil {
-			count^ = i64(body.string_length)
-		}
-		return padd(p, body.string_offset)
-	}
-	if intbuf != nil {
-		length := ll2string(intbuf, body.value)
-		if count != nil {
-			count^ = i64(length)
-		}
-		return intbuf
+	case body.is_string:
+		text = padd(p, body.string_offset)
+	case intbuf != nil:
+		text = intbuf
+		measure = i64(ll2string(intbuf, body.value))
+	case:
+		measure = body.value
 	}
 	if count != nil {
-		count^ = body.value
+		count^ = measure
 	}
-	return nil
+	return text
 }
 
 lp_get_value :: proc "contextless" (p: [^]u8, slen: ^u32, lval: ^i64) -> [^]u8 {

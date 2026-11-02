@@ -37,18 +37,18 @@ Field_Mark :: enum u8 {
 
 Field_Read :: bit_set[Field_Mark;u8]
 
-value_from_entry :: #force_inline proc "contextless" (e: lp.Entry) -> Value {
-	if e.sval == nil {
-		return Value{ival = e.lval, is_int = true}
+value_from_entry :: #force_inline proc "contextless" (e: lp.Element) -> Value {
+	if e.text == nil {
+		return Value{ival = e.number, is_int = true}
 	}
-	return Value{str = e.sval[:e.slen]}
+	return Value{str = e.text[:e.text_len]}
 }
 
 value_from_lp :: #force_inline proc "contextless" (p: [^]u8) -> Value {
 	return value_from_entry(lp.lp_get_entry(p))
 }
 
-value_bytes :: proc "contextless" (v: Value, buf: ^[lp.LP_INTBUF_SIZE]u8) -> []u8 {
+value_bytes :: proc "contextless" (v: Value, buf: ^[lp.DECIMAL_BUFFER_BYTES]u8) -> []u8 {
 	if !v.is_int {
 		return v.str
 	}
@@ -64,11 +64,11 @@ value_len :: #force_inline proc "contextless" (v: Value) -> int {
 }
 
 value_eq :: proc "contextless" (v: Value, s: []u8) -> bool {
-	buf: [lp.LP_INTBUF_SIZE]u8
+	buf: [lp.DECIMAL_BUFFER_BYTES]u8
 	return bytes_equal(value_bytes(v, &buf), s)
 }
 
-value_to_entry :: #force_inline proc "contextless" (v: Value) -> lp.Entry {
+value_to_entry :: #force_inline proc "contextless" (v: Value) -> lp.Element {
 	if v.is_int {
 		return lp.entry_from_int(v.ival)
 	}
@@ -157,7 +157,7 @@ length :: #force_inline proc(h: Hash) -> int {
 		return h.table.count
 	}
 	cached := lp.lp_get_num_elements(h.lp)
-	if cached != lp.LP_HDR_NUMELE_UNKNOWN {
+	if cached != lp.COUNT_UNTRACKED {
 		return int(cached) / pack_stride(h)
 	}
 	return int(lp.lp_length(h.lp)) / pack_stride(h)
@@ -183,7 +183,7 @@ convert :: proc(h: Hash, presize: int = 0) {
 	t := table_make(max(length(h), presize))
 	it := iterator(h)
 	for next(&it) {
-		fb, vb: [lp.LP_INTBUF_SIZE]u8
+		fb, vb: [lp.DECIMAL_BUFFER_BYTES]u8
 		b := table_add_new(t, value_bytes(current_field(&it), &fb), value_bytes(current_value(&it), &vb))
 		expiry := current_expire(&it)
 		if expiry != DEADLINE_UNSET {
@@ -303,7 +303,7 @@ set :: proc(h: Hash, field, value: []u8, keep_ttl := false) -> (updated: bool) {
 			h.lp = lp.lp_replace(h.lp, &vp, value)
 			updated = true
 		} else {
-			ent := [2]lp.Entry{lp.entry_from_bytes(field), lp.entry_from_bytes(value)}
+			ent := [2]lp.Element{lp.entry_from_bytes(field), lp.entry_from_bytes(value)}
 			h.lp = lp.lp_batch_append(h.lp, ent[:])
 		}
 	}

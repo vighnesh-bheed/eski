@@ -121,7 +121,7 @@ object_move :: proc "contextless" (type: Obj_Type, obj: rawptr, from: ^Db, to: ^
 }
 
 @(private)
-hash_sort_buf: [lp.LP_INTBUF_SIZE]u8
+hash_sort_buf: [lp.DECIMAL_BUFFER_BYTES]u8
 
 hash_sort_field :: proc(key: []u8, e: ^Entry, field: []u8) -> (val: []u8, ok: bool) {
 	h := ht.Hash(entry_object(e, .Hash))

@@ -10,7 +10,7 @@ expire_due_fields :: proc(h: Hash, now: u64, quota: int) -> int {
 			break
 		}
 		field: []u8
-		buf: [lp.LP_INTBUF_SIZE]u8
+		buf: [lp.DECIMAL_BUFFER_BYTES]u8
 		if h.encoding == .Hashtable {
 			field = blob_field(h.table.vol[0].blob)
 		} else {

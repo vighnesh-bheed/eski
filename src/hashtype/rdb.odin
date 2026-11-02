@@ -84,7 +84,7 @@ pack_row :: proc(h: Hash, field, value: []u8, deadline: u64, stride: int) {
 		lpex_add_new(h, field, value, deadline)
 		return
 	}
-	pair := [2]lp.Entry{lp.entry_from_bytes(field), lp.entry_from_bytes(value)}
+	pair := [2]lp.Element{lp.entry_from_bytes(field), lp.entry_from_bytes(value)}
 	h.lp = lp.lp_batch_append(h.lp, pair[:])
 }
 
@@ -110,10 +110,11 @@ admit_row :: proc(r: ^rdb.Reader, h: Hash, field, value: []u8, deadline: u64, la
 }
 
 load_rows :: proc(r: ^rdb.Reader, count: u64, layout: Row_Layout, deep: bool) -> Hash {
+	if !rdb.ok(r) {
+		return nil
+	}
 	if count == 0 {
 		r.status = .Empty_Key
-	}
-	if !rdb.ok(r) {
 		return nil
 	}
 	reserve := int(min(count, u64(RDB_HASH_INITIAL_RESERVE_MAX)))
@@ -153,10 +154,7 @@ load_rows :: proc(r: ^rdb.Reader, count: u64, layout: Row_Layout, deep: bool) ->
 
 rdb_load_plain :: proc(r: ^rdb.Reader, deep: bool) -> Hash {
 	layout := Row_Layout{stride = 2, headroom = 32, kind = rdb.TYPE_HASH, pack_limit = u64(hash_max_listpack_entries)}
-	if count := rdb.get_len(r); count != rdb.LENERR {
-		return load_rows(r, count, layout, deep)
-	}
-	return nil
+	return load_rows(r, rdb.get_len(r), layout, deep)
 }
 
 rdb_repack_loaded :: proc(h: Hash) -> bool {

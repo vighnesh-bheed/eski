@@ -124,7 +124,7 @@ check_against :: proc(z: zt.Zset, ref: ^[dynamic]Ref, what: string) {
 	check(zt.length(z) == len(ref), fmt.tprintf("%s length %d vs %d", what, zt.length(z), len(ref)))
 	it := zt.iter_make(z, false)
 	item: zt.Item
-	buf: [lp.LP_INTBUF_SIZE]u8
+	buf: [lp.DECIMAL_BUFFER_BYTES]u8
 	i := 0
 	for zt.iter_next(&it, &item) {
 		if i < len(ref) {
@@ -192,7 +192,7 @@ unit_structure :: proc() {
 				}
 			} else if zt.length(z) > 0 {
 				it := zt.peek(z, rng_below(&rng, 2) == 0)
-				buf: [lp.LP_INTBUF_SIZE]u8
+				buf: [lp.DECIMAL_BUFFER_BYTES]u8
 				mm := strings.clone(string(zt.item_bytes(&it, &buf)), context.temp_allocator)
 				zt.del(z, b(mm))
 				for r, i in ref {

@@ -153,7 +153,7 @@ model_pairs :: proc(z: zt.Zset) -> [dynamic]Pair {
 	out := make([dynamic]Pair, context.temp_allocator)
 	it := zt.iter_make(z, false)
 	item: zt.Item
-	buf: [lp.LP_INTBUF_SIZE]u8
+	buf: [lp.DECIMAL_BUFFER_BYTES]u8
 	for zt.iter_next(&it, &item) {
 		append(&out, Pair{strings.clone(string(zt.item_bytes(&item, &buf)), context.temp_allocator), transmute(u64)item.score})
 	}

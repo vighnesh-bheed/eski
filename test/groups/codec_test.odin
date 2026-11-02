@@ -40,7 +40,7 @@ transcript_dump_loads_groups_consumers_and_pending :: proc(t: ^testing.T) {
 	testing.expect(t, same_ids(pel_ids(g.pending), ids({4, 0}, {5, 0}, {7, 0}, {9, 0}, {10, 0})))
 	testing.expect(t, same_strings(consumer_names(g), {"alice", "bob", "carol", "dave", "erin"}))
 	erin := st.find_member(g, b("erin"))
-	testing.expect_value(t, erin.owned.numele, 5)
+	testing.expect_value(t, erin.owned.stored, 5)
 	testing.expect_value(t, erin.seen_ms, 1793090537365)
 	testing.expect_value(t, erin.active_ms, 1793090537365)
 	dave := st.find_member(g, b("dave"))

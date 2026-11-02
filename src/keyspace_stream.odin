@@ -414,7 +414,7 @@ keyspace_pel_claim :: proc(task: ^Keyspace_Task, b: ^Keyspace_Builder, s: sm.Str
 
 @(private = "file")
 keyspace_pel_autoclaim :: proc(task: ^Keyspace_Task, b: ^Keyspace_Builder, s: sm.Stream, group: ^sm.Group, consumer: ^sm.Member, args: ^sm.Autoclaim_Args) -> (stepped: int, ok: bool) {
-	backlog := int(group.pending.numele)
+	backlog := int(group.pending.stored)
 	room := backlog * 2 * size_of(sm.Autoclaim_Step)
 	if !ks.reserve_external(&keyspace_pool, room) {
 		task.failed = true
@@ -532,7 +532,7 @@ keyspace_stream_pending :: proc(task: ^Keyspace_Task) {
 
 keyspace_stream_pending_reply :: proc(task: ^Keyspace_Task, b: ^Keyspace_Builder, cg: ^sm.Group, args: ^sm.Xpending_Args) {
 	if args.justinfo {
-		keyspace_builder_integer(b, 4, '*'); keyspace_builder_integer(b, i64(cg.pending.numele))
+		keyspace_builder_integer(b, 4, '*'); keyspace_builder_integer(b, i64(cg.pending.stored))
 		first, last, any := sm.pel_first_last(cg.pending)
 		if !any {
 			keyspace_hash_null(task, b); keyspace_hash_null(task, b); keyspace_builder_text(b, "_\r\n" if task.client.resp == RESP3 else "*-1\r\n"); return
@@ -542,9 +542,9 @@ keyspace_stream_pending_reply :: proc(task: ^Keyspace_Task, b: ^Keyspace_Builder
 		it: rx.Iterator; rx.start(&it, cg.members); rx.seek(&it, "^")
 		for rx.next(&it) {
 			consumer := cast(^sm.Member)it.data
-			if consumer.owned.numele == 0 { continue }
+			if consumer.owned.stored == 0 { continue }
 			keyspace_builder_integer(b, 2, '*'); keyspace_builder_bulk(b, consumer.name)
-			digits: [24]u8; n := format_u64(raw_data(digits[:]), consumer.owned.numele); keyspace_builder_bulk(b, digits[:n]); listed += 1
+			digits: [24]u8; n := format_u64(raw_data(digits[:]), consumer.owned.stored); keyspace_builder_bulk(b, digits[:n]); listed += 1
 		}
 		rx.stop(&it); keyspace_builder_prefix(b, mark, '*', i64(listed)); return
 	}
@@ -590,13 +590,13 @@ keyspace_stream_info :: proc(task: ^Keyspace_Task, s: sm.Stream, b: ^Keyspace_Bu
 	if eq_nocase(sub, "consumers") {
 		if len(argv) != 4 { task.failed = true; return }
 		cg := sm.find_group(s, argv[3]); if cg == nil { task.failed = true; return }
-		keyspace_builder_integer(b, i64(cg.members.numele), '*')
+		keyspace_builder_integer(b, i64(cg.members.stored), '*')
 		it: rx.Iterator; rx.start(&it, cg.members); rx.seek(&it, "^")
 		for rx.next(&it) {
 			consumer := cast(^sm.Member)it.data
 			keyspace_stream_map(task, b, 4)
 			keyspace_stream_label(b, "name"); keyspace_builder_bulk(b, consumer.name)
-			keyspace_stream_label(b, "pending"); keyspace_builder_integer(b, i64(consumer.owned.numele))
+			keyspace_stream_label(b, "pending"); keyspace_builder_integer(b, i64(consumer.owned.stored))
 			keyspace_stream_label(b, "idle"); keyspace_builder_integer(b, task.now - consumer.seen_ms)
 			keyspace_stream_label(b, "inactive"); keyspace_builder_integer(b, -1 if consumer.active_ms == -1 else task.now - consumer.active_ms)
 		}
@@ -629,7 +629,7 @@ keyspace_stream_info :: proc(task: ^Keyspace_Task, s: sm.Stream, b: ^Keyspace_Bu
 }
 
 keyspace_stream_pel_limit :: proc "contextless" (pel: ^rx.Rax, count: i64) -> int {
-	return int(count) if count > 0 && u64(count) < pel.numele else int(pel.numele)
+	return int(count) if count > 0 && u64(count) < pel.stored else int(pel.stored)
 }
 
 keyspace_stream_info_groups :: proc(task: ^Keyspace_Task, b: ^Keyspace_Builder, s: sm.Stream, full: bool, count: i64) {
@@ -641,14 +641,14 @@ keyspace_stream_info_groups :: proc(task: ^Keyspace_Task, b: ^Keyspace_Builder, 
 		keyspace_stream_map(task, b, 7 if full else 6)
 		keyspace_stream_label(b, "name"); keyspace_builder_bulk(b, rx.key(&groups))
 		if !full {
-			keyspace_stream_label(b, "consumers"); keyspace_builder_integer(b, i64(cg.members.numele))
-			keyspace_stream_label(b, "pending"); keyspace_builder_integer(b, i64(cg.pending.numele))
+			keyspace_stream_label(b, "consumers"); keyspace_builder_integer(b, i64(cg.members.stored))
+			keyspace_stream_label(b, "pending"); keyspace_builder_integer(b, i64(cg.pending.stored))
 		}
 		keyspace_stream_label(b, "last-delivered-id"); keyspace_stream_id(b, cg.delivered)
 		keyspace_stream_label(b, "entries-read"); keyspace_stream_entries_read(task, b, cg)
 		keyspace_stream_label(b, "lag"); keyspace_stream_lag(task, b, s, cg)
 		if !full { continue }
-		keyspace_stream_label(b, "pel-count"); keyspace_builder_integer(b, i64(cg.pending.numele))
+		keyspace_stream_label(b, "pel-count"); keyspace_builder_integer(b, i64(cg.pending.stored))
 		keyspace_stream_label(b, "pending")
 		limit := keyspace_stream_pel_limit(cg.pending, count)
 		keyspace_builder_integer(b, i64(limit), '*')
@@ -659,7 +659,7 @@ keyspace_stream_info_groups :: proc(task: ^Keyspace_Task, b: ^Keyspace_Builder, 
 			keyspace_builder_bulk(b, nack.owner.name); keyspace_builder_integer(b, nack.sent_ms); keyspace_builder_integer(b, i64(nack.times))
 		}
 		rx.stop(&pending)
-		keyspace_stream_label(b, "consumers"); keyspace_builder_integer(b, i64(cg.members.numele), '*')
+		keyspace_stream_label(b, "consumers"); keyspace_builder_integer(b, i64(cg.members.stored), '*')
 		consumers: rx.Iterator; rx.start(&consumers, cg.members); rx.seek(&consumers, "^")
 		for rx.next(&consumers) {
 			consumer := cast(^sm.Member)consumers.data
@@ -667,7 +667,7 @@ keyspace_stream_info_groups :: proc(task: ^Keyspace_Task, b: ^Keyspace_Builder, 
 			keyspace_stream_label(b, "name"); keyspace_builder_bulk(b, consumer.name)
 			keyspace_stream_label(b, "seen-time"); keyspace_builder_integer(b, consumer.seen_ms)
 			keyspace_stream_label(b, "active-time"); keyspace_builder_integer(b, consumer.active_ms)
-			keyspace_stream_label(b, "pel-count"); keyspace_builder_integer(b, i64(consumer.owned.numele))
+			keyspace_stream_label(b, "pel-count"); keyspace_builder_integer(b, i64(consumer.owned.stored))
 			keyspace_stream_label(b, "pending")
 			n := keyspace_stream_pel_limit(consumer.owned, count); keyspace_builder_integer(b, i64(n), '*')
 			entries: rx.Iterator; rx.start(&entries, consumer.owned); rx.seek(&entries, "^")

@@ -210,10 +210,10 @@ run_model_stress :: proc(accurate: bool) {
 				v := gen_value(buf)
 				newp: [^]u8
 				if kind == 2 {
-					l = lp.lp_insert_string(l, v, p, lp.LP_BEFORE, &newp)
+					l = lp.lp_insert_string(l, v, p, lp.Placement.Before, &newp)
 					model_insert(&model, idx, v)
 				} else {
-					l = lp.lp_insert_string(l, v, p, lp.LP_AFTER, &newp)
+					l = lp.lp_insert_string(l, v, p, lp.Placement.After, &newp)
 					model_insert(&model, idx + 1, v)
 				}
 				check(newp != nil && lp.lp_compare(newp, v), "insert newp")
@@ -224,9 +224,9 @@ run_model_stress :: proc(accurate: bool) {
 				if lp.lp_rand() % 3 == 0 {
 					iv = iv * iv * (1 if lp.lp_rand() % 2 == 0 else -1)
 				}
-				tmp: [lp.LP_INTBUF_SIZE]u8
+				tmp: [lp.DECIMAL_BUFFER_BYTES]u8
 				sl := lp.ll2string(raw_data(tmp[:]), iv)
-				l = lp.lp_insert_integer(l, iv, p, lp.LP_AFTER, nil)
+				l = lp.lp_insert_integer(l, iv, p, lp.Placement.After, nil)
 				model_insert(&model, idx + 1, tmp[:sl])
 			case 5:
 				idx := int(lp.lp_rand()) % n
@@ -234,7 +234,7 @@ run_model_stress :: proc(accurate: bool) {
 				if lp.lp_rand() % 4 == 0 {
 					iv := i64(lp.lp_rand()) * i64(lp.lp_rand() % 5000) - 70000
 					l = lp.lp_replace_integer(l, &p, iv)
-					tmp: [lp.LP_INTBUF_SIZE]u8
+					tmp: [lp.DECIMAL_BUFFER_BYTES]u8
 					sl := lp.ll2string(raw_data(tmp[:]), iv)
 					model_remove(&model, idx, 1)
 					model_insert(&model, idx, tmp[:sl])
@@ -271,13 +271,13 @@ run_model_stress :: proc(accurate: bool) {
 				idx := int(lp.lp_rand()) % n
 				p := lp.lp_seek(l, i64(idx))
 				k := 1 + int(lp.lp_rand() % 5)
-				ents := make([]lp.Entry, k)
+				ents := make([]lp.Element, k)
 				store := make([dynamic][]u8)
 				for e in 0 ..< k {
 					if lp.lp_rand() % 3 == 0 {
 						iv := i64(lp.lp_rand()) - 1000000
 						ents[e] = lp.entry_from_int(iv)
-						tmp: [lp.LP_INTBUF_SIZE]u8
+						tmp: [lp.DECIMAL_BUFFER_BYTES]u8
 						sl := lp.ll2string(raw_data(tmp[:]), iv)
 						c := make([]u8, sl)
 						copy(c, tmp[:sl])
@@ -292,7 +292,7 @@ run_model_stress :: proc(accurate: bool) {
 				}
 				after := lp.lp_rand() % 2 == 0
 				newp: [^]u8
-				l = lp.lp_batch_insert(l, p, lp.LP_AFTER if after else lp.LP_BEFORE, ents, &newp)
+				l = lp.lp_batch_insert(l, p, lp.Placement.After if after else lp.Placement.Before, ents, &newp)
 				base := idx + 1 if after else idx
 				for e in 0 ..< k {
 					model_insert(&model, base + e, store[e])
@@ -305,7 +305,7 @@ run_model_stress :: proc(accurate: bool) {
 				delete(ents)
 			case 10:
 				k := 1 + int(lp.lp_rand() % 4)
-				ents := make([]lp.Entry, k)
+				ents := make([]lp.Element, k)
 				store := make([dynamic][]u8)
 				for e in 0 ..< k {
 					v := gen_value(buf[:4200])
@@ -365,7 +365,7 @@ run_model_stress :: proc(accurate: bool) {
 				free_all(context.temp_allocator)
 			}
 		}
-		intbuf: [lp.LP_INTBUF_SIZE]u8
+		intbuf: [lp.DECIMAL_BUFFER_BYTES]u8
 		p := lp.lp_last(l)
 		i := len(model) - 1
 		back_ok := true
@@ -403,7 +403,7 @@ run_corruption_fuzz :: proc(accurate: bool) {
 		lp.lp_free(l)
 		flips := 1 + int(lp.lp_rand() % 3)
 		for _ in 0 ..< flips {
-			pos := lp.LP_HDR_SIZE + int(lp.lp_rand()) % max(1, size - lp.LP_HDR_SIZE)
+			pos := lp.PACK_HEADER_BYTES + int(lp.lp_rand()) % max(1, size - lp.PACK_HEADER_BYTES)
 			if lp.lp_rand() % 8 == 0 {
 				pos = int(lp.lp_rand()) % size
 			}
@@ -417,14 +417,14 @@ run_corruption_fuzz :: proc(accurate: bool) {
 			accepted += 1
 			count := 0
 			p := lp.lp_first(c)
-			intbuf: [lp.LP_INTBUF_SIZE]u8
+			intbuf: [lp.DECIMAL_BUFFER_BYTES]u8
 			for p != nil {
 				_ = lp.lp_get_bytes(p, &intbuf)
 				count += 1
 				p = lp.lp_next(c, p)
 			}
 			hdr := lp.lp_get_num_elements(c)
-			ok = ok && (hdr == lp.LP_HDR_NUMELE_UNKNOWN || int(hdr) == count)
+			ok = ok && (hdr == lp.COUNT_UNTRACKED || int(hdr) == count)
 		} else {
 			rejected += 1
 		}

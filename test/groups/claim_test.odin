@@ -12,11 +12,11 @@ delivery_with_and_without_noack :: proc(t: ^testing.T) {
 	bc := st.add_member(s, g, b("b"), T0)
 	deliver(s, g, a, 2, false, T0 + 10)
 	testing.expect_value(t, a.active_ms, T0 + 10)
-	testing.expect_value(t, g.pending.numele, 2)
+	testing.expect_value(t, g.pending.stored, 2)
 	got := deliver(s, g, bc, 1, true, T0 + 20)
 	testing.expect(t, same_ids(got, ids({3, 0})))
-	testing.expect_value(t, g.pending.numele, 2)
-	testing.expect_value(t, bc.owned.numele, 0)
+	testing.expect_value(t, g.pending.stored, 2)
+	testing.expect_value(t, bc.owned.stored, 0)
 	testing.expect_value(t, bc.active_ms, -1)
 	testing.expect_value(t, g.delivered, id(3))
 	deliver(s, g, bc, 1, false, T0 + 30)
@@ -55,7 +55,7 @@ history_reads_see_deleted_entries :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, same_ids(live[:], ids({2, 0}, {3, 0})))
 	testing.expect(t, same_ids(gone[:], ids({1, 0})))
-	testing.expect_value(t, c.owned.numele, 3)
+	testing.expect_value(t, c.owned.stored, 3)
 	testing.expect(t, st.find_delivery(g, id(1)) != nil)
 }
 
@@ -122,14 +122,14 @@ claim_moves_idle_entries_and_honours_options :: proc(t: ^testing.T) {
 	xdel(s, id(2))
 	testing.expect_value(t, st.claim_entry(s, g, bob, id(2), &j, now), st.Claim_Result.Deleted)
 	testing.expect(t, st.find_delivery(g, id(2)) == nil)
-	testing.expect_value(t, alice.owned.numele, 0)
+	testing.expect_value(t, alice.owned.stored, 0)
 	testing.expect_value(t, st.claim_entry(s, g, bob, id(2), &f, now), st.Claim_Result.Skipped)
 	dup := claim_args(0)
 	st.claim_entry(s, g, bob, id(1), &dup, now)
 	st.claim_entry(s, g, bob, id(1), &dup, now)
 	testing.expect_value(t, st.find_delivery(g, id(1)).times, 4)
 	testing.expect(t, same_ids(pel_ids(bob.owned), ids({1, 0})))
-	testing.expect_value(t, g.pending.numele, 9)
+	testing.expect_value(t, g.pending.stored, 9)
 }
 
 autoclaim :: proc(s: st.Stream, g: ^st.Group, c: ^st.Member, start: st.ID, count: i64, minidle: i64, justid: bool, now: i64) -> (next: st.ID, claimed: []st.ID, deleted: []st.ID) {
@@ -180,8 +180,8 @@ autoclaim_scans_counts_and_reports_deleted :: proc(t: ^testing.T) {
 	testing.expect_value(t, next, id(0))
 	testing.expect(t, same_ids(cl, ids({1, 0}, {2, 0}, {3, 0}, {5, 0}, {7, 0}, {8, 0}, {9, 0})))
 	testing.expect(t, same_ids(dl, ids({6, 0})))
-	testing.expect_value(t, gina.owned.numele, 7)
-	testing.expect_value(t, frank.owned.numele, 0)
+	testing.expect_value(t, gina.owned.stored, 7)
+	testing.expect_value(t, frank.owned.stored, 0)
 	testing.expect_value(t, gina.active_ms, now)
 }
 
