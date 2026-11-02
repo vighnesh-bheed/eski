@@ -71,7 +71,7 @@ table_bank :: #force_inline proc "contextless" (t: ^Table, bank: int) -> ([^]Slo
 }
 
 slots_alloc :: proc "contextless" (cap: int) -> [^]Slot {
-	resize_require(cap >= TABLE_INITIAL_SIZE && cap <= max(int) / size_of(Slot) && cap & (cap - 1) == 0)
+	resize_require(cap >= TABLE_FLOOR_SLOTS && cap <= max(int) / size_of(Slot) && cap & (cap - 1) == 0)
 	n := cap * size_of(Slot)
 	if n <= SLOTS_HEAP_LIMIT {
 		p := runtime.heap_alloc(n, true)

@@ -763,7 +763,7 @@ persist_attach :: proc(e: ^Entry, key: []u8, v: Loaded_Value) {
 	case .Hash:
 		h := cast(ht.Hash)v.obj
 		h.acct = ht.memory_usage(h)
-		hash_copy_attach(e, key, v.obj, ht.min_expire(h, true))
+		hash_copy_attach(e, key, v.obj, ht.earliest_deadline(h))
 		hash_sync(e.db, h)
 	case .Stream:
 		s := cast(sm.Stream)v.obj
@@ -1772,7 +1772,7 @@ digest_hash :: proc(hv: ht.Hash) -> (total: Digest) {
 		digest_text(&h, ht.value_bytes(ht.current_field(&walk), cast(^[21]u8)&field_scratch))
 		digest_text(&h, ht.value_bytes(ht.current_value(&walk), cast(^[21]u8)&value_scratch))
 		deadline := ht.current_expire(&walk)
-		if deadline != ht.NO_FIELD_DEADLINE && deadline != 0 {
+		if deadline != ht.DEADLINE_UNSET && deadline != 0 {
 			digest_word(&h, u64(deadline))
 		}
 		digest_accumulate(&total, digest_close(&h))

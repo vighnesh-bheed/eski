@@ -23,20 +23,20 @@ convert_to_ex :: proc(h: Hash) {
 	h.encoding = .Listpack_Ex
 }
 
-lpex_locate :: proc(h: Hash, field: []u8) -> (fptr, vptr: [^]u8, ttl: i64, ok: bool) {
-	fptr = lp_find_field(h.lp, field, 2)
-	if fptr == nil {
+lpex_locate :: proc(h: Hash, field: []u8) -> (field_at, value_at: [^]u8, mark: i64, ok: bool) {
+	field_at = lp_find_field(h.lp, field, 2)
+	if field_at == nil {
 		return
 	}
-	vptr = pack_next(fptr)
-	if vptr == nil {
+	value_at = pack_next(field_at)
+	if value_at == nil {
 		return
 	}
-	t := pack_next(vptr)
+	t := pack_next(value_at)
 	if t == nil {
 		return
 	}
-	ttl = value_from_lp(t).ival
+	mark = value_from_lp(t).ival
 	ok = true
 	return
 }
@@ -44,19 +44,19 @@ lpex_locate :: proc(h: Hash, field: []u8) -> (fptr, vptr: [^]u8, ttl: i64, ok: b
 lpex_min_expire :: proc(zl: [^]u8) -> u64 {
 	field := pack_first(zl)
 	if field == nil {
-		return NO_FIELD_DEADLINE
+		return DEADLINE_UNSET
 	}
 	value := pack_next(field)
 	if value == nil {
-		return NO_FIELD_DEADLINE
+		return DEADLINE_UNSET
 	}
 	t := pack_next(value)
 	if t == nil {
-		return NO_FIELD_DEADLINE
+		return DEADLINE_UNSET
 	}
 	deadline := value_from_lp(t).ival
 	if deadline <= 0 {
-		return NO_FIELD_DEADLINE
+		return DEADLINE_UNSET
 	}
 	return u64(deadline)
 }
@@ -65,120 +65,63 @@ fields_with_expire :: proc(h: Hash) -> bool {
 	if h.encoding == .Hashtable {
 		return h.table.vol_len > 0
 	}
-	return h.encoding == .Listpack_Ex && lpex_min_expire(h.lp) != NO_FIELD_DEADLINE
+	return h.encoding == .Listpack_Ex && lpex_min_expire(h.lp) != DEADLINE_UNSET
 }
 
-min_expire :: proc(h: Hash, accurate: bool) -> u64 {
-	if !accurate {
-		return registered_expire(h)
-	}
-	switch h.encoding {
-	case .Hashtable:
-		return vol_min(h.table)
-	case .Listpack_Ex:
-		return lpex_min_expire(h.lp)
-	case .Listpack:
-		return NO_FIELD_DEADLINE
-	}
-	unreachable()
-}
-
-dump_min_expire :: proc "contextless" (h: Hash) -> u64 {
+earliest_deadline :: proc(h: Hash) -> u64 {
 	if h.encoding == .Hashtable {
 		return vol_min(h.table)
 	}
-	deadline := NO_FIELD_DEADLINE
 	if h.encoding == .Listpack_Ex {
-		deadline = registered_expire(h)
+		return lpex_min_expire(h.lp)
 	}
-	if deadline == NO_FIELD_DEADLINE {
-		return 0
-	}
-	return deadline
+	return DEADLINE_UNSET
 }
 
-lpex_dry_run :: proc(zl: [^]u8, now: u64) -> int {
-	n := 0
-	f := pack_first(zl)
-	for f != nil {
-		v := pack_next(f)
-		if v == nil {
-			break
-		}
-		t := pack_next(v)
-		if t == nil {
-			break
-		}
-		deadline := value_from_lp(t).ival
-		if deadline == 0 || u64(deadline) >= now {
-			break
-		}
-		n += 1
-		f = pack_next(t)
+dump_min_expire :: proc "contextless" (h: Hash) -> u64 {
+	booked := DEADLINE_UNSET
+	switch h.encoding {
+	case .Hashtable:
+		booked = vol_min(h.table)
+	case .Listpack_Ex:
+		booked = registered_expire(h)
+	case .Listpack:
 	}
-	return n
+	return 0 if booked == DEADLINE_UNSET else booked
 }
 
-lpex_add_internal :: proc(h: Hash, ent: ^[3]lp.Entry) {
-	total := 0
-	for entry in ent^ {
-		if entry.sval != nil {
-			total += int(entry.slen)
+pack_mark :: #force_inline proc "contextless" (deadline: u64) -> i64 {
+	return 0 if deadline == DEADLINE_UNSET else i64(deadline)
+}
+
+pack_slot_for :: proc(zl: [^]u8, mark: i64) -> [^]u8 {
+	if mark <= 0 {
+		return nil
+	}
+	for at := pack_first(zl); at != nil; at = pack_next(pack_next(pack_next(at))) {
+		held := value_from_lp(pack_next(pack_next(at))).ival
+		if held == 0 || mark <= held {
+			return at
 		}
 	}
-	storage := mem_alloc(max(total, 1))
-	defer mem_free(storage)
-	owned := ent^
-	position := 0
-	for entry, i in ent^ {
-		if entry.sval != nil {
-			n := int(entry.slen)
-			dst := storage[position:position + n]
-			copy(dst, entry.sval[:n])
-			owned[i] = lp.entry_from_bytes(dst)
-			position += n
-		}
-	}
-	deadline := owned[2].lval
-	f := pack_first(h.lp)
-	insert_at: [^]u8
-	if deadline > 0 {
-		for f != nil {
-			v := pack_next(f)
-			t := pack_next(v)
-			old := value_from_lp(t).ival
-			if old == 0 || deadline <= old {
-				insert_at = f
-				break
-			}
-			f = pack_next(t)
-		}
-	}
-	if insert_at == nil {
-		h.lp = lp.lp_batch_append(h.lp, owned[:])
-	} else {
-		h.lp = lp.lp_batch_insert(h.lp, insert_at, lp.LP_BEFORE, owned[:], nil)
-	}
+	return nil
 }
 
 lpex_add_new :: proc(h: Hash, field, value: []u8, expire_at: u64) {
-	entries := [3]lp.Entry{lp.entry_from_bytes(field), lp.entry_from_bytes(value), lp.entry_from_int(i64(expire_at))}
-	lpex_add_internal(h, &entries)
+	mark := pack_mark(expire_at)
+	tuple := [3]lp.Entry{lp.entry_from_bytes(field), lp.entry_from_bytes(value), lp.entry_from_int(mark)}
+	if slot := pack_slot_for(h.lp, mark); slot != nil {
+		h.lp = lp.lp_batch_insert(h.lp, slot, lp.LP_BEFORE, tuple[:], nil)
+	} else {
+		h.lp = lp.lp_batch_append(h.lp, tuple[:])
+	}
 }
 
-lpex_update_expiry :: proc(h: Hash, field: []u8, fptr, vptr: [^]u8, expire_at: u64) {
-	fbuf, vbuf: [lp.LP_INTBUF_SIZE]u8
-	old_field := value_bytes(value_from_lp(fptr), &fbuf)
-	old_value := value_bytes(value_from_lp(vptr), &vbuf)
-	storage := mem_alloc(max(len(old_field) + len(old_value), 1))
-	defer mem_free(storage)
-	f := storage[:len(old_field)]
-	v := storage[len(old_field):len(old_field) + len(old_value)]
-	copy(f, old_field)
-	copy(v, old_value)
-	p := fptr
-	h.lp = lp.lp_delete_range_with_entry(h.lp, &p, 3)
-	lpex_add_new(h, f, v, expire_at)
+pack_retime :: proc(h: Hash, field_at: [^]u8, deadline: u64) {
+	spelled: [2][lp.LP_INTBUF_SIZE]u8
+	field := value_bytes(value_from_lp(field_at), &spelled[0])
+	value := value_bytes(value_from_lp(pack_next(field_at)), &spelled[1])
+	lpex_replace_value(h, field_at, field, value, deadline)
 }
 
 lpex_replace_value :: proc(h: Hash, fptr: [^]u8, field, value: []u8, expire_at: u64) {

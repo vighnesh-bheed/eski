@@ -293,15 +293,15 @@ compare_dump :: proc(cs: ^Compare_State, idx: int, args: [][]u8, rr: Reply) {
 		}
 		ok = ok && j == len(body) && version_ok && h.encoding == .Hashtable
 		want := make([dynamic]Item, context.temp_allocator)
-		mmin := ht.min_expire(h, true)
+		mmin := ht.earliest_deadline(h)
 		if h.encoding == .Hashtable {
 			it := ht.iterator(h)
 			for ht.next(&it) {
 				e := ht.current_expire(&it)
-				append(&want, Item{value_string(ht.current_field(&it)), value_string(ht.current_value(&it)), i64(e) if e != ht.NO_FIELD_DEADLINE else -1})
+				append(&want, Item{value_string(ht.current_field(&it)), value_string(ht.current_value(&it)), i64(e) if e != ht.DEADLINE_UNSET else -1})
 			}
 		}
-		ok = ok && with_ttl == (mmin != ht.NO_FIELD_DEADLINE)
+		ok = ok && with_ttl == (mmin != ht.DEADLINE_UNSET)
 		if with_ttl {
 			ok = ok && near(i64(rmin), i64(mmin), TOLERANCE_MS)
 		}

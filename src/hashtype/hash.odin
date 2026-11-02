@@ -2,8 +2,6 @@ package hashtype
 
 import lp "../listpack"
 
-OBJ_HASH_KEY :: 1
-OBJ_HASH_VALUE :: 2
 HASH_MAX_LISTPACK_ENTRIES_DEFAULT :: 512
 HASH_MAX_LISTPACK_VALUE_DEFAULT :: 64
 hash_max_listpack_entries: int = HASH_MAX_LISTPACK_ENTRIES_DEFAULT
@@ -31,12 +29,13 @@ Value :: struct {
 	is_int: bool,
 }
 
-Get_Result :: enum u8 {
-	Ok,
-	Not_Found,
-	Expired,
-	Expired_Hash,
+Field_Mark :: enum u8 {
+	Live,
+	Reaped,
+	Emptied,
 }
+
+Field_Read :: bit_set[Field_Mark;u8]
 
 value_from_entry :: #force_inline proc "contextless" (e: lp.Entry) -> Value {
 	if e.sval == nil {
@@ -143,7 +142,7 @@ listpack_bytes :: proc "contextless" (h: Hash) -> []u8 {
 	return lp.lp_view(h.lp)
 }
 
-tuple_len :: #force_inline proc "contextless" (h: Hash) -> int {
+pack_stride :: #force_inline proc "contextless" (h: Hash) -> int {
 	if h.encoding == .Listpack_Ex {
 		return 3
 	}
@@ -159,9 +158,9 @@ length :: #force_inline proc(h: Hash) -> int {
 	}
 	cached := lp.lp_get_num_elements(h.lp)
 	if cached != lp.LP_HDR_NUMELE_UNKNOWN {
-		return int(cached) / tuple_len(h)
+		return int(cached) / pack_stride(h)
 	}
-	return int(lp.lp_length(h.lp)) / tuple_len(h)
+	return int(lp.lp_length(h.lp)) / pack_stride(h)
 }
 
 length_live :: proc(h: Hash, now: u64) -> int {
@@ -187,7 +186,7 @@ convert :: proc(h: Hash, presize: int = 0) {
 		fb, vb: [lp.LP_INTBUF_SIZE]u8
 		b := table_add_new(t, value_bytes(current_field(&it), &fb), value_bytes(current_value(&it), &vb))
 		expiry := current_expire(&it)
-		if expiry != NO_FIELD_DEADLINE {
+		if expiry != DEADLINE_UNSET {
 			vol_set(t, b, expiry)
 		}
 	}
@@ -197,23 +196,20 @@ convert :: proc(h: Hash, presize: int = 0) {
 	h.encoding = .Hashtable
 }
 
-try_conversion :: proc(h: Hash, args: [][]u8) {
-	if h.encoding == .Hashtable {
-		return
-	}
-	if len(args) / 2 > hash_max_listpack_entries {
-		convert(h, length(h) + len(args) / 2)
-		return
-	}
-	bytes := 0
+PACK_ENTRY_HEADROOM :: 16
+
+pack_admits :: proc(h: Hash, args: [][]u8) -> bool {
+	widest, growth := 0, 0
 	for arg in args {
-		if len(arg) > hash_max_listpack_value {
-			convert(h, length(h) + len(args) / 2)
-			return
-		}
-		bytes += len(arg) + 16
+		widest = max(widest, len(arg))
+		growth += len(arg) + PACK_ENTRY_HEADROOM
 	}
-	if !lp.lp_safe_to_add(h.lp, bytes) {
+	pairs := len(args) / 2
+	return pairs <= hash_max_listpack_entries && widest <= hash_max_listpack_value && lp.lp_safe_to_add(h.lp, growth)
+}
+
+try_conversion :: proc(h: Hash, args: [][]u8) {
+	if h.encoding != .Hashtable && !pack_admits(h, args) {
 		convert(h, length(h) + len(args) / 2)
 	}
 }
@@ -230,7 +226,7 @@ get_raw :: proc(h: Hash, field: []u8) -> (v: Value, expire: u64, found: bool) {
 	} else if h.encoding == .Listpack_Ex {
 		_, vp, ttl, ok := lpex_locate(h, field)
 		if ok {
-			exp := NO_FIELD_DEADLINE
+			exp := DEADLINE_UNSET
 			if ttl != 0 {
 				exp = u64(ttl)
 			}
@@ -238,43 +234,47 @@ get_raw :: proc(h: Hash, field: []u8) -> (v: Value, expire: u64, found: bool) {
 		}
 	} else {
 		if p := lp_find_field(h.lp, field, 1); p != nil {
-			return value_from_lp(pack_next(p)), NO_FIELD_DEADLINE, true
+			return value_from_lp(pack_next(p)), DEADLINE_UNSET, true
 		}
 	}
-	return {}, NO_FIELD_DEADLINE, false
+	return {}, DEADLINE_UNSET, false
 }
 
-get :: proc(h: Hash, field: []u8, now: u64, delete_expired := true) -> (v: Value, res: Get_Result) {
-	val, expiry, found := get_raw(h, field)
-	if !found {
-		return {}, .Not_Found
+reap_field :: proc(h: Hash, field: []u8) -> Field_Read {
+	notify_field_expired(h, field)
+	delete_field(h, field)
+	if length(h) > 0 {
+		return {.Reaped}
 	}
-	if expiry != NO_FIELD_DEADLINE && expiry < now {
-		if !delete_expired {
-			return {}, .Not_Found
-		}
-		notify_field_expired(h, field)
-		delete_field(h, field)
-		if length(h) == 0 {
-			registry_remove(h)
-			return {}, .Expired_Hash
-		}
-		return {}, .Expired
-	}
-	return val, .Ok
+	registry_remove(h)
+	return {.Reaped, .Emptied}
 }
 
-exists :: proc(h: Hash, field: []u8, now: u64, delete_expired := true) -> (bool, Get_Result) {
-	_, res := get(h, field, now, delete_expired)
-	return res == .Ok, res
+get :: proc(h: Hash, field: []u8, now: u64, delete_expired := true) -> (v: Value, read: Field_Read) {
+	stored, deadline, present := get_raw(h, field)
+	switch {
+	case !present:
+		return
+	case deadline >= now:
+		return stored, {.Live}
+	case delete_expired:
+		read = reap_field(h, field)
+	}
+	return
 }
 
-field_strlen :: proc(h: Hash, field: []u8, now: u64, delete_expired := true) -> (int, Get_Result) {
-	v, res := get(h, field, now, delete_expired)
-	if res != .Ok {
-		return 0, res
+exists :: proc(h: Hash, field: []u8, now: u64, delete_expired := true) -> (bool, Field_Read) {
+	_, read := get(h, field, now, delete_expired)
+	return .Live in read, read
+}
+
+field_strlen :: proc(h: Hash, field: []u8, now: u64, delete_expired := true) -> (n: int, read: Field_Read) {
+	v: Value
+	v, read = get(h, field, now, delete_expired)
+	if .Live in read {
+		n = value_len(v)
 	}
-	return value_len(v), res
+	return
 }
 
 set :: proc(h: Hash, field, value: []u8, keep_ttl := false) -> (updated: bool) {
@@ -324,11 +324,11 @@ hset :: proc(h: Hash, args: [][]u8) -> (created: int) {
 }
 
 hsetnx :: proc(h: Hash, field, value: []u8, now: u64) -> bool {
-	_, res := get(h, field, now)
-	if res == .Ok {
+	_, read := get(h, field, now)
+	if .Live in read {
 		return false
 	}
-	if res == .Expired_Hash {
+	if .Emptied in read {
 		reset(h)
 	}
 	set(h, field, value)
@@ -340,9 +340,9 @@ delete_field :: proc(h: Hash, field: []u8) -> bool {
 	if h.encoding == .Hashtable {
 		removed = table_delete(h.table, field)
 	} else {
-		p := lp_find_field(h.lp, field, u32(tuple_len(h) - 1))
+		p := lp_find_field(h.lp, field, u32(pack_stride(h) - 1))
 		if p != nil {
-			h.lp = lp.lp_delete_range_with_entry(h.lp, &p, u64(tuple_len(h)))
+			h.lp = lp.lp_delete_range_with_entry(h.lp, &p, u64(pack_stride(h)))
 			removed = true
 		}
 	}
@@ -354,7 +354,7 @@ hdel :: proc(h: Hash, fields: [][]u8) -> (deleted: int, emptied: bool) {
 	for field in fields {
 		if !volatile && is_registered(h) {
 			_, expiry, found := get_raw(h, field)
-			volatile = found && expiry != NO_FIELD_DEADLINE
+			volatile = found && expiry != DEADLINE_UNSET
 		}
 		if delete_field(h, field) {
 			deleted += 1
@@ -367,29 +367,27 @@ hdel :: proc(h: Hash, fields: [][]u8) -> (deleted: int, emptied: bool) {
 	return
 }
 
-duplicate :: proc(h: Hash) -> (d: Hash, min_expire: u64) {
-	d = create()
-	min_expire = registered_expire(h)
-	if h.encoding != .Hashtable {
-		lp.lp_free(d.lp)
-		d.lp = lp.lp_dup(h.lp)
-		d.encoding = h.encoding
-		if h.encoding == .Listpack_Ex {
-			ensure_meta(d)
-		}
-		return
+clone_table :: proc(h: Hash) -> ^Table {
+	copied := table_make(length(h))
+	rows := iterator(h)
+	for next(&rows) {
+		blob := table_add_new(copied, blob_field(rows.blob), blob_value(rows.blob))
+		vol_set(copied, blob, current_expire(&rows))
 	}
-	convert(d, length(h))
-	if h.hfe != nil {
+	return copied
+}
+
+duplicate :: proc(h: Hash) -> (d: Hash, min_expire: u64) {
+	d = cast(Hash)mem_alloc(size_of(Hash_Object))
+	d.encoding = h.encoding
+	switch h.encoding {
+	case .Hashtable:
+		d.table = clone_table(h)
+	case .Listpack, .Listpack_Ex:
+		d.lp = lp.lp_dup(h.lp)
+	}
+	if h.encoding == .Listpack_Ex || (h.encoding == .Hashtable && h.hfe != nil) {
 		ensure_meta(d)
 	}
-	it := iterator(h)
-	for next(&it) {
-		b := table_add_new(d.table, current_field(&it).str, current_value(&it).str)
-		expiry := current_expire(&it)
-		if expiry != NO_FIELD_DEADLINE {
-			vol_set(d.table, b, expiry)
-		}
-	}
-	return
+	return d, registered_expire(h)
 }

@@ -24,8 +24,8 @@ private_hash_expiry_trace_owns_field_bytes_and_detaches_context :: proc(t: ^test
 		trace := Keyspace_Hash_Trace{builder = {bytes = bytes[:]}, registry = &registry}
 		registry.owner = &trace
 		registry.expired_hook = keyspace_hash_trace_expired
-		_, result := ht.get(h, first, 101)
-		testing.expect_value(t, result, ht.Get_Result.Expired)
+		_, read := ht.get(h, first, 101)
+		testing.expect_value(t, read, ht.Field_Read{.Reaped})
 		ht.expire_if_needed(h, 101)
 		testing.expect_value(t, trace.count, 2)
 		testing.expect_value(t, string(trace.builder.bytes[:trace.builder.used]), "$5\r\nfirst\r\n$6\r\nsecond\r\n")

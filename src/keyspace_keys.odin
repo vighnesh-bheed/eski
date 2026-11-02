@@ -92,7 +92,7 @@ keyspace_record_payload :: proc(task: ^Keyspace_Task, r: ^ks.Record) -> ^ks.Valu
 	if r.kind == u8(Obj_Type.Hash) {
 		hash = cast(ht.Hash)r.object
 		minimum := keyspace_hash_binding_minimum(hash, r.hash_minimum)
-		if minimum != ht.NO_FIELD_DEADLINE { ht.registry_add(&registry, hash, minimum) }
+		if minimum != ht.DEADLINE_UNSET { ht.registry_add(&registry, hash, minimum) }
 	}
 	defer { if hash != nil { keyspace_hash_detach(hash) } }
 	writer: rdb.Writer
@@ -291,8 +291,8 @@ keyspace_restore_execute :: proc(task: ^Keyspace_Task) {
 		work := Keyspace_Object_Work{kind = loaded.kind, object = loaded.object, charge = held}
 		loaded.object, held = nil, 0
 		if work.kind == .Hash {
-			earliest := ht.min_expire(cast(ht.Hash)work.object, true)
-			if earliest != ht.NO_FIELD_DEADLINE { work.hash_minimum = earliest }
+			earliest := ht.earliest_deadline(cast(ht.Hash)work.object)
+			if earliest != ht.DEADLINE_UNSET { work.hash_minimum = earliest }
 		}
 		defer keyspace_object_discard(&work)
 		if !keyspace_object_commit(task, r, &work, true) {
