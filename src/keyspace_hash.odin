@@ -138,7 +138,7 @@ keyspace_hash_execute :: proc(job: ^ks.Job) {
 		if !keyspace_builder_finish(task, &b) { return }
 	case .Hexpire, .Hpexpire, .Hexpireat, .Hpexpireat, .Httl, .Hpttl, .Hexpiretime, .Hpexpiretime, .Hpersist:
 		valid, modified := keyspace_hash_expiry(task, h, &registry, &b)
-		if !valid { return }; changed = modified
+		if !valid { return }; changed = modified || op <= .Hpexpireat
 	}
 	work.hash_minimum = keyspace_hash_registered_minimum(h)
 	keyspace_hash_detach(h)

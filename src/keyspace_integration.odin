@@ -418,8 +418,16 @@ keyspace_publish_completions :: proc(replay: bool) {
 	}
 }
 
+keyspace_fence_idle :: #force_inline proc "contextless" () -> bool {
+	return keyspace_records == 0 && keyspace_pending == 0 && keyspace_completion_count == 0 && len(keyspace_retries) == 0 && !keyspace_replay_needed && keyspace_publish_sequence == keyspace_next_sequence
+}
+
 keyspace_fence :: proc() {
 	if !keyspace_initialized || keyspace_in_fence {
+		return
+	}
+	if keyspace_fence_idle() {
+		keyspace_timed = false
 		return
 	}
 	keyspace_in_fence = true
