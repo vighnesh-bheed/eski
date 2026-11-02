@@ -215,5 +215,5 @@ xreadgroup_option_parsing :: proc(t: ^testing.T) {
 		testing.expectf(t, err == c.err, "%s: err %v want %v", c.line, err, c.err)
 	}
 	a, _ := st.parse_xread_args(argv_of("XREADGROUP GROUP g c5 GROUP h c6 NOACK COUNT -3 STREAMS q r 0 >"), T0, true)
-	testing.expect(t, a.group_arg == 5 && a.noack && a.count == 0 && a.streams_count == 2 && a.timeout == -1)
+	testing.expect(t, a.group_arg == 5 && a.noack && a.count == 0 && a.key_count == 2 && a.timeout == -1)
 }

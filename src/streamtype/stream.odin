@@ -1,5 +1,6 @@
 package streamtype
 
+import integer "../integer"
 import lp "../listpack"
 import rx "../rax"
 import "base:intrinsics"
@@ -19,7 +20,7 @@ LISTPACK_MAX_PRE_ALLOCATE :: 4096
 LISTPACK_MAX_SIZE :: 1 << 30
 NODE_MAX_BYTES_DEFAULT :: 4096
 NODE_MAX_ENTRIES_DEFAULT :: 100
-ID_STR_LEN :: 44
+ID_TEXT_MAX :: 41
 BATCH_MAX :: 64
 
 stream_node_max_bytes: int = NODE_MAX_BYTES_DEFAULT
@@ -50,8 +51,8 @@ Stream :: ^Stream_Object
 
 Append_Result :: enum u8 {
 	Ok,
-	Edom,
-	Erange,
+	Id_Not_Greater,
+	Entry_Too_Large,
 }
 
 @(private)
@@ -166,7 +167,7 @@ format_u64 :: proc "contextless" (dst: [^]u8, v: u64) -> int #no_bounds_check {
 	return n
 }
 
-format_id :: proc "contextless" (buf: ^[ID_STR_LEN]u8, id: ID) -> []u8 {
+format_id :: proc "contextless" (buf: ^[ID_TEXT_MAX]u8, id: ID) -> []u8 {
 	p := ([^]u8)(&buf[0])
 	n := format_u64(p, id.ms)
 	buf[n] = '-'
@@ -184,38 +185,6 @@ read_le :: #force_inline proc "contextless" (p: [^]u8, width: int) -> u64 #no_bo
 	return v
 }
 
-@(private)
-parse_int_text :: proc "contextless" (s: []u8) -> (i64, bool) #no_bounds_check {
-	if len(s) == 0 || len(s) > 20 {
-		return 0, false
-	}
-	if len(s) == 1 && s[0] == '0' {
-		return 0, true
-	}
-	neg := s[0] == '-'
-	i := neg ? 1 : 0
-	if i >= len(s) || s[i] < '1' || s[i] > '9' {
-		return 0, false
-	}
-	limit: u64 = neg ? u64(1) << 63 : u64(max(i64))
-	acc: u64
-	for ; i < len(s); i += 1 {
-		c := s[i]
-		if c < '0' || c > '9' {
-			return 0, false
-		}
-		d := u64(c - '0')
-		if acc > (limit - d) / 10 {
-			return 0, false
-		}
-		acc = acc * 10 + d
-	}
-	if neg {
-		return i64(-i128(acc)), true
-	}
-	return i64(acc), true
-}
-
 lp_get_integer :: #force_inline proc "contextless" (ele: [^]u8) -> i64 {
 	return elem_int(ele)
 }
@@ -227,18 +196,18 @@ elem_int :: proc "contextless" (p: [^]u8) -> i64 #no_bounds_check {
 	case tag < 0x80:
 		return i64(tag)
 	case tag < 0xC0:
-		v, _ := parse_int_text(p[1:1 + int(tag & 0x3F)])
+		v, _ := integer.parse_i64(p[1:1 + int(tag & 0x3F)])
 		return v
 	case tag < 0xE0:
 		v := i64(u16(tag & 0x1F) << 8 | u16(p[1]))
 		return v >= 4096 ? v - 8192 : v
 	case tag < 0xF0:
 		n := int(tag & 0x0F) << 8 | int(p[1])
-		v, _ := parse_int_text(p[2:2 + n])
+		v, _ := integer.parse_i64(p[2:2 + n])
 		return v
 	case tag == 0xF0:
 		n := int(read_le(&p[1], 4))
-		v, _ := parse_int_text(p[5:5 + n])
+		v, _ := integer.parse_i64(p[5:5 + n])
 		return v
 	case tag == 0xF1:
 		return i64(i16(u16(read_le(&p[1], 2))))
@@ -781,7 +750,7 @@ write_new_node :: proc "contextless" (dst: [^]u8, fv: [][]u8, size: int, elems: 
 append_item :: proc(s: Stream, fv: [][]u8, use_id: ^ID, seq_given: bool, now_ms: u64) -> (added: ID, res: Append_Result) #no_bounds_check {
 	nfields := len(fv) / 2
 	if nfields == 0 {
-		return {}, .Erange
+		return {}, .Entry_Too_Large
 	}
 	id: ID
 	if use_id == nil {
@@ -789,7 +758,7 @@ append_item :: proc(s: Stream, fv: [][]u8, use_id: ^ID, seq_given: bool, now_ms:
 	} else if !seq_given {
 		if use_id.ms == s.last_id.ms {
 			if s.last_id.seq == max(u64) {
-				return {}, .Edom
+				return {}, .Id_Not_Greater
 			}
 			id = ID{use_id.ms, s.last_id.seq + 1}
 		} else {
@@ -799,14 +768,14 @@ append_item :: proc(s: Stream, fv: [][]u8, use_id: ^ID, seq_given: bool, now_ms:
 		id = use_id^
 	}
 	if compare_id(id, s.last_id) <= 0 {
-		return {}, .Edom
+		return {}, .Id_Not_Greater
 	}
 	raw := 0
 	for a in fv {
 		raw += len(a)
 	}
 	if raw > LISTPACK_MAX_SIZE {
-		return {}, .Erange
+		return {}, .Entry_Too_Large
 	}
 	tail: [^]u8
 	tail_key: [16]u8
@@ -837,7 +806,7 @@ append_item :: proc(s: Stream, fv: [][]u8, use_id: ^ID, seq_given: bool, now_ms:
 		size, elems := new_node_size(fv)
 		total := HDR + size + 1
 		if total > LISTPACK_MAX_SIZE {
-			return {}, .Erange
+			return {}, .Entry_Too_Large
 		}
 		reserve := total
 		pre := LISTPACK_MAX_PRE_ALLOCATE
@@ -879,7 +848,7 @@ append_item :: proc(s: Stream, fv: [][]u8, use_id: ^ID, seq_given: bool, now_ms:
 		elems += 1
 		total := lp_total(tail)
 		if total + esize + 16 > LISTPACK_MAX_SIZE {
-			return {}, .Erange
+			return {}, .Entry_Too_Large
 		}
 		need := total + esize + 16
 		if need > usable(tail) {
@@ -919,23 +888,26 @@ append_item :: proc(s: Stream, fv: [][]u8, use_id: ^ID, seq_given: bool, now_ms:
 	return id, .Ok
 }
 
-Trim_Strategy :: enum u8 {
-	None,
-	Maxlen,
-	Minid,
+Trim_Rule :: enum u8 {
+	Off,
+	Max_Len,
+	Min_Id,
 }
 
-Add_Trim_Args :: struct {
-	id:                    ID,
-	id_given:              bool,
-	seq_given:             bool,
-	no_mkstream:           bool,
-	trim_strategy:         Trim_Strategy,
-	trim_strategy_arg_idx: int,
-	approx_trim:           bool,
-	limit:                 i64,
-	maxlen:                i64,
-	minid:                 ID,
+Trim_Spec :: struct {
+	rule:    Trim_Rule,
+	nearly:  bool,
+	max_len: i64,
+	min_id:  ID,
+	limit:   i64,
+}
+
+Xadd_Spec :: struct {
+	trim:       Trim_Spec,
+	id_mode:    Xadd_Id_Mode,
+	id:         ID,
+	nomkstream: bool,
+	fields_at:  int,
 }
 
 @(private)
@@ -953,12 +925,12 @@ node_counts_store :: proc "contextless" (s: Stream, node: ^[^]u8, count: i64, de
 	node_rewrite_int(s, node, HDR, count)
 }
 
-trim :: proc(s: Stream, args: ^Add_Trim_Args) -> i64 #no_bounds_check {
-	if args.trim_strategy == .None || s.rax.numele == 0 {
+trim :: proc(s: Stream, args: ^Trim_Spec) -> i64 #no_bounds_check {
+	if args.rule == .Off || s.rax.numele == 0 {
 		return 0
 	}
-	maxlen := args.trim_strategy == .Maxlen
-	if maxlen && args.maxlen < 0 {
+	maxlen := args.rule == .Max_Len
+	if maxlen && args.max_len < 0 {
 		return 0
 	}
 	removed: i64
@@ -967,7 +939,7 @@ trim :: proc(s: Stream, args: ^Add_Trim_Args) -> i64 #no_bounds_check {
 	rx.start(&it, s.rax)
 	rx.seek(&it, "^")
 	for rx.next(&it) {
-		if maxlen && s.length <= u64(args.maxlen) {
+		if maxlen && s.length <= u64(args.max_len) {
 			break
 		}
 		node := ([^]u8)(it.data)
@@ -982,10 +954,10 @@ trim :: proc(s: Stream, args: ^Add_Trim_Args) -> i64 #no_bounds_check {
 		if h.entries[0] == EOF {
 			whole = true
 		} else if maxlen {
-			whole = s.length - u64(h.count) >= u64(args.maxlen)
+			whole = s.length - u64(h.count) >= u64(args.max_len)
 		} else {
 			last := entry_id_at(entry_last(node), master)
-			whole = compare_id(last, args.minid) < 0
+			whole = compare_id(last, args.min_id) < 0
 		}
 		if whole {
 			s.length -= u64(h.count)
@@ -993,7 +965,7 @@ trim :: proc(s: Stream, args: ^Add_Trim_Args) -> i64 #no_bounds_check {
 			node_remove(s, key[:], node)
 			continue
 		}
-		if args.approx_trim {
+		if args.nearly {
 			break
 		}
 		count := h.count
@@ -1004,11 +976,11 @@ trim :: proc(s: Stream, args: ^Add_Trim_Args) -> i64 #no_bounds_check {
 			next := entry_skip(e, h.nfields)
 			if flags & ITEM_FLAG_DELETED == 0 {
 				if maxlen {
-					if s.length <= u64(args.maxlen) {
+					if s.length <= u64(args.max_len) {
 						break
 					}
 				} else {
-					if compare_id(entry_id_at(e, master), args.minid) >= 0 {
+					if compare_id(entry_id_at(e, master), args.min_id) >= 0 {
 						break
 					}
 				}

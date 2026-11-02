@@ -1,5 +1,6 @@
 package streams_test
 
+import decimal "../../src/decimal"
 import st "../../src/streamtype"
 import "core:strings"
 import "core:testing"
@@ -55,7 +56,8 @@ id_parsing_for_xadd :: proc(t: ^testing.T) {
 		{"-05", false, {}, false},
 	}
 	for c in cases {
-		id, seq_given, ok := st.parse_id(bytes_of(c.arg), 0, true, true)
+		id, mode, ok := st.parse_xadd_id(bytes_of(c.arg))
+		seq_given := mode == .Explicit
 		testing.expectf(t, ok == c.ok, "parse %q ok=%v want %v", c.arg, ok, c.ok)
 		if ok && c.ok {
 			testing.expectf(t, id == c.id, "parse %q id=%v want %v", c.arg, id, c.id)
@@ -66,29 +68,29 @@ id_parsing_for_xadd :: proc(t: ^testing.T) {
 
 @(test)
 id_parsing_ranges :: proc(t: ^testing.T) {
-	id, ok := st.parse_strict_id(bytes_of("-"))
+	id, ok := st.parse_exact_id(bytes_of("-"))
 	testing.expect(t, !ok)
-	id, ok = st.parse_strict_id(bytes_of("12-3"))
+	id, ok = st.parse_exact_id(bytes_of("12-3"))
 	testing.expect(t, ok && id == st.ID{12, 3})
-	full, _, fok := st.parse_id(bytes_of("-"), 0, false, false)
+	full, fok := st.parse_id_or_sentinel(bytes_of("-"), 0)
 	testing.expect(t, fok && full == st.ID_MIN)
-	full, _, fok = st.parse_id(bytes_of("+"), 0, false, false)
+	full, fok = st.parse_id_or_sentinel(bytes_of("+"), 0)
 	testing.expect(t, fok && full == st.ID_MAX)
-	full, _, fok = st.parse_id(bytes_of("9"), MAXU, false, false)
+	full, fok = st.parse_id_or_sentinel(bytes_of("9"), MAXU)
 	testing.expect(t, fok && full == st.ID{9, MAXU})
-	excl, ex, eok := st.parse_interval_id(bytes_of("(5"), 0)
+	excl, ex, eok := st.parse_range_bound(bytes_of("(5"), 0)
 	testing.expect(t, eok && ex && excl == st.ID{5, 0})
-	excl, ex, eok = st.parse_interval_id(bytes_of("(5"), MAXU)
+	excl, ex, eok = st.parse_range_bound(bytes_of("(5"), MAXU)
 	testing.expect(t, eok && ex && excl == st.ID{5, MAXU})
-	_, _, eok = st.parse_interval_id(bytes_of("("), 0)
+	_, _, eok = st.parse_range_bound(bytes_of("("), 0)
 	testing.expect(t, !eok)
-	_, _, eok = st.parse_interval_id(bytes_of("(-"), 0)
+	_, _, eok = st.parse_range_bound(bytes_of("(-"), 0)
 	testing.expect(t, !eok)
-	_, _, eok = st.parse_interval_id(bytes_of("(+"), 0)
+	_, _, eok = st.parse_range_bound(bytes_of("(+"), 0)
 	testing.expect(t, !eok)
-	_, _, eok = st.parse_interval_id(bytes_of("((5"), 0)
+	_, _, eok = st.parse_range_bound(bytes_of("((5"), 0)
 	testing.expect(t, !eok)
-	plain, px, pok := st.parse_interval_id(bytes_of("-"), 0)
+	plain, px, pok := st.parse_range_bound(bytes_of("-"), 0)
 	testing.expect(t, pok && !px && plain == st.ID_MIN)
 }
 
@@ -106,7 +108,7 @@ id_arithmetic_and_format :: proc(t: ^testing.T) {
 	testing.expect(t, st.next_id(st.ID{5, 9}, 5) == st.ID{5, 10})
 	testing.expect(t, st.next_id(st.ID{5, 9}, 3) == st.ID{5, 10})
 	testing.expect(t, st.next_id(st.ID{MAXU, 2}, 3) == st.ID{MAXU, 3})
-	buf: [st.ID_STR_LEN]u8
+	buf: [st.ID_TEXT_MAX]u8
 	testing.expect_value(t, string(st.format_id(&buf, st.ID_MAX)), "18446744073709551615-18446744073709551615")
 	testing.expect_value(t, string(st.format_id(&buf, st.ID{0, 0})), "0-0")
 	testing.expect_value(t, string(st.format_id(&buf, st.ID{1793090057517, 3})), "1793090057517-3")
@@ -138,22 +140,21 @@ id_generation_rules :: proc(t: ^testing.T) {
 	testing.expect(t, res == .Ok && id == st.ID{1000, 2})
 	partial = st.ID{999, 0}
 	_, res = st.append_item(s, fv, &partial, false, 0)
-	testing.expect(t, res == .Edom)
+	testing.expect(t, res == .Id_Not_Greater)
 	partial = st.ID{2000, 0}
 	id, res = st.append_item(s, fv, &partial, false, 0)
 	testing.expect(t, res == .Ok && id == st.ID{2000, 0})
 	explicit := st.ID{2000, 0}
 	_, res = st.append_item(s, fv, &explicit, true, 0)
-	testing.expect(t, res == .Edom)
+	testing.expect(t, res == .Id_Not_Greater)
 	explicit = st.ID{MAXU, MAXU}
 	id, res = st.append_item(s, fv, &explicit, true, 0)
 	testing.expect(t, res == .Ok && id == st.ID_MAX)
-	args: st.Add_Trim_Args
+	args: st.Xadd_Spec
 	_, err := st.xadd_apply(s, &args, fv, 0)
 	testing.expect(t, err == .Id_Exhausted)
 	args.id = st.ID{1, 0}
-	args.id_given = true
-	args.seq_given = false
+	args.id_mode = .Generated_Seq
 	_, err = st.xadd_apply(s, &args, fv, 0)
 	testing.expect(t, err == .Id_Exhausted)
 	testing.expect_value(t, st.length(s), 5)
@@ -169,7 +170,7 @@ id_generation_rules :: proc(t: ^testing.T) {
 	testing.expect(t, res == .Ok && id == seqmax)
 	again := st.ID{3, 0}
 	_, res = st.append_item(e, fv, &again, false, 0)
-	testing.expect(t, res == .Edom)
+	testing.expect(t, res == .Id_Not_Greater)
 }
 
 @(test)
@@ -196,8 +197,8 @@ string_to_unsigned :: proc(t: ^testing.T) {
 		{"-18446744073709551616", false, 0},
 	}
 	for c in cases {
-		v, ok := st.string2ull(bytes_of(c.s))
-		testing.expectf(t, ok == c.ok && (!ok || v == c.v), "string2ull %q => %v %v", c.s, v, ok)
+		v, ok := decimal.parse_u64_loose(bytes_of(c.s))
+		testing.expectf(t, ok == c.ok && (!ok || v == c.v), "parse_u64_loose %q => %v %v", c.s, v, ok)
 	}
 	pv, pok := st.parse_ll(bytes_of("-9223372036854775808"))
 	testing.expect(t, pok && pv == min(i64))

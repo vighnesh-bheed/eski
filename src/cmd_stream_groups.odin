@@ -234,7 +234,7 @@ cmd_xreadgroup :: proc(c: ^Conn, argv: [][]u8) {
 		reply_stream_error(c, err)
 		return
 	}
-	nkeys := a.streams_count
+	nkeys := a.key_count
 	group := argv[a.group_arg]
 	cname := argv[a.group_arg + 1]
 	clear(&stream_ids)
@@ -248,8 +248,8 @@ cmd_xreadgroup :: proc(c: ^Conn, argv: [][]u8) {
 	clear(&group_streams)
 	resize(&group_streams, nkeys)
 	for i in 0 ..< nkeys {
-		key := argv[a.streams_arg + i]
-		arg := argv[a.streams_arg + nkeys + i]
+		key := argv[a.keys_at + i]
+		arg := argv[a.keys_at + nkeys + i]
 		e, s, wrong := stream_lookup(key, true)
 		if wrong {
 			reply_wrongtype(c)
@@ -273,7 +273,7 @@ cmd_xreadgroup :: proc(c: ^Conn, argv: [][]u8) {
 			reply_stream_error(c, .Plus_Group)
 			return
 		case:
-			id, ok := st.parse_strict_id(arg)
+			id, ok := st.parse_exact_id(arg)
 			if !ok {
 				reply_stream_error(c, .Invalid_ID)
 				return
@@ -286,7 +286,7 @@ cmd_xreadgroup :: proc(c: ^Conn, argv: [][]u8) {
 	clear(&group_consumers)
 	resize(&group_consumers, nkeys)
 	for i in 0 ..< nkeys {
-		key := argv[a.streams_arg + i]
+		key := argv[a.keys_at + i]
 		e := group_entries[i]
 		s := group_streams[i]
 		consumer, created := consumer_create_noted(s, stream_groups[i], cname, key)
@@ -301,7 +301,7 @@ cmd_xreadgroup :: proc(c: ^Conn, argv: [][]u8) {
 	mark := defer_mark(c)
 	served := 0
 	for i in 0 ..< nkeys {
-		key := argv[a.streams_arg + i]
+		key := argv[a.keys_at + i]
 		e := group_entries[i]
 		s := group_streams[i]
 		cg := stream_groups[i]
@@ -344,7 +344,7 @@ cmd_xreadgroup :: proc(c: ^Conn, argv: [][]u8) {
 			c.bstate = new(Block_State)
 		}
 		clear(&c.bstate.stream_ids)
-		block_for_keys(c, .Stream, argv[a.streams_arg:a.streams_arg + nkeys], a.timeout, true)
+		block_for_keys(c, .Stream, argv[a.keys_at:a.keys_at + nkeys], a.timeout, true)
 		return
 	}
 	reply_null_array(c)
@@ -454,9 +454,9 @@ cmd_xgroup :: proc(c: ^Conn, argv: [][]u8) {
 			parsed: st.ID
 			good: bool
 			if op == .Setid {
-				parsed, _, good = st.parse_id(argv[4], 0, false, false)
+				parsed, good = st.parse_id_or_sentinel(argv[4], 0)
 			} else {
-				parsed, good = st.parse_strict_id(argv[4])
+				parsed, good = st.parse_exact_id(argv[4])
 			}
 			if !good {
 				reply_stream_error(c, .Invalid_ID)
@@ -561,7 +561,7 @@ cmd_xack :: proc(c: ^Conn, argv: [][]u8) {
 	}
 	clear(&stream_ids)
 	for arg in argv[3:] {
-		id, ok := st.parse_strict_id(arg)
+		id, ok := st.parse_exact_id(arg)
 		if !ok {
 			reply_stream_error(c, .Invalid_ID)
 			return

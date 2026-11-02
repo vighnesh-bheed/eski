@@ -142,7 +142,7 @@ many_entries_stay_consistent :: proc(t: ^testing.T) {
 	s := st.create()
 	defer st.destroy(s)
 	fv := args_of("field", "value", "n", "1")
-	args: st.Add_Trim_Args
+	args: st.Xadd_Spec
 	for i in 0 ..< 70000 {
 		_, err := st.xadd_apply(s, &args, fv, u64(1000 + i / 3))
 		assert(err == .None)

@@ -1,5 +1,8 @@
 package streamtype
 
+import decimal "../decimal"
+import integer "../integer"
+
 WRONGTYPE_ERROR :: "WRONGTYPE Operation against a key holding the wrong kind of value"
 
 Error :: enum u8 {
@@ -99,7 +102,7 @@ ERROR_MESSAGES := [Error]string {
 }
 
 @(private)
-ID_ARG_MAX :: 127
+ID_ARG_BYTES_MAX :: 127
 
 error_has_prefix :: proc "contextless" (e: Error) -> bool {
 	return e == .Busygroup
@@ -150,107 +153,124 @@ is_byte :: #force_inline proc "contextless" (a: []u8, b: u8) -> bool {
 }
 
 parse_ll :: #force_inline proc "contextless" (s: []u8) -> (v: i64, ok: bool) {
-	return parse_int_text(s)
+	return integer.parse_i64(s)
 }
 
-@(private)
-is_space :: #force_inline proc "contextless" (b: u8) -> bool {
-	return b == ' ' || b == '\t' || b == '\n' || b == '\v' || b == '\f' || b == '\r'
+Id_Shape :: enum u8 {
+	Bad,
+	Lowest,
+	Highest,
+	Ms,
+	Ms_Seq,
+	Ms_Star,
 }
 
-string2ull :: proc "contextless" (s: []u8) -> (v: u64, ok: bool) {
-	if strict, good := parse_int_text(s); good {
-		if strict < 0 {
-			return 0, false
-		}
-		return u64(strict), true
-	}
-	i := 0
-	for i < len(s) && is_space(s[i]) {
-		i += 1
-	}
-	neg := false
-	if i < len(s) && (s[i] == '+' || s[i] == '-') {
-		neg = s[i] == '-'
-		i += 1
-	}
-	digits := i
-	acc: u64
-	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
-		d := u64(s[i] - '0')
-		if acc > (max(u64) - d) / 10 {
-			return 0, false
-		}
-		acc = acc * 10 + d
-		i += 1
-	}
-	if i == digits || i != len(s) {
-		return 0, false
-	}
-	if neg {
-		acc = 0 - acc
-	}
-	return acc, true
+Id_Text :: struct {
+	shape: Id_Shape,
+	ms:    u64,
+	seq:   u64,
 }
 
-parse_id :: proc "contextless" (arg: []u8, missing_seq: u64, strict: bool, allow_partial: bool) -> (id: ID, seq_given: bool, ok: bool) {
-	if len(arg) > ID_ARG_MAX {
+Xadd_Id_Mode :: enum u8 {
+	Generated,
+	Explicit,
+	Generated_Seq,
+}
+
+read_id_text :: proc "contextless" (arg: []u8) -> (t: Id_Text) {
+	if len(arg) > ID_ARG_BYTES_MAX {
 		return
 	}
-	s := cstr(arg)
-	if !strict && len(s) == 1 {
-		if s[0] == '-' {
-			return ID_MIN, true, true
-		}
-		if s[0] == '+' {
-			return ID_MAX, true, true
-		}
+	text := cstr(arg)
+	if len(text) == 1 && (text[0] == '-' || text[0] == '+') {
+		t.shape = .Lowest if text[0] == '-' else .Highest
+		return
 	}
-	dash := -1
-	for c, i in s {
+	head, tail := text, []u8{}
+	split := false
+	for c, at in text {
 		if c == '-' {
-			dash = i
+			head, tail = text[:at], text[at + 1:]
+			split = true
 			break
 		}
 	}
-	if dash < 0 {
-		ms, good := string2ull(s)
-		if !good {
-			return
-		}
-		return ID{ms, missing_seq}, true, true
-	}
-	ms, good := string2ull(s[:dash])
+	ms, good := decimal.parse_u64_loose(head)
 	if !good {
 		return
 	}
-	rest := s[dash + 1:]
-	if allow_partial && len(rest) == 1 && rest[0] == '*' {
-		return ID{ms, 0}, false, true
-	}
-	seq, sgood := string2ull(rest)
-	if !sgood {
+	t.ms = ms
+	if !split {
+		t.shape = .Ms
 		return
 	}
-	return ID{ms, seq}, true, true
-}
-
-parse_strict_id :: #force_inline proc "contextless" (arg: []u8) -> (id: ID, ok: bool) {
-	id, _, ok = parse_id(arg, 0, true, false)
+	if len(tail) == 1 && tail[0] == '*' {
+		t.shape = .Ms_Star
+		return
+	}
+	seq, fine := decimal.parse_u64_loose(tail)
+	if fine {
+		t.seq = seq
+		t.shape = .Ms_Seq
+	}
 	return
 }
 
-parse_interval_id :: proc "contextless" (arg: []u8, missing_seq: u64) -> (id: ID, exclude: bool, ok: bool) {
-	if len(arg) > 0 && arg[0] == '(' {
-		if len(arg) > ID_ARG_MAX {
-			return
-		}
-		id, _, ok = parse_id(arg[1:], missing_seq, true, false)
-		exclude = true
+parse_exact_id :: proc "contextless" (arg: []u8) -> (ID, bool) {
+	t := read_id_text(arg)
+	#partial switch t.shape {
+	case .Ms, .Ms_Seq:
+		return ID{t.ms, t.seq}, true
+	}
+	return {}, false
+}
+
+parse_id_or_sentinel :: proc "contextless" (arg: []u8, missing_seq: u64) -> (ID, bool) {
+	t := read_id_text(arg)
+	#partial switch t.shape {
+	case .Lowest:
+		return ID_MIN, true
+	case .Highest:
+		return ID_MAX, true
+	case .Ms:
+		return ID{t.ms, missing_seq}, true
+	case .Ms_Seq:
+		return ID{t.ms, t.seq}, true
+	}
+	return {}, false
+}
+
+parse_range_bound :: proc "contextless" (arg: []u8, missing_seq: u64) -> (id: ID, exclusive: bool, ok: bool) {
+	if len(arg) == 0 || arg[0] != '(' {
+		id, ok = parse_id_or_sentinel(arg, missing_seq)
 		return
 	}
-	id, _, ok = parse_id(arg, missing_seq, false, false)
+	exclusive = true
+	if len(arg) > ID_ARG_BYTES_MAX {
+		return
+	}
+	t := read_id_text(arg[1:])
+	#partial switch t.shape {
+	case .Ms:
+		id, ok = ID{t.ms, missing_seq}, true
+	case .Ms_Seq:
+		id, ok = ID{t.ms, t.seq}, true
+	}
 	return
+}
+
+parse_xadd_id :: proc "contextless" (arg: []u8) -> (id: ID, mode: Xadd_Id_Mode, ok: bool) {
+	if is_byte(arg, '*') {
+		return {}, .Generated, true
+	}
+	t := read_id_text(arg)
+	#partial switch t.shape {
+	case .Ms, .Ms_Seq:
+		return ID{t.ms, t.seq}, .Explicit, true
+	case .Ms_Star:
+		return ID{t.ms, 0}, .Generated_Seq, true
+	}
+	return {}, .Explicit, false
 }
 
 trim_limit_relaxed: bool
@@ -267,136 +287,158 @@ default_trim_limit :: proc "contextless" () -> i64 {
 	return n * 100
 }
 
-parse_add_trim_args :: proc "contextless" (argv: [][]u8, xadd: bool) -> (args: Add_Trim_Args, idpos: int, err: Error) {
-	n := len(argv)
-	i := 2
-	limit_given := false
-	for i < n {
-		opt := argv[i]
-		more := n - 1 - i
-		if xadd && is_byte(opt, '*') {
-			break
-		}
-		if (opt_is(opt, "maxlen") || opt_is(opt, "minid")) && more >= 1 {
-			is_maxlen := opt_is(opt, "maxlen")
-			approx := false
-			nx := argv[i + 1]
-			if more >= 2 && is_byte(nx, '~') {
-				approx = true
-				i += 1
-			} else if more >= 2 && is_byte(nx, '=') {
-				i += 1
-			}
-			if is_maxlen {
-				v, ok := parse_ll(argv[i + 1])
-				if !ok {
-					err = .Not_Integer
-					return
-				}
-				if v < 0 {
-					err = .Maxlen_Negative
-					return
-				}
-				if args.trim_strategy == .Minid {
-					err = .Maxlen_Minid
-					return
-				}
-				args.trim_strategy = .Maxlen
-				args.maxlen = v
-			} else {
-				m, ok := parse_strict_id(argv[i + 1])
-				if !ok {
-					err = .Invalid_ID
-					return
-				}
-				if args.trim_strategy == .Maxlen {
-					err = .Maxlen_Minid
-					return
-				}
-				args.trim_strategy = .Minid
-				args.minid = m
-			}
-			args.approx_trim = approx
-			args.trim_strategy_arg_idx = i + 1
-			i += 2
-			continue
-		}
-		if opt_is(opt, "limit") && more >= 1 {
-			v, ok := parse_ll(argv[i + 1])
-			if !ok {
-				err = .Not_Integer
-				return
-			}
-			if v < 0 {
-				err = .Limit_Negative
-				return
-			}
-			args.limit = v
-			limit_given = true
-			i += 2
-			continue
-		}
-		if xadd && opt_is(opt, "nomkstream") {
-			args.no_mkstream = true
-			i += 1
-			continue
-		}
-		if xadd {
-			break
-		}
-		err = .Syntax
-		return
+@(private)
+Trim_Word :: enum u8 {
+	Unknown,
+	Max_Len,
+	Min_Id,
+	Limit,
+	Nomkstream,
+	Auto_Id,
+}
+
+@(private)
+trim_word :: proc "contextless" (arg: []u8, xadd: bool, has_value: bool) -> Trim_Word {
+	switch {
+	case xadd && is_byte(arg, '*'):
+		return .Auto_Id
+	case has_value && opt_is(arg, "maxlen"):
+		return .Max_Len
+	case has_value && opt_is(arg, "minid"):
+		return .Min_Id
+	case has_value && opt_is(arg, "limit"):
+		return .Limit
+	case xadd && opt_is(arg, "nomkstream"):
+		return .Nomkstream
 	}
-	if args.limit > 0 && args.trim_strategy == .None {
-		err = .Limit_No_Strategy
-		return
-	}
-	if !xadd && args.trim_strategy == .None {
-		err = .Xtrim_No_Strategy
-		return
-	}
-	if args.limit > 0 && !args.approx_trim && !trim_limit_relaxed {
-		err = .Limit_No_Approx
-		return
-	}
-	if args.approx_trim {
-		if !limit_given {
-			args.limit = default_trim_limit()
+	return .Unknown
+}
+
+@(private)
+Trim_Reader :: struct {
+	spec:       Trim_Spec,
+	limit_seen: bool,
+	nomkstream: bool,
+	stop:       int,
+}
+
+@(private)
+read_threshold :: proc "contextless" (r: ^Trim_Reader, argv: [][]u8, at: int, word: Trim_Word) -> (next: int, err: Error) {
+	value := at + 1
+	r.spec.nearly = false
+	if value + 1 < len(argv) {
+		if is_byte(argv[value], '~') {
+			r.spec.nearly = true
+			value += 1
+		} else if is_byte(argv[value], '=') {
+			value += 1
 		}
+	}
+	other := Trim_Rule.Min_Id if word == .Max_Len else Trim_Rule.Max_Len
+	if word == .Max_Len {
+		keep, good := parse_ll(argv[value])
+		switch {
+		case !good:
+			return value, .Not_Integer
+		case keep < 0:
+			return value, .Maxlen_Negative
+		case r.spec.rule == other:
+			return value, .Maxlen_Minid
+		}
+		r.spec.rule = .Max_Len
+		r.spec.max_len = keep
 	} else {
-		args.limit = 0
-	}
-	if !xadd {
-		return
-	}
-	idpos = i
-	if i >= n {
-		err = .Xadd_Arity
-		return
-	}
-	if is_byte(argv[i], '*') {
-		args.id_given = false
-		args.seq_given = true
-	} else {
-		id, seq_given, ok := parse_id(argv[i], 0, true, true)
-		if !ok {
-			err = .Invalid_ID
-			return
+		floor, good := parse_exact_id(argv[value])
+		switch {
+		case !good:
+			return value, .Invalid_ID
+		case r.spec.rule == other:
+			return value, .Maxlen_Minid
 		}
-		args.id = id
-		args.id_given = true
-		args.seq_given = seq_given
+		r.spec.rule = .Min_Id
+		r.spec.min_id = floor
 	}
-	rest := n - i - 1
-	if rest <= 0 || rest % 2 != 0 {
-		err = .Xadd_Arity
-		return
+	return value + 1, .None
+}
+
+@(private)
+read_trim_words :: proc "contextless" (argv: [][]u8, xadd: bool) -> (r: Trim_Reader, err: Error) {
+	at := 2
+	scan: for at < len(argv) {
+		word := trim_word(argv[at], xadd, at + 1 < len(argv))
+		switch word {
+		case .Max_Len, .Min_Id:
+			at = read_threshold(&r, argv, at, word) or_return
+		case .Limit:
+			bound, good := parse_ll(argv[at + 1])
+			if !good {
+				return r, .Not_Integer
+			}
+			if bound < 0 {
+				return r, .Limit_Negative
+			}
+			r.spec.limit = bound
+			r.limit_seen = true
+			at += 2
+		case .Nomkstream:
+			r.nomkstream = true
+			at += 1
+		case .Auto_Id:
+			break scan
+		case .Unknown:
+			if !xadd {
+				return r, .Syntax
+			}
+			break scan
+		}
 	}
-	if args.id_given && args.seq_given && id_is_zero(args.id) {
-		err = .Id_Zero
-		return
+	r.stop = at
+	if r.spec.rule == .Off {
+		if r.spec.limit > 0 {
+			return r, .Limit_No_Strategy
+		}
+		if !xadd {
+			return r, .Xtrim_No_Strategy
+		}
 	}
-	return
+	if r.spec.limit > 0 && !r.spec.nearly && !trim_limit_relaxed {
+		return r, .Limit_No_Approx
+	}
+	switch {
+	case !r.spec.nearly:
+		r.spec.limit = 0
+	case !r.limit_seen:
+		r.spec.limit = default_trim_limit()
+	}
+	return r, .None
+}
+
+parse_xtrim :: proc "contextless" (argv: [][]u8) -> (spec: Trim_Spec, err: Error) {
+	r := read_trim_words(argv, false) or_return
+	return r.spec, .None
+}
+
+parse_xadd :: proc "contextless" (argv: [][]u8) -> (spec: Xadd_Spec, err: Error) {
+	r := read_trim_words(argv, true) or_return
+	spec.trim = r.spec
+	spec.nomkstream = r.nomkstream
+	if r.stop >= len(argv) {
+		return spec, .Xadd_Arity
+	}
+	good: bool
+	spec.id, spec.id_mode, good = parse_xadd_id(argv[r.stop])
+	if !good {
+		return spec, .Invalid_ID
+	}
+	spec.fields_at = r.stop + 1
+	pairs := len(argv) - spec.fields_at
+	if pairs == 0 || pairs % 2 == 1 {
+		return spec, .Xadd_Arity
+	}
+	if spec.id_mode == .Explicit && id_is_zero(spec.id) {
+		return spec, .Id_Zero
+	}
+	return spec, .None
 }
 
 parse_range_args :: proc "contextless" (argv: [][]u8, rev: bool) -> (start: ID, end: ID, count: i64, err: Error) {
@@ -408,7 +450,7 @@ parse_range_args :: proc "contextless" (argv: [][]u8, rev: bool) -> (start: ID, 
 	sarg := rev ? argv[3] : argv[2]
 	earg := rev ? argv[2] : argv[3]
 	sx, ex, ok: bool
-	start, sx, ok = parse_interval_id(sarg, 0)
+	start, sx, ok = parse_range_bound(sarg, 0)
 	if !ok {
 		err = .Invalid_ID
 		return
@@ -417,7 +459,7 @@ parse_range_args :: proc "contextless" (argv: [][]u8, rev: bool) -> (start: ID, 
 		err = .Invalid_Start
 		return
 	}
-	end, ex, ok = parse_interval_id(earg, max(u64))
+	end, ex, ok = parse_range_bound(earg, max(u64))
 	if !ok {
 		err = .Invalid_ID
 		return
@@ -465,8 +507,8 @@ parse_timeout_ms :: proc "contextless" (arg: []u8, now_ms: i64) -> (timeout: i64
 Xread_Args :: struct {
 	timeout:       i64,
 	count:         i64,
-	streams_arg:   int,
-	streams_count: int,
+	keys_at:       int,
+	key_count:     int,
 	group_arg:     int,
 	noack:         bool,
 }
@@ -495,13 +537,13 @@ parse_xread_args :: proc "contextless" (argv: [][]u8, now_ms: i64, xreadgroup: b
 			a.count = v < 0 ? 0 : v
 			i += 2
 		} else if opt_is(opt, "streams") && more >= 1 {
-			a.streams_arg = i + 1
-			rem := n - a.streams_arg
+			a.keys_at = i + 1
+			rem := n - a.keys_at
 			if rem % 2 != 0 {
 				err = xreadgroup ? .Unbalanced_Xreadgroup : .Unbalanced_Xread
 				return
 			}
-			a.streams_count = rem / 2
+			a.key_count = rem / 2
 			break
 		} else if opt_is(opt, "group") && more >= 2 {
 			if !xreadgroup {
@@ -522,7 +564,7 @@ parse_xread_args :: proc "contextless" (argv: [][]u8, now_ms: i64, xreadgroup: b
 			return
 		}
 	}
-	if a.streams_arg == 0 {
+	if a.keys_at == 0 {
 		err = .Syntax
 		return
 	}
@@ -534,9 +576,9 @@ parse_xread_args :: proc "contextless" (argv: [][]u8, now_ms: i64, xreadgroup: b
 }
 
 Setid_Args :: struct {
-	id:            ID,
-	entries_added: i64,
-	max_xdel_id:   ID,
+	id:             ID,
+	entries_added:  i64,
+	max_deleted_id: ID,
 }
 
 parse_xsetid_args :: proc "contextless" (argv: [][]u8) -> (a: Setid_Args, err: Error) {
@@ -545,7 +587,7 @@ parse_xsetid_args :: proc "contextless" (argv: [][]u8) -> (a: Setid_Args, err: E
 		err = .Syntax
 		return
 	}
-	id, ok := parse_strict_id(argv[2])
+	id, ok := parse_exact_id(argv[2])
 	if !ok {
 		err = .Invalid_ID
 		return
@@ -565,7 +607,7 @@ parse_xsetid_args :: proc "contextless" (argv: [][]u8) -> (a: Setid_Args, err: E
 			}
 			a.entries_added = v
 		} else if opt_is(argv[i], "maxdeletedid") && i + 1 < n {
-			m, good := parse_strict_id(argv[i + 1])
+			m, good := parse_exact_id(argv[i + 1])
 			if !good {
 				err = .Invalid_ID
 				return
@@ -574,7 +616,7 @@ parse_xsetid_args :: proc "contextless" (argv: [][]u8) -> (a: Setid_Args, err: E
 				err = .Setid_Max_Deleted
 				return
 			}
-			a.max_xdel_id = m
+			a.max_deleted_id = m
 		} else {
 			err = .Syntax
 			return
@@ -597,8 +639,8 @@ xsetid_apply :: proc(s: Stream, a: ^Setid_Args) -> Error {
 	if a.entries_added != -1 {
 		s.entries_added = u64(a.entries_added)
 	}
-	if !id_is_zero(a.max_xdel_id) {
-		s.max_deleted_entry_id = a.max_xdel_id
+	if !id_is_zero(a.max_deleted_id) {
+		s.max_deleted_entry_id = a.max_deleted_id
 	}
 	return .None
 }
@@ -642,22 +684,22 @@ xdel_apply :: proc(s: Stream, ids: []ID) -> int {
 	return deleted
 }
 
-xadd_apply :: proc(s: Stream, args: ^Add_Trim_Args, fv: [][]u8, now_ms: u64) -> (id: ID, err: Error) {
+xadd_apply :: proc(s: Stream, spec: ^Xadd_Spec, fv: [][]u8, now_ms: u64) -> (id: ID, err: Error) {
 	if compare_id(s.last_id, ID_MAX) == 0 {
 		err = .Id_Exhausted
 		return
 	}
-	use_id: ^ID
-	if args.id_given {
-		use_id = &args.id
+	wanted: ^ID
+	if spec.id_mode != .Generated {
+		wanted = &spec.id
 	}
-	added, res := append_item(s, fv, use_id, args.seq_given, now_ms)
-	switch res {
+	added, outcome := append_item(s, fv, wanted, spec.id_mode != .Generated_Seq, now_ms)
+	switch outcome {
 	case .Ok:
 		return added, .None
-	case .Edom:
+	case .Id_Not_Greater:
 		err = .Id_Too_Small
-	case .Erange:
+	case .Entry_Too_Large:
 		err = .Too_Large
 	}
 	return
@@ -733,7 +775,7 @@ parse_xpending_args :: proc "contextless" (argv: [][]u8) -> (a: Xpending_Args, e
 		at = 5
 	}
 	sx, ex, ok: bool
-	a.start, sx, ok = parse_interval_id(argv[at], 0)
+	a.start, sx, ok = parse_range_bound(argv[at], 0)
 	if !ok {
 		err = .Invalid_ID
 		return
@@ -742,7 +784,7 @@ parse_xpending_args :: proc "contextless" (argv: [][]u8) -> (a: Xpending_Args, e
 		err = .Invalid_Start
 		return
 	}
-	a.end, ex, ok = parse_interval_id(argv[at + 1], max(u64))
+	a.end, ex, ok = parse_range_bound(argv[at + 1], max(u64))
 	if !ok {
 		err = .Invalid_ID
 		return
@@ -779,7 +821,7 @@ parse_xclaim_args :: proc(argv: [][]u8, now: i64, ids: ^[dynamic]ID) -> (a: Clai
 	a.minidle = minidle < 0 ? 0 : minidle
 	j := 5
 	for j < n {
-		id, good := parse_strict_id(argv[j])
+		id, good := parse_exact_id(argv[j])
 		if !good {
 			break
 		}
@@ -818,7 +860,7 @@ parse_xclaim_args :: proc(argv: [][]u8, now: i64, ids: ^[dynamic]ID) -> (a: Clai
 			a.retrycount = v
 			j += 1
 		} else if opt_is(opt, "lastid") && more >= 1 {
-			id, good := parse_strict_id(argv[j + 1])
+			id, good := parse_exact_id(argv[j + 1])
 			if !good {
 				err = .Invalid_ID
 				return
@@ -855,7 +897,7 @@ parse_xautoclaim_args :: proc "contextless" (argv: [][]u8) -> (a: Autoclaim_Args
 	}
 	a.minidle = minidle < 0 ? 0 : minidle
 	sx: bool
-	a.start, sx, ok = parse_interval_id(argv[5], 0)
+	a.start, sx, ok = parse_range_bound(argv[5], 0)
 	if !ok {
 		err = .Invalid_ID
 		return

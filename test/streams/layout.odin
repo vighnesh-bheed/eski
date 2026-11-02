@@ -29,17 +29,17 @@ xadd :: proc(s: st.Stream, parts: ..string) -> (st.ID, st.Error, i64) {
 	for p, i in parts {
 		argv[i + 2] = bytes_of(p)
 	}
-	args, idpos, err := st.parse_add_trim_args(argv, true)
+	spec, err := st.parse_xadd(argv)
 	if err != .None {
 		return {}, err, 0
 	}
-	id, aerr := st.xadd_apply(s, &args, argv[idpos + 1:], 1)
+	id, aerr := st.xadd_apply(s, &spec, argv[spec.fields_at:], 1)
 	if aerr != .None {
 		return {}, aerr, 0
 	}
 	trimmed: i64
-	if args.trim_strategy != .None {
-		trimmed = st.trim(s, &args)
+	if spec.trim.rule != .Off {
+		trimmed = st.trim(s, &spec.trim)
 	}
 	return id, .None, trimmed
 }
@@ -51,17 +51,17 @@ xtrim :: proc(s: st.Stream, parts: ..string) -> (i64, st.Error) {
 	for p, i in parts {
 		argv[i + 2] = bytes_of(p)
 	}
-	args, _, err := st.parse_add_trim_args(argv, false)
+	limits, err := st.parse_xtrim(argv)
 	if err != .None {
 		return 0, err
 	}
-	return st.trim(s, &args), .None
+	return st.trim(s, &limits), .None
 }
 
 xdel :: proc(s: st.Stream, ids: ..string) -> int {
 	list := make([]st.ID, len(ids), context.temp_allocator)
 	for a, i in ids {
-		id, ok := st.parse_strict_id(bytes_of(a))
+		id, ok := st.parse_exact_id(bytes_of(a))
 		assert(ok)
 		list[i] = id
 	}

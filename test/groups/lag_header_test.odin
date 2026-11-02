@@ -14,7 +14,7 @@ lag_after_xsetid_sequence :: proc(t: ^testing.T) {
 	st.group_set_id(g, id(1, 2), 2)
 	expect_lag(t, s, g, 0)
 	setid :: proc(s: st.Stream, x: st.ID, added: i64, md: st.ID) -> st.Error {
-		a := st.Setid_Args{id = x, entries_added = added, max_xdel_id = md}
+		a := st.Setid_Args{id = x, entries_added = added, max_deleted_id = md}
 		return st.xsetid_apply(s, &a)
 	}
 	testing.expect_value(t, setid(s, id(1, 2), 0, id(0)), st.Error.Setid_Entries_Added)

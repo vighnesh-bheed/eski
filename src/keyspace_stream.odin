@@ -23,7 +23,7 @@ keyspace_builder_prefix :: proc "contextless" (b: ^Keyspace_Builder, mark: int, 
 }
 
 keyspace_stream_id :: proc "contextless" (b: ^Keyspace_Builder, id: sm.ID) {
-	buf: [sm.ID_STR_LEN]u8
+	buf: [sm.ID_TEXT_MAX]u8
 	keyspace_builder_bulk(b, sm.format_id(&buf, id))
 }
 
@@ -66,11 +66,13 @@ keyspace_stream_execute :: proc(job: ^ks.Job) {
 	index := 2 if name == "xinfo" else 1
 	r := keyspace_task_record(task, argv[index])
 	if r == nil { task.failed = true; return }
-	add: sm.Add_Trim_Args
-	idpos := 0
-	if name == "xadd" || name == "xtrim" {
-		args, at, err := sm.parse_add_trim_args(argv, name == "xadd")
-		if err != .None { task.failed = true; return }; add = args; idpos = at
+	add: sm.Xadd_Spec
+	if name == "xadd" {
+		spec, err := sm.parse_xadd(argv)
+		if err != .None { task.failed = true; return }; add = spec
+	} else if name == "xtrim" {
+		limits, err := sm.parse_xtrim(argv)
+		if err != .None { task.failed = true; return }; add.trim = limits
 	}
 	start, end: sm.ID
 	count: i64
@@ -99,12 +101,12 @@ keyspace_stream_execute :: proc(job: ^ks.Job) {
 	if s == nil && name != "xadd" {
 		if name == "xsetid" { task.failed = true }; return
 	}
-	if s == nil && name == "xadd" && add.no_mkstream { task.null = true; return }
+	if s == nil && name == "xadd" && add.nomkstream { task.null = true; return }
 	ids := make([dynamic]sm.ID, 0, max(0, len(argv) - 2)); defer delete(ids)
 	charge := cap(ids) * size_of(sm.ID)
 	if !ks.reserve_external(&keyspace_pool, charge) { task.failed = true; return }; defer ks.release_external(&keyspace_pool, charge)
 	if name == "xdel" {
-		for arg in argv[2:] { id, ok := sm.parse_strict_id(arg); if !ok { task.failed = true; return }; append(&ids, id) }
+		for arg in argv[2:] { id, ok := sm.parse_exact_id(arg); if !ok { task.failed = true; return }; append(&ids, id) }
 	}
 	work, ok := keyspace_object_work(task, r, .Stream)
 	if !ok { return }; defer keyspace_object_discard(&work)
@@ -112,16 +114,16 @@ keyspace_stream_execute :: proc(job: ^ks.Job) {
 	trimmed := i64(0)
 	switch name {
 	case "xadd":
-		id, err := sm.xadd_apply(candidate, &add, argv[idpos + 1:], u64(task.now))
+		id, err := sm.xadd_apply(candidate, &add, argv[add.fields_at:], u64(task.now))
 		if err != .None { task.failed = true; return }
 		keyspace_stream_id(&b, id)
-		if add.trim_strategy != .None { trimmed = sm.trim(candidate, &add) }
+		if add.trim.rule != .Off { trimmed = sm.trim(candidate, &add.trim) }
 		if !keyspace_builder_finish(task, &b) { return }; task.dirty = 1
 	case "xdel":
 		task.integer = i64(sm.xdel_apply(candidate, ids[:])); task.dirty = task.integer
 		if task.dirty == 0 { return }
 	case "xtrim":
-		task.integer = sm.trim(candidate, &add); task.dirty = task.integer
+		task.integer = sm.trim(candidate, &add.trim); task.dirty = task.integer
 		if task.dirty == 0 { return }
 	case "xsetid":
 		if err := sm.xsetid_apply(candidate, &setid); err != .None { task.failed = true; return }; task.ok = true; task.dirty = 1
@@ -156,7 +158,7 @@ keyspace_stream_group :: proc(task: ^Keyspace_Task) {
 		dollar = sm.is_byte(argv[4], '$')
 		if !dollar {
 			parsed := false
-			if setid { id, _, parsed = sm.parse_id(argv[4], 0, false, false) } else { id, parsed = sm.parse_strict_id(argv[4]) }
+			if setid { id, parsed = sm.parse_id_or_sentinel(argv[4], 0) } else { id, parsed = sm.parse_exact_id(argv[4]) }
 			if !parsed { task.failed = true; return }
 		}
 	}
@@ -193,7 +195,7 @@ keyspace_stream_read :: proc(task: ^Keyspace_Task, grouped: bool) {
 	argv := task.argv
 	args, err := sm.parse_xread_args(argv, task.now, grouped)
 	if err != .None || args.timeout != -1 { task.failed = true; return }
-	n := args.streams_count
+	n := args.key_count
 	charge := n * (size_of(sm.ID) + size_of(^ks.Record) + size_of(sm.Stream) + size_of(Keyspace_Object_Work) + 4 * size_of(int) + size_of(bool))
 	if !ks.reserve_external(&keyspace_pool, charge) { task.failed = true; return }; defer ks.release_external(&keyspace_pool, charge)
 	ids := make([]sm.ID, n); defer delete(ids)
@@ -205,7 +207,7 @@ keyspace_stream_read :: proc(task: ^Keyspace_Task, grouped: bool) {
 	defer { for &work in works { keyspace_object_discard(&work) }; delete(works) }
 	budget := u128(1024)
 	for i in 0 ..< n {
-		key := argv[args.streams_arg + i]
+		key := argv[args.keys_at + i]
 		r := keyspace_task_record(task, key)
 		if r == nil { task.failed = true; return }
 		records[i] = r
@@ -214,16 +216,16 @@ keyspace_stream_read :: proc(task: ^Keyspace_Task, grouped: bool) {
 		keyspace_read(task, r)
 		s := cast(sm.Stream)r.object
 		streams[i] = s
-		arg := argv[args.streams_arg + n + i]
+		arg := argv[args.keys_at + n + i]
 		if grouped {
 			if sm.lookup_cg(s, argv[args.group_arg]) == nil || sm.is_byte(arg, '$') || sm.is_byte(arg, '+') { task.failed = true; return }
-			if !sm.is_byte(arg, '>') { id, ok := sm.parse_strict_id(arg); if !ok { task.failed = true; return }; ids[i] = id; history[i] = true }
+			if !sm.is_byte(arg, '>') { id, ok := sm.parse_exact_id(arg); if !ok { task.failed = true; return }; ids[i] = id; history[i] = true }
 		} else {
 			switch {
 			case sm.is_byte(arg, '$'): if s != nil { ids[i] = s.last_id }
 			case sm.is_byte(arg, '+'): if s != nil && s.length > 0 { ids[i] = sm.last_valid_id(s); sm.decr_id(&ids[i]) }
 			case sm.is_byte(arg, '>'): task.failed = true; return
-			case: id, ok := sm.parse_strict_id(arg); if !ok { task.failed = true; return }; ids[i] = id
+			case: id, ok := sm.parse_exact_id(arg); if !ok { task.failed = true; return }; ids[i] = id
 			}
 		}
 		budget += u128(sm.memory_usage(s)) * 6 + u128(sm.length(s)) * 128 + u128(len(key)) + 128
@@ -261,7 +263,7 @@ keyspace_stream_read :: proc(task: ^Keyspace_Task, grouped: bool) {
 			if !history[i] && (s.length == 0 || sm.compare_id(sm.last_valid_id(s), cg.last_id) <= 0) { continue }
 		}
 		if task.client.resp != RESP3 { keyspace_builder_integer(&b, 2, '*') }
-		keyspace_builder_bulk(&b, argv[args.streams_arg + i])
+		keyspace_builder_bulk(&b, argv[args.keys_at + i])
 		if grouped {
 			cg := sm.lookup_cg(s, argv[args.group_arg]); consumer := sm.lookup_consumer(cg, argv[args.group_arg + 1])
 			if history[i] { keyspace_stream_history(task, &b, s, consumer, ids[i], int(args.count)) } else {
@@ -336,7 +338,7 @@ keyspace_stream_pending :: proc(task: ^Keyspace_Task) {
 	b := keyspace_stream_builder(task, s); defer ks.free(&keyspace_pool, b.bytes)
 	if b.failed { return }
 	if name == "xpending" { keyspace_stream_pending_reply(task, &b, cg, &pending); keyspace_builder_finish(task, &b); return }
-	if name == "xack" { for arg in argv[3:] { id, ok := sm.parse_strict_id(arg); if !ok { task.failed = true; return }; append(&ids, id) } }
+	if name == "xack" { for arg in argv[3:] { id, ok := sm.parse_exact_id(arg); if !ok { task.failed = true; return }; append(&ids, id) } }
 	work, ok := keyspace_object_work(task, r, .Stream)
 	if !ok { return }; defer keyspace_object_discard(&work)
 	candidate := cast(sm.Stream)work.object

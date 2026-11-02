@@ -148,7 +148,7 @@ defer_len :: proc(c: ^Conn, mark: int, prefix: u8, n: int) #no_bounds_check {
 
 @(private)
 reply_stream_id :: proc(c: ^Conn, id: st.ID) {
-	buf: [st.ID_STR_LEN]u8
+	buf: [st.ID_TEXT_MAX]u8
 	reply_bulk(c, st.format_id(&buf, id))
 }
 
@@ -186,7 +186,7 @@ stream_reply_range :: proc(c: ^Conn, s: st.Stream, start: ^st.ID, end: ^st.ID, c
 }
 
 cmd_xadd :: proc(c: ^Conn, argv: [][]u8) {
-	args, idpos, err := st.parse_add_trim_args(argv, true)
+	spec, err := st.parse_xadd(argv)
 	if err != .None {
 		reply_stream_error(c, err)
 		return
@@ -199,7 +199,7 @@ cmd_xadd :: proc(c: ^Conn, argv: [][]u8) {
 	}
 	created := false
 	if s == nil {
-		if args.no_mkstream {
+		if spec.nomkstream {
 			pst.dirty_explicit = true
 			reply_null(c)
 			return
@@ -207,7 +207,7 @@ cmd_xadd :: proc(c: ^Conn, argv: [][]u8) {
 		e, s = stream_create(key)
 		created = true
 	}
-	id, aerr := st.xadd_apply(s, &args, argv[idpos + 1:], u64(srv.now_ms))
+	id, aerr := st.xadd_apply(s, &spec, argv[spec.fields_at:], u64(srv.now_ms))
 	if aerr != .None {
 		if created {
 			db_remove(key)
@@ -218,8 +218,8 @@ cmd_xadd :: proc(c: ^Conn, argv: [][]u8) {
 	reply_stream_id(c, id)
 	signal_key(key)
 	notify(.Stream, "xadd", key)
-	if args.trim_strategy != .None {
-		if st.trim(s, &args) > 0 {
+	if spec.trim.rule != .Off {
+		if st.trim(s, &spec.trim) > 0 {
 			notify(.Stream, "xtrim", key)
 		}
 	}
@@ -286,7 +286,7 @@ cmd_xdel :: proc(c: ^Conn, argv: [][]u8) {
 	}
 	clear(&stream_ids)
 	for a in argv[2:] {
-		id, ok := st.parse_strict_id(a)
+		id, ok := st.parse_exact_id(a)
 		if !ok {
 			reply_stream_error(c, .Invalid_ID)
 			return
@@ -307,7 +307,7 @@ cmd_xdel :: proc(c: ^Conn, argv: [][]u8) {
 
 cmd_xtrim :: proc(c: ^Conn, argv: [][]u8) {
 	pst.dirty_explicit = true
-	args, _, err := st.parse_add_trim_args(argv, false)
+	limits, err := st.parse_xtrim(argv)
 	if err != .None {
 		reply_stream_error(c, err)
 		return
@@ -323,7 +323,7 @@ cmd_xtrim :: proc(c: ^Conn, argv: [][]u8) {
 		reply_int(c, 0)
 		return
 	}
-	removed := st.trim(s, &args)
+	removed := st.trim(s, &limits)
 	pst.dirty += removed
 	stream_sync(e.db, s)
 	if removed > 0 {
@@ -484,15 +484,15 @@ cmd_xread :: proc(c: ^Conn, argv: [][]u8) {
 		reply_stream_error(c, err)
 		return
 	}
-	nkeys := a.streams_count
+	nkeys := a.key_count
 	reexec := block_in_reexecution() && c.bstate != nil && len(c.bstate.stream_ids) == nkeys
 	clear(&stream_ids)
 	resize(&stream_ids, nkeys)
 	clear(&stream_reads)
 	resize(&stream_reads, nkeys)
 	for i in 0 ..< nkeys {
-		key := argv[a.streams_arg + i]
-		arg := argv[a.streams_arg + nkeys + i]
+		key := argv[a.keys_at + i]
+		arg := argv[a.keys_at + nkeys + i]
 		_, s, wrong := stream_lookup(key, true)
 		if wrong {
 			reply_wrongtype(c)
@@ -518,7 +518,7 @@ cmd_xread :: proc(c: ^Conn, argv: [][]u8) {
 			return
 		case:
 			ok: bool
-			id, ok = st.parse_strict_id(arg)
+			id, ok = st.parse_exact_id(arg)
 			if !ok {
 				reply_stream_error(c, .Invalid_ID)
 				return
@@ -528,7 +528,7 @@ cmd_xread :: proc(c: ^Conn, argv: [][]u8) {
 	}
 	served := 0
 	for i in 0 ..< nkeys {
-		_, s, _ := stream_lookup(argv[a.streams_arg + i], true)
+		_, s, _ := stream_lookup(argv[a.keys_at + i], true)
 		stream_reads[i] = s
 		if s != nil && s.length > 0 && st.compare_id(st.last_valid_id(s), stream_ids[i]) > 0 {
 			served += 1
@@ -550,7 +550,7 @@ cmd_xread :: proc(c: ^Conn, argv: [][]u8) {
 			if c.resp == RESP2 {
 				reply_array(c, 2)
 			}
-			reply_bulk(c, argv[a.streams_arg + i])
+			reply_bulk(c, argv[a.keys_at + i])
 			start := stream_ids[i]
 			st.incr_id(&start)
 			stream_reply_range(c, s, &start, nil, int(a.count), false, false)
@@ -567,7 +567,7 @@ cmd_xread :: proc(c: ^Conn, argv: [][]u8) {
 				append(&c.bstate.stream_ids, [2]u64{id.ms, id.seq})
 			}
 		}
-		block_for_keys(c, .Stream, argv[a.streams_arg:a.streams_arg + nkeys], a.timeout, false)
+		block_for_keys(c, .Stream, argv[a.keys_at:a.keys_at + nkeys], a.timeout, false)
 		return
 	}
 	reply_null_array(c)

@@ -55,7 +55,12 @@ add_and_trim_errors :: proc(t: ^testing.T) {
 	}
 	for c in cases {
 		argv := args_of(..c.argv)
-		_, _, err := st.parse_add_trim_args(argv, c.argv[0] == "XADD")
+		err: st.Error
+		if c.argv[0] == "XADD" {
+			_, err = st.parse_xadd(argv)
+		} else {
+			_, err = st.parse_xtrim(argv)
+		}
 		testing.expectf(t, err == c.err, "%v => %v want %v", c.argv, err, c.err)
 	}
 	Message :: struct {
@@ -159,7 +164,7 @@ xread_errors :: proc(t: ^testing.T) {
 		testing.expectf(t, err == c.err, "%v => %v want %v", c.argv, err, c.err)
 	}
 	a, err := st.parse_xread_args(args_of("XREAD", "COUNT", "1", "COUNT", "-2", "BLOCK", "0", "STREAMS", "x", "y", "1", "2"), 1000, false)
-	testing.expect(t, err == .None && a.count == 0 && a.timeout == 0 && a.streams_arg == 8 && a.streams_count == 2)
+	testing.expect(t, err == .None && a.count == 0 && a.timeout == 0 && a.keys_at == 8 && a.key_count == 2)
 	a, err = st.parse_xread_args(args_of("XREAD", "BLOCK", "250", "STREAMS", "x", "1"), 1000, false)
 	testing.expect(t, err == .None && a.timeout == 1250)
 	a, err = st.parse_xread_args(args_of("XREAD", "STREAMS", "x", "1"), 1000, false)

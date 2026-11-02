@@ -685,7 +685,7 @@ apply_clock_hint :: proc(cs: ^Compare_State, rr: Reply) {
 	if rr.kind != .Bulk {
 		return
 	}
-	id, ok := st.parse_strict_id(rr.str)
+	id, ok := st.parse_exact_id(rr.str)
 	if ok {
 		cs.m.now = id.ms
 		cs.clock_hints += 1

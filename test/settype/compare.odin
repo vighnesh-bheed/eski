@@ -444,7 +444,7 @@ scan_pages_model :: proc(m: ^Model, args: [][]u8) -> []u8 {
 scan_union_ok :: proc(wrapper: Reply, s: st.Set, opts: ht.Scan_Options, full: bool) -> (ok: bool, why: string) {
 	expected := make(map[string]bool, 16, context.temp_allocator)
 	for v in set_members(s) {
-		if !opts.use_pattern || ht.string_match_len(opts.pattern, transmute([]u8)v, false) {
+		if !opts.use_pattern || ht.matches_pattern(opts.pattern, transmute([]u8)v, false) {
 			expected[v] = true
 		}
 	}
