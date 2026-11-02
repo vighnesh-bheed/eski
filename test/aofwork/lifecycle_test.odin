@@ -25,7 +25,7 @@ enter_dir :: proc(dir: string) {
 }
 
 leave_dir :: proc() {
-	if j.aof.state != .Off {
+	if j.aof.state != .Disabled {
 		j.aof_stop()
 	}
 	for j.aof_rewriting() {
@@ -33,7 +33,7 @@ leave_dir :: proc() {
 	}
 	j.aof.started = false
 	j.aof.wanted = false
-	j.aof.state = .Off
+	j.aof.state = .Disabled
 	j.aof.rewrite_scheduled = false
 	j.aof.disable_auto_gc = false
 	j.aof.preamble = true
@@ -82,17 +82,17 @@ lifecycle_enable_rewrite_disable :: proc(t: ^testing.T) {
 	enter_dir(dir)
 	defer leave_dir()
 	j.aof.started = true
-	j.aof.state = .Off
+	j.aof.state = .Disabled
 	before := j.aof.stat_rewrites
 	c := new_client(0)
 	run(c, "SET", "k1", "v1")
 	testing.expect_value(t, run(c, "BGREWRITEAOF"), "+Background append only file rewriting started\r\n")
 	testing.expect(t, j.aof_start())
-	testing.expect_value(t, j.aof.state, j.Aof_State.Wait_Rewrite)
+	testing.expect_value(t, j.aof.state, j.Aof_Status.Awaiting_Base)
 	testing.expect(t, j.aof.feed)
 	run(c, "SET", "during", "1")
 	testing.expect(t, wait_rewrite())
-	testing.expect_value(t, j.aof.state, j.Aof_State.On)
+	testing.expect_value(t, j.aof.state, j.Aof_Status.Enabled)
 	testing.expect_value(t, j.aof.stat_rewrites - before, 2)
 	testing.expect_value(t, manifest_now(), "file appendonly.aof.1.base.rdb seq 1 type b\nfile appendonly.aof.1.incr.aof seq 1 type i\n")
 	j.aof_flush(true)
@@ -142,7 +142,7 @@ lifecycle_enable_rewrite_disable :: proc(t: ^testing.T) {
 	testing.expect_value(t, db_size(0), 4)
 
 	j.aof_stop()
-	testing.expect_value(t, j.aof.state, j.Aof_State.Off)
+	testing.expect_value(t, j.aof.state, j.Aof_Status.Disabled)
 	testing.expect(t, !j.aof.feed)
 	testing.expect_value(t, run(c, "BGREWRITEAOF"), "+Background append only file rewriting started\r\n")
 	testing.expect(t, wait_rewrite())
@@ -183,7 +183,7 @@ lifecycle_startup_paths :: proc(t: ^testing.T) {
 	j.aof.wanted = true
 	j.aof.started = false
 	testing.expect(t, j.aof_startup())
-	testing.expect_value(t, j.aof.state, j.Aof_State.On)
+	testing.expect_value(t, j.aof.state, j.Aof_Status.Enabled)
 	testing.expect(t, j.aof.feed)
 	testing.expect_value(t, manifest_now(), "file appendonly.aof.1.base.rdb seq 1 type b\nfile appendonly.aof.1.incr.aof seq 1 type i\n")
 	testing.expect(t, strings.contains(log_text(), "Creating AOF base file appendonly.aof.1.base.rdb on server start"))

@@ -435,10 +435,10 @@ info_stats :: proc(b: ^[dynamic]u8) {
 	info_line_int(b, "eventloop_duration_cmd_sum", stat_el_cmd_sum)
 	info_line_int(b, "instantaneous_eventloop_cycles_per_sec", inst_get(.El_Cycle))
 	info_line_int(b, "instantaneous_eventloop_duration_usec", inst_get(.El_Duration))
-	info_line_int(b, "acl_access_denied_auth", acl_denied[.Auth])
-	info_line_int(b, "acl_access_denied_cmd", acl_denied[.Cmd])
-	info_line_int(b, "acl_access_denied_key", acl_denied[.Key])
-	info_line_int(b, "acl_access_denied_channel", acl_denied[.Channel])
+	info_line_int(b, "acl_access_denied_auth", acl_denied[.Auth_Failed])
+	info_line_int(b, "acl_access_denied_cmd", acl_denied[.Command_Denied])
+	info_line_int(b, "acl_access_denied_key", acl_denied[.Key_Denied])
+	info_line_int(b, "acl_access_denied_channel", acl_denied[.Channel_Denied])
 }
 
 @(private = "file")

@@ -47,7 +47,7 @@ aof_hooks_through_persistence :: proc(t: ^testing.T) {
 	j.config_reading_file = false
 	j.persist_startup()
 	testing.expect(t, j.aof.started)
-	testing.expect_value(t, j.aof.state, j.Aof_State.On)
+	testing.expect_value(t, j.aof.state, j.Aof_Status.Enabled)
 	populate_all_types()
 	cmd("DEL", "nokey")
 	digest := cmd("DEBUG", "DIGEST")
@@ -90,7 +90,7 @@ aof_hooks_through_persistence :: proc(t: ^testing.T) {
 	expect_reply(t, cmd("DEBUG", "LOADAOF"), "+OK\r\n", "loadaof after rewrite")
 	expect_reply(t, cmd("DEBUG", "DIGEST"), digest, "digest after second loadaof")
 	expect_reply(t, cmd("CONFIG", "SET", "appendonly", "no"), "+OK\r\n", "appendonly off")
-	testing.expect_value(t, j.aof.state, j.Aof_State.Off)
+	testing.expect_value(t, j.aof.state, j.Aof_Status.Disabled)
 	empty := test_dir()
 	defer cleanup_dir(empty)
 	enter_dir(empty)

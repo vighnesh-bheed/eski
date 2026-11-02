@@ -97,8 +97,8 @@ registry_signal_gating_and_ready_queue :: proc(t: ^testing.T) {
 	eski.block_signal_key(&eski.dbs[1], transmute([]u8)string("k"), .List)
 	eski.block_signal_key(&eski.dbs[1], transmute([]u8)string("k"), .List)
 	testing.expect_value(t, len(eski.block_ready), 1)
-	testing.expect_value(t, eski.block_ready[0].db, 1)
-	testing.expect_value(t, eski.block_ready[0].key, "k")
+	testing.expect_value(t, eski.block_ready[0].db_index, 1)
+	testing.expect_value(t, eski.block_ready[0].name, "k")
 	testing.expect_value(t, eski.block_work, 2)
 	testing.expect(t, eski.block_wait_ms(500) == 0, "pending ready keys make the loop poll")
 	drop_fake(c)
@@ -162,12 +162,12 @@ registry_nokey_removal_and_scans :: proc(t: ^testing.T) {
 	eski.block_check_removed()
 	testing.expect(t, !eski.block_removed)
 	testing.expect_value(t, len(eski.block_ready), 1)
-	testing.expect_value(t, eski.block_ready[0].key, "gone")
+	testing.expect_value(t, eski.block_ready[0].name, "gone")
 	eski.block_scan_ready(&eski.dbs[3])
 	names: [dynamic]string
 	defer delete(names)
 	for rk in eski.block_ready {
-		append(&names, rk.key)
+		append(&names, rk.name)
 	}
 	testing.expect_value(t, len(names), 3)
 	has :: proc(names: []string, s: string) -> bool {

@@ -724,12 +724,12 @@ cmd_waitaof :: proc(c: ^Conn, argv: [][]u8) {
 	if !wait_timeout_ok(c, argv[3]) {
 		return
 	}
-	if numlocal != 0 && aof.state != .On {
+	if numlocal != 0 && aof.state != .Enabled {
 		reply_error(c, "ERR WAITAOF cannot be used when numlocal is set but appendonly is disabled.")
 		return
 	}
 	acked: i64 = 0
-	if aof.state == .On {
+	if aof.state == .Enabled {
 		aof_fsync_sync()
 		acked = 1
 	}

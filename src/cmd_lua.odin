@@ -311,8 +311,8 @@ lua_inner :: proc(run: ^Lua_Invocation, argv: [][]u8) {
 		return
 	}
 	permission, position := acl_check_user(run.source.user, int(id), argv)
-	if permission != .Ok {
-		acl_log_add(run.source, permission, .Lua, argv, position, nil, transmute([]u8)spec.name if permission == .Cmd else nil)
+	if permission != .Allowed {
+		acl_log_add(run.source, permission, .Lua, argv, position, nil, transmute([]u8)spec.name if permission == .Command_Denied else nil)
 		reply_error(client, "ERR ACL failure in script: this user has no permissions to run the command or access its keys or channels")
 		stat_reject(hot, argv)
 		return
@@ -476,7 +476,7 @@ lua_acl_callback :: proc "c" (opaque: rawptr, count: c.size_t, arguments: [^]lr.
 		return lua_fixed("-ERR Invalid command passed to redis.acl_check_cmd()\r\n")
 	}
 	permission, _ := acl_check_user(run.source.user, int(id), argv)
-	return lua_fixed(":1\r\n" if permission == .Ok else ":0\r\n")
+	return lua_fixed(":1\r\n" if permission == .Allowed else ":0\r\n")
 }
 
 lua_propagation_callback :: proc "c" (opaque: rawptr, mask: i32) -> i32 {
