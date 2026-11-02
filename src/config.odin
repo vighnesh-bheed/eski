@@ -2779,6 +2779,7 @@ create_pid_file :: proc() {
 
 remove_pid_file :: proc() {
 	if cfg.pidfile != "" {
+		plog(LOG_NOTICE, "Removing the pid file.")
 		buf: [4096]u8
 		linux.unlink(persist_cstr(cfg.pidfile, buf[:]))
 	}

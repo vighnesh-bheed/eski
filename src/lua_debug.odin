@@ -34,6 +34,11 @@ lua_debug_reap :: proc() {
 
 lua_debug_shutdown :: proc() {
 	for pid in lua_debug_children {
+		line: Log_Line
+		ll_begin(&line, LOG_NOTICE)
+		ll_str(&line, "Killing debugging session ")
+		ll_int(&line, i64(pid))
+		ll_end(&line)
 		linux.kill(pid, .SIGTERM)
 		status: u32
 		for {
@@ -82,6 +87,7 @@ lua_debug_fork :: proc(client: ^Conn) -> (proceed, child: bool) {
 		}
 	}
 	aof.feed = false
+	plog(LOG_NOTICE, "Eski forked for debugging eval")
 	return true, true
 }
 

@@ -71,49 +71,102 @@ lua_busy_dispatch_inner :: proc(client: ^Conn, argv: [][]u8) {
 	if len(argv) == 0 {
 		return
 	}
-	cmd := lookup_command(argv[0])
-	if cmd == nil || !arity_ok(cmd.arity, len(argv)) {
-		reply_error(client, LUA_ERR_BUSY)
+	slot := lookup_entry(argv[0])
+	if slot == nil {
+		reply_unknown_command(client, argv)
 		tx_flag(client)
 		return
+	}
+	cmd, hot := slot.cmd, slot.stats
+	if !arity_ok(cmd.arity, len(argv)) {
+		execute_bad_arity(client, cmd)
+		stat_reject(hot, argv)
+		return
+	}
+	spec := cmd_spec_lookup(cmd, argv)
+	if len(argv) >= 2 && len(hot.subs) > 0 {
+		if spec == nil {
+			upper := make([]u8, len(cmd.name), context.temp_allocator)
+			for byte, i in transmute([]u8)cmd.name {
+				upper[i] = byte-('a'-'A') if byte >= 'a' && byte <= 'z' else byte
+			}
+			reply_unknown_subcommand(client, argv[1], string(upper))
+			tx_flag(client)
+			stat_reject(hot, argv)
+			return
+		}
+		if !arity_ok(int(spec.arity), len(argv)) {
+			reply_wrong_args(client, spec.name)
+			tx_flag(client)
+			stat_reject(hot, argv)
+			return
+		}
 	}
 	if !lua_busy_authorize(client, cmd, argv) {
 		tx_flag(client)
 		return
 	}
 	if lua_active.loading && persist_gate(client, cmd, argv) {
-		stat_reject(stat_of(cmd), argv)
+		stat_reject(hot, argv)
 		return
 	}
-	stat_cur = &stat_of(cmd).stats
+	if spec == nil || .Allow_Busy not_in spec.flags {
+		if cmd.handler == cmd_exec && .Multi in client.txf {
+			tx_exec_abort(client, lua_busy_error())
+		} else {
+			reply_error(client, lua_busy_error())
+			tx_flag(client)
+		}
+		stat_reject(hot, argv)
+		return
+	}
+	if .Multi in client.txf && !tx_immediate(cmd) {
+		tx_queue(client, cmd, argv)
+		return
+	}
+	stat_cur = &hot.stats
 	start := mono_now()
 	client.last_cmd = cmd.name
 	switch {
-	case cmd.handler == cmd_auth || cmd.handler == cmd_hello:
-		cmd.handler(client, argv)
-	case cmd.handler == cmd_multi || cmd.handler == cmd_discard || cmd.handler == cmd_unwatch:
-		cmd.handler(client, argv)
-	case cmd.handler == cmd_exec:
-		stat_cur = nil
-		tx_exec_abort(client, LUA_ERR_BUSY)
-		stat_reject(stat_of(cmd), argv)
-		return
-	case cmd.handler == cmd_script && len(argv) == 2 && eq_nocase(argv[1], "kill") && !lua_active.function:
-		lua_script_kill(client)
-	case cmd.handler == cmd_function && len(argv) == 2 && eq_nocase(argv[1], "kill") && lua_active.function:
-		lua_function_kill(client)
-	case cmd.handler == cmd_function && len(argv) == 2 && eq_nocase(argv[1], "stats"):
-		lua_function_stats(client)
-	case cmd.handler == cmd_shutdown && len(argv) == 2 && eq_nocase(argv[1], "nosave"):
-		linux.exit_group(0)
+	case cmd.handler == cmd_script:
+		lua_kill(client, false)
+	case cmd.handler == cmd_function && eq_nocase(argv[1], "kill"):
+		lua_kill(client, true)
+	case cmd.handler == cmd_function:
+		if lua_active.function {
+			lua_function_stats(client)
+		} else {
+			stat_cur = nil
+			reply_error(client, lua_busy_error())
+			stat_reject(hot, argv)
+			return
+		}
+	case cmd.handler == cmd_shutdown:
+		lua_busy_shutdown(client, argv)
 	case:
-		stat_cur = nil
-		reply_error(client, LUA_ERR_BUSY)
-		tx_flag(client)
-		stat_reject(stat_of(cmd), argv)
+		cmd.handler(client, argv)
+	}
+	stat_call_slow(client, cmd, hot, argv, mono_now()-start)
+}
+
+lua_busy_shutdown :: proc(client: ^Conn, argv: [][]u8) {
+	nosave, valid := false, true
+	for arg in argv[1:] {
+		switch {
+		case eq_nocase(arg, "nosave"):
+			nosave = true
+		case eq_nocase(arg, "abort"):
+			valid = false
+		case eq_nocase(arg, "save"), eq_nocase(arg, "now"), eq_nocase(arg, "force"):
+		case:
+			valid = false
+		}
+	}
+	if valid && !nosave {
+		reply_error(client, lua_busy_error())
 		return
 	}
-	stat_call_slow(client, cmd, stat_of(cmd), argv, mono_now()-start)
+	cmd_shutdown(client, argv)
 }
 
 lua_busy_parse :: proc(state: ^Lua_Busy_State, client: ^Conn) -> (argv: [][]u8, kind: rp.Kind) {
@@ -288,10 +341,19 @@ lua_busy_callback :: proc "c" (opaque: rawptr, wrote: i32, stats: ^lr.Stats) -> 
 	run.wrote = run.wrote || wrote != 0
 	lua_note_runtime(run, stats)
 	if run.killed || (persist_signal_pending() && !run.wrote) {
-		return lr.KILL_READONLY
+		return lua_busy_kill(run)
 	}
 	if len(run.busy.temporary) == 0 {
-		plog(LOG_WARNING, "Slow script detected: execution exceeded the configured busy threshold.")
+		line: Log_Line
+		ll_begin(&line, LOG_WARNING)
+		ll_str(&line, "Slow script detected: still in execution after ")
+		ll_int(&line, i64(cfg.busy_reply_threshold))
+		ll_str(&line, " milliseconds. You can try killing the script using the ")
+		ll_str(&line, "FUNCTION KILL" if run.function else "SCRIPT KILL")
+		ll_str(&line, " command. Script name is: ")
+		ll_bytes(&line, run.identifier)
+		ll_str(&line, ".")
+		ll_end(&line)
 		run.busy.temporary = make([]u8, LUA_BUSY_TEMP)
 		mem.arena_init(&run.busy.arena, run.busy.temporary)
 	}
@@ -351,5 +413,13 @@ lua_busy_callback :: proc "c" (opaque: rawptr, wrote: i32, stats: ^lr.Stats) -> 
 			lua_busy_flush(client)
 		}
 	}
-	return lr.KILL_READONLY if run.killed || (persist_signal_pending() && !run.wrote) else lr.CONTINUE
+	return lua_busy_kill(run) if run.killed || (persist_signal_pending() && !run.wrote) else lr.CONTINUE
+}
+
+lua_busy_kill :: proc(run: ^Lua_Invocation) -> i32 {
+	if run.killed && !run.wrote && !run.kill_logged {
+		run.kill_logged = true
+		plog(LOG_NOTICE, "Lua script killed by user with SCRIPT KILL.")
+	}
+	return lr.KILL_READONLY
 }

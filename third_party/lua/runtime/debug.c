@@ -8,7 +8,7 @@ struct es_debug_state {
     size_t log_count, maxlen;
     uint64_t resumed_ns, eval_started_ns;
     int eval_timed_out;
-    int line, stepping, dynamic, inspecting, detached, force_trace;
+    int line, stepping, dynamic, inspecting, detached, force_trace, hinted, protocol_error;
     int *breaks;
     size_t break_count, break_capacity;
 };
@@ -79,7 +79,7 @@ static void es_dline(lua_State *L,int line) {
     es_debug_state *state=es_context_of(L)->debug; const unsigned char *text; size_t len;
     if(!es_dsource(L,line,&text,&len)) return;
     es_buffer out={0}; char prefix[64];
-    int n=snprintf(prefix,sizeof(prefix),"%s%s%d   ",line==state->line?"->":"  ",es_dbreak(state,line)?"#":" ",line);
+    int n=snprintf(prefix,sizeof(prefix),"%s%s%-3d ",line==state->line?"->":"  ",es_dbreak(state,line)?"#":" ",line);
     es_append(L,&out,prefix,(size_t)n); es_append(L,&out,text,len); es_dmark(&out,es_context_of(L));
     es_dlog(L,(const char *)out.data,out.len); es_release(es_context_of(L),out.data);
 }
@@ -120,6 +120,8 @@ static void es_ddump(lua_State *L,int index,es_buffer *out,unsigned depth,const 
             else if(s[i]=='\n')es_dput(L,out,"\\n",2);
             else if(s[i]=='\r')es_dput(L,out,"\\r",2);
             else if(s[i]=='\t')es_dput(L,out,"\\t",2);
+            else if(s[i]=='\a')es_dput(L,out,"\\a",2);
+            else if(s[i]=='\b')es_dput(L,out,"\\b",2);
             else if(s[i]<32 || s[i]>=127) {int n=snprintf(text,sizeof(text),"\\x%02x",s[i]);es_dput(L,out,text,(size_t)n);}
             else es_dput(L,out,(const char *)s+i,1);
         }
@@ -148,24 +150,38 @@ static void es_ddump(lua_State *L,int index,es_buffer *out,unsigned depth,const 
     es_dput(L,out,"}",1);
 }
 
+static void es_dtrimmed(lua_State *L,es_buffer *out) {
+    es_context *ctx=es_context_of(L); es_debug_state *state=ctx->debug; int trimmed=0;
+    if(state->maxlen && out->len>state->maxlen) {out->len=state->maxlen;es_append(L,out," ...",4);es_dmark(out,ctx);trimmed=1;}
+    es_dlog(L,(const char *)out->data,out->len);
+    if(trimmed&&!state->hinted){state->hinted=1;es_dfmt(L,"<hint> The above reply was trimmed. Use 'maxlen 0' to disable trimming.");}
+}
+
 static void es_dvalue(lua_State *L,const char *prefix,int index) {
     es_context *ctx=es_context_of(L); es_buffer out={0}; const void *path[9]={0};
     es_dput(L,&out,prefix,strlen(prefix));es_ddump(L,index,&out,0,path);
-    if(ctx->debug->maxlen && out.len>ctx->debug->maxlen) {out.len=ctx->debug->maxlen;es_append(L,&out," ...",4);}
-    es_dlog(L,(const char *)out.data,out.len);es_release(ctx,out.data);
+    es_dtrimmed(L,&out);es_release(ctx,out.data);
 }
 
 static int es_dnumber(eslua_arg arg,int *value) {
     if(!arg.len || arg.len>32) return 0;
     size_t i=0;int negative=arg.data[0]=='-';if(negative)i++;
     int64_t n=0;if(i==arg.len)return 0;
+    if(arg.data[i]=='0'&&(negative||arg.len>1))return 0;
     for(;i<arg.len;i++){if(arg.data[i]<'0'||arg.data[i]>'9')return 0;n=n*10+arg.data[i]-'0';if(n>INT_MAX)return 0;}
     *value=negative?-(int)n:(int)n;return 1;
 }
 
+static int es_datoi(eslua_arg arg) {
+    char text[64]; size_t len=arg.len<sizeof(text)-1?arg.len:sizeof(text)-1;
+    memcpy(text,arg.data,len);text[len]=0;
+    return (int)strtol(text,NULL,10);
+}
+
 static int es_dequal(eslua_arg arg,const char *text) {return arg.len==strlen(text)&&!memcmp(arg.data,text,arg.len);}
 
-static eslua_arg *es_drequest(lua_State *L,eslua_result input,size_t *argc,void **owned) {
+static eslua_arg *es_drequest(lua_State *L,eslua_result input,size_t *argc,void **owned,int *protocol) {
+    *protocol=0;
     if(input.status || !input.data || !input.len) return NULL;
     unsigned char *copy=es_dalloc(L,NULL,input.len);memcpy(copy,input.data,input.len);*owned=copy;
     size_t pos=0;
@@ -173,6 +189,7 @@ static eslua_arg *es_drequest(lua_State *L,eslua_result input,size_t *argc,void 
     size_t count=0;
     while(pos<input.len && copy[pos]>='0'&&copy[pos]<='9'){if(count>1048576)return NULL;count=count*10+copy[pos++]-'0';}
     if(!count || count>1048576 || pos+2>input.len || copy[pos]!='\r'||copy[pos+1]!='\n')return NULL;
+    if(count>1024){*protocol=1;return NULL;}
     pos+=2;eslua_arg *args=es_dalloc(L,NULL,count*sizeof(*args));
     for(size_t i=0;i<count;i++) {
         if(pos>=input.len||copy[pos++]!='$')return NULL;
@@ -210,12 +227,11 @@ static void es_dprint(lua_State *L,size_t argc,const eslua_arg *args) {
     if(argc>1&&(es_dequal(args[1],"KEYS")||es_dequal(args[1],"ARGV"))) {
         lua_getglobal(L,es_dequal(args[1],"KEYS")?"KEYS":"ARGV");es_dvalue(L,"<value> ",-1);lua_pop(L,1);found=1;
     }
-    if(!found)es_dfmt(L,"No such variable.");
+    if(!found)es_dfmt(L,argc==1?"No local variables in the current context.":"No such variable.");
 }
 
 static void es_deval(lua_State *L,size_t argc,const eslua_arg *args) {
     es_context *ctx=es_context_of(L);es_buffer code={0};
-    if(argc<2){es_dfmt(L,"<error> Please specify some Lua code to evaluate.");return;}
     es_append(L,&code,"return ",7);
     for(size_t i=1;i<argc;i++){if(i>1)es_byte(L,&code,' ');es_append(L,&code,args[i].data,args[i].len);}es_dmark(&code,ctx);
     int status=luaL_loadbuffer(L,(const char *)code.data,code.len,"@ldb_eval");
@@ -237,8 +253,9 @@ static void es_dtrace(lua_State *L) {
     int count=0;
     for(int level=0;level<128;level++){
         lua_Debug frame;if(!lua_getstack(L,level,&frame))break;lua_getinfo(L,"nSl",&frame);
-        if(frame.what&&!strcmp(frame.what,"C"))continue;
-        if(frame.name)es_dfmt(L,"In %s:",frame.name);else es_dfmt(L,"In top level:");
+        if(frame.what&&(!strcmp(frame.what,"C")||!strcmp(frame.what,"tail")))continue;
+        const char *where=count?"From":"In";
+        if(frame.name)es_dfmt(L,"%s %s:",where,frame.name);else es_dfmt(L,"%s top level:",where);
         es_dline(L,frame.currentline);count++;
     }
     if(!count)es_dfmt(L,"No Lua frames.");
@@ -249,6 +266,13 @@ static void es_dhelp(lua_State *L) {
     for(size_t i=0;i<sizeof(lines)/sizeof(*lines);i++)es_dfmt(L,"%s",lines[i]);
 }
 
+static int es_dequal_nocase(eslua_arg arg,const char *text) {
+    size_t len=strlen(text);
+    if(arg.len!=len)return 0;
+    for(size_t i=0;i<len;i++)if(tolower(arg.data[i])!=text[i])return 0;
+    return 1;
+}
+
 static void es_dloop(lua_State *L,const char *reason) {
     es_context *ctx=es_context_of(L);es_debug_state *state=ctx->debug;
     state->inspecting=1;
@@ -256,13 +280,17 @@ static void es_dloop(lua_State *L,const char *reason) {
     if(!es_dflush(L))goto disconnected;
     for(;;){
         eslua_result input=ctx->callbacks.debug_read?ctx->callbacks.debug_read(ctx->callbacks.opaque):(eslua_result){0};
-        size_t argc=0;void *owned=NULL;eslua_arg *args=es_drequest(L,input,&argc,&owned);
-        if(!args){es_release(ctx,owned);goto disconnected;}
-        unsigned char command=args[0].len?(unsigned char)tolower(args[0].data[0]):0;
+        size_t argc=0;void *owned=NULL;int protocol=0;eslua_arg *args=es_drequest(L,input,&argc,&owned,&protocol);
+        if(!args){
+            es_release(ctx,owned);
+            if(protocol){state->inspecting=0;state->protocol_error=1;ctx->sticky=ESLUA_KILLED;ctx->failure=NULL;lua_pushliteral(L,"protocol error");lua_error(L);}
+            goto disconnected;
+        }
         const char *names[]={"help","step","next","continue","abort","print","eval","trace","list","whole","maxlen","break","redis"};
-        int known=args[0].len==1;
-        if(!known)for(size_t i=0;i<sizeof(names)/sizeof(*names);i++)if(es_dequal(args[0],names[i]))known=1;
-        if(!known)command=0;
+        unsigned char command=0;
+        if(args[0].len==1)command=(unsigned char)tolower(args[0].data[0]);
+        else for(size_t i=0;i<sizeof(names)/sizeof(*names);i++)if(es_dequal_nocase(args[0],names[i]))command=(unsigned char)names[i][0];
+        if(command=='r'&&argc<2)command=0;
         int resume=0;
         switch(command){
         case 's':case 'n':state->stepping=1;resume=1;break;
@@ -275,40 +303,46 @@ static void es_dloop(lua_State *L,const char *reason) {
         case 'l':case 'w':{
             int line=state->line,context=5;
             if(command=='w'){line=1;context=INT_MAX-1;}
-            else{if(argc>1&&!es_dnumber(args[1],&line))line=state->line;if(argc>2&&!es_dnumber(args[2],&context))context=5;}
+            else{if(argc>1)line=es_datoi(args[1]);if(argc>2)context=es_datoi(args[2]);}
             es_dlist(L,line,context);break;
         }
         case 'm':{
-            int len=256;if(argc>1&&(!es_dnumber(args[1],&len)||len<0)){es_dfmt(L,"Invalid maxlen.");break;}
-            if(argc>1)state->maxlen=(size_t)len;
-            if(state->maxlen)es_dfmt(L,"<value> replies are truncated at %zu bytes.",state->maxlen);else es_dfmt(L,"<value> replies are not truncated.");break;
+            if(argc>1){int len=es_datoi(args[1]);if(len!=0&&len<=60)len=60;state->maxlen=(size_t)len;state->hinted=1;}
+            if(state->maxlen)es_dfmt(L,"<value> replies are truncated at %zu bytes.",state->maxlen);else es_dfmt(L,"<value> replies are unlimited.");break;
         }
         case 'b':{
-            if(argc==1){es_dfmt(L,"%zu breakpoints set:",state->break_count);for(size_t i=0;i<state->break_count;i++)es_dline(L,state->breaks[i]);}
+            if(argc==1){
+                if(!state->break_count)es_dfmt(L,"No breakpoints set. Use 'b <line>' to add one.");
+                else{es_dfmt(L,"%zu breakpoints set:",state->break_count);for(size_t i=0;i<state->break_count;i++)es_dline(L,state->breaks[i]);}
+            }
             else for(size_t i=1;i<argc;i++){
-                int line;if(!es_dnumber(args[i],&line)){es_dfmt(L,"Invalid breakpoint.");continue;}
-                if(!line)state->break_count=0;
-                else if(line<0){for(size_t j=0;j<state->break_count;j++)if(state->breaks[j]==-line){state->breaks[j]=state->breaks[--state->break_count];break;}}
-                else if(!es_dbreak(state,line)){
-                    const unsigned char *text;size_t len;if(!es_dsource(L,line,&text,&len)){es_dfmt(L,"Wrong line number.");continue;}
+                int line;if(!es_dnumber(args[i],&line)){es_dfmt(L,"Invalid argument:'%.*s'",(int)(args[i].len>512?512:args[i].len),(const char *)args[i].data);continue;}
+                if(!line){state->break_count=0;es_dfmt(L,"All breakpoints removed.");}
+                else if(line<0){
+                    int found=0;
+                    for(size_t j=0;j<state->break_count;j++)if(state->breaks[j]==-line){memmove(state->breaks+j,state->breaks+j+1,(state->break_count-j-1)*sizeof(*state->breaks));state->break_count--;found=1;break;}
+                    es_dfmt(L,found?"Breakpoint removed.":"No breakpoint in the specified line.");
+                }
+                else{
+                    const unsigned char *text;size_t len;
+                    if(es_dbreak(state,line)||!es_dsource(L,line,&text,&len)){es_dfmt(L,"Wrong line number.");continue;}
                     if(state->break_count==state->break_capacity){size_t cap=state->break_capacity?state->break_capacity*2:16;state->breaks=es_dalloc(L,state->breaks,cap*sizeof(*state->breaks));state->break_capacity=cap;}
                     state->breaks[state->break_count++]=line;
+                    es_dlist(L,line,1);
                 }
-                if(line>0)es_dlist(L,line,1);
             }break;
         }
         case 'r':{
-            if(argc<2){es_dfmt(L,"<error> Specify a Redis command.");break;}
             if(argc>INT_MAX || !lua_checkstack(L,(int)argc+1)){es_dfmt(L,"<error> Too many Redis command arguments.");break;}
             int top=lua_gettop(L);state->force_trace=1;lua_pushcfunction(L,es_debug_call);
             for(size_t i=1;i<argc;i++)lua_pushlstring(L,(const char *)args[i].data,args[i].len);
             lua_pcall(L,(int)argc-1,1,0);ctx->host_error_origin=0;state->force_trace=0;lua_settop(L,top);
             if(ctx->sticky)es_fail(L,ctx->sticky,ctx->failure);break;
         }
-        default:es_dfmt(L,"Unknown Redis Lua debugger command or wrong number of arguments.");break;
+        default:es_dfmt(L,"<error> Unknown Redis Lua debugger command or wrong number of arguments.");break;
         }
         es_release(ctx,args);es_release(ctx,owned);
-        if(!resume&&!state->log_count)es_dfmt(L,command=='b'?"No breakpoints set.":"No source lines in range.");
+        if(!resume&&!state->log_count)es_dfmt(L,"No source lines in range.");
         if(resume){state->inspecting=0;state->resumed_ns=es_dclock();return;}
         if(!es_dflush(L))goto disconnected;
     }
@@ -348,7 +382,7 @@ void es_debug_hook(lua_State *L,lua_Debug *debug) {
         lua_getinfo(L,"S",debug);
         if(!debug->source||strcmp(debug->source,"@user_script"))return;
         state->line=debug->currentline;
-        const char *reason=state->dynamic?"redis.breakpoint() called":state->stepping?"step over":es_dbreak(state,state->line)?"break point":NULL;
+        const char *reason=state->dynamic?"redis.breakpoint() called":es_dbreak(state,state->line)?"break point":state->stepping?"step over":NULL;
         if(reason){state->dynamic=0;es_dloop(L,reason);}
     } else if(debug->event==LUA_HOOKCOUNT && (es_dclock()-state->resumed_ns)/1000000 >= (ctx->options.busy_threshold_ms?ctx->options.busy_threshold_ms:5000))es_dloop(L,"timeout reached, infinite loop?");
 }
@@ -359,23 +393,115 @@ void es_debug_finish(lua_State *L) {
     es_dfmt(L,"<endsession>");es_dflush(L);state->detached=1;
 }
 
+static int es_dtracing(es_debug_state *state) {
+    return state->force_trace||(state->stepping&&!state->inspecting);
+}
+
 void es_debug_command(lua_State *L,int argc,const eslua_arg *args) {
     es_context *ctx=es_context_of(L);es_debug_state *state=ctx->debug;
-    if(!state||state->detached||(!state->stepping&&!state->force_trace))return;
-    es_buffer out={0};es_append(L,&out,"<redis> ",8);
-    for(int i=0;i<argc;i++){if(i)es_byte(L,&out,' ');es_append(L,&out,args[i].data,args[i].len);}es_dmark(&out,ctx);
+    if(!state||state->detached||!es_dtracing(state))return;
+    es_buffer out={0};es_append(L,&out,"<redis>",7);
+    int shown=argc>10?10:argc;
+    for(int i=0;i<shown;i++){es_byte(L,&out,' ');es_append(L,&out,args[i].data,args[i].len);}
+    if(argc>10){char more[64];int n=snprintf(more,sizeof(more)," ... (%d more)",argc-11);if(n>0)es_append(L,&out,more,(size_t)n);}
+    es_dmark(&out,ctx);
     es_dlog(L,(const char *)out.data,out.len);es_release(ctx,out.data);
+}
+
+static void es_drepr(lua_State *L,es_buffer *out,unsigned char tag,const unsigned char *s,size_t len) {
+    char text[8];
+    es_dput(L,out,"\"",1);
+    if(tag)es_dput(L,out,(const char *)&tag,1);
+    for(size_t i=0;i<len;i++) {
+        es_debug_state *state=es_context_of(L)->debug;
+        if(state->maxlen && out->len>state->maxlen+32) break;
+        if(s[i]=='"' || s[i]=='\\') {char b[2]={'\\',(char)s[i]};es_dput(L,out,b,2);}
+        else if(s[i]=='\n')es_dput(L,out,"\\n",2);
+        else if(s[i]=='\r')es_dput(L,out,"\\r",2);
+        else if(s[i]=='\t')es_dput(L,out,"\\t",2);
+        else if(s[i]=='\a')es_dput(L,out,"\\a",2);
+        else if(s[i]=='\b')es_dput(L,out,"\\b",2);
+        else if(s[i]<32 || s[i]>=127) {int n=snprintf(text,sizeof(text),"\\x%02x",s[i]);es_dput(L,out,text,(size_t)n);}
+        else es_dput(L,out,(const char *)s+i,1);
+    }
+    es_dput(L,out,"\"",1);
+}
+
+static int es_dresp_line(const unsigned char *data,size_t len,size_t *pos,const unsigned char **line,size_t *line_len) {
+    size_t begin=*pos,end=begin;
+    while(end+1<len && !(data[end]=='\r'&&data[end+1]=='\n'))end++;
+    if(end+1>=len)return 0;
+    *line=data+begin;*line_len=end-begin;*pos=end+2;return 1;
+}
+
+static int64_t es_dresp_count(const unsigned char *line,size_t len) {
+    char text[32];if(!len||len>=sizeof(text))return -2;
+    memcpy(text,line,len);text[len]=0;
+    char *end;long long value=strtoll(text,&end,10);
+    if(*end)return -2;
+    return value;
+}
+
+static int es_dresp(lua_State *L,es_buffer *out,const unsigned char *data,size_t len,size_t *pos,unsigned depth) {
+    if(*pos>=len||depth>64)return 0;
+    unsigned char tag=data[(*pos)++];
+    const unsigned char *line;size_t line_len;
+    if(!es_dresp_line(data,len,pos,&line,&line_len))return 0;
+    switch(tag){
+    case '+':case '-':es_drepr(L,out,tag,line,line_len);return 1;
+    case ':':es_dput(L,out,(const char *)line,line_len);return 1;
+    case ',':es_dput(L,out,"(double) ",9);es_dput(L,out,(const char *)line,line_len);return 1;
+    case '_':es_dput(L,out,"(null)",6);return 1;
+    case '#':case '(':return 1;
+    case '$':case '=':case '!':{
+        int64_t n=es_dresp_count(line,line_len);
+        if(n==-1&&tag=='$'){es_dput(L,out,"NULL",4);return 1;}
+        if(n<0||(uint64_t)n>len-*pos||len-*pos-(size_t)n<2)return 0;
+        if(tag=='$')es_drepr(L,out,0,data+*pos,(size_t)n);
+        *pos+=(size_t)n+2;return 1;
+    }
+    case '*':case '~':case '%':case '>':case '|':{
+        int64_t n=es_dresp_count(line,line_len);
+        if(n==-1&&tag=='*'){es_dput(L,out,"NULL",4);return 1;}
+        if(n<0||(uint64_t)n>len)return 0;
+        if(tag=='|'){
+            es_buffer skipped={0};
+            for(int64_t i=0;i<n*2;i++){if(!es_dresp(L,&skipped,data,len,pos,depth+1)){es_release(es_context_of(L),skipped.data);return 0;}}
+            es_release(es_context_of(L),skipped.data);
+            return es_dresp(L,out,data,len,pos,depth+1);
+        }
+        const char *open=tag=='~'?"~(":tag=='%'?"{":"[",*close=tag=='~'?")":tag=='%'?"}":"]";
+        es_dput(L,out,open,strlen(open));
+        for(int64_t i=0;i<n;i++){
+            if(i)es_dput(L,out,",",1);
+            if(!es_dresp(L,out,data,len,pos,depth+1))return 0;
+            if(tag=='%'){es_dput(L,out," => ",4);if(!es_dresp(L,out,data,len,pos,depth+1))return 0;}
+        }
+        es_dput(L,out,close,strlen(close));return 1;
+    }
+    }
+    return 0;
 }
 
 void es_debug_reply(lua_State *L,const eslua_result *result) {
     es_context *ctx=es_context_of(L);es_debug_state *state=ctx->debug;
-    if(!state||state->detached||(!state->stepping&&!state->force_trace)||!result->data||!result->len)return;
-    int top=lua_gettop(L);
-    if(result->data[0]=='+'||result->data[0]=='-'){
-        size_t len=result->len;if(len>=2)len-=2;lua_pushlstring(L,(const char *)result->data,len);es_dvalue(L,"<reply> ",-1);
-    } else if((result->len>=5&&!memcmp(result->data,"$-1\r\n",5))||result->data[0]=='_')es_dfmt(L,"<reply> NULL");
-    else {es_parse_response(L,result->data,result->len);es_dvalue(L,"<reply> ",-1);}
-    lua_settop(L,top);
+    if(!state||state->detached||!es_dtracing(state)||!result->data||!result->len)return;
+    const unsigned char *data=result->data;size_t len=result->len;
+    if(result->rejected||data[0]=='-'){
+        size_t end=0;while(end+1<len&&!(data[end]=='\r'&&data[end+1]=='\n'))end++;
+        const unsigned char *text=data;size_t text_len=end;
+        if(result->rejected){
+            if(text_len&&text[0]=='-'){text++;text_len--;}
+            if(text_len>=4&&!memcmp(text,"ERR ",4)){text+=4;text_len-=4;}
+        }
+        es_buffer error={0};es_append(L,&error,"<error> ",8);es_append(L,&error,text,text_len);es_dmark(&error,ctx);
+        es_dlog(L,(const char *)error.data,error.len);es_release(ctx,error.data);
+        if(result->rejected)return;
+    }
+    es_buffer out={0};es_dput(L,&out,"<reply> ",8);
+    size_t pos=0;size_t mark=out.len;
+    if(!es_dresp(L,&out,data,len,&pos,0))out.len=mark;
+    es_dtrimmed(L,&out);es_release(ctx,out.data);
 }
 
 int es_debug_log(lua_State *L) {

@@ -49,7 +49,7 @@ typedef struct es_context {
     uint64_t module_serial;
     struct eslua_library *library;
     size_t function_index;
-    int loading, calling, eval_reuse, compile_failed;
+    int loading, calling, eval_reuse, compile_failed, load_plain;
     int globals_reference, cleanup_reference, load_globals_reference;
     struct es_debug_state *debug;
     uint64_t random_state;
@@ -65,6 +65,7 @@ void es_byte(lua_State *L, es_buffer *out, unsigned char value);
 void es_install_codecs(lua_State *L);
 void es_install_bits(lua_State *L);
 int es_sha1hex(lua_State *L);
+size_t es_number_text(double value, int argument, char *out, size_t capacity);
 void es_serialize(lua_State *L, int index, int resp, es_buffer *out);
 void es_parse_response(lua_State *L, const unsigned char *data, size_t len);
 void es_debug_begin(lua_State *L);

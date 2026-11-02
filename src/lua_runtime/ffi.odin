@@ -29,6 +29,7 @@ Result :: struct {
 	forwarded_error: i32,
 	errors: [^]Error_Event,
 	error_count: c.size_t,
+	rejected: i32,
 }
 
 OK :: 0
@@ -73,6 +74,8 @@ Function_Info :: struct {
 	description: Arg,
 	flags: u32,
 }
+
+Number_Fn :: #type proc "c" (value: f64, argument: i32, out: [^]u8, capacity: c.size_t) -> c.size_t
 
 Debug_Read_Fn :: #type proc "c" (opaque: rawptr) -> Result
 Debug_Write_Fn :: #type proc "c" (opaque: rawptr, frame: Arg) -> i32
@@ -123,4 +126,6 @@ foreign runtime_library {
 	functions_active_stats :: proc() -> Stats ---
 	eval_stats :: proc() -> Stats ---
 	detached_memory :: proc() -> c.size_t ---
+	set_number_format :: proc(format: Number_Fn) ---
+	set_load_log :: proc(log: Log_Fn) ---
 }
