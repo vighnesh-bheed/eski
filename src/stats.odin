@@ -449,6 +449,7 @@ stat_error_disable :: proc() {
 	stat_errors = nil
 	stat_errors_disabled = true
 	stat_errors[clone_key(transmute([]u8)string("ERRORSTATS_DISABLED"))] = 1
+	mem_registry_changed()
 	lazyfree_submit(Lazy_Job{release = stat_error_release, payload = detached, count = count, bytes = bytes})
 }
 
@@ -471,6 +472,7 @@ stat_error_reply :: #force_no_inline proc(c: ^Conn, msg: []u8, count_global: boo
 	}
 	if len(stat_errors) >= 128 { stat_error_disable(); return }
 	stat_errors[clone_key(prefix)] = 1
+	mem_registry_changed()
 }
 
 @(private = "file")
@@ -518,6 +520,7 @@ stats_reset :: proc() {
 		mem_free(raw_data(k))
 	}
 	clear(&stat_errors)
+	mem_registry_changed()
 	stat_errors_disabled = false
 	stat_total_error_replies = 0
 	stat_unexpected_error_replies = 0

@@ -45,6 +45,8 @@ conn_mem: int
 tx_mem_total: int
 mem_peak: int
 mem_system: i64
+mem_registry_cached: int
+mem_registry_stale := true
 
 @(private = "file")
 mem_sample_rss: i64
@@ -160,8 +162,33 @@ mem_keyspace :: #force_inline proc "contextless" () -> int {
 	return storage_table_allocated()
 }
 
+mem_counter_total :: #force_inline proc "contextless" () -> int {
+	return diagnostics_memory_used() + intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed) + ht.maintenance_metadata() + st.maintenance_metadata() + zt.maintenance_metadata() + mem_startup + db_used_memory + mem_keyspace() + storage_dead_payload + client_metadata_total + conn_mem + tx_mem_total + mem_aof_buffer() + lazyfree_pending_bytes() + compute_reserved + keyspace_memory_used() + lua_host_memory_used()
+}
+
+mem_registry_total :: #force_inline proc "contextless" () -> int {
+	return client_registry_memory() + lua_vm_memory_used() + stat_error_memory()
+}
+
 mem_used :: #force_inline proc "contextless" () -> int {
-	return intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed) + ht.maintenance_metadata() + st.maintenance_metadata() + zt.maintenance_metadata() + mem_startup + db_used_memory + mem_keyspace() + storage_dead_payload + client_metadata_total + client_registry_memory() + conn_mem + tx_mem_total + mem_aof_buffer() + lazyfree_pending_bytes() + compute_reserved + keyspace_memory_used() + lua_memory_used() + stat_error_memory() + diagnostics_memory_used()
+	return mem_counter_total() + mem_registry_total()
+}
+
+mem_registry_changed :: #force_inline proc "contextless" () {
+	mem_registry_stale = true
+}
+
+@(cold)
+mem_registry_refresh :: #force_no_inline proc "contextless" () {
+	mem_registry_cached = mem_registry_total()
+	mem_registry_stale = false
+}
+
+mem_used_current :: #force_inline proc "contextless" () -> int {
+	if mem_registry_stale || lua_active != nil {
+		mem_registry_refresh()
+	}
+	return mem_counter_total() + mem_registry_cached
 }
 
 mem_not_counted :: #force_inline proc "contextless" () -> int {
@@ -611,7 +638,7 @@ client_eviction_limit :: proc() -> int {
 }
 
 memory_worker_admissible :: proc() -> bool {
-	over, _ := memory_state_over()
+	over := memory_state_over_current()
 	limit := client_eviction_limit()
 	return !over && !evict_timer && (limit == 0 || conn_mem + tx_mem_total + client_metadata_total <= limit)
 }

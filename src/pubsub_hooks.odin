@@ -90,6 +90,7 @@ ps_mark :: proc(c: ^Conn) {
 	c.ps += {.Subscribed}
 	st.slot = len(ps_conns)
 	append(&ps_conns, c)
+	mem_registry_changed()
 	hooks_update()
 }
 

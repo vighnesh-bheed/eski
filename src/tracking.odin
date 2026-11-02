@@ -38,6 +38,7 @@ tracking_eviction_capture :: proc(t: ^Conn) {
     if !tracking_eviction_active || t == ps_exec || t.fd < 0 || t.eviction_delivery_epoch == tracking_eviction_epoch { return }
     t.eviction_delivery_epoch = tracking_eviction_epoch
     append(&tracking_eviction_targets, Tracking_Eviction_Target{t.fd, t.id, max(1024, t.wcap)})
+    mem_registry_changed()
 }
 
 tracking_eviction_end :: proc() {
@@ -53,6 +54,7 @@ tracking_eviction_end :: proc() {
     }
     delete(tracking_eviction_targets)
     tracking_eviction_targets = nil
+    mem_registry_changed()
 }
 
 
@@ -603,6 +605,7 @@ trk_enable :: proc(c: ^Conn, redirect: i64, options: Track_Flags, prefixes: [][]
 }
 
 tracking_disable :: proc(c: ^Conn) {
+	mem_registry_changed()
 	delete_key(&trk_redirects, c.id)
 	st := c.pubsub
 	if st == nil {
@@ -687,6 +690,7 @@ trk_check_overlaps :: proc(c: ^Conn, prefixes: [][]u8) -> bool {
 }
 
 client_tracking :: proc(c: ^Conn, argv: [][]u8) {
+	defer mem_registry_changed()
 	options: Track_Flags
 	redirect: i64
 	has_redirect := false
@@ -878,6 +882,7 @@ client_trackinginfo :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 tracking_invalidate_key :: proc(key: []u8, attributed: bool, bcast := true) {
+	mem_registry_changed()
 	by: ^Conn = nil
 	if attributed {
 		by = ps_exec
@@ -931,6 +936,7 @@ tracking_flush :: proc() {
 		clear(targets)
 	}
 	trk_table_reset()
+	mem_registry_changed()
 }
 
 tracking_pending :: #force_inline proc() -> bool {
@@ -940,6 +946,7 @@ tracking_pending :: #force_inline proc() -> bool {
 tracking_flush_pending :: proc(c: ^Conn) {
 	if len(trk_deferred) > 0 {
 		trk_drain_deferred(false)
+		mem_registry_changed()
 	}
 }
 
@@ -981,6 +988,7 @@ tracking_remember_keys :: proc(c: ^Conn, cmd: ^Command, argv: [][]u8) {
 			trk_remember(c.id, argv[i])
 		}
 	}
+	mem_registry_changed()
 }
 
 tracking_limit :: proc() {
@@ -1000,6 +1008,7 @@ tracking_limit :: proc() {
 }
 
 tracking_before_sleep :: proc() {
+	mem_registry_changed()
 	if trk_bcast_dirty {
 		trk_flush_bcast()
 	}
@@ -1034,6 +1043,7 @@ trk_metadata_adjust :: proc(bs: ^Trk_Prefix, sign: int) {
 
 tracking_release_idle :: proc() {
 	if tracking_clients != 0 || len(trk_prefixes) != 0 { return }
+	mem_registry_changed()
 	delete(trk_table); trk_table = nil
 	delete(trk_dense); trk_dense = nil
 	delete(trk_conns); trk_conns = nil
