@@ -15,7 +15,7 @@ private_hash_publisher_uses_kernel_deadline_and_actual_suppressed_reply :: proc(
 	defer { keyspace_pool = saved_pool; aof = saved_aof }
 	testing.expect(t, ks.init(&keyspace_pool, 1, 65536))
 	defer testing.expect(t, ks.destroy(&keyspace_pool))
-	aof = Aof{feed = true, state = .On, in_tx = true, selected_db = -1}
+	aof = Aof{feed = true, state = .Enabled, in_tx = true, selected_db = -1}
 	defer { delete(aof.stage); delete(aof.buf) }
 	db := Db{id = 3}
 	argv := [][]u8{transmute([]u8)string("HPEXPIRE"), transmute([]u8)string("key"), transmute([]u8)string("250"), transmute([]u8)string("NX"), transmute([]u8)string("FIELDS"), transmute([]u8)string("2"), transmute([]u8)string("old"), transmute([]u8)string("new")}
@@ -38,7 +38,7 @@ private_hash_publisher_keeps_expiry_then_float_write_atomic_without_canonical_lo
 	defer { keyspace_pool = saved_pool; aof = saved_aof }
 	testing.expect(t, ks.init(&keyspace_pool, 1, 65536))
 	defer testing.expect(t, ks.destroy(&keyspace_pool))
-	aof = Aof{feed = true, state = .On, in_tx = true, selected_db = -1}
+	aof = Aof{feed = true, state = .Enabled, in_tx = true, selected_db = -1}
 	defer { delete(aof.stage); delete(aof.buf) }
 	db := Db{id = 3}
 	argv := [][]u8{transmute([]u8)string("HINCRBYFLOAT"), transmute([]u8)string("key"), transmute([]u8)string("field"), transmute([]u8)string("3.5")}

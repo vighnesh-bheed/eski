@@ -22,10 +22,10 @@ Block_Type :: enum u8 {
 }
 
 Block_State :: struct {
-	deadline:         i64,
-	keys:             [dynamic]string,
-	unblock_on_nokey: bool,
-	stream_ids:       [dynamic][2]u64,
+	deadline:            i64,
+	keys:                [dynamic]string,
+	wake_on_key_removal: bool,
+	stream_ids:          [dynamic][2]u64,
 }
 
 Block_Key :: struct {
@@ -34,14 +34,14 @@ Block_Key :: struct {
 	nokey:   int,
 }
 
-Ready_Key :: struct {
-	db:  int,
-	key: string,
+Block_Wakeup :: struct {
+	db_index: int,
+	name:     string,
 }
 
 block_keys: []map[string]^Block_Key
 
-block_ready: [dynamic]Ready_Key
+block_ready: [dynamic]Block_Wakeup
 
 block_clients: [dynamic]^Conn
 
@@ -186,25 +186,31 @@ block_timeout_ms :: proc "contextless" (v: ld.F80) -> (ms: i64, err: string) {
 	return i64(whole), ""
 }
 
-block_parse_timeout :: proc(c: ^Conn, arg: []u8) -> (deadline: i64, ok: bool) {
-	v, parsed := ld.parse(arg)
+@(private = "file")
+block_deadline_from :: proc(arg: []u8, now: i64) -> (deadline: i64, problem: string) {
+	value, parsed := ld.parse(arg)
 	if !parsed {
-		reply_error(c, ERR_TIMEOUT_NOT_FLOAT)
+		return 0, ERR_TIMEOUT_NOT_FLOAT
+	}
+	span, why := block_timeout_ms(value)
+	switch {
+	case why != "":
+		return 0, why
+	case span == 0:
+		return 0, ""
+	case span > max(i64) - now:
+		return 0, ERR_TIMEOUT_RANGE
+	}
+	return now + span, ""
+}
+
+block_parse_timeout :: proc(c: ^Conn, arg: []u8) -> (deadline: i64, ok: bool) {
+	at, problem := block_deadline_from(arg, srv.now_ms)
+	if problem != "" {
+		reply_error(c, problem)
 		return 0, false
 	}
-	ms, err := block_timeout_ms(v)
-	if err != "" {
-		reply_error(c, err)
-		return 0, false
-	}
-	if ms == 0 {
-		return 0, true
-	}
-	if ms > max(i64) - srv.now_ms {
-		reply_error(c, ERR_TIMEOUT_RANGE)
-		return 0, false
-	}
-	return srv.now_ms + ms, true
+	return at, true
 }
 
 block_in_reexecution :: #force_inline proc "contextless" () -> bool {
@@ -265,7 +271,7 @@ block_free_key :: proc(m: ^map[string]^Block_Key, key: string) {
 	delete(k)
 }
 
-block_for_keys :: proc(c: ^Conn, type: Block_Type, keys: [][]u8, deadline: i64, unblock_on_nokey := false) {
+block_for_keys :: proc(c: ^Conn, type: Block_Type, keys: [][]u8, deadline: i64, wake_on_key_removal := false) {
 	if block_reexecuting && c == block_current {
 		block_rearmed = true
 		pst.dirty_explicit = true
@@ -288,7 +294,7 @@ block_for_keys :: proc(c: ^Conn, type: Block_Type, keys: [][]u8, deadline: i64, 
 	}
 	clear(&bs.keys)
 	bs.deadline = deadline
-	bs.unblock_on_nokey = unblock_on_nokey
+	bs.wake_on_key_removal = wake_on_key_removal
 	m := &block_keys[dbi]
 	outer: for k in keys {
 		kp, vp, inserted, _ := map_entry(m, string(k))
@@ -307,7 +313,7 @@ block_for_keys :: proc(c: ^Conn, type: Block_Type, keys: [][]u8, deadline: i64, 
 			block_key_total += 1
 		}
 		append(&bk.waiters, c)
-		if unblock_on_nokey {
+		if wake_on_key_removal {
 			if bk.nokey == 0 {
 				block_nokey_total += 1
 			}
@@ -315,7 +321,7 @@ block_for_keys :: proc(c: ^Conn, type: Block_Type, keys: [][]u8, deadline: i64, 
 		}
 		append(&bs.keys, kp^)
 	}
-	if unblock_on_nokey {
+	if wake_on_key_removal {
 		block_nokey_clients += 1
 	}
 	pst.dirty_explicit = true
@@ -350,7 +356,7 @@ block_release :: proc(c: ^Conn) {
 					break
 				}
 			}
-			if bs.unblock_on_nokey {
+			if bs.wake_on_key_removal {
 				bk.nokey -= 1
 				if bk.nokey == 0 {
 					block_nokey_total -= 1
@@ -365,10 +371,10 @@ block_release :: proc(c: ^Conn) {
 		}
 	}
 	clear(&bs.keys)
-	if bs.unblock_on_nokey {
+	if bs.wake_on_key_removal {
 		block_nokey_clients -= 1
 	}
-	bs.unblock_on_nokey = false
+	bs.wake_on_key_removal = false
 	bs.deadline = 0
 	block_by_type[t] -= 1
 	i := block_index(c)
@@ -495,7 +501,7 @@ block_queue_ready :: proc(dbi: int, key: string, bk: ^Block_Key) {
 		return
 	}
 	bk.ready = true
-	append(&block_ready, Ready_Key{db = dbi, key = key})
+	append(&block_ready, Block_Wakeup{db_index = dbi, name = key})
 	block_work += 1
 }
 
@@ -622,7 +628,7 @@ block_serve_key :: proc(dbi: int, key: string) {
 		if !present && bk.nokey == 0 {
 			break
 		}
-		eligible := c.bstate.unblock_on_nokey
+		eligible := c.bstate.wake_on_key_removal
 		if present && block_type_of(t) == c.blocked {
 			eligible = true
 		}
@@ -652,10 +658,10 @@ block_serve_ready :: proc() {
 		if i >= len(block_ready) {
 			break
 		}
-		rk := block_ready[i]
+		wake := block_ready[i]
 		i += 1
 		block_work -= 1
-		block_serve_key(rk.db, rk.key)
+		block_serve_key(wake.db_index, wake.name)
 	}
 	clear(&block_ready)
 	block_serving = false

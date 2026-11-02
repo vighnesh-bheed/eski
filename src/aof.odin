@@ -15,11 +15,11 @@ import st "settype"
 import sm "streamtype"
 import zt "zsettype"
 
-AOF_REWRITE_ITEMS_PER_CMD :: 64
+AOF_ITEMS_PER_EMITTED_COMMAND :: 64
 
 AOF_AUTOSYNC_BYTES :: 4 * 1024 * 1024
 
-AOF_POSTPONE_MS :: 2000
+AOF_WRITE_DEFER_MAX_MS :: 2000
 
 AOF_LOAD_EVENTS_BYTES :: 2 * 1024 * 1024
 
@@ -33,10 +33,10 @@ ERR_AOF_LOAD :: "ERR Error trying to load the AOF files, check server logs."
 
 ERR_AOF_CHILD_BGSAVE :: "ERR Another child process is active (AOF?): can't BGSAVE right now. Use BGSAVE SCHEDULE in order to schedule a BGSAVE whenever possible."
 
-Aof_State :: enum u8 {
-	Off,
-	On,
-	Wait_Rewrite,
+Aof_Status :: enum u8 {
+	Disabled,
+	Enabled,
+	Awaiting_Base,
 }
 
 Aof_Fsync :: enum u8 {
@@ -66,13 +66,13 @@ Aof_Manifest :: struct {
 	incr_seq: i64,
 }
 
-Aof_Load_Result :: enum u8 {
-	Ok,
-	Empty,
-	Not_Exist,
-	Open_Err,
-	Failed,
-	Truncated,
+Aof_Load_Outcome :: enum u8 {
+	Loaded,
+	Blank,
+	Absent,
+	Unopenable,
+	Aborted,
+	Truncated_Tail,
 }
 
 Aof_Deferred :: struct {
@@ -93,7 +93,7 @@ Aof_Job :: struct {
 }
 
 Aof :: struct {
-	state:               Aof_State,
+	state:               Aof_Status,
 	wanted:              bool,
 	fsync:               Aof_Fsync,
 	preamble:            bool,
@@ -114,7 +114,7 @@ Aof :: struct {
 	base_size:           i64,
 	fsynced_size:        i64,
 	last_fsync_ms:       i64,
-	postponed_start:     i64,
+	deferred_write_at:   i64,
 	delayed_fsync:       i64,
 	write_err:           bool,
 	write_errno:         linux.Errno,
@@ -122,7 +122,7 @@ Aof :: struct {
 	rewrite_start:       i64,
 	rewrite_last:        i64,
 	rewrite_preamble:    bool,
-	rewrite_state:       Aof_State,
+	rewrite_state:       Aof_Status,
 	stat_rewrites:       i64,
 	failures:            i64,
 	last_rewrite_err:    bool,
@@ -291,7 +291,7 @@ aof_mode_dir :: proc "contextless" () -> linux.Mode {
 }
 
 aof_update_feed :: proc "contextless" () {
-	on := aof.state == .On || (aof.state == .Wait_Rewrite && aof_rewriting())
+	on := aof.state == .Enabled || (aof.state == .Awaiting_Base && aof_rewriting())
 	aof.feed = on && !aof.loading && aof.fd >= 0
 }
 
@@ -923,23 +923,32 @@ aof_bio_pending :: #force_inline proc "contextless" () -> i32 {
 	return intrinsics.atomic_load(&aof_bio_pending_fsync)
 }
 
+@(private = "file")
+aof_datasync_retry :: proc "contextless" (fd: linux.Fd) -> linux.Errno {
+	for {
+		if err := linux.fdatasync(fd); err != .EINTR {
+			return err
+		}
+	}
+}
+
+@(private = "file")
+aof_job_sync :: proc "contextless" (fd: linux.Fd) {
+	#partial switch err := aof_datasync_retry(fd); err {
+	case .NONE, .EBADF, .EINVAL:
+	case:
+		intrinsics.atomic_store(&aof_bio_err, i32(err))
+	}
+}
+
 aof_bio_run :: proc "contextless" (job: ^Aof_Job) {
 	switch job.kind {
-	case .Fsync:
-		for {
-			err := linux.fdatasync(job.fd)
-			if err == .EINTR {
-				continue
-			}
-			if err != .NONE && err != .EBADF && err != .EINVAL {
-				intrinsics.atomic_store(&aof_bio_err, i32(err))
-			}
-			break
-		}
+	case .Unlink:
+		linux.unlink(cstring(&job.path[0]))
 	case .Close:
 		linux.close(job.fd)
-	case .Unlink:
-		linux.unlink(cstring(raw_data(job.path[:])))
+	case .Fsync:
+		aof_job_sync(job.fd)
 	}
 }
 
@@ -1349,106 +1358,146 @@ aof_shrink_buf :: proc() {
 	}
 }
 
-aof_write_buffer :: proc() -> bool {
-	if aof.fd < 0 || len(aof.buf) == 0 {
-		return true
+@(private = "file")
+aof_account_written :: proc(n: int) {
+	aof.current_size += i64(n)
+	aof_incr_bytes += i64(n)
+}
+
+@(private = "file")
+aof_clear_write_error :: proc() {
+	if !aof.write_err || aof_err_from_fsync {
+		return
 	}
-	t0 := latency_start()
-	written, err := aof_write_all(aof.fd, aof.buf[:])
-	latency_end("aof-write", t0)
-	if err == .NONE {
-		aof.current_size += i64(written)
-		aof_incr_bytes += i64(written)
-		clear(&aof.buf)
-		aof_shrink_buf()
-		if aof.write_err && !aof_err_from_fsync {
-			aof.write_err = false
-			plog(LOG_WARNING, "AOF write error looks solved, Eski can write again.")
-			persist_update_gate()
-		}
-		return true
+	plog(LOG_WARNING, "AOF write error looks solved, Eski can write again.")
+	aof.write_err = false
+	persist_update_gate()
+}
+
+@(private = "file")
+aof_note_write_failure :: proc(written: int, err: linux.Errno) {
+	if written > 0 && linux.ftruncate(aof.fd, aof_incr_bytes) != .NONE {
+		aof_account_written(written)
+		remove_range(&aof.buf, 0, written)
 	}
-	if written > 0 {
-		if terr := linux.ftruncate(aof.fd, aof_incr_bytes); terr != .NONE {
-			aof.current_size += i64(written)
-			aof_incr_bytes += i64(written)
-			remove_range(&aof.buf, 0, written)
-		}
-	}
-	aof.write_errno = err
 	aof_err_from_fsync = false
-	now := persist_unix_now()
-	if now - aof_last_err_log >= 30 {
-		aof_last_err_log = now
-		plog(LOG_WARNING, "Error writing to the AOF file: ", errno_text(err))
-	}
-	if aof.fsync == .Always {
+	aof.write_errno = err
+	aof_log_write_error(err)
+	switch {
+	case aof.fsync == .Always:
 		plog(LOG_WARNING, "Can't recover from AOF write error when the AOF fsync policy is 'always'. Exiting...")
 		linux.exit_group(1)
-	}
-	if !aof.write_err {
+	case !aof.write_err:
 		aof.write_err = true
 		persist_update_gate()
 	}
-	return false
+}
+
+@(private = "file")
+aof_log_write_error :: proc(err: linux.Errno) {
+	stamp := persist_unix_now()
+	if stamp - aof_last_err_log < 30 {
+		return
+	}
+	aof_last_err_log = stamp
+	plog(LOG_WARNING, "Error writing to the AOF file: ", errno_text(err))
+}
+
+aof_write_buffer :: proc() -> bool {
+	if len(aof.buf) == 0 || aof.fd < 0 {
+		return true
+	}
+	started := latency_start()
+	written, err := aof_write_all(aof.fd, aof.buf[:])
+	latency_end("aof-write", started)
+	if err != .NONE {
+		aof_note_write_failure(written, err)
+		return false
+	}
+	aof_account_written(written)
+	clear(&aof.buf)
+	aof_shrink_buf()
+	aof_clear_write_error()
+	return true
 }
 
 @(private = "file")
 aof_incr_bytes: i64
 
-aof_flush :: proc(force: bool) {
-	if aof.fd < 0 {
+@(private = "file")
+aof_fsync_suppressed :: proc() -> bool {
+	return aof.no_fsync_on_rewrite && pst.child_pid > 0
+}
+
+@(private = "file")
+aof_maybe_background_sync :: proc(now: i64) {
+	if aof_bio_pending() != 0 || now - aof.last_fsync_ms < 1000 {
 		return
 	}
-	now := aof_now_ms()
-	if len(aof.buf) == 0 {
-		if aof.fsync == .Everysec && aof.fsynced_size != aof.current_size && now - aof.last_fsync_ms >= 1000 && aof_bio_pending() == 0 && !(aof.no_fsync_on_rewrite && pst.child_pid > 0) {
-			aof_bio_fsync(aof.fd)
-			aof.last_fsync_ms = now
-		}
-		return
+	aof_bio_fsync(aof.fd)
+	aof.last_fsync_ms = now
+}
+
+@(private = "file")
+aof_keep_deferring :: proc(now: i64) -> bool {
+	if aof.deferred_write_at == 0 {
+		aof.deferred_write_at = now
+		return true
 	}
-	if aof.fsync == .Everysec && !force && aof_bio_pending() > 0 {
-		if aof.postponed_start == 0 {
-			aof.postponed_start = now
-			return
-		}
-		if now - aof.postponed_start < AOF_POSTPONE_MS {
-			return
-		}
-		aof.delayed_fsync += 1
-		plog(LOG_NOTICE, "Asynchronous AOF fsync is taking too long (disk is busy?). Writing the AOF buffer without waiting for fsync to complete, this may slow down Redis.")
+	if now - aof.deferred_write_at < AOF_WRITE_DEFER_MAX_MS {
+		return true
 	}
+	aof.delayed_fsync += 1
+	plog(LOG_NOTICE, "Asynchronous AOF fsync is taking too long (disk is busy?). Writing the AOF buffer without waiting for fsync to complete, this may slow down Redis.")
+	return false
+}
+
+@(private = "file")
+aof_write_pending :: proc() -> bool {
+	aof.deferred_write_at = 0
 	if aof_flush_sleep_us > 0 {
 		aof_flush_sleep()
 	}
-	aof.postponed_start = 0
-	if !aof_write_buffer() {
-		return
-	}
-	if aof.no_fsync_on_rewrite && pst.child_pid > 0 {
-		return
-	}
-	switch aof.fsync {
-	case .Always:
-		t0 := latency_start()
-		err := linux.fdatasync(aof.fd)
-		for err == .EINTR {
-			err = linux.fdatasync(aof.fd)
-		}
-		latency_end("aof-fsync-always", t0)
-		if err != .NONE {
-			plog(LOG_WARNING, "Can't persist AOF for fsync error when the AOF fsync policy is 'always': ", errno_text(err), ". Exiting...")
-			linux.exit_group(1)
-		}
-		aof.fsynced_size = aof.current_size
+	return aof_write_buffer()
+}
+
+@(private = "file")
+aof_sync_now :: proc(now: i64) {
+	started := latency_start()
+	err := aof_datasync_retry(aof.fd)
+	latency_end("aof-fsync-always", started)
+	if err == .NONE {
 		aof.last_fsync_ms = now
-	case .Everysec:
-		if now - aof.last_fsync_ms >= 1000 && aof_bio_pending() == 0 {
-			aof_bio_fsync(aof.fd)
-			aof.last_fsync_ms = now
+		aof.fsynced_size = aof.current_size
+		return
+	}
+	plog(LOG_WARNING, "Can't persist AOF for fsync error when the AOF fsync policy is 'always': ", errno_text(err), ". Exiting...")
+	linux.exit_group(1)
+}
+
+aof_flush :: proc(force: bool) {
+	now := aof_now_ms()
+	if aof.fd < 0 {
+		return
+	}
+	per_second := aof.fsync == .Everysec
+	if len(aof.buf) == 0 {
+		if per_second && aof.fsynced_size != aof.current_size && !aof_fsync_suppressed() {
+			aof_maybe_background_sync(now)
 		}
-	case .No:
+		return
+	}
+	if per_second && !force && aof_bio_pending() > 0 && aof_keep_deferring(now) {
+		return
+	}
+	if !aof_write_pending() || aof_fsync_suppressed() {
+		return
+	}
+	#partial switch aof.fsync {
+	case .Always:
+		aof_sync_now(now)
+	case .Everysec:
+		aof_maybe_background_sync(now)
 	}
 }
 
@@ -3558,7 +3607,7 @@ aof_rewrite_hash :: proc(w: ^rdb.Writer, key: []u8, h: ht.Hash, now: u64) {
 	if !has_ttl {
 		remaining := live
 		for remaining > 0 {
-			batch := min(remaining, AOF_REWRITE_ITEMS_PER_CMD)
+			batch := min(remaining, AOF_ITEMS_PER_EMITTED_COMMAND)
 			aof_w_header(w, 2 + 2 * batch)
 			aof_w_str(w, "HMSET")
 			aof_w_arg(w, key)
@@ -3716,7 +3765,7 @@ aof_rewrite_value :: proc(w: ^rdb.Writer, key: []u8, v: Slot_Value) {
 		it := lt.iterator(l, 0, .Tail)
 		entry: lt.List_Entry
 		for remaining > 0 {
-			batch := min(remaining, AOF_REWRITE_ITEMS_PER_CMD)
+			batch := min(remaining, AOF_ITEMS_PER_EMITTED_COMMAND)
 			aof_w_header(w, 2 + batch)
 			aof_w_str(w, "RPUSH")
 			aof_w_arg(w, key)
@@ -3734,7 +3783,7 @@ aof_rewrite_value :: proc(w: ^rdb.Writer, key: []u8, v: Slot_Value) {
 		remaining := st.size(s)
 		it := st.iterator(s)
 		for remaining > 0 {
-			batch := min(remaining, AOF_REWRITE_ITEMS_PER_CMD)
+			batch := min(remaining, AOF_ITEMS_PER_EMITTED_COMMAND)
 			aof_w_header(w, 2 + batch)
 			aof_w_str(w, "SADD")
 			aof_w_arg(w, key)
@@ -3755,7 +3804,7 @@ aof_rewrite_value :: proc(w: ^rdb.Writer, key: []u8, v: Slot_Value) {
 		item: zt.Item
 		sbuf: [64]u8
 		for remaining > 0 {
-			batch := min(remaining, AOF_REWRITE_ITEMS_PER_CMD)
+			batch := min(remaining, AOF_ITEMS_PER_EMITTED_COMMAND)
 			aof_w_header(w, 2 + 2 * batch)
 			aof_w_str(w, "ZADD")
 			aof_w_arg(w, key)
@@ -3934,7 +3983,7 @@ aof_close_fd :: proc() {
 aof_open_new_incr_for_rewrite :: proc() -> bool {
 	name: [dynamic]u8
 	defer delete(name)
-	if aof.state == .Wait_Rewrite {
+	if aof.state == .Awaiting_Base {
 		aof_temp_incr_name(&name)
 		fd, err := aof_open_incr(string(name[:]), true)
 		if err != .NONE {
@@ -3945,7 +3994,7 @@ aof_open_new_incr_for_rewrite :: proc() -> bool {
 		aof_switch_fd(fd)
 		return true
 	}
-	if aof.state != .On {
+	if aof.state != .Enabled {
 		return true
 	}
 	aof_flush(true)
@@ -4113,190 +4162,248 @@ aof_recompute_sizes :: proc() {
 }
 
 @(private = "file")
-aof_install_rewrite :: proc(pid: linux.Pid) -> bool {
-	tbuf: [64]u8
-	tmp := aof_temp_base_name(tbuf[:], pid, true)
-	nm := aof_manifest_dup(&aof.manifest)
-	base_kind := "base.rdb" if aof.rewrite_preamble else "base.aof"
-	base_name: [dynamic]u8
-	defer delete(base_name)
-	aof_name(&base_name, nm.base_seq + 1, base_kind)
-	if nm.has_base {
-		old := nm.base
-		old.kind = .History
-		inject_at(&nm.history, 0, old)
+aof_retire :: proc(m: ^Aof_Manifest, f: Aof_File) {
+	gone := f
+	gone.kind = .History
+	inject_at(&m.history, 0, gone)
+}
+
+@(private = "file")
+aof_retire_incr_below :: proc(m: ^Aof_Manifest, limit: i64) {
+	kept := 0
+	for f in m.incr {
+		if f.seq < limit {
+			aof_retire(m, f)
+			continue
+		}
+		m.incr[kept] = f
+		kept += 1
 	}
-	nm.base = Aof_File {
-		seq  = nm.base_seq + 1,
-		kind = .Base,
-	}
-	append(&nm.base.name, ..base_name[:])
-	nm.has_base = true
-	nm.base_seq += 1
-	cbuf: [80]u8
-	fbuf: [PERSIST_PATH_MAX]u8
-	src := persist_cstr(tmp, cbuf[:])
-	dst := aof_cpath(string(base_name[:]), fbuf[:])
-	if err := linux.rename(src, dst); err != .NONE {
-		plog(LOG_WARNING, "Error trying to rename the temporary AOF base file ", tmp, " into ", string(base_name[:]), ": ", errno_text(err))
-		aof_manifest_free(&nm)
-		linux.unlink(src)
+	resize(&m.incr, kept)
+}
+
+@(private = "file")
+aof_rename_temp :: proc(what: string, from_name: string, from: cstring, to_name: string, to: cstring) -> bool {
+	if err := linux.rename(from, to); err != .NONE {
+		plog(LOG_WARNING, "Error trying to rename the temporary AOF ", what, " file ", from_name, " into ", to_name, ": ", errno_text(err))
 		return false
 	}
-	plog(LOG_NOTICE, "Successfully renamed the temporary AOF base file ", tmp, " into ", string(base_name[:]))
-	incr_name: [dynamic]u8
-	defer delete(incr_name)
-	moved_incr := false
-	switch aof.state {
-	case .Wait_Rewrite:
-		seq := nm.incr_seq + 1
-		aof_name(&incr_name, seq, "incr.aof")
-		tname: [dynamic]u8
-		defer delete(tname)
-		aof_temp_incr_name(&tname)
-		tb: [PERSIST_PATH_MAX]u8
-		nb: [PERSIST_PATH_MAX]u8
-		if err := linux.rename(aof_cpath(string(tname[:]), tb[:]), aof_cpath(string(incr_name[:]), nb[:])); err != .NONE {
-			plog(LOG_WARNING, "Error trying to rename the temporary AOF incr file ", string(tname[:]), " into ", string(incr_name[:]), ": ", errno_text(err))
-			linux.unlink(dst)
-			aof_manifest_free(&nm)
-			return false
-		}
-		plog(LOG_NOTICE, "Successfully renamed the temporary AOF incr file ", string(tname[:]), " into ", string(incr_name[:]))
-		for &f in nm.incr {
-			f.kind = .History
-			inject_at(&nm.history, 0, f)
-		}
-		clear(&nm.incr)
-		f := Aof_File {
-			seq  = seq,
-			kind = .Incr,
-		}
-		append(&f.name, ..incr_name[:])
-		append(&nm.incr, f)
-		nm.incr_seq = seq
-		moved_incr = true
-	case .On:
-		keep: [dynamic]Aof_File
-		for &f in nm.incr {
-			if f.seq < aof_rewrite_incr_seq {
-				f.kind = .History
-				inject_at(&nm.history, 0, f)
-			} else {
-				append(&keep, f)
-			}
-		}
-		delete(nm.incr)
-		nm.incr = keep
-	case .Off:
-		for &f in nm.incr {
-			f.kind = .History
-			inject_at(&nm.history, 0, f)
-		}
-		clear(&nm.incr)
-	}
-	if !aof_persist_manifest(&nm) {
-		linux.unlink(dst)
-		if moved_incr {
-			tname: [dynamic]u8
-			defer delete(tname)
-			aof_temp_incr_name(&tname)
-			tb: [PERSIST_PATH_MAX]u8
-			nb: [PERSIST_PATH_MAX]u8
-			linux.rename(aof_cpath(string(incr_name[:]), nb[:]), aof_cpath(string(tname[:]), tb[:]))
-		}
-		aof_manifest_free(&nm)
-		return false
-	}
-	aof_manifest_set(nm)
-	if aof.state == .Wait_Rewrite {
-		aof.state = .On
-	}
-	aof_recompute_sizes()
-	aof_delete_history()
+	plog(LOG_NOTICE, "Successfully renamed the temporary AOF ", what, " file ", from_name, " into ", to_name)
 	return true
 }
 
+@(private = "file")
+aof_adopt_seed_incr :: proc(m: ^Aof_Manifest, incr_name: ^[dynamic]u8) -> bool {
+	seq := m.incr_seq + 1
+	aof_name(incr_name, seq, "incr.aof")
+	temp: [dynamic]u8
+	defer delete(temp)
+	aof_temp_incr_name(&temp)
+	from: [PERSIST_PATH_MAX]u8
+	to: [PERSIST_PATH_MAX]u8
+	if !aof_rename_temp("incr", string(temp[:]), aof_cpath(string(temp[:]), from[:]), string(incr_name[:]), aof_cpath(string(incr_name[:]), to[:])) {
+		return false
+	}
+	aof_retire_incr_below(m, max(i64))
+	fresh := Aof_File {
+		seq  = seq,
+		kind = .Incr,
+	}
+	append(&fresh.name, ..incr_name[:])
+	append(&m.incr, fresh)
+	m.incr_seq = seq
+	return true
+}
+
+@(private = "file")
+aof_return_seed_incr :: proc(incr_name: string) {
+	temp: [dynamic]u8
+	defer delete(temp)
+	aof_temp_incr_name(&temp)
+	from: [PERSIST_PATH_MAX]u8
+	to: [PERSIST_PATH_MAX]u8
+	linux.rename(aof_cpath(incr_name, from[:]), aof_cpath(string(temp[:]), to[:]))
+}
+
+@(private = "file")
+aof_adopt_manifest :: proc(m: Aof_Manifest) {
+	aof_manifest_set(m)
+	aof_recompute_sizes()
+	if aof.state == .Awaiting_Base {
+		aof.state = .Enabled
+	}
+	aof_delete_history()
+}
+
+@(private = "file")
+aof_install_rewrite :: proc(pid: linux.Pid) -> bool {
+	next := aof_manifest_dup(&aof.manifest)
+	seq := next.base_seq + 1
+	base_name: [dynamic]u8
+	defer delete(base_name)
+	aof_name(&base_name, seq, "base.rdb" if aof.rewrite_preamble else "base.aof")
+	nbuf: [64]u8
+	temp := aof_temp_base_name(nbuf[:], pid, true)
+	tbuf: [80]u8
+	bbuf: [PERSIST_PATH_MAX]u8
+	temp_path := persist_cstr(temp, tbuf[:])
+	base_path := aof_cpath(string(base_name[:]), bbuf[:])
+	if !aof_rename_temp("base", temp, temp_path, string(base_name[:]), base_path) {
+		aof_manifest_free(&next)
+		linux.unlink(temp_path)
+		return false
+	}
+	if next.has_base {
+		aof_retire(&next, next.base)
+	}
+	next.base = Aof_File {
+		seq  = seq,
+		kind = .Base,
+	}
+	append(&next.base.name, ..base_name[:])
+	next.has_base = true
+	next.base_seq = seq
+	incr_name: [dynamic]u8
+	defer delete(incr_name)
+	settled := true
+	moved := false
+	switch aof.state {
+	case .Disabled:
+		aof_retire_incr_below(&next, max(i64))
+	case .Enabled:
+		aof_retire_incr_below(&next, aof_rewrite_incr_seq)
+	case .Awaiting_Base:
+		settled = aof_adopt_seed_incr(&next, &incr_name)
+		moved = settled
+	}
+	if settled && aof_persist_manifest(&next) {
+		aof_adopt_manifest(next)
+		return true
+	}
+	linux.unlink(base_path)
+	if moved {
+		aof_return_seed_incr(string(incr_name[:]))
+	}
+	aof_manifest_free(&next)
+	return false
+}
+
+@(private = "file")
+aof_abandon_seed :: proc() {
+	clear(&aof.buf)
+	aof_close_fd()
+	aof_remove_temp_incr()
+}
+
+@(private = "file")
+aof_arm_retry_limit :: proc() {
+	if aof.failures < 3 {
+		return
+	}
+	delay: i64 = 60
+	for left := aof.failures - 3; left > 0 && delay < 3600; left -= 1 {
+		delay *= 2
+	}
+	aof_retry_reported = false
+	aof_retry_at = persist_unix_now() + min(delay, 3600)
+}
+
 aof_rewrite_failed :: proc() {
-	aof.last_rewrite_err = true
 	aof.failures += 1
-	if aof.state == .Wait_Rewrite {
-		aof_close_fd()
-		aof_remove_temp_incr()
-		clear(&aof.buf)
+	aof.last_rewrite_err = true
+	if aof.state == .Awaiting_Base {
+		aof.rewrite_scheduled = true
+		aof_abandon_seed()
+	}
+	aof_arm_retry_limit()
+}
+
+@(private = "file")
+aof_forget_child :: proc() {
+	pst.child_aof = false
+	pst.child_pid = 0
+}
+
+@(private = "file")
+aof_rewrite_succeeded :: proc(pid: linux.Pid) {
+	plog(LOG_NOTICE, "Background AOF rewrite terminated with success")
+	if !aof_install_rewrite(pid) {
+		aof_rewrite_failed()
+		return
+	}
+	aof.failures = 0
+	aof.last_rewrite_err = false
+	aof_retry_at = 0
+	aof_retry_reported = false
+	plog(LOG_NOTICE, "Background AOF rewrite finished successfully")
+}
+
+@(private = "file")
+aof_rewrite_abandoned :: proc(pid: linux.Pid, killed_by_us: bool) {
+	if pid > 0 {
+		aof_remove_temp_base(pid)
+	}
+	if !killed_by_us {
+		aof_rewrite_failed()
+	} else if aof.state == .Awaiting_Base {
 		aof.rewrite_scheduled = true
 	}
-	if aof.failures >= 3 {
-		shift := min(aof.failures - 3, 6)
-		delay := min(i64(60) << uint(shift), 3600)
-		aof_retry_at = persist_unix_now() + delay
-		aof_retry_reported = false
+}
+
+@(private = "file")
+aof_close_rewrite_window :: proc() {
+	if started := aof.rewrite_start; started >= 0 {
+		aof.rewrite_last = persist_unix_now() - started
 	}
+	aof.rewrite_start = -1
 }
 
 aof_rewrite_done :: proc(exitcode: int, bysignal: int) {
 	pid := pst.child_pid
-	pst.child_pid = 0
-	pst.child_aof = false
-	now := persist_unix_now()
-	if aof.rewrite_start >= 0 {
-		aof.rewrite_last = now - aof.rewrite_start
+	aof_forget_child()
+	if pst.progress != nil {
+		aof.last_cow = intrinsics.volatile_load(&pst.progress.cow)
 	}
-	aof.rewrite_start = -1
-	if p := pst.progress; p != nil {
-		aof.last_cow = intrinsics.volatile_load(&p.cow)
+	aof_close_rewrite_window()
+	switch {
+	case bysignal == 0 && exitcode == 0:
+		aof_rewrite_succeeded(pid)
+	case bysignal == 0:
+		plog(LOG_WARNING, "Background AOF rewrite terminated with error")
+		aof_rewrite_abandoned(pid, false)
+	case:
+		digits: [24]u8
+		plog(LOG_WARNING, "Background AOF rewrite terminated by signal ", string(digits[:format_i64(&digits[0], i64(bysignal))]))
+		aof_rewrite_abandoned(pid, bysignal == int(linux.Signal.SIGUSR1))
 	}
-	if bysignal == 0 && exitcode == 0 {
-		plog(LOG_NOTICE, "Background AOF rewrite terminated with success")
-		if aof_install_rewrite(pid) {
-			aof.last_rewrite_err = false
-			aof.failures = 0
-			aof_retry_at = 0
-			aof_retry_reported = false
-			plog(LOG_NOTICE, "Background AOF rewrite finished successfully")
-		} else {
-			aof_rewrite_failed()
-		}
-	} else {
-		if bysignal == 0 {
-			plog(LOG_WARNING, "Background AOF rewrite terminated with error")
-		} else {
-			tmp: [24]u8
-			n := format_i64(&tmp[0], i64(bysignal))
-			plog(LOG_WARNING, "Background AOF rewrite terminated by signal ", string(tmp[:n]))
-		}
-		if pid > 0 {
-			aof_remove_temp_base(pid)
-		}
-		if bysignal != int(linux.Signal.SIGUSR1) {
-			aof_rewrite_failed()
-		} else if aof.state == .Wait_Rewrite {
-			aof.rewrite_scheduled = true
-		}
-	}
-	aof_feed_refresh()
 	persist_update_gate()
+	aof_feed_refresh()
+}
+
+@(private = "file")
+aof_reap :: proc(pid: linux.Pid) {
+	status: u32
+	for {
+		if _, err := linux.wait4(pid, &status, {}, nil); err != .EINTR {
+			return
+		}
+	}
 }
 
 aof_kill_child :: proc() {
-	if !aof_rewriting() {
-		return
+	if aof_rewriting() {
+		aof_terminate_child(pst.child_pid)
 	}
-	pid := pst.child_pid
-	tmp: [24]u8
-	n := format_i64(&tmp[0], i64(pid))
-	plog(LOG_NOTICE, "Killing running AOF rewrite child: ", string(tmp[:n]))
+}
+
+@(private = "file")
+aof_terminate_child :: proc(pid: linux.Pid) {
+	digits: [24]u8
+	plog(LOG_NOTICE, "Killing running AOF rewrite child: ", string(digits[:format_i64(&digits[0], i64(pid))]))
 	linux.kill(pid, .SIGUSR1)
-	status: u32
-	for {
-		_, werr := linux.wait4(pid, &status, {}, nil)
-		if werr != .EINTR {
-			break
-		}
-	}
+	aof_reap(pid)
 	aof_remove_temp_base(pid)
-	pst.child_pid = 0
-	pst.child_aof = false
+	aof_forget_child()
 	aof.rewrite_start = -1
 	aof_feed_refresh()
 }
@@ -4307,13 +4414,13 @@ aof_start :: proc() -> bool {
 		aof.wanted = true
 		return true
 	}
-	if aof.state != .Off {
+	if aof.state != .Disabled {
 		return true
 	}
 	if !aof_make_dir() {
 		return false
 	}
-	aof.state = .Wait_Rewrite
+	aof.state = .Awaiting_Base
 	aof.last_fsync_ms = aof_now_ms()
 	if (pst.child_pid > 0 && !pst.child_aof) || aof_in_exec() || pst.loading {
 		aof.rewrite_scheduled = true
@@ -4326,7 +4433,7 @@ aof_start :: proc() -> bool {
 		if !aof_rewrite_background() {
 			aof_close_fd()
 			aof_remove_temp_incr()
-			aof.state = .Off
+			aof.state = .Disabled
 			plog(LOG_WARNING, "Eski needs to enable the AOF but can't trigger a background AOF rewrite operation. Check the above logs for more info about the error.")
 			aof_feed_refresh()
 			persist_update_gate()
@@ -4343,12 +4450,12 @@ aof_stop :: proc() {
 		aof.wanted = false
 		return
 	}
-	if aof.state == .Off {
+	if aof.state == .Disabled {
 		return
 	}
 	was := aof.state
 	if aof.fd >= 0 {
-		if was == .On {
+		if was == .Enabled {
 			aof_flush(true)
 			linux.fdatasync(aof.fd)
 		}
@@ -4357,13 +4464,13 @@ aof_stop :: proc() {
 	if aof_rewriting() {
 		aof_kill_child()
 	}
-	if was == .Wait_Rewrite {
+	if was == .Awaiting_Base {
 		aof_remove_temp_incr()
 	}
 	clear(&aof.buf)
 	clear(&aof.stage)
 	aof.stage_count = 0
-	aof.state = .Off
+	aof.state = .Disabled
 	aof.rewrite_scheduled = false
 	aof.write_err = false
 	aof_err_from_fsync = false
@@ -4508,7 +4615,7 @@ aof_startup :: proc() -> bool {
 			aof_manifest_free(&m)
 			aof_manifest_set({})
 		}
-		aof.state = .Off
+		aof.state = .Disabled
 		aof_feed_refresh()
 		return true
 	}
@@ -4538,13 +4645,13 @@ aof_startup :: proc() -> bool {
 			return false
 		}
 	}
-	aof.state = .On
+	aof.state = .Enabled
 	if aof.manifest.has_base || len(aof.manifest.incr) > 0 {
 		t0 := now_ns()
 		#partial switch aof_load_all(true) {
-		case .Failed, .Open_Err, .Not_Exist:
+		case .Aborted, .Unopenable, .Absent:
 			return false
-		case .Ok, .Truncated:
+		case .Loaded, .Truncated_Tail:
 			l: Log_Line
 			ll_begin(&l, LOG_NOTICE)
 			ll_str(&l, "DB loaded from append only file: ")
@@ -4582,7 +4689,7 @@ aof_cron :: proc() {
 	}
 	aof_bio_collect()
 	aof_delete_history()
-	if aof.state == .Wait_Rewrite && !aof_rewriting() && !aof.rewrite_scheduled {
+	if aof.state == .Awaiting_Base && !aof_rewriting() && !aof.rewrite_scheduled {
 		aof.rewrite_scheduled = true
 	}
 	if !aof_rewriting() && aof.rewrite_start >= 0 {
@@ -4593,7 +4700,7 @@ aof_cron :: proc() {
 			if aof_retry_allowed() {
 				aof_rewrite_background()
 			}
-		} else if aof.state == .On && aof.auto_pct > 0 && aof.current_size > aof.auto_min {
+		} else if aof.state == .Enabled && aof.auto_pct > 0 && aof.current_size > aof.auto_min {
 			base := aof.base_size if aof.base_size > 0 else 1
 			growth := aof.current_size * 100 / base - 100
 			if growth >= aof.auto_pct && aof_retry_allowed() {
@@ -4614,10 +4721,10 @@ aof_shutdown :: proc() {
 		plog(LOG_WARNING, "There is a child rewriting the AOF. Killing it!")
 		aof_kill_child()
 	}
-	if aof.state == .Wait_Rewrite {
+	if aof.state == .Awaiting_Base {
 		plog(LOG_WARNING, "Writing initial AOF. Exit anyway.")
 	}
-	if aof.state != .Off && aof.fd >= 0 {
+	if aof.state != .Disabled && aof.fd >= 0 {
 		plog(LOG_NOTICE, "Calling fsync() on the AOF file.")
 		aof_flush(true)
 		linux.fdatasync(aof.fd)
@@ -4895,38 +5002,38 @@ aof_q_run :: proc(c: ^Conn, name: string) -> bool {
 }
 
 @(private = "file")
-aof_load_truncated :: proc(name: string, valid: i64, is_last: bool) -> Aof_Load_Result {
+aof_load_truncated :: proc(name: string, valid: i64, is_last: bool) -> Aof_Load_Outcome {
 	tmp: [24]u8
 	n := format_i64(&tmp[0], valid)
 	if !is_last {
 		plog(LOG_WARNING, "Unexpected end of file reading the append only file ", name)
 		plog(LOG_WARNING, "Fatal error: the truncated file is not the last file")
-		return .Failed
+		return .Aborted
 	}
 	if !aof.load_truncated {
 		plog(LOG_WARNING, "Unexpected end of file reading the append only file ", name, ". Eski has no AOF repair tool. You can: 1) Make a backup of your AOF file, then remove the incomplete command at its end by hand. 2) Alternatively you can set the 'aof-load-truncated' configuration option to yes and restart the server.")
-		return .Failed
+		return .Aborted
 	}
 	plog(LOG_WARNING, "!!! Warning: short read while loading the AOF file ", name, "!!!")
 	plog(LOG_WARNING, "!!! Truncating the AOF ", name, " at offset ", string(tmp[:n]), " !!!")
 	buf: [PERSIST_PATH_MAX]u8
 	if err := linux.truncate(aof_cpath(name, buf[:]), valid); err != .NONE {
 		plog(LOG_WARNING, "Error truncating the AOF file ", name, ": ", errno_text(err))
-		return .Failed
+		return .Aborted
 	}
 	plog(LOG_WARNING, "AOF ", name, " loaded anyway because aof-load-truncated is enabled")
-	return .Truncated
+	return .Truncated_Tail
 }
 
 @(private = "file")
-aof_load_commands :: proc(r: ^Aof_Reader, name: string, is_last: bool, done_before: i64) -> Aof_Load_Result {
+aof_load_commands :: proc(r: ^Aof_Reader, name: string, is_last: bool, done_before: i64) -> Aof_Load_Outcome {
 	c := aof_fake_conn()
 	if len(dbs) > 0 {
 		c.db = &dbs[0]
 	}
 	valid := aof_r_offset(r)
 	before_multi := valid
-	in_multi := false
+	inside_transaction := false
 	aof_q_reset()
 	defer aof_q_reset()
 	interval := cfg.loading_events_interval_bytes if cfg.loading_events_interval_bytes > 0 else AOF_LOAD_EVENTS_BYTES
@@ -4936,48 +5043,48 @@ aof_load_commands :: proc(r: ^Aof_Reader, name: string, is_last: bool, done_befo
 		res := aof_r_command(r, &aof_load_argv)
 		switch res {
 		case .Eof:
-			if in_multi {
+			if inside_transaction {
 				plog(LOG_WARNING, "Revert incomplete MULTI/EXEC transaction in AOF file ", name)
 				return aof_load_truncated(name, before_multi, is_last)
 			}
 			if r.err != .NONE {
 				plog(LOG_WARNING, "Unrecoverable error reading the append only file ", name, ": ", errno_text(r.err))
-				return .Failed
+				return .Aborted
 			}
-			return .Ok
+			return .Loaded
 		case .Truncated:
 			if r.err != .NONE {
 				plog(LOG_WARNING, "Unrecoverable error reading the append only file ", name, ": ", errno_text(r.err))
-				return .Failed
+				return .Aborted
 			}
-			return aof_load_truncated(name, before_multi if in_multi else valid, is_last)
+			return aof_load_truncated(name, before_multi if inside_transaction else valid, is_last)
 		case .Bad:
 			plog(LOG_WARNING, "Bad file format reading the append only file ", name, ": make a backup of your AOF file, then repair it by hand. Eski has no AOF repair tool.")
-			return .Failed
+			return .Aborted
 		case .Ok:
 		}
 		argv := aof_load_argv[:]
 		switch {
 		case eq_nocase(argv[0], "multi"):
-			if !in_multi {
+			if !inside_transaction {
 				before_multi = valid
 			}
-			in_multi = true
+			inside_transaction = true
 			aof_q_reset()
 		case eq_nocase(argv[0], "exec"):
-			if in_multi && !aof_q_run(c, name) {
-				return .Failed
+			if inside_transaction && !aof_q_run(c, name) {
+				return .Aborted
 			}
-			in_multi = false
+			inside_transaction = false
 			aof_q_reset()
 		case eq_nocase(argv[0], "discard"):
-			in_multi = false
+			inside_transaction = false
 			aof_q_reset()
-		case in_multi:
+		case inside_transaction:
 			aof_q_push(argv)
 		case:
 			if !aof_exec_one(c, argv, name) {
-				return .Failed
+				return .Aborted
 			}
 		}
 		valid = aof_r_offset(r)
@@ -4996,27 +5103,27 @@ aof_load_commands :: proc(r: ^Aof_Reader, name: string, is_last: bool, done_befo
 }
 
 @(private = "file")
-aof_load_one :: proc(f: ^Aof_File, is_last: bool, done_before: i64) -> Aof_Load_Result {
+aof_load_one :: proc(f: ^Aof_File, is_last: bool, done_before: i64) -> Aof_Load_Outcome {
 	name := string(f.name[:])
 	buf: [PERSIST_PATH_MAX]u8
 	fd, err := linux.open(aof_cpath(name, buf[:]), {.CLOEXEC})
 	if err == .ENOENT {
 		plog(LOG_WARNING, "The AOF file ", name, " doesn't exist: ", errno_text(err))
-		return .Not_Exist
+		return .Absent
 	}
 	if err != .NONE {
 		plog(LOG_WARNING, "Fatal error: can't open the append log file ", name, " for reading: ", errno_text(err))
-		return .Open_Err
+		return .Unopenable
 	}
 	defer linux.close(fd)
 	sb: linux.Stat
 	if serr := linux.fstat(fd, &sb); serr != .NONE {
 		plog(LOG_WARNING, "Unable to obtain the AOF file ", name, " length. stat: ", errno_text(serr))
-		return .Open_Err
+		return .Unopenable
 	}
 	size := i64(sb.size)
 	if size == 0 {
-		return .Empty
+		return .Blank
 	}
 	r := Aof_Reader {
 		fd = fd,
@@ -5027,7 +5134,7 @@ aof_load_one :: proc(f: ^Aof_File, is_last: bool, done_before: i64) -> Aof_Load_
 	if got == 5 && string(magic[:]) == "REDIS" {
 		if f.kind != .Base {
 			plog(LOG_WARNING, "Bad file format reading the append only file ", name, ": make a backup of your AOF file, then repair it by hand. Eski has no AOF repair tool.")
-			return .Failed
+			return .Aborted
 		}
 		plog(LOG_NOTICE, "Reading RDB base file on AOF loading...")
 		rr: rdb.Reader
@@ -5040,23 +5147,23 @@ aof_load_one :: proc(f: ^Aof_File, is_last: bool, done_before: i64) -> Aof_Load_
 		rdb.reader_destroy(&rr)
 		if res != .Ok {
 			plog(LOG_WARNING, "Error reading the RDB base file ", name, ", AOF loading aborted")
-			return .Failed
+			return .Aborted
 		}
 		persist_log_load_done()
 		if rest >= size {
-			return .Ok
+			return .Loaded
 		}
 		plog(LOG_NOTICE, "Reading the remaining AOF tail...")
 		if _, lerr := linux.lseek(fd, rest, .SET); lerr != .NONE {
 			plog(LOG_WARNING, "Unrecoverable error reading the append only file ", name, ": ", errno_text(lerr))
-			return .Failed
+			return .Aborted
 		}
 		r.base = rest
 	}
 	return aof_load_commands(&r, name, is_last, done_before)
 }
 
-aof_load_file :: proc(name: string, is_last: bool, at_startup: bool) -> Aof_Load_Result {
+aof_load_file :: proc(name: string, is_last: bool, at_startup: bool) -> Aof_Load_Outcome {
 	m: Aof_Manifest
 	defer aof_manifest_free(&m)
 	m.base = Aof_File {
@@ -5081,15 +5188,15 @@ aof_log_loaded :: proc(kind: string, name: string, t0: i64) {
 	ll_end(&l)
 }
 
-aof_load_all :: proc(at_startup: bool) -> Aof_Load_Result {
+aof_load_all :: proc(at_startup: bool) -> Aof_Load_Outcome {
 	return aof_load_manifest(&aof.manifest, at_startup)
 }
 
 @(private = "file")
-aof_load_manifest :: proc(m: ^Aof_Manifest, at_startup: bool) -> Aof_Load_Result {
+aof_load_manifest :: proc(m: ^Aof_Manifest, at_startup: bool) -> Aof_Load_Outcome {
 	keyspace_fence()
 	if !m.has_base && len(m.incr) == 0 {
-		return .Not_Exist
+		return .Absent
 	}
 	total: i64 = 0
 	missing := 0
@@ -5108,7 +5215,7 @@ aof_load_manifest :: proc(m: ^Aof_Manifest, at_startup: bool) -> Aof_Load_Result
 		}
 	}
 	if total == 0 && missing == 0 {
-		return .Empty
+		return .Blank
 	}
 	saved_dirty := pst.dirty
 	saved_db := db_cur
@@ -5123,21 +5230,21 @@ aof_load_manifest :: proc(m: ^Aof_Manifest, at_startup: bool) -> Aof_Load_Result
 	deny_blocking = true
 	aof_feed_refresh()
 	persist_update_gate()
-	result := Aof_Load_Result.Ok
+	result := Aof_Load_Outcome.Loaded
 	done: i64 = 0
-	step :: proc(res: ^Aof_Load_Result, r: Aof_Load_Result, kind: string, name: string, t0: i64) -> bool {
+	step :: proc(res: ^Aof_Load_Outcome, r: Aof_Load_Outcome, kind: string, name: string, t0: i64) -> bool {
 		switch r {
-		case .Ok:
+		case .Loaded:
 			aof_log_loaded(kind, name, t0)
-		case .Truncated:
+		case .Truncated_Tail:
 			aof_log_loaded(kind, name, t0)
-			res^ = .Truncated
-		case .Empty:
-		case .Not_Exist, .Failed:
-			res^ = .Failed
+			res^ = .Truncated_Tail
+		case .Blank:
+		case .Absent, .Aborted:
+			res^ = .Aborted
 			return false
-		case .Open_Err:
-			res^ = .Open_Err
+		case .Unopenable:
+			res^ = .Unopenable
 			return false
 		}
 		return true
@@ -5173,10 +5280,10 @@ aof_load_manifest :: proc(m: ^Aof_Manifest, at_startup: bool) -> Aof_Load_Result
 }
 
 aof_debug_loadaof :: proc(c: ^Conn) {
-	if aof.state == .On {
+	if aof.state == .Enabled {
 		aof_flush(true)
 	}
-	if aof.state == .Off {
+	if aof.state == .Disabled {
 		m: Aof_Manifest
 		exists, ok := aof_manifest_load_from_disk(&m)
 		if !ok {
@@ -5197,7 +5304,7 @@ aof_debug_loadaof :: proc(c: ^Conn) {
 		aof.fsynced_size = aof.current_size
 	}
 	#partial switch res {
-	case .Ok, .Empty, .Truncated:
+	case .Loaded, .Blank, .Truncated_Tail:
 		pst.dirty = 0
 		pst.dirty_explicit = false
 		plog(LOG_NOTICE, "Append Only File loaded by DEBUG LOADAOF")
@@ -5230,7 +5337,7 @@ aof_info :: proc(b: ^[dynamic]u8) {
 	if running && aof.rewrite_start >= 0 {
 		current = max(persist_unix_now() - aof.rewrite_start, 0)
 	}
-	info_line_int(b, "aof_enabled", 1 if aof.state != .Off else 0)
+	info_line_int(b, "aof_enabled", 1 if aof.state != .Disabled else 0)
 	info_line_int(b, "aof_rewrite_in_progress", 1 if running else 0)
 	info_line_int(b, "aof_rewrite_scheduled", 1 if aof.rewrite_scheduled else 0)
 	info_line_int(b, "aof_last_rewrite_time_sec", aof.rewrite_last)
@@ -5242,7 +5349,7 @@ aof_info :: proc(b: ^[dynamic]u8) {
 	info_line_int(b, "aof_last_cow_size", aof.last_cow)
 	info_line_int(b, "module_fork_in_progress", 0)
 	info_line_int(b, "module_fork_last_cow_size", 0)
-	if aof.state == .Off {
+	if aof.state == .Disabled {
 		return
 	}
 	info_line_int(b, "aof_current_size", aof.current_size)

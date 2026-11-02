@@ -108,7 +108,7 @@ rewrite_command_base_for_fixed_dataset :: proc(t: ^testing.T) {
 		testing.expect_value(t, second[7], "69")
 	}
 	write_file(path_join({dir, "appendonly.aof.manifest"}), transmute([]u8)string("file appendonly.aof.1.base.aof seq 1 type b\n"))
-	testing.expect_value(t, load_manifest_dir(dir), j.Aof_Load_Result.Ok)
+	testing.expect_value(t, load_manifest_dir(dir), j.Aof_Load_Outcome.Loaded)
 	after := dataset_digest()
 	testing.expect(t, before == after, "digest after reload differs")
 	c6 := new_client(6)
@@ -135,7 +135,7 @@ rewrite_rdb_base_for_fixed_dataset :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(string(data), "\xfa\x09redis-ver\x067.4.11"))
 	write_file(path_join({dir, "appendonly.aof.manifest"}), transmute([]u8)string("file appendonly.aof.1.base.rdb seq 1 type b\nfile appendonly.aof.1.incr.aof seq 1 type i\n"))
 	write_file(path_join({dir, "appendonly.aof.1.incr.aof"}), transmute([]u8)string("*2\r\n$6\r\nSELECT\r\n$1\r\n9\r\n*3\r\n$3\r\nSET\r\n$4\r\ntail\r\n$1\r\nt\r\n"))
-	testing.expect_value(t, load_manifest_dir(dir), j.Aof_Load_Result.Ok)
+	testing.expect_value(t, load_manifest_dir(dir), j.Aof_Load_Outcome.Loaded)
 	c9 := new_client(9)
 	testing.expect_value(t, run(c9, "GET", "tail"), "$1\r\nt\r\n")
 	run(c9, "DEL", "tail")
@@ -233,7 +233,7 @@ info_fields_in_reference_order :: proc(t: ^testing.T) {
 	defer delete(b)
 	saved := j.aof.state
 	defer j.aof.state = saved
-	j.aof.state = .Off
+	j.aof.state = .Disabled
 	j.aof_info(&b)
 	lines := strings.split_lines(strings.trim_space(string(b[:])), context.temp_allocator)
 	off := []string{"aof_enabled", "aof_rewrite_in_progress", "aof_rewrite_scheduled", "aof_last_rewrite_time_sec", "aof_current_rewrite_time_sec", "aof_last_bgrewrite_status", "aof_rewrites", "aof_rewrites_consecutive_failures", "aof_last_write_status", "aof_last_cow_size", "module_fork_in_progress", "module_fork_last_cow_size"}
@@ -247,7 +247,7 @@ info_fields_in_reference_order :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(string(b[:]), "aof_current_rewrite_time_sec:-1\r\n"))
 	testing.expect(t, strings.contains(string(b[:]), "aof_last_bgrewrite_status:ok\r\n"))
 	clear(&b)
-	j.aof.state = .On
+	j.aof.state = .Enabled
 	j.aof_info(&b)
 	lines = strings.split_lines(strings.trim_space(string(b[:])), context.temp_allocator)
 	on := []string{"aof_current_size", "aof_base_size", "aof_pending_rewrite", "aof_buffer_length", "aof_pending_bio_fsync", "aof_delayed_fsync"}

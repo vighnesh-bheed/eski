@@ -105,7 +105,7 @@ feed_on :: proc(name: string) -> string {
 		return ""
 	}
 	j.aof.fd = fd
-	j.aof.state = .On
+	j.aof.state = .Enabled
 	j.aof.loading = false
 	j.aof.selected_db = -1
 	j.aof.in_cmd = false
@@ -123,7 +123,7 @@ feed_off :: proc() {
 		linux.close(j.aof.fd)
 	}
 	j.aof.fd = -1
-	j.aof.state = .Off
+	j.aof.state = .Disabled
 	clear(&j.aof.buf)
 	j.aof_update_feed()
 }

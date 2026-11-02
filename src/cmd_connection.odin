@@ -114,7 +114,7 @@ cmd_auth :: proc(c: ^Conn, argv: [][]u8) {
 	username := transmute([]u8)string(DEFAULT_USER)
 	password := argv[1]
 	if len(argv) == 2 {
-		if .Nopass in acl_default.flags {
+		if .Nopass in acl_default.attributes {
 			reply_error(c, ERR_AUTH_NOPASS)
 			return
 		}

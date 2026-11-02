@@ -641,7 +641,7 @@ keyspace_try :: proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8) -> bool {
 	if restore { task.restore_deep = persist_deep_sanitize(true) && !(pst.sanitize == .Clients && acl_skips_sanitize(c)) }
 	task.client = Conn{fd = -1, id = c.id, addr = c.addr, addr_len = c.addr_len, db = c.db, kind = c.kind, flags = c.flags, resp = c.resp}
 	if restore && c.user != nil {
-		task.restore_user.flags = c.user.flags
+		task.restore_user.attributes = c.user.attributes
 		task.client.user = &task.restore_user
 	}
 	task.client.name = region[offset:offset + len(c.name)]

@@ -217,7 +217,7 @@ persist_init_commands :: proc() {
 
 @(private = "file")
 persist_aof_denied :: #force_inline proc "contextless" () -> bool {
-	return aof.state != .Off && aof.write_err
+	return aof.state != .Disabled && aof.write_err
 }
 
 persist_update_gate :: proc "contextless" () {
@@ -1369,7 +1369,7 @@ persist_prepare_shutdown :: proc(flags_in: Shutdown_Flags) -> bool {
 		flags -= {.Save}
 	}
 	plog(LOG_WARNING, "User requested shutdown...")
-	if aof.state == .Wait_Rewrite && .Force not_in flags {
+	if aof.state == .Awaiting_Base && .Force not_in flags {
 		plog(LOG_WARNING, "Writing initial AOF, can't exit.")
 		return false
 	}
@@ -1482,7 +1482,7 @@ persist_startup :: proc() {
 		plog(LOG_WARNING, "Fatal error loading the DB, check server logs. Exiting.")
 		linux.exit_group(1)
 	}
-	if aof.wanted || aof.state != .Off {
+	if aof.wanted || aof.state != .Disabled {
 		return
 	}
 	switch persist_rdb_load(false, true) {
