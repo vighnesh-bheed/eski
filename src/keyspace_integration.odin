@@ -5,7 +5,12 @@ import ks "keyspace"
 import ld "ldfloat"
 import "core:sys/linux"
 
-KEYSPACE_BUCKETS :: 1024
+KEYSPACE_INDEX_SLOTS :: 512
+
+Keyspace_Slot :: struct {
+	hash:   u64,
+	record: ^ks.Record,
+}
 
 Keyspace_Task :: struct {
 	job:        ks.Job,
@@ -72,7 +77,8 @@ keyspace_max_memory: i64 = 128 * 1024 * 1024
 keyspace_initialized: bool
 keyspace_registered: bool
 keyspace_in_fence: bool
-keyspace_directory: [KEYSPACE_BUCKETS]^ks.Record
+keyspace_index_fixed: [KEYSPACE_INDEX_SLOTS]Keyspace_Slot
+keyspace_index: []Keyspace_Slot
 keyspace_timed: bool
 keyspace_records: int
 keyspace_pending: int
@@ -445,26 +451,32 @@ keyspace_fence :: proc() {
 	defer db_cur = saved_db
 	saved_reconciling := store_reconciling
 	store_reconciling = true
-	for &head in keyspace_directory {
-		r := head
-		for r != nil {
-			next := r.caller_next
-			if r.changed && r.exists && !r.value_changed {
-				keyspace_store_import_metadata(&dbs[r.db], transmute([]u8)r.key, r.clock, r.expire_at)
-			} else if r.changed && r.exists && r.kind != u8(Obj_Type.String) {
-				keyspace_object_import(&dbs[r.db], r)
-			} else if r.changed && r.exists && r.string_copy {
-				keyspace_store_import_copy(&dbs[r.db], transmute([]u8)r.key, ks.value_data(r.value), r.clock, r.expire_at, r.encoding)
-			} else if r.changed || r.touched {
-				keyspace_store_import_full(&dbs[r.db], transmute([]u8)r.key, ks.value_data(r.value), r.clock, r.changed, r.exists, r.expire_at, r.encoding)
-			}
-			if !ks.record_free(&keyspace_pool, r) {
-				store_fatal("keyspace record release invariant")
-			}
-			r = next
+	visited := 0
+	slots := keyspace_index_slots()
+	for &slot in slots {
+		r := slot.record
+		if r == nil {
+			continue
 		}
-		head = nil
+		if r.changed && r.exists && !r.value_changed {
+			keyspace_store_import_metadata(&dbs[r.db], transmute([]u8)r.key, r.clock, r.expire_at)
+		} else if r.changed && r.exists && r.kind != u8(Obj_Type.String) {
+			keyspace_object_import(&dbs[r.db], r)
+		} else if r.changed && r.exists && r.string_copy {
+			keyspace_store_import_copy(&dbs[r.db], transmute([]u8)r.key, ks.value_data(r.value), r.clock, r.expire_at, r.encoding)
+		} else if r.changed || r.touched {
+			keyspace_store_import_full(&dbs[r.db], transmute([]u8)r.key, ks.value_data(r.value), r.clock, r.changed, r.exists, r.expire_at, r.encoding)
+		}
+		if !ks.record_free(&keyspace_pool, r) {
+			store_fatal("keyspace record release invariant")
+		}
+		slot = {}
+		visited += 1
 	}
+	if visited != keyspace_records {
+		store_fatal("keyspace record index invariant")
+	}
+	keyspace_index_reset()
 	store_reconciling = saved_reconciling
 	keyspace_records = 0
 	keyspace_timed = false
@@ -541,12 +553,68 @@ keyspace_task_free :: proc(task: ^Keyspace_Task) {
 	if !ks.free(&keyspace_pool, task.region) { store_fatal("keyspace task release invariant") }
 }
 
+keyspace_index_slots :: #force_inline proc "contextless" () -> []Keyspace_Slot {
+	return keyspace_index if len(keyspace_index) != 0 else keyspace_index_fixed[:]
+}
+
+keyspace_index_reset :: proc "contextless" () {
+	if len(keyspace_index) == 0 {
+		return
+	}
+	region := (cast([^]u8)raw_data(keyspace_index))[:len(keyspace_index) * size_of(Keyspace_Slot)]
+	keyspace_index = nil
+	if !ks.free(&keyspace_pool, region) { store_fatal("keyspace record index release invariant") }
+}
+
+keyspace_index_find :: proc "contextless" (hash: u64, db: int, key: []u8) -> ^ks.Record {
+	slots := keyspace_index_slots()
+	mask := u64(len(slots) - 1)
+	for i := hash & mask; ; i = (i + 1) & mask {
+		r := slots[i].record
+		if r == nil { return nil }
+		if slots[i].hash == hash && r.db == db && r.key == transmute(string)key { return r }
+	}
+}
+
+keyspace_index_place :: proc "contextless" (slots: []Keyspace_Slot, hash: u64, r: ^ks.Record) {
+	mask := u64(len(slots) - 1)
+	i := hash & mask
+	for slots[i].record != nil { i = (i + 1) & mask }
+	slots[i] = Keyspace_Slot{hash = hash, record = r}
+}
+
+keyspace_index_reserve :: proc "contextless" () -> bool {
+	slots := keyspace_index_slots()
+	if 2 * (keyspace_records + 1) <= len(slots) {
+		return true
+	}
+	if len(slots) > max(int) / (2 * size_of(Keyspace_Slot)) {
+		return false
+	}
+	size := 2 * len(slots)
+	region := ks.allocate(&keyspace_pool, size * size_of(Keyspace_Slot))
+	if len(region) == 0 {
+		return false
+	}
+	runtime.mem_zero(raw_data(region), len(region))
+	grown := (cast([^]Keyspace_Slot)raw_data(region))[:size]
+	for slot in slots {
+		if slot.record != nil { keyspace_index_place(grown, slot.hash, slot.record) }
+	}
+	if len(keyspace_index) == 0 { keyspace_index_fixed = {} } else { keyspace_index_reset() }
+	keyspace_index = grown
+	return true
+}
+
+keyspace_index_insert :: proc "contextless" (hash: u64, r: ^ks.Record) {
+	keyspace_index_place(keyspace_index_slots(), hash, r)
+	keyspace_records += 1
+}
+
 keyspace_record :: proc(c: ^Conn, key: []u8) -> ^ks.Record {
 	hash := hash_bytes(key) ~ (u64(c.db.id) * WY_P1)
-	bucket := int(hash & (KEYSPACE_BUCKETS - 1))
-	for r := keyspace_directory[bucket]; r != nil; r = r.caller_next {
-		if r.db == c.db.id && r.key == transmute(string)key { return r }
-	}
+	if r := keyspace_index_find(hash, c.db.id, key); r != nil { return r }
+	if !keyspace_index_reserve() { return nil }
 	seed, clock, expires, encoding, exists, eligible := keyspace_store_seed_full(c.db, key)
 	r: ^ks.Record
 	if eligible {
@@ -560,9 +628,7 @@ keyspace_record :: proc(c: ^Conn, key: []u8) -> ^ks.Record {
 		if r == nil { return nil }
 	}
 	if r.expire_at != 0 { keyspace_timed = true }
-	r.caller_next = keyspace_directory[bucket]
-	keyspace_directory[bucket] = r
-	keyspace_records += 1
+	keyspace_index_insert(hash, r)
 	return r
 }
 

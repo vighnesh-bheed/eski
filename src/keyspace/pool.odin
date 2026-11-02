@@ -34,7 +34,6 @@ Record :: struct {
 	db:          int,
 	key:         string,
 	owner:       int,
-	caller_next: ^Record,
 	exists:      bool,
 	value:       ^Value,
 	clock:       u32,
