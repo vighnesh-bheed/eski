@@ -5,8 +5,8 @@ import lp "../listpack"
 expire_due_fields :: proc(h: Hash, now: u64, quota: int) -> int {
 	expired := 0
 	for expired < quota {
-		deadline := min_expire(h, true)
-		if deadline == NO_FIELD_DEADLINE || deadline > now {
+		deadline := earliest_deadline(h)
+		if deadline == DEADLINE_UNSET || deadline > now {
 			break
 		}
 		field: []u8
@@ -25,56 +25,76 @@ expire_due_fields :: proc(h: Hash, now: u64, quota: int) -> int {
 	return expired
 }
 
-hash_type_expire :: proc(h: Hash, now: u64, quota: ^int, update_registry: bool) -> (next: u64, expired: int) {
-	reg: ^Registry
-	if h.hfe != nil {
-		reg = h.hfe.reg
+Sweep :: struct {
+	removed: int,
+	next:    u64,
+	emptied: bool,
+}
+
+sweep :: proc(h: Hash, now: u64, budget: ^int) -> (s: Sweep) {
+	s.removed = expire_due_fields(h, now, max(budget^, 0))
+	budget^ -= s.removed
+	s.emptied = length(h) == 0
+	s.next = DEADLINE_UNSET if s.emptied else earliest_deadline(h)
+	return
+}
+
+home_registry :: #force_inline proc "contextless" (h: Hash) -> ^Registry {
+	if h.hfe == nil {
+		return nil
 	}
-	expired = expire_due_fields(h, now, max(quota^, 0))
-	quota^ -= expired
-	if length(h) == 0 {
-		next = 0
-	} else {
-		next = min_expire(h, true)
-	}
-	if update_registry && expired > 0 {
+	return h.hfe.reg
+}
+
+sweep_and_rebook :: proc(h: Hash, now: u64, budget: ^int) -> Sweep {
+	home := home_registry(h)
+	s := sweep(h, now, budget)
+	if s.removed > 0 {
 		registry_remove(h)
-		if reg != nil && next != 0 && next != NO_FIELD_DEADLINE {
-			registry_add(reg, h, next)
+		if home != nil && s.next != DEADLINE_UNSET {
+			registry_add(home, h, s.next)
 		}
 	}
-	return
+	return s
 }
 
 expire_if_needed :: proc(h: Hash, now: u64) -> (emptied: bool) {
-	minimum := min_expire(h, true)
-	if minimum == NO_FIELD_DEADLINE || minimum >= now {
+	if earliest_deadline(h) >= now {
 		return false
 	}
-	quota := max(int)
-	next, _ := hash_type_expire(h, now, &quota, true)
-	return next == 0
+	budget := max(int)
+	return sweep_and_rebook(h, now, &budget).emptied
+}
+
+registry_due :: proc "contextless" (reg: ^Registry, now: u64) -> Hash {
+	if registry_len(reg) == 0 || reg.items[0].expire > now {
+		return nil
+	}
+	return reg.items[0].h
 }
 
 active_expire :: proc(reg: ^Registry, now: u64, max_fields: int, out: ^[dynamic]Expired_Hash) -> (fields_expired: int) {
-	pending := make([dynamic]Reg_Item)
-	defer delete(pending)
-	quota := max(max_fields, 0)
-	for quota > 0 && registry_len(reg) > 0 && registry_next_expire(reg) <= now {
-		h := reg.items[0].h
+	budget := max(max_fields, 0)
+	parked: [dynamic]Reg_Item
+	defer delete(parked)
+	for budget > 0 {
+		h := registry_due(reg, now)
+		if h == nil {
+			break
+		}
 		key := key_ref(h)
 		registry_remove(h)
-		next, removed := hash_type_expire(h, now, &quota, false)
-		if removed > 0 {
-			append(out, Expired_Hash{h = h, key = key, fields = removed, emptied = next == 0})
-			fields_expired += removed
+		s := sweep(h, now, &budget)
+		fields_expired += s.removed
+		if s.removed > 0 {
+			append(out, Expired_Hash{h = h, key = key, fields = s.removed, emptied = s.emptied})
 		}
-		if next != 0 && next != NO_FIELD_DEADLINE {
-			append(&pending, Reg_Item{expire = next, h = h})
+		if s.next != DEADLINE_UNSET {
+			append(&parked, Reg_Item{expire = s.next, h = h})
 		}
 	}
-	for item in pending {
-		registry_add(reg, item.h, item.expire)
+	for entry in parked {
+		registry_add(reg, entry.h, entry.expire)
 	}
-	return
+	return fields_expired
 }

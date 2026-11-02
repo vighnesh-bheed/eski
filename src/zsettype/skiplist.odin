@@ -10,6 +10,8 @@ MAX_SEARCH :: 10
 
 DICT_MIN_CAP :: 4
 
+DICT_SPARSE_RATIO :: 8
+
 Level :: struct {
 	forward: ^Node,
 	span:    u64,
@@ -429,32 +431,43 @@ slots_scan_bucket :: proc(slots: [^]^Node, cap: int, bucket: u64, fn: proc(user:
 	}
 }
 
-dict_scan_bucket :: proc(sl: ^Skiplist, v: u64, fn: proc(user: rawptr, n: ^Node), user: rawptr) -> u64 {
-	if dict_count(sl) == 0 {
+scan_images :: proc(slots: [^]^Node, cap: int, home: u64, stride: int, fn: proc(user: rawptr, n: ^Node), user: rawptr) {
+	for image := home; image < u64(cap); image += u64(stride) {
+		slots_scan_bucket(slots, cap, image, fn, user)
+	}
+}
+
+cursor_advance :: proc "contextless" (cursor: u64, buckets: int) -> u64 {
+	open := ~cursor & u64(buckets - 1)
+	if open == 0 {
 		return 0
 	}
-	small_slots, small_cap := sl.slots, sl.cap
-	large_slots: [^]^Node
-	large_cap := 0
-	if sl.resize != nil {
-		large_slots, large_cap = sl.resize.old_slots, sl.resize.old_cap
-		if small_cap > large_cap {
-			small_slots, large_slots = large_slots, small_slots
-			small_cap, large_cap = large_cap, small_cap
+	top := u64(1) << (63 - intrinsics.count_leading_zeros(open))
+	return cursor & (top - 1) | top
+}
+
+dict_scan_bucket :: proc(sl: ^Skiplist, v: u64, fn: proc(user: rawptr, n: ^Node), user: rawptr) -> u64 {
+	if sl.count == 0 {
+		return 0
+	}
+	banks := [2]struct {
+		slots: [^]^Node,
+		cap:   int,
+	}{{sl.slots, sl.cap}, {}}
+	if r := sl.resize; r != nil {
+		banks[1] = {r.old_slots, r.old_cap}
+		if banks[1].cap < banks[0].cap {
+			banks[0], banks[1] = banks[1], banks[0]
 		}
 	}
-	mask := u64(small_cap - 1)
-	bucket := v & mask
-	slots_scan_bucket(small_slots, small_cap, bucket, fn, user)
-	if large_cap != 0 {
-		for b := bucket; b < u64(large_cap); b += u64(small_cap) {
-			slots_scan_bucket(large_slots, large_cap, b, fn, user)
+	stride := banks[0].cap
+	home := v & u64(stride - 1)
+	for bank in banks {
+		if bank.cap != 0 {
+			scan_images(bank.slots, bank.cap, home, stride, fn, user)
 		}
 	}
-	next := v | ~mask
-	next = intrinsics.reverse_bits(next)
-	next += 1
-	return intrinsics.reverse_bits(next)
+	return cursor_advance(v, stride)
 }
 
 dict_cap_for :: proc "contextless" (n: int) -> int {
@@ -526,10 +539,15 @@ dict_remove :: proc "contextless" (sl: ^Skiplist, x: ^Node) {
 	sl.count -= 1
 }
 
+dict_sparse :: #force_inline proc "contextless" (sl: ^Skiplist) -> bool {
+	return sl.cap > DICT_MIN_CAP && sl.count * DICT_SPARSE_RATIO <= sl.cap
+}
+
 dict_shrink_if_needed :: proc "contextless" (sl: ^Skiplist) {
-	if sl.resize == nil && sl.cap > DICT_MIN_CAP && sl.count <= sl.cap / 8 {
-		dict_resize(sl, sl.cap / 2)
+	if sl.resize != nil || !dict_sparse(sl) {
+		return
 	}
+	dict_resize(sl, sl.cap >> 1)
 }
 
 dict_after_remove :: proc "contextless" (sl: ^Skiplist) {

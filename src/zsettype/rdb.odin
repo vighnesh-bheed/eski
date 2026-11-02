@@ -19,117 +19,126 @@ rdb_save :: proc "contextless" (w: ^rdb.Writer, z: Zset) {
 	}
 }
 
-rdb_load :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> Zset {
-	if rdbtype == rdb.TYPE_ZSET_LISTPACK || rdbtype == rdb.TYPE_ZSET_ZIPLIST {
-		blob, good := rdb.get_string(r, 0)
-		if !good {
-			return nil
-		}
-		pack: [^]u8
-		reason := "Zset listpack integrity check failed."
-		if rdbtype == rdb.TYPE_ZSET_ZIPLIST {
-			reason = "Zset ziplist integrity check failed."
-			pack, good = rdb.ziplist_to_listpack(blob, true)
-			if good {
-				good = rdb.lp_validate_dups(lp.lp_view(pack), true, 2)
-			}
-		} else {
-			good = rdb.lp_validate_dups(blob, deep, 2)
-			if good {
-				pack = rdb.lp_copy(blob)
-			}
-		}
-		if !good {
-			lp.lp_free(pack)
-			rdb.corrupt(r, reason)
-			return nil
-		}
-		z := create_listpack()
-		lp.lp_free(z.lp)
-		z.lp = pack
-		if zzl_length(pack) == 0 {
-			r.status = .Empty_Key
-			destroy(z)
-			return nil
-		}
-		if zzl_length(pack) > zset_max_listpack_entries {
-			seen := create_skiplist(zzl_length(pack))
-			buf: [lp.LP_INTBUF_SIZE]u8
-			valid := true
-			for p := lp.lp_first(pack); p != nil; {
-				sp := lp.lp_next(pack, p)
-				member := zzl_member(p, &buf)
-				value := zzl_score(sp)
-				_, duplicate := score(seen, member)
-				if is_nan(value) || duplicate {
-					valid = false
-					break
-				}
-				_, _, _ = add(seen, value, member, {})
-				p = sp == nil ? nil : lp.lp_next(pack, sp)
-			}
-			destroy(seen)
-			if !valid {
-				destroy(z)
-				rdb.corrupt(r, reason)
-				return nil
-			}
-			convert_to_skiplist(z, zzl_length(pack))
-		}
-		return z
+packed_reason :: proc "contextless" (rdbtype: int) -> string {
+	if rdbtype == rdb.TYPE_ZSET_ZIPLIST {
+		return "Zset ziplist integrity check failed."
 	}
-	if rdbtype != rdb.TYPE_ZSET && rdbtype != rdb.TYPE_ZSET_2 {
-		rdb.corrupt(r, "Unknown sorted set encoding")
+	return "Zset listpack integrity check failed."
+}
+
+import_pack :: proc(blob: []u8, rdbtype: int, deep: bool) -> (pack: [^]u8, sound: bool) {
+	if rdbtype == rdb.TYPE_ZSET_ZIPLIST {
+		pack, sound = rdb.ziplist_to_listpack(blob, true)
+		return pack, sound && rdb.lp_validate_dups(lp.lp_view(pack), true, 2)
+	}
+	if !rdb.lp_validate_dups(blob, deep, 2) {
+		return nil, false
+	}
+	return rdb.lp_copy(blob), true
+}
+
+pack_members_sound :: proc(pack: [^]u8) -> bool {
+	seen: rdb.Dup_Set
+	defer rdb.dup_destroy(&seen)
+	spelled: [lp.LP_INTBUF_SIZE]u8
+	member := lp.lp_first(pack)
+	for member != nil {
+		weight := lp.lp_next(pack, member)
+		if is_nan(zzl_score(weight)) || !rdb.dup_add(&seen, zzl_member(member, &spelled)) {
+			return false
+		}
+		member = lp.lp_next(pack, weight)
+	}
+	return true
+}
+
+rdb_load_packed :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> Zset {
+	blob, got := rdb.get_string(r, 0)
+	if !got {
 		return nil
 	}
-	count := rdb.get_len(r)
-	if count == rdb.LENERR {
+	pack, sound := import_pack(blob, rdbtype, deep)
+	if !sound {
+		lp.lp_free(pack)
+		rdb.corrupt(r, packed_reason(rdbtype))
 		return nil
 	}
-	if count == 0 {
+	members := zzl_length(pack)
+	if members == 0 {
+		lp.lp_free(pack)
 		r.status = .Empty_Key
 		return nil
 	}
-	if count > u64(max(int) / size_of(^Node) / 4) {
+	z := cast(Zset)mem_alloc_zero(size_of(Zset_Object))
+	z.encoding = .Listpack
+	z.lp = pack
+	if members <= zset_max_listpack_entries {
+		return z
+	}
+	if !pack_members_sound(pack) {
+		destroy(z)
+		rdb.corrupt(r, packed_reason(rdbtype))
+		return nil
+	}
+	convert_to_skiplist(z, members)
+	return z
+}
+
+rdb_load_pairs :: proc(r: ^rdb.Reader, binary_scores: bool) -> Zset {
+	count := rdb.get_len(r)
+	switch {
+	case count == rdb.LENERR:
+		return nil
+	case count == 0:
+		r.status = .Empty_Key
+		return nil
+	case count > u64(max(int) / size_of(^Node) / 4):
 		rdb.corrupt(r, "Invalid sorted set length")
 		return nil
 	}
 	z := create_skiplist(int(min(count, u64(4096))))
-	maxlen, totlen := 0, 0
+	widest, total := 0, 0
 	for _ in 0 ..< count {
-		member, good := rdb.get_string(r, 0)
-		if !good {
-			destroy(z)
-			return nil
+		member, got := rdb.get_string(r, 0)
+		if !got {
+			break
 		}
-		owned := mem_alloc(len(member))
-		copy(owned[:len(member)], member)
-		value: f64
-		if rdbtype == rdb.TYPE_ZSET_2 {
-			value, good = rdb.get_double_bin(r)
+		weight: f64
+		if binary_scores {
+			weight, got = rdb.get_double_bin(r)
 		} else {
-			value, good = rdb.get_double_str(r)
+			weight, got = rdb.get_double_str(r)
 		}
-		if !good || is_nan(value) {
-			mem_free(owned)
-			destroy(z)
-			if good {
-				rdb.corrupt(r, "Zset with NAN score detected")
-			}
-			return nil
+		if !got {
+			break
 		}
-		_, duplicate := score(z, owned[:len(member)])
-		if duplicate {
-			mem_free(owned)
-			destroy(z)
+		if is_nan(weight) {
+			rdb.corrupt(r, "Zset with NAN score detected")
+			break
+		}
+		if _, taken := score(z, member); taken {
 			rdb.corrupt(r, "Duplicate zset fields detected")
-			return nil
+			break
 		}
-		_, _, _ = add(z, value, owned[:len(member)], {})
-		mem_free(owned)
-		maxlen = max(maxlen, len(member))
-		totlen += len(member)
+		_, _, _ = add(z, weight, member, {})
+		widest = max(widest, len(member))
+		total += len(member)
 	}
-	convert_to_listpack_if_needed(z, maxlen, totlen)
+	if !rdb.ok(r) {
+		destroy(z)
+		return nil
+	}
+	convert_to_listpack_if_needed(z, widest, total)
 	return z
+}
+
+rdb_load :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> Zset {
+	switch rdbtype {
+	case rdb.TYPE_ZSET_LISTPACK, rdb.TYPE_ZSET_ZIPLIST:
+		return rdb_load_packed(r, rdbtype, deep)
+	case rdb.TYPE_ZSET, rdb.TYPE_ZSET_2:
+		return rdb_load_pairs(r, rdbtype == rdb.TYPE_ZSET_2)
+	}
+	rdb.corrupt(r, "Unknown sorted set encoding")
+	return nil
 }

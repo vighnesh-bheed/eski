@@ -46,7 +46,7 @@ keyspace_hash_execute :: proc(job: ^ks.Job) {
 	defer keyspace_hash_trace_finish(task, &trace)
 	if task.failed { return }
 	minimum := keyspace_hash_binding_minimum(h, work.hash_minimum)
-	if minimum != ht.NO_FIELD_DEADLINE { ht.registry_add(&registry, h, minimum) }
+	if minimum != ht.DEADLINE_UNSET { ht.registry_add(&registry, h, minimum) }
 	changed := false
 	reset_ttl := false
 	b := keyspace_object_builder(task, .Hash, h, len(argv) * 64)
@@ -58,27 +58,27 @@ keyspace_hash_execute :: proc(job: ^ks.Job) {
 		task.integer = i64(ht.hset(h, argv[2:])); task.ok = op == .Hmset
 		task.dirty = i64((len(argv) - 2) / 2); changed = true
 	case .Hsetnx:
-		_, result := ht.get(h, argv[2], now)
-		if result == .Ok { return }
-		if result == .Expired || result == .Expired_Hash { task.subexpired += 1; changed = true }
-		if result == .Expired_Hash { ht.reset(h); reset_ttl = true }
+		_, read := ht.get(h, argv[2], now)
+		if .Live in read { return }
+		if .Reaped in read { task.subexpired += 1; changed = true }
+		if .Emptied in read { ht.reset(h); reset_ttl = true }
 		ht.set(h, argv[2], argv[3]); task.integer = 1; task.dirty = 1; changed = true
 	case .Hget, .Hexists, .Hstrlen:
-		value, result := ht.get(h, argv[2], now)
-		if result == .Expired || result == .Expired_Hash { task.subexpired += 1; changed = true }
+		value, read := ht.get(h, argv[2], now)
+		if .Reaped in read { task.subexpired += 1; changed = true }
 		if op == .Hget {
-			if result == .Ok { keyspace_hash_reply_value(&b, value) } else { keyspace_hash_null(task, &b) }
+			if .Live in read { keyspace_hash_reply_value(&b, value) } else { keyspace_hash_null(task, &b) }
 			if !keyspace_builder_finish(task, &b) { return }
-		} else if result == .Ok { task.integer = 1 if op == .Hexists else i64(ht.value_len(value)) }
+		} else if .Live in read { task.integer = 1 if op == .Hexists else i64(ht.value_len(value)) }
 	case .Hmget:
 		keyspace_builder_integer(&b, i64(len(argv) - 2), '*')
 		empty := false
 		for field in argv[2:] {
 			if empty { keyspace_hash_null(task, &b); continue }
-			value, result := ht.get(h, field, now)
-			if result == .Ok { keyspace_hash_reply_value(&b, value) } else { keyspace_hash_null(task, &b) }
-			if result == .Expired || result == .Expired_Hash { task.subexpired += 1; changed = true }
-			empty = result == .Expired_Hash
+			value, read := ht.get(h, field, now)
+			if .Live in read { keyspace_hash_reply_value(&b, value) } else { keyspace_hash_null(task, &b) }
+			if .Reaped in read { task.subexpired += 1; changed = true }
+			empty = .Emptied in read
 		}
 		if !keyspace_builder_finish(task, &b) { return }
 	case .Hgetall, .Hkeys, .Hvals:
@@ -99,9 +99,9 @@ keyspace_hash_execute :: proc(job: ^ks.Job) {
 	case .Hdel:
 		n, _ := ht.hdel(h, argv[2:]); task.integer = i64(n); task.dirty = i64(n); changed = n > 0
 	case .Hincrby, .Hincrbyfloat:
-		_, result := ht.get(h, argv[2], now)
-		if result == .Expired || result == .Expired_Hash { task.subexpired += 1; changed = true }
-		if result == .Expired_Hash { ht.reset(h); reset_ttl = true }
+		_, read := ht.get(h, argv[2], now)
+		if .Reaped in read { task.subexpired += 1; changed = true }
+		if .Emptied in read { ht.reset(h); reset_ttl = true }
 		if op == .Hincrby {
 			delta, _ := ht.parse_incrby_increment(argv[3])
 			value, err := ht.incrby(h, argv[2], delta, now)
@@ -113,7 +113,7 @@ keyspace_hash_execute :: proc(job: ^ks.Job) {
 			if err != .None { task.failed = true; return }
 			_, expires, found := ht.get_raw(h, argv[2])
 			task.hash_expire_at = 0
-			if found && expires != ht.NO_FIELD_DEADLINE { task.hash_expire_at = i64(expires) }
+			if found && expires != ht.DEADLINE_UNSET { task.hash_expire_at = i64(expires) }
 			keyspace_builder_bulk(&b, value); if !keyspace_builder_finish(task, &b) { return }
 		}
 		task.dirty = 1; changed = true
@@ -272,6 +272,6 @@ keyspace_hash_detach :: proc "contextless" (h: ht.Hash) {
 	if h.hfe != nil {
 		h.hfe.reg = nil
 		h.hfe.reg_index = -1
-		h.hfe.reg_expire = ht.NO_FIELD_DEADLINE
+		h.hfe.reg_expire = ht.DEADLINE_UNSET
 	}
 }

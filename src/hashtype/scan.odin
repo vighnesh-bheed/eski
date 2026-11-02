@@ -149,7 +149,7 @@ scan_chain :: proc(page: ^Scan_Page, slots: [^]Slot, capacity: int, home: int) {
 		if blob_live(blob) && int(slots[at].hash & u64(mask)) == home {
 			page.visited += 1
 			expire := table_field_expire(page.table, blob)
-			stale := expire != NO_FIELD_DEADLINE && expire < page.now
+			stale := expire != DEADLINE_UNSET && expire < page.now
 			field := blob_field(blob)
 			if !stale && scan_wanted(&page.opts, field) {
 				append(page.out, Value{str = field})

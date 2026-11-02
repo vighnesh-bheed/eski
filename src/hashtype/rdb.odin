@@ -22,7 +22,7 @@ rdb_type :: proc "contextless" (h: Hash) -> u8 {
 
 rdb_save :: proc "contextless" (w: ^rdb.Writer, h: Hash) {
 	type := rdb_type(h)
-	minimum := NO_FIELD_DEADLINE
+	minimum := DEADLINE_UNSET
 	if type == rdb.TYPE_HASH_TABLE_EX || type == rdb.TYPE_HASH_LISTPACK_EX {
 		minimum = dump_min_expire(h)
 		rdb.put_ms(w, i64(minimum))
@@ -37,7 +37,7 @@ rdb_save :: proc "contextless" (w: ^rdb.Writer, h: Hash) {
 		if type == rdb.TYPE_HASH_TABLE_EX {
 			expiry := current_expire(&it)
 			delta := u64(0)
-			if expiry != NO_FIELD_DEADLINE {
+			if expiry != DEADLINE_UNSET {
 				delta = expiry - minimum + 1
 			}
 			rdb.put_len(w, delta)
@@ -55,50 +55,108 @@ rdb_fail :: proc(r: ^rdb.Reader, h: Hash, msg: string) -> Hash {
 	return nil
 }
 
-rdb_load_plain :: proc(r: ^rdb.Reader, deep: bool) -> Hash {
-	count := rdb.get_len(r)
-	if count == rdb.LENERR {
-		return nil
+Row_Layout :: struct {
+	stride:     int,
+	headroom:   int,
+	kind:       int,
+	base:       u64,
+	pack_limit: u64,
+}
+
+row_fits_pack :: proc(h: Hash, field, value: []u8, headroom: int) -> bool {
+	return max(len(field), len(value)) <= hash_max_listpack_value && lp.lp_safe_to_add(h.lp, len(field) + len(value) + headroom)
+}
+
+spill_if_needed :: proc(r: ^rdb.Reader, h: Hash, field, value: []u8, layout: Row_Layout, reserve: int) -> bool {
+	if h.encoding == .Hashtable || row_fits_pack(h, field, value, layout.headroom) {
+		return true
 	}
+	if !rdb.lp_validate_dups(lp.lp_view(h.lp), true, layout.stride) {
+		rdb.corrupt(r, "Duplicate hash fields detected")
+		return false
+	}
+	convert(h, reserve)
+	return true
+}
+
+pack_row :: proc(h: Hash, field, value: []u8, deadline: u64, stride: int) {
+	if stride == 3 {
+		lpex_add_new(h, field, value, deadline)
+		return
+	}
+	pair := [2]lp.Entry{lp.entry_from_bytes(field), lp.entry_from_bytes(value)}
+	h.lp = lp.lp_batch_append(h.lp, pair[:])
+}
+
+admit_row :: proc(r: ^rdb.Reader, h: Hash, field, value: []u8, deadline: u64, layout: Row_Layout, reserve: int, deep: bool, seen: ^rdb.Dup_Set) -> bool {
+	if !spill_if_needed(r, h, field, value, layout, reserve) {
+		return false
+	}
+	if h.encoding != .Hashtable {
+		if deep && !rdb.dup_add(seen, field) {
+			rdb.corrupt(r, "Hash with dup elements")
+			return false
+		}
+		pack_row(h, field, value, deadline, layout.stride)
+		return true
+	}
+	blob := table_add_new(h.table, field, value)
+	if blob == nil {
+		rdb.corrupt(r, "Duplicate hash fields detected")
+		return false
+	}
+	vol_set(h.table, blob, deadline)
+	return true
+}
+
+load_rows :: proc(r: ^rdb.Reader, count: u64, layout: Row_Layout, deep: bool) -> Hash {
 	if count == 0 {
 		r.status = .Empty_Key
+	}
+	if !rdb.ok(r) {
 		return nil
 	}
-	h := create()
 	reserve := int(min(count, u64(RDB_HASH_INITIAL_RESERVE_MAX)))
-	if count > u64(hash_max_listpack_entries) {
+	h := create()
+	if layout.stride == 3 {
+		convert_to_ex(h)
+	}
+	if count > layout.pack_limit {
 		convert(h, reserve)
 	}
-	duplicates: rdb.Dup_Set
-	defer rdb.dup_destroy(&duplicates)
+	seen: rdb.Dup_Set
+	defer rdb.dup_destroy(&seen)
 	for _ in 0 ..< count {
-		field, fok := rdb.get_string(r, 0)
-		if !fok {
-			return rdb_fail(r, h, "")
-		}
-		value, vok := rdb.get_string(r, 1)
-		if !vok {
-			return rdb_fail(r, h, "")
-		}
-		if h.encoding != .Hashtable && (len(field) > hash_max_listpack_value || len(value) > hash_max_listpack_value || !lp.lp_safe_to_add(h.lp, len(field) + len(value) + 32)) {
-			if !rdb.lp_validate_dups(lp.lp_view(h.lp), true, 2) {
-				return rdb_fail(r, h, "Duplicate hash fields detected")
+		deadline := DEADLINE_UNSET
+		if layout.stride == 3 {
+			got: bool
+			deadline, got = read_row_deadline(r, layout)
+			if !got {
+				break
 			}
-			convert(h, reserve)
 		}
-		if h.encoding == .Hashtable {
-			if table_set(h.table, field, value) {
-				return rdb_fail(r, h, "Duplicate hash fields detected")
-			}
-		} else {
-			if deep && !rdb.dup_add(&duplicates, field) {
-				return rdb_fail(r, h, "Hash with dup elements")
-			}
-			entries := [2]lp.Entry{lp.entry_from_bytes(field), lp.entry_from_bytes(value)}
-			h.lp = lp.lp_batch_append(h.lp, entries[:])
+		field, field_read := rdb.get_string(r, 0)
+		if !field_read {
+			break
+		}
+		value, value_read := rdb.get_string(r, 1)
+		if !value_read || !admit_row(r, h, field, value, deadline, layout, reserve, deep, &seen) {
+			break
 		}
 	}
+	if !rdb.ok(r) {
+		destroy(h)
+		return nil
+	}
 	return h
+}
+
+rdb_load_plain :: proc(r: ^rdb.Reader, deep: bool) -> Hash {
+	layout := Row_Layout{stride = 2, headroom = 32, kind = rdb.TYPE_HASH, pack_limit = u64(hash_max_listpack_entries)}
+	if count := rdb.get_len(r); count != rdb.LENERR {
+		return load_rows(r, count, layout, deep)
+	}
+	return nil
 }
 
 rdb_repack_loaded :: proc(h: Hash) -> bool {
@@ -111,7 +169,7 @@ rdb_repack_loaded :: proc(h: Hash) -> bool {
 		}
 	}
 	if convert_needed {
-		if !rdb.lp_validate_dups(lp.lp_view(h.lp), true, tuple_len(h)) {
+		if !rdb.lp_validate_dups(lp.lp_view(h.lp), true, pack_stride(h)) {
 			return false
 		}
 		convert(h)

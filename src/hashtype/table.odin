@@ -3,8 +3,8 @@ package hashtype
 import xx "core:hash/xxhash"
 import "base:intrinsics"
 
-TABLE_INITIAL_SIZE :: 4
-TABLE_MIN_FILL :: 8
+TABLE_FLOOR_SLOTS :: 4
+TABLE_SPARSE_RATIO :: 8
 
 Blob :: struct {
 	flen: u32,
@@ -96,7 +96,7 @@ checked_table_capacity :: proc "contextless" (n: int) -> (capacity: int, valid: 
 	if n < 0 || n > TABLE_MAX_CAPACITY {
 		return 0, false
 	}
-	c := TABLE_INITIAL_SIZE
+	c := TABLE_FLOOR_SLOTS
 	for c < n {
 		c *= 2
 	}
@@ -155,7 +155,7 @@ table_free :: proc "contextless" (t: ^Table) {
 }
 
 table_resize :: proc "contextless" (t: ^Table, new_cap: int) {
-	resize_require(new_cap >= TABLE_INITIAL_SIZE && new_cap & (new_cap - 1) == 0)
+	resize_require(new_cap >= TABLE_FLOOR_SLOTS && new_cap & (new_cap - 1) == 0)
 	capacity, valid := checked_table_capacity(new_cap)
 	resize_require(valid && t.resize == nil)
 	resize_require(t.count >= 0 && t.count < capacity)
@@ -217,7 +217,7 @@ table_find :: #force_inline proc "contextless" (t: ^Table, field: []u8, h: u64) 
 table_grow_if_needed :: proc "contextless" (t: ^Table) {
 	resize_require(t.count >= 0)
 	if t.cap == 0 {
-		table_resize(t, TABLE_INITIAL_SIZE)
+		table_resize(t, TABLE_FLOOR_SLOTS)
 	} else if t.resize == nil && t.count >= t.cap - t.cap / 4 {
 		resize_require(t.cap <= TABLE_MAX_CAPACITY / 2)
 		table_resize(t, t.cap * 2)
@@ -309,10 +309,15 @@ table_delete_at :: proc "contextless" (t: ^Table, slot: ^Slot) {
 	t.slots[hole] = {}
 }
 
+table_sparse :: #force_inline proc "contextless" (t: ^Table) -> bool {
+	return t.cap > TABLE_FLOOR_SLOTS && t.count * TABLE_SPARSE_RATIO < t.cap
+}
+
 table_shrink_if_needed :: proc "contextless" (t: ^Table) {
-	if t.resize == nil && t.cap > TABLE_INITIAL_SIZE && t.count < t.cap / TABLE_MIN_FILL {
-		table_resize(t, cap_for(t.count))
+	if t.resize != nil || !table_sparse(t) {
+		return
 	}
+	table_resize(t, cap_for(t.count))
 }
 
 table_delete :: proc(t: ^Table, field: []u8) -> bool {

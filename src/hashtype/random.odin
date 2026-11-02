@@ -82,7 +82,7 @@ random_element :: proc(h: Hash) -> (field: Value, value: Value) {
 		return Value{str = blob_field(b)}, Value{str = blob_value(b)}
 	}
 	f, v: lp.Entry
-	lp.lp_random_pair(h.lp, u64(length(h)), &f, &v, tuple_len(h))
+	lp.lp_random_pair(h.lp, u64(length(h)), &f, &v, pack_stride(h))
 	return value_from_entry(f), value_from_entry(v)
 }
 
