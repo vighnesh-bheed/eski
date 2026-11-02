@@ -1,14 +1,14 @@
 package settype
 
-SPOP_MOVE_STRATEGY_MUL :: 5
-SRANDMEMBER_SUB_STRATEGY_MUL :: 3
-SRANDMEMBER_RANDOM_SAMPLE_LIMIT :: 1000
+import lp "../listpack"
+
+SRANDMEMBER_REPLY_BATCH :: 1000
 
 Popped_Item :: struct {
-	off:    int,
-	n:      int,
-	ival:   i64,
-	is_int: bool,
+	off:     int,
+	n:       int,
+	number:  i64,
+	numeric: bool,
 }
 
 Popped :: struct {
@@ -32,14 +32,14 @@ popped_destroy :: proc(p: ^Popped) {
 	p^ = {}
 }
 
-popped_push :: proc(p: ^Popped, v: Value) {
+popped_push :: proc(p: ^Popped, v: Member) {
 	resize_require(len(p.items) < max(int) / size_of(Popped_Item))
-	item := Popped_Item{ival = v.ival, is_int = v.is_int}
-	if !v.is_int {
-		resize_require(len(v.str) <= max(int) - len(p.arena))
+	item := Popped_Item{number = v.number, numeric = v.numeric}
+	if !v.numeric {
+		resize_require(len(v.text) <= max(int) - len(p.arena))
 		item.off = len(p.arena)
-		item.n = len(v.str)
-		append(&p.arena, ..v.str)
+		item.n = len(v.text)
+		append(&p.arena, ..v.text)
 	}
 	append(&p.items, item)
 }
@@ -48,12 +48,12 @@ popped_len :: proc(p: ^Popped) -> int {
 	return len(p.items)
 }
 
-popped_get :: proc(p: ^Popped, i: int) -> Value {
+popped_get :: proc(p: ^Popped, i: int) -> Member {
 	item := p.items[i]
-	if item.is_int {
-		return {ival = item.ival, is_int = true}
+	if item.numeric {
+		return {number = item.number, numeric = true}
 	}
-	return {str = p.arena[item.off:item.off + item.n]}
+	return {text = p.arena[item.off:item.off + item.n]}
 }
 
 rand_below :: proc "contextless" (n: u64) -> u64 {
@@ -84,14 +84,14 @@ table_random_blob :: proc "contextless" (t: ^Table) -> ^Blob {
 	return nil
 }
 
-random_element :: proc(s: Set) -> Value {
+random_element :: proc(s: Set) -> Member {
 	resize_require(size(s) > 0)
 	if s.encoding == .Hashtable {
-		return {str = blob_bytes(table_random_blob(s.table))}
+		return {text = blob_bytes(table_random_blob(s.table))}
 	}
 	index := int(rand_below(u64(size(s))))
 	if s.encoding == .Intset {
-		return {ival = intset_get(s.data, index), is_int = true}
+		return {number = intset_get(s.data, index), numeric = true}
 	}
 	it := iterator(s)
 	for i in 0 ..= index {
@@ -110,11 +110,11 @@ pop_random :: proc(s: Set, out: ^Popped) {
 	remove_aux(s, value)
 }
 
-random_with_repeats :: proc(s: Set, count: int, out: ^[dynamic]Value) {
+random_with_repeats :: proc(s: Set, count: int, out: ^[dynamic]Member) {
 	if size(s) == 0 || count <= 0 {
 		return
 	}
-	resize_require(count <= (max(int) / size_of(Value)) - len(out^))
+	resize_require(count <= (max(int) / size_of(Member)) - len(out^))
 	for _ in 0 ..< count {
 		append(out, random_element(s))
 	}
@@ -138,13 +138,13 @@ index_set_insert :: proc "contextless" (s: ^Index_Set, idx: int) -> bool {
 	return false
 }
 
-random_unique :: proc(s: Set, count: int, out: ^[dynamic]Value) {
+random_unique :: proc(s: Set, count: int, out: ^[dynamic]Member) {
 	n := size(s)
 	take := min(max(0, count), n)
 	if take == 0 {
 		return
 	}
-	resize_require(n <= max(int) / size_of(Value) && take <= max(int) / size_of(Value) - len(out^))
+	resize_require(n <= max(int) / size_of(Member) && take <= max(int) / size_of(Member) - len(out^))
 	if take == n {
 		it := iterator(s)
 		for {
@@ -171,7 +171,7 @@ random_unique :: proc(s: Set, count: int, out: ^[dynamic]Value) {
 		}
 		return
 	}
-	values := make([]Value, n)
+	values := make([]Member, n)
 	defer delete(values)
 	it := iterator(s)
 	for i in 0 ..< n {
@@ -184,50 +184,54 @@ random_unique :: proc(s: Set, count: int, out: ^[dynamic]Value) {
 	}
 }
 
+spop_keep_survivors :: proc(s: Set, kept: int, out: ^Popped) -> Set {
+	survivors: [dynamic]Member
+	defer delete(survivors)
+	random_unique(s, kept, &survivors)
+	keeper := create_intset() if s.encoding == .Intset else create_listpack()
+	for survivor in survivors {
+		add_aux(keeper, survivor)
+	}
+	retained := iterator(keeper)
+	for survivor in next(&retained) {
+		remove_aux(s, survivor)
+	}
+	leftovers := iterator(s)
+	for member in next(&leftovers) {
+		popped_push(out, member)
+	}
+	return keeper
+}
+
+spop_listpack_in_place :: proc(s: Set, count: int, out: ^Popped) {
+	unseen := u64(size(s))
+	wanted := u64(count)
+	at := lp.lp_first(s.data)
+	for at != nil && wanted > 0 {
+		if rand_below(unseen) < wanted {
+			popped_push(out, value_from_entry(lp.lp_get_entry(at)))
+			s.data = lp.lp_delete(s.data, at, &at)
+			resize_require(s.data != nil)
+			wanted -= 1
+		} else {
+			at = lp.lp_next(s.data, at)
+		}
+		unseen -= 1
+	}
+}
+
 spop_count :: proc(s: Set, count: int, out: ^Popped) -> (newset: Set) {
 	resize_require(count > 0 && count < size(s))
-	remaining := size(s) - count
-	if remaining <= count / SPOP_MOVE_STRATEGY_MUL {
-		chosen: [dynamic]Value
-		defer delete(chosen)
-		random_unique(s, remaining, &chosen)
-		newset = create_intset() if s.encoding == .Intset else create_listpack()
-		for value in chosen {
-			add_aux(newset, value)
+	kept := size(s) - count
+	switch {
+	case kept * 5 <= count:
+		newset = spop_keep_survivors(s, kept, out)
+	case s.encoding == .Listpack:
+		spop_listpack_in_place(s, count, out)
+	case:
+		for _ in 0 ..< count {
+			pop_random(s, out)
 		}
-		it := iterator(newset)
-		for {
-			value, ok := next(&it)
-			if !ok {
-				break
-			}
-			remove_aux(s, value)
-		}
-		it = iterator(s)
-		for {
-			value, ok := next(&it)
-			if !ok {
-				break
-			}
-			popped_push(out, value)
-		}
-		return
 	}
-	if s.encoding == .Listpack {
-		chosen: [dynamic]Value
-		defer delete(chosen)
-		random_unique(s, count, &chosen)
-		first := popped_len(out)
-		for value in chosen {
-			popped_push(out, value)
-		}
-		for index in first ..< popped_len(out) {
-			remove_aux(s, popped_get(out, index))
-		}
-		return nil
-	}
-	for _ in 0 ..< count {
-		pop_random(s, out)
-	}
-	return nil
+	return
 }

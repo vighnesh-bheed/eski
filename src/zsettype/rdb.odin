@@ -40,7 +40,7 @@ import_pack :: proc(blob: []u8, rdbtype: int, deep: bool) -> (pack: [^]u8, sound
 pack_members_sound :: proc(pack: [^]u8) -> bool {
 	seen: rdb.Dup_Set
 	defer rdb.dup_destroy(&seen)
-	spelled: [lp.LP_INTBUF_SIZE]u8
+	spelled: [lp.DECIMAL_BUFFER_BYTES]u8
 	member := lp.lp_first(pack)
 	for member != nil {
 		weight := lp.lp_next(pack, member)
@@ -87,7 +87,7 @@ rdb_load_packed :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> Zset {
 rdb_load_pairs :: proc(r: ^rdb.Reader, binary_scores: bool) -> Zset {
 	count := rdb.get_len(r)
 	switch {
-	case count == rdb.LENERR:
+	case !rdb.ok(r):
 		return nil
 	case count == 0:
 		r.status = .Empty_Key

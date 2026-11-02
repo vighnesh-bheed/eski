@@ -31,7 +31,7 @@ reply_bitmap_error :: #force_no_inline proc(c: ^Conn, err: bm.Error) {
 }
 
 @(private = "file")
-BITMAP_STORE_LIMIT :: i64(max(u32)) - 2 * bm.SDS_MAX_PREALLOC
+BITMAP_STORE_LIMIT :: i64(max(u32)) - 2 * bm.GREEDY_GROWTH_LIMIT
 
 @(private = "file")
 bitmap_bulk_limit :: #force_inline proc() -> i64 {

@@ -188,7 +188,7 @@ expected_stream_dump :: proc(s: st.Stream, nodes: []st.Node_Info) -> []u8 {
 			rdb_put_len(&out, cg.delivered.ms)
 			rdb_put_len(&out, cg.delivered.seq)
 			rdb_put_len(&out, u64(cg.reads))
-			rdb_put_len(&out, cg.pending.numele)
+			rdb_put_len(&out, cg.pending.stored)
 			pi: rx.Iterator
 			rx.start(&pi, cg.pending)
 			rx.seek(&pi, "^")
@@ -199,7 +199,7 @@ expected_stream_dump :: proc(s: st.Stream, nodes: []st.Node_Info) -> []u8 {
 				rdb_put_len(&out, nack.times)
 			}
 			rx.stop(&pi)
-			rdb_put_len(&out, cg.members.numele)
+			rdb_put_len(&out, cg.members.stored)
 			ci: rx.Iterator
 			rx.start(&ci, cg.members)
 			rx.seek(&ci, "^")
@@ -208,7 +208,7 @@ expected_stream_dump :: proc(s: st.Stream, nodes: []st.Node_Info) -> []u8 {
 				rdb_put_string(&out, rx.key(&ci))
 				rdb_put_ms(&out, c.seen_ms)
 				rdb_put_ms(&out, c.active_ms)
-				rdb_put_len(&out, c.owned.numele)
+				rdb_put_len(&out, c.owned.stored)
 				ki: rx.Iterator
 				rx.start(&ki, c.owned)
 				rx.seek(&ki, "^")

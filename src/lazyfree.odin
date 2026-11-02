@@ -165,7 +165,7 @@ lazyfree_effort :: proc(type: Obj_Type, obj: rawptr) -> int {
 			rx.seek(&it, "^")
 			pel := 0
 			if rx.next(&it) {
-				pel = int((^sm.Group)(it.data).pending.numele)
+				pel = int((^sm.Group)(it.data).pending.stored)
 			}
 			rx.stop(&it)
 			effort += groups * (1 + pel)

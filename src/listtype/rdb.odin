@@ -10,15 +10,15 @@ rdb_type :: proc "contextless" (l: List) -> u8 {
 rdb_save :: proc "contextless" (w: ^rdb.Writer, l: List) {
 	if l.encoding == .Listpack {
 		rdb.put_len(w, 1)
-		rdb.put_len(w, rdb.QUICKLIST_NODE_CONTAINER_PACKED)
+		rdb.put_len(w, rdb.LIST_NODE_PACKED)
 		rdb.put_string(w, lp.lp_view(l.lp))
 		return
 	}
 	rdb.put_len(w, u64(l.ql.len))
 	for n := l.ql.head; n != nil; n = n.next {
-		container := u64(rdb.QUICKLIST_NODE_CONTAINER_PACKED)
+		container := u64(rdb.LIST_NODE_PACKED)
 		if n.plain {
-			container = rdb.QUICKLIST_NODE_CONTAINER_PLAIN
+			container = rdb.LIST_NODE_PLAIN
 		}
 		rdb.put_len(w, container)
 		rdb.put_string(w, n.entry[:n.sz])
@@ -61,13 +61,13 @@ rdb_load :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> List {
 			return rdb_fail(r, l, "")
 		}
 		for i: u64 = 0; i < n; i += 1 {
-			container := u64(rdb.QUICKLIST_NODE_CONTAINER_PACKED)
+			container := u64(rdb.LIST_NODE_PACKED)
 			if rdbtype == rdb.TYPE_LIST_QUICKLIST_2 {
 				container = rdb.get_len(r)
 				if !rdb.ok(r) {
 					return rdb_fail(r, l, "")
 				}
-				if container != rdb.QUICKLIST_NODE_CONTAINER_PLAIN && container != rdb.QUICKLIST_NODE_CONTAINER_PACKED {
+				if container != rdb.LIST_NODE_PLAIN && container != rdb.LIST_NODE_PACKED {
 					return rdb_fail(r, l, "Quicklist integrity check failed.")
 				}
 			}
@@ -89,7 +89,7 @@ rdb_load :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> List {
 					return rdb_fail(r, l, "Ziplist integrity check failed.")
 				}
 				append_listpack(l.ql, lp.lp_shrink_to_fit(pack))
-			} else if container == rdb.QUICKLIST_NODE_CONTAINER_PLAIN {
+			} else if container == rdb.LIST_NODE_PLAIN {
 				node := node_create_container(l.ql, true, blob)
 				insert_node(l.ql, l.ql.tail, node, true)
 			} else {
@@ -99,7 +99,7 @@ rdb_load :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> List {
 				append_listpack(l.ql, rdb.lp_copy(blob))
 			}
 		}
-		try_conversion(l, .Auto)
+		settle_encoding(l)
 	}
 	if length(l) == 0 {
 		destroy(l)

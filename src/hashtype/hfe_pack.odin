@@ -15,7 +15,7 @@ convert_to_ex :: proc(h: Hash) {
 	packed := lp.lp_new(0)
 	it := iterator(h)
 	for next(&it) {
-		entries := [3]lp.Entry{value_to_entry(current_field(&it)), value_to_entry(current_value(&it)), lp.entry_from_int(0)}
+		entries := [3]lp.Element{value_to_entry(current_field(&it)), value_to_entry(current_value(&it)), lp.entry_from_int(0)}
 		packed = lp.lp_batch_append(packed, entries[:])
 	}
 	lp.lp_free(h.lp)
@@ -109,16 +109,16 @@ pack_slot_for :: proc(zl: [^]u8, mark: i64) -> [^]u8 {
 
 lpex_add_new :: proc(h: Hash, field, value: []u8, expire_at: u64) {
 	mark := pack_mark(expire_at)
-	tuple := [3]lp.Entry{lp.entry_from_bytes(field), lp.entry_from_bytes(value), lp.entry_from_int(mark)}
+	tuple := [3]lp.Element{lp.entry_from_bytes(field), lp.entry_from_bytes(value), lp.entry_from_int(mark)}
 	if slot := pack_slot_for(h.lp, mark); slot != nil {
-		h.lp = lp.lp_batch_insert(h.lp, slot, lp.LP_BEFORE, tuple[:], nil)
+		h.lp = lp.lp_batch_insert(h.lp, slot, lp.Placement.Before, tuple[:], nil)
 	} else {
 		h.lp = lp.lp_batch_append(h.lp, tuple[:])
 	}
 }
 
 pack_retime :: proc(h: Hash, field_at: [^]u8, deadline: u64) {
-	spelled: [2][lp.LP_INTBUF_SIZE]u8
+	spelled: [2][lp.DECIMAL_BUFFER_BYTES]u8
 	field := value_bytes(value_from_lp(field_at), &spelled[0])
 	value := value_bytes(value_from_lp(pack_next(field_at)), &spelled[1])
 	lpex_replace_value(h, field_at, field, value, deadline)

@@ -15,13 +15,13 @@ random_tuple_pack :: proc(tuple_len: int) -> [^]u8 {
 	return lp
 }
 
-expect_sample_pair :: proc(t: ^testing.T, key, val: Entry) {
+expect_sample_pair :: proc(t: ^testing.T, key, val: Element) {
 	values := [4]string{"v0", "v1", "v2", "v3"}
-	testing.expect(t, key.sval == nil && key.lval >= 10 && key.lval <= 40 && key.lval % 10 == 0)
-	if key.sval != nil || key.lval < 10 || key.lval > 40 || key.lval % 10 != 0 {
+	testing.expect(t, key.text == nil && key.number >= 10 && key.number <= 40 && key.number % 10 == 0)
+	if key.text != nil || key.number < 10 || key.number > 40 || key.number % 10 != 0 {
 		return
 	}
-	testing.expect(t, val.sval != nil && string(val.sval[:int(val.slen)]) == values[int(key.lval / 10) - 1])
+	testing.expect(t, val.text != nil && string(val.text[:int(val.text_len)]) == values[int(key.number / 10) - 1])
 }
 
 @(test)
@@ -40,17 +40,17 @@ seeded_sampling_preserves_draw_order_unique_pack_order_and_tuple_alignment :: pr
 	}
 	for tuple_len in 2..=3 {
 		lp := random_tuple_pack(tuple_len)
-		keys, vals: [32]Entry
+		keys, vals: [32]Element
 		lp_srand(1234)
 		lp_random_pairs(lp, len(keys), keys[:], vals[:], tuple_len)
 		for key, index in keys {
 			expect_sample_pair(t, key, vals[index])
 		}
 		lp_srand(1234)
-		repeated_keys, repeated_vals: [32]Entry
+		repeated_keys, repeated_vals: [32]Element
 		lp_random_pairs(lp, len(keys), repeated_keys[:], repeated_vals[:], tuple_len)
 		for key, index in keys {
-			testing.expect(t, repeated_keys[index].lval == key.lval && repeated_vals[index].sval == vals[index].sval)
+			testing.expect(t, repeated_keys[index].number == key.number && repeated_vals[index].text == vals[index].text)
 		}
 		for requested in ([]int{0, 1, 3, 4, 6}) {
 			for _, index in keys {
@@ -62,13 +62,13 @@ seeded_sampling_preserves_draw_order_unique_pack_order_and_tuple_alignment :: pr
 			previous := i64(0)
 			for index in 0..<written {
 				expect_sample_pair(t, keys[index], vals[index])
-				testing.expect(t, keys[index].lval > previous)
-				previous = keys[index].lval
+				testing.expect(t, keys[index].number > previous)
+				previous = keys[index].number
 			}
-			testing.expect(t, keys[written].lval == 555 && vals[written].lval == 555)
+			testing.expect(t, keys[written].number == 555 && vals[written].number == 555)
 		}
 		for _ in 0..<32 {
-			key, val: Entry
+			key, val: Element
 			lp_random_pair(lp, 4, &key, &val, tuple_len)
 			expect_sample_pair(t, key, val)
 		}
@@ -93,26 +93,26 @@ seeded_sampling_preserves_draw_order_unique_pack_order_and_tuple_alignment :: pr
 		}
 		lp_free(lp)
 	}
-	lp := test_pack([]Entry{entry_from_bytes(transmute([]u8)string("a")), entry_from_bytes(transmute([]u8)string("b")), entry_from_bytes(transmute([]u8)string("c"))})
-	samples: [64]Entry
+	lp := test_pack([]Element{entry_from_bytes(transmute([]u8)string("a")), entry_from_bytes(transmute([]u8)string("b")), entry_from_bytes(transmute([]u8)string("c"))})
+	samples: [64]Element
 	lp_random_entries(lp, samples[:])
 	for sample in samples {
-		testing.expect(t, sample.sval != nil && sample.slen == 1 && sample.sval[0] >= 'a' && sample.sval[0] <= 'c')
+		testing.expect(t, sample.text != nil && sample.text_len == 1 && sample.text[0] >= 'a' && sample.text[0] <= 'c')
 	}
 	lp_free(lp)
 	empty := lp_new(0)
-	keys := [1]Entry{entry_from_int(555)}
-	vals := [1]Entry{entry_from_int(555)}
+	keys := [1]Element{entry_from_int(555)}
+	vals := [1]Element{entry_from_int(555)}
 	lp_random_entries(empty, keys[:])
 	lp_random_pairs(empty, 1, keys[:], vals[:], 2)
-	testing.expect(t, lp_random_pairs_unique(empty, 1, keys[:], vals[:], 2) == 0 && keys[0].lval == 555 && vals[0].lval == 555)
+	testing.expect(t, lp_random_pairs_unique(empty, 1, keys[:], vals[:], 2) == 0 && keys[0].number == 555 && vals[0].number == 555)
 	lp_free(empty)
 	random_cursor_aligns_nonzero_start_and_keeps_incomplete_tail_candidate(t)
 	sampling_without_values_preserves_draws_and_unique_pack_order(t)
 }
 
 random_cursor_aligns_nonzero_start_and_keeps_incomplete_tail_candidate :: proc(t: ^testing.T) {
-	lp := test_pack([]Entry{entry_from_bytes(transmute([]u8)string("a")), entry_from_bytes(transmute([]u8)string("b")), entry_from_bytes(transmute([]u8)string("c"))})
+	lp := test_pack([]Element{entry_from_bytes(transmute([]u8)string("a")), entry_from_bytes(transmute([]u8)string("b")), entry_from_bytes(transmute([]u8)string("c"))})
 	defer lp_free(lp)
 	for start in 0..<3 {
 		index := u32(start)
@@ -130,21 +130,21 @@ random_cursor_aligns_nonzero_start_and_keeps_incomplete_tail_candidate :: proc(t
 sampling_without_values_preserves_draws_and_unique_pack_order :: proc(t: ^testing.T) {
 	lp := random_tuple_pack(2)
 	defer lp_free(lp)
-	key: Entry
+	key: Element
 	lp_srand(321)
 	lp_random_pair(lp, 4, &key, nil, 2)
-	testing.expect(t, key.sval == nil && key.lval >= 10 && key.lval <= 40 && key.lval % 10 == 0)
-	with_keys, with_vals, without_vals: [8]Entry
+	testing.expect(t, key.text == nil && key.number >= 10 && key.number <= 40 && key.number % 10 == 0)
+	with_keys, with_vals, without_vals: [8]Element
 	lp_srand(321)
 	lp_random_pairs(lp, 8, with_keys[:], with_vals[:], 2)
 	lp_srand(321)
 	lp_random_pairs(lp, 8, without_vals[:], nil, 2)
 	for sampled, index in with_keys {
-		testing.expect(t, without_vals[index].lval == sampled.lval)
+		testing.expect(t, without_vals[index].number == sampled.number)
 	}
 	written := lp_random_pairs_unique(lp, 6, without_vals[:], nil, 2)
 	testing.expect(t, written == 4)
 	for index in 0..<written {
-		testing.expect(t, without_vals[index].lval == i64((index + 1) * 10))
+		testing.expect(t, without_vals[index].number == i64((index + 1) * 10))
 	}
 }

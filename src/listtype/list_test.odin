@@ -82,10 +82,10 @@ mutation_model :: proc(t: ^testing.T) {
 	sync.mutex_lock(&test_lock)
 	defer sync.mutex_unlock(&test_lock)
 	oldfill := list_max_listpack_size
-	oldthreshold := packed_threshold
+	oldthreshold := plain_node_threshold
 	defer {
 		list_max_listpack_size = oldfill
-		packed_threshold = oldthreshold
+		plain_node_threshold = oldthreshold
 	}
 	big := make([]u8, 9001)
 	defer delete(big)
@@ -95,7 +95,7 @@ mutation_model :: proc(t: ^testing.T) {
 	values := [?]string{"", "0", "-1", "01", "9223372036854775807", "-9223372036854775808", "a\x00b", "value", string(big)}
 	for fill in ([?]int{1, 2, 4, -1, -2}) {
 		list_max_listpack_size = fill
-		packed_threshold = 0
+		plain_node_threshold = 0
 		l := create()
 		model: [4096]string
 		n := 0
@@ -112,7 +112,7 @@ mutation_model :: proc(t: ^testing.T) {
 					where_ = .Tail
 					at = n
 				}
-				try_conversion_append(l, len(value), 1)
+				widen_if_needed(l, len(value), 1)
 				push(l, transmute([]u8)value, where_)
 				model_insert(model[:], &n, at, value)
 			} else if op == 2 {
@@ -126,7 +126,7 @@ mutation_model :: proc(t: ^testing.T) {
 				testing.expect(t, iter_next(&it, &e))
 				entry_delete(&it, &e)
 				model_remove(model[:], &n, at)
-				try_conversion(l, .Shrinking)
+				narrow_if_possible(l)
 			} else if op == 4 {
 				at := int(random_word(&state)%u64(n))
 				after := choice&8 != 0
@@ -143,7 +143,7 @@ mutation_model :: proc(t: ^testing.T) {
 					target += 1
 				}
 				model_insert(model[:], &n, target, value)
-				try_conversion(l, .Auto)
+				settle_encoding(l)
 			} else if op == 5 {
 				tail := choice&16 != 0
 				where_ := Where.Head
@@ -154,7 +154,7 @@ mutation_model :: proc(t: ^testing.T) {
 				}
 				pop_discard(l, where_)
 				model_remove(model[:], &n, at)
-				try_conversion(l, .Shrinking)
+				narrow_if_possible(l)
 			} else {
 				at := int(random_word(&state)%u64(n))
 				amount := min(int(random_word(&state)%5)+1, n-at)
@@ -162,7 +162,7 @@ mutation_model :: proc(t: ^testing.T) {
 				for _ in 0..<amount {
 					model_remove(model[:], &n, at)
 				}
-				try_conversion(l, .Shrinking)
+				narrow_if_possible(l)
 			}
 			assert_model(t, l, model[:n])
 			if choice%41 == 0 {
@@ -279,7 +279,7 @@ codec_roundtrip :: proc(t: ^testing.T) {
 		defer destroy(l)
 		expected := []string{"a", "-2", "", "c\x00d", "9223372036854775807"}
 		for value in expected {
-			try_conversion_append(l, len(value), 1)
+			widen_if_needed(l, len(value), 1)
 			push(l, transmute([]u8)value, .Tail)
 		}
 		w: rdb.Writer
@@ -328,25 +328,25 @@ boundaries_and_nested_iterators :: proc(t: ^testing.T) {
 	defer sync.mutex_unlock(&test_lock)
 	oldfill := list_max_listpack_size
 	olddepth := list_compress_depth
-	oldthreshold := packed_threshold
+	oldthreshold := plain_node_threshold
 	defer {
 		list_max_listpack_size = oldfill
 		list_compress_depth = olddepth
-		packed_threshold = oldthreshold
+		plain_node_threshold = oldthreshold
 	}
 	for fill in ([?]int{0, 1, 2, 17, -1, -5}) {
 		q := ql_new(fill, 999999)
-		testing.expect_value(t, q.compress, COMPRESS_MAX)
+		testing.expect_value(t, q.compress, COMPRESS_DEPTH_CEILING)
 		testing.expect_value(t, q.fill, clamp_fill(fill))
 		ql_release(q)
 	}
-	testing.expect(t, set_packed_threshold(0))
+	testing.expect(t, set_plain_node_threshold(0))
 	testing.expect(t, !is_large_element(1, -2))
-	testing.expect(t, set_packed_threshold(1))
+	testing.expect(t, set_plain_node_threshold(1))
 	testing.expect(t, is_large_element(1, -2))
 	testing.expect(t, !is_large_element(0, -2))
-	testing.expect(t, !set_packed_threshold(PACKED_THRESHOLD_LIMIT+1))
-	testing.expect(t, set_packed_threshold(32))
+	testing.expect(t, !set_plain_node_threshold(PLAIN_THRESHOLD_CEILING+1))
+	testing.expect(t, set_plain_node_threshold(32))
 	q := ql_new(3, 0)
 	payload: [32]u8
 	for &b in payload {
@@ -358,7 +358,7 @@ boundaries_and_nested_iterators :: proc(t: ^testing.T) {
 	testing.expect(t, q.tail.plain)
 	testing.expect_value(t, q.len, 2)
 	ql_release(q)
-	packed_threshold = 0
+	plain_node_threshold = 0
 	list_max_listpack_size = 3
 	list_compress_depth = 4
 	l := create_quicklist()
@@ -498,38 +498,38 @@ conversion_adoption_and_plain_codec :: proc(t: ^testing.T) {
 	sync.mutex_lock(&test_lock)
 	defer sync.mutex_unlock(&test_lock)
 	oldfill := list_max_listpack_size
-	oldthreshold := packed_threshold
+	oldthreshold := plain_node_threshold
 	defer {
 		list_max_listpack_size = oldfill
-		packed_threshold = oldthreshold
+		plain_node_threshold = oldthreshold
 	}
-	packed_threshold = 0
+	plain_node_threshold = 0
 	list_max_listpack_size = 4
 	l := create()
 	defer destroy(l)
 	for _ in 0..<4 {
-		try_conversion_append(l, 1, 1)
+		widen_if_needed(l, 1, 1)
 		push(l, transmute([]u8)string("1"), .Tail)
 	}
 	testing.expect_value(t, l.encoding, Encoding.Listpack)
 	adopted := l.lp
-	try_conversion_append(l, 1, 1)
+	widen_if_needed(l, 1, 1)
 	testing.expect_value(t, l.encoding, Encoding.Quicklist)
 	testing.expect_value(t, l.ql.head.entry, adopted)
 	testing.expect_value(t, l.ql.count, 4)
-	try_conversion(l, .Shrinking)
+	narrow_if_possible(l)
 	testing.expect_value(t, l.encoding, Encoding.Quicklist)
 	delete_range(l, 2, 2)
-	try_conversion(l, .Shrinking)
+	narrow_if_possible(l)
 	testing.expect_value(t, l.encoding, Encoding.Listpack)
 	assert_model(t, l, []string{"1", "1"})
 	list_max_listpack_size = 1
-	try_conversion(l, .Growing)
+	widen_if_needed(l, 0, 0)
 	testing.expect_value(t, l.encoding, Encoding.Quicklist)
 	list_max_listpack_size = 8
-	try_conversion(l, .Growing)
+	widen_if_needed(l, 0, 0)
 	testing.expect_value(t, l.encoding, Encoding.Quicklist)
-	try_conversion(l, .Auto)
+	settle_encoding(l)
 	testing.expect_value(t, l.encoding, Encoding.Listpack)
 	q := ql_new(-2, 0)
 	pack := lp.lp_new(0)
@@ -616,7 +616,7 @@ observed_conversion_entrypoints :: proc(t: ^testing.T) {
 		for mode in 0..<5 {
 			l := create()
 			for value in ([]string{"a", "b"}) {
-				try_conversion_append(l, len(value), 1)
+				widen_if_needed(l, len(value), 1)
 				push(l, transmute([]u8)value, .Tail)
 			}
 			if mode == 0 {
@@ -652,23 +652,23 @@ observed_conversion_entrypoints :: proc(t: ^testing.T) {
 observed_memory_grammar :: proc(t: ^testing.T) {
 	sync.mutex_lock(&test_lock)
 	defer sync.mutex_unlock(&test_lock)
-	oldthreshold := packed_threshold
+	oldthreshold := plain_node_threshold
 	defer {
-		packed_threshold = oldthreshold
+		plain_node_threshold = oldthreshold
 	}
 	for input in ([]string{"", "b", "k", "kb", "m", "mb", "g", "gb", "0"}) {
 		testing.expect_value(t, parse_packed_threshold(transmute([]u8)input), Error.None)
-		testing.expect_value(t, packed_threshold, 0)
+		testing.expect_value(t, plain_node_threshold, 0)
 	}
 	for input in ([]string{"1", "01"}) {
 		testing.expect_value(t, parse_packed_threshold(transmute([]u8)input), Error.None)
-		testing.expect_value(t, packed_threshold, 1)
+		testing.expect_value(t, plain_node_threshold, 1)
 	}
 	testing.expect_value(t, parse_packed_threshold(transmute([]u8)string("1KB")), Error.None)
-	testing.expect_value(t, packed_threshold, 1024)
+	testing.expect_value(t, plain_node_threshold, 1024)
 	for input in ([]string{"+1", " 1", "1 ", "1KiB", "0x10", "18446744073709551615", "18446744073709551616", "18446744073709551615kb"}) {
 		testing.expect_value(t, parse_packed_threshold(transmute([]u8)input), Error.Packed_Threshold)
-		testing.expect_value(t, packed_threshold, 1024)
+		testing.expect_value(t, plain_node_threshold, 1024)
 	}
 	long := make([]u8, 128)
 	defer delete(long)
@@ -707,7 +707,7 @@ observed_conversion_limits :: proc(t: ^testing.T) {
 		push(l, value, .Tail)
 	}
 	testing.expect(t, l.ql.head.sz > 4096 && l.ql.head.sz < 8192)
-	try_conversion(l, .Shrinking)
+	narrow_if_possible(l)
 	testing.expect_value(t, l.encoding, Encoding.Listpack)
 	assert_model(t, l, []string{string(value), string(value), string(value)})
 	destroy(l)
@@ -718,9 +718,9 @@ observed_conversion_limits :: proc(t: ^testing.T) {
 	}
 	l = create()
 	push(l, large, .Tail)
-	try_conversion(l, .Auto)
+	settle_encoding(l)
 	testing.expect_value(t, l.encoding, Encoding.Quicklist)
-	try_conversion(l, .Auto)
+	settle_encoding(l)
 	testing.expect_value(t, l.encoding, Encoding.Listpack)
 	destroy(l)
 }
@@ -730,13 +730,13 @@ observed_split_and_replace_boundaries :: proc(t: ^testing.T) {
 	sync.mutex_lock(&test_lock)
 	defer sync.mutex_unlock(&test_lock)
 	oldfill := list_max_listpack_size
-	oldthreshold := packed_threshold
+	oldthreshold := plain_node_threshold
 	defer {
 		list_max_listpack_size = oldfill
-		packed_threshold = oldthreshold
+		plain_node_threshold = oldthreshold
 	}
 	list_max_listpack_size = -3
-	packed_threshold = 0
+	plain_node_threshold = 0
 	l := create()
 	for value in ([]string{"a", "b", "c"}) {
 		push(l, transmute([]u8)value, .Tail)
@@ -751,7 +751,7 @@ observed_split_and_replace_boundaries :: proc(t: ^testing.T) {
 	for &b in y {
 		b = 'Y'
 	}
-	try_conversion_append(l, len(z), 1)
+	widen_if_needed(l, len(z), 1)
 	push(l, z, .Tail)
 	testing.expect(t, linsert(l, true, transmute([]u8)string("b"), y))
 	assert_model(t, l, []string{"a", "b", string(y), "c", string(z)})
@@ -773,7 +773,7 @@ observed_split_and_replace_boundaries :: proc(t: ^testing.T) {
 	v := value_from_lp(lp.lp_first(l.ql.tail.entry))
 	testing.expect(t, v.is_int && v.ival == 1)
 	destroy(l)
-	packed_threshold = 5
+	plain_node_threshold = 5
 	l = create_quicklist()
 	for values in ([][]string{{"bbbbbbbbbbbb", "bbbbbbbbbbb"}, {"c", "cccc"}}) {
 		pack := lp.lp_new(0)
@@ -798,13 +798,13 @@ observed_neighbor_merge_boundaries :: proc(t: ^testing.T) {
 	sync.mutex_lock(&test_lock)
 	defer sync.mutex_unlock(&test_lock)
 	oldfill := list_max_listpack_size
-	oldthreshold := packed_threshold
+	oldthreshold := plain_node_threshold
 	defer {
 		list_max_listpack_size = oldfill
-		packed_threshold = oldthreshold
+		plain_node_threshold = oldthreshold
 	}
 	list_max_listpack_size = 4
-	packed_threshold = 0
+	plain_node_threshold = 0
 	l := create_quicklist()
 	for values in ([][]string{{"a", "b", "c", "pivot"}, {"d", "e"}}) {
 		pack := lp.lp_new(0)

@@ -7,7 +7,7 @@ import "base:intrinsics"
 import "core:sync"
 
 TABLE_INITIAL_SIZE :: 4
-TABLE_MIN_FILL :: 8
+TABLE_SPARSE_RATIO :: 8
 TABLE_RANDOM_PROBES :: 4096
 TABLE_MAX_CAPACITY :: (max(int) / size_of(Slot) + 1) / 2
 
@@ -256,7 +256,8 @@ table_delete_at :: proc "contextless" (t: ^Table, slot: ^Slot) {
 }
 
 table_shrink_if_needed :: proc "contextless" (t: ^Table) {
-	if t.resize == nil && t.cap > TABLE_INITIAL_SIZE && t.count <= t.cap / TABLE_MIN_FILL {
+	sparse := t.cap > TABLE_INITIAL_SIZE && t.count * TABLE_SPARSE_RATIO <= t.cap
+	if sparse && t.resize == nil {
 		table_resize(t, t.cap / 2)
 	}
 }

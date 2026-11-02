@@ -55,7 +55,7 @@ reply_lag :: proc(c: ^Conn, s: st.Stream, cg: ^st.Group) {
 
 @(private = "file")
 pel_limit :: #force_inline proc "contextless" (r: ^rx.Rax, count: i64) -> int {
-	n := int(r.numele)
+	n := int(r.stored)
 	if count > 0 && count < i64(n) {
 		return int(count)
 	}
@@ -85,9 +85,9 @@ xinfo_groups :: proc(c: ^Conn, s: st.Stream) {
 		reply_bulk_str(c, "name")
 		reply_bulk(c, rx.key(&it))
 		reply_bulk_str(c, "consumers")
-		reply_int(c, i64(cg.members.numele))
+		reply_int(c, i64(cg.members.stored))
 		reply_bulk_str(c, "pending")
-		reply_int(c, i64(cg.pending.numele))
+		reply_int(c, i64(cg.pending.stored))
 		reply_bulk_str(c, "last-delivered-id")
 		reply_stream_id(c, cg.delivered)
 		reply_bulk_str(c, "entries-read")
@@ -105,7 +105,7 @@ xinfo_consumers :: proc(c: ^Conn, argv: [][]u8, s: st.Stream) {
 		return
 	}
 	now := srv.now_ms
-	reply_array(c, int(cg.members.numele))
+	reply_array(c, int(cg.members.stored))
 	it: rx.Iterator
 	rx.start(&it, cg.members)
 	rx.seek(&it, "^")
@@ -115,7 +115,7 @@ xinfo_consumers :: proc(c: ^Conn, argv: [][]u8, s: st.Stream) {
 		reply_bulk_str(c, "name")
 		reply_bulk(c, consumer.name)
 		reply_bulk_str(c, "pending")
-		reply_int(c, i64(consumer.owned.numele))
+		reply_int(c, i64(consumer.owned.stored))
 		reply_bulk_str(c, "idle")
 		reply_int(c, now - consumer.seen_ms)
 		reply_bulk_str(c, "inactive")
@@ -148,7 +148,7 @@ xinfo_full_groups :: proc(c: ^Conn, s: st.Stream, count: i64) {
 		reply_bulk_str(c, "lag")
 		reply_lag(c, s, cg)
 		reply_bulk_str(c, "pel-count")
-		reply_int(c, i64(cg.pending.numele))
+		reply_int(c, i64(cg.pending.stored))
 		reply_bulk_str(c, "pending")
 		limit := pel_limit(cg.pending, count)
 		reply_array(c, limit)
@@ -165,7 +165,7 @@ xinfo_full_groups :: proc(c: ^Conn, s: st.Stream, count: i64) {
 		}
 		rx.stop(&pi)
 		reply_bulk_str(c, "consumers")
-		reply_array(c, int(cg.members.numele))
+		reply_array(c, int(cg.members.stored))
 		ci: rx.Iterator
 		rx.start(&ci, cg.members)
 		rx.seek(&ci, "^")
@@ -179,7 +179,7 @@ xinfo_full_groups :: proc(c: ^Conn, s: st.Stream, count: i64) {
 			reply_bulk_str(c, "active-time")
 			reply_int(c, consumer.active_ms)
 			reply_bulk_str(c, "pel-count")
-			reply_int(c, i64(consumer.owned.numele))
+			reply_int(c, i64(consumer.owned.stored))
 			reply_bulk_str(c, "pending")
 			climit := pel_limit(consumer.owned, count)
 			reply_array(c, climit)
@@ -661,7 +661,7 @@ cmd_xpending :: proc(c: ^Conn, argv: [][]u8) {
 @(private = "file")
 xpending_summary :: proc(c: ^Conn, cg: ^st.Group) {
 	reply_array(c, 4)
-	reply_int(c, i64(cg.pending.numele))
+	reply_int(c, i64(cg.pending.stored))
 	first, last, any := st.pel_first_last(cg.pending)
 	if !any {
 		reply_null(c)
@@ -678,12 +678,12 @@ xpending_summary :: proc(c: ^Conn, cg: ^st.Group) {
 	rx.seek(&it, "^")
 	for rx.next(&it) {
 		consumer := (^st.Member)(it.data)
-		if consumer.owned.numele == 0 {
+		if consumer.owned.stored == 0 {
 			continue
 		}
 		reply_array(c, 2)
 		reply_bulk(c, consumer.name)
-		reply_bulk_int(c, i64(consumer.owned.numele))
+		reply_bulk_int(c, i64(consumer.owned.stored))
 		listed += 1
 	}
 	rx.stop(&it)

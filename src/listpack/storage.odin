@@ -1,22 +1,25 @@
 package listpack
 
-LP_INTBUF_SIZE :: 21
-LP_BEFORE :: 0
-LP_AFTER :: 1
-LP_REPLACE :: 2
-LP_HDR_SIZE :: 6
-LP_HDR_NUMELE_UNKNOWN :: 65535
-LP_EOF :: u8(255)
-LISTPACK_MAX_SAFETY_SIZE :: 1073741824
+DECIMAL_BUFFER_BYTES :: 21
+PACK_HEADER_BYTES :: 6
+COUNT_UNTRACKED :: 65535
+PACK_END :: u8(255)
+PACK_SIZE_CEILING :: 1 << 30
 
-Entry :: struct {
-	sval: [^]u8,
-	slen: u32,
-	lval: i64,
+Placement :: enum u8 {
+	Before,
+	After,
+	Replace,
 }
 
-Lp_Cmp :: #type proc(lp: [^]u8, p: [^]u8, user: rawptr, s: [^]u8, slen: i64) -> int
-Validate_Entry_Cb :: #type proc(p: [^]u8, head_count: u32, userdata: rawptr) -> bool
+Element :: struct {
+	text:     [^]u8,
+	text_len: u32,
+	number:   i64,
+}
+
+Element_Matcher :: #type proc(pack: [^]u8, at: [^]u8, state: rawptr, text: [^]u8, measure: i64) -> int
+Element_Visitor :: #type proc(at: [^]u8, declared_count: u32, state: rawptr) -> bool
 
 empty_string_byte: u8
 
@@ -55,15 +58,15 @@ write_unsigned :: proc "contextless" (data: []u8, offset, width: int, value: u64
 }
 
 decode_header :: proc "contextless" (data: []u8) -> (Header, bool) {
-	if len(data) < LP_HDR_SIZE + 1 {
+	if len(data) < PACK_HEADER_BYTES + 1 {
 		return {}, false
 	}
 	total, _ := read_unsigned(data, 0, 4)
 	count, _ := read_unsigned(data, 4, 2)
-	if total < LP_HDR_SIZE + 1 || total > u64(len(data)) {
+	if total < PACK_HEADER_BYTES + 1 || total > u64(len(data)) {
 		return {}, false
 	}
-	if data[int(total) - 1] != LP_EOF {
+	if data[int(total) - 1] != PACK_END {
 		return {}, false
 	}
 	return {bytes = u32(total), count = u16(count)}, true

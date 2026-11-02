@@ -238,8 +238,8 @@ grow_zero_clears_spare_capacity :: proc(t: ^testing.T) {
 		testing.expect_value(t, buf[i], 0)
 	}
 	testing.expect_value(t, buf[0], 0xaa)
-	testing.expect_value(t, bm.grow_zero(&buf, 2 * bm.SDS_MAX_PREALLOC, bm.RAW_HEAP_ALLOCATOR, &capacity), bm.Error.None)
-	testing.expect_value(t, capacity, 3 * bm.SDS_MAX_PREALLOC)
+	testing.expect_value(t, bm.grow_zero(&buf, 2 * bm.GREEDY_GROWTH_LIMIT, bm.RAW_HEAP_ALLOCATOR, &capacity), bm.Error.None)
+	testing.expect_value(t, capacity, 3 * bm.GREEDY_GROWTH_LIMIT)
 	testing.expect_value(t, buf[2], 0xaa)
 	testing.expect_value(t, buf[3], 0)
 	bm.free_bytes(&buf, bm.RAW_HEAP_ALLOCATOR, &capacity)

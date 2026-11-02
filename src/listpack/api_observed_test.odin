@@ -3,7 +3,7 @@ package listpack
 import "core:testing"
 
 api_observed_pack :: proc() -> [^]u8 {
-	return test_pack([]Entry{entry_from_bytes(transmute([]u8)string("a")), entry_from_bytes(nil), entry_from_int(0), entry_from_int(-7), entry_from_bytes(transmute([]u8)string("01")), entry_from_bytes(transmute([]u8)string("a\x00b"))})
+	return test_pack([]Element{entry_from_bytes(transmute([]u8)string("a")), entry_from_bytes(nil), entry_from_int(0), entry_from_int(-7), entry_from_bytes(transmute([]u8)string("01")), entry_from_bytes(transmute([]u8)string("a\x00b"))})
 }
 
 @(test)
@@ -22,7 +22,7 @@ observed_getters_preserve_unselected_outputs_and_trailing_buffer_bytes :: proc(t
 		if s != nil {
 			testing.expect(t, string(s[:int(count)]) == value)
 		}
-		buffer: [LP_INTBUF_SIZE]u8
+		buffer: [DECIMAL_BUFFER_BYTES]u8
 		for _, position in buffer {
 			buffer[position] = 238
 		}
@@ -173,7 +173,7 @@ empty_batch_extension_preserves_pack_capacity_and_output_cursor :: proc(t: ^test
 	capacity := lp_malloc_size(lp)
 	cursor := lp_seek(lp, 2)
 	old_cursor := cursor
-	result := lp_batch_insert(lp, lp_first(lp), LP_BEFORE, nil, &cursor)
+	result := lp_batch_insert(lp, lp_first(lp), Placement.Before, nil, &cursor)
 	testing.expect(t, result == lp && cursor == old_cursor && lp_malloc_size(lp) == capacity)
 	testing.expect(t, string(lp_view(lp)) == string(lp_view(before)))
 	result = lp_batch_append(lp, nil)

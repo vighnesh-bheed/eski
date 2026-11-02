@@ -254,7 +254,7 @@ keyspace_list_execute :: proc(job: ^ks.Job) {
 	#partial switch op {
 	case .Lpush, .Rpush, .Lpushx, .Rpushx:
 		if op == .Rpush || op == .Rpushx { where_ = .Tail }
-		lt.try_conversion_append_values(candidate, argv[2:])
+		lt.widen_for_values(candidate, argv[2:])
 		for value in argv[2:] { lt.push(candidate, value, where_) }
 		task.integer = i64(lt.length(candidate)); task.dirty = i64(len(argv) - 2)
 	case .Lpop, .Rpop:
@@ -273,7 +273,7 @@ keyspace_list_execute :: proc(job: ^ks.Job) {
 		if !keyspace_builder_finish(task, &b) { return }
 		a, n := lt.pop_range_bounds(candidate, where_, count)
 		lt.delete_range(candidate, a, n)
-		lt.try_conversion(candidate, .Shrinking)
+		lt.narrow_if_possible(candidate)
 		task.dirty = i64(count)
 	case .Lset:
 		index, err := lt.parse_index(argv[2])
@@ -292,7 +292,7 @@ keyspace_list_execute :: proc(job: ^ks.Job) {
 		removed := lt.lrem(candidate, n, argv[3])
 		task.integer = i64(removed); task.dirty = i64(removed)
 		if removed == 0 { return }
-		lt.try_conversion(candidate, .Shrinking)
+		lt.narrow_if_possible(candidate)
 	case:
 		task.failed = true; return
 	}
@@ -346,10 +346,10 @@ keyspace_list_move :: proc(task: ^Keyspace_Task) {
 	owned := ks.value_data(task.results[0])
 	encoding := src.encoding
 	if source == destination { lt.pop_discard(src, from) }
-	lt.try_conversion_append(dst, lt.moved_add_bytes(encoding, value, len(owned)), 1)
+	lt.widen_if_needed(dst, lt.moved_add_bytes(encoding, value, len(owned)), 1)
 	lt.push(dst, owned, to)
 	if source != destination { lt.pop_discard(src, from) }
-	lt.try_conversion(src, .Shrinking)
+	lt.narrow_if_possible(src)
 	if !keyspace_list_prepare_commit(task, &left) { return }
 	if source != destination && !keyspace_list_prepare_commit(task, &right) { return }
 	if !keyspace_list_commit(task, source, &left) { return }
@@ -391,7 +391,7 @@ keyspace_list_mpop :: proc(task: ^Keyspace_Task) {
 		if !keyspace_builder_finish(task, &b) { return }
 		a, n := lt.pop_range_bounds(l, plan.where_, count)
 		lt.delete_range(l, a, n)
-		lt.try_conversion(l, .Shrinking)
+		lt.narrow_if_possible(l)
 		if !keyspace_list_commit(task, r, &work) { return }
 		task.dirty = i64(count)
 		keyspace_notify(task, r, .List, "lpop" if plan.where_ == .Head else "rpop")

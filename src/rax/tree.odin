@@ -4,8 +4,8 @@ import "base:intrinsics"
 import "base:runtime"
 
 Rax :: struct {
-	numele:   u64,
-	numnodes: u64,
+	stored:   u64,
+	nodes:    u64,
 	root:     ^Node,
 	shared:   ^int,
 	mem:      int,
@@ -153,15 +153,13 @@ used_after_remove :: #force_inline proc "contextless" (n: ^Node, idx: int) -> in
 }
 
 create :: proc "contextless" (shared: ^int = nil) -> ^Rax {
-	p := runtime.heap_alloc(size_of(Rax), true)
-	if p == nil {
+	tree := cast(^Rax)runtime.heap_alloc(size_of(Rax), true)
+	if tree == nil {
 		intrinsics.trap()
 	}
-	r := cast(^Rax)p
-	r.numnodes = 1
-	r.shared = shared
-	account(r, usable_size(p))
-	return r
+	tree^ = Rax{nodes = 1, shared = shared}
+	account(tree, usable_size(tree))
+	return tree
 }
 
 @(private)
@@ -259,7 +257,7 @@ insert_common :: proc "contextless" (r: ^Rax, s: []u8, data: rawptr, old: ^rawpt
 	sp, sl, sroom := probe_prepare(&buf, s)
 	if r.root == nil {
 		r.root = single_node(r, sp, sl, data)
-		r.numele += 1
+		r.stored += 1
 		r.version += 1
 		finger_note(r, r.root, EDGE_LEFT | EDGE_RIGHT, 0)
 		return true
@@ -280,7 +278,7 @@ insert_common :: proc "contextless" (r: ^Rax, s: []u8, data: rawptr, old: ^rawpt
 				return false
 			}
 			if node_insert_fast(f, idx, sp, sl, sroom, data) {
-				r.numele += 1
+				r.stored += 1
 				r.version += 1
 				r.stamp = r.version
 				return true
@@ -304,7 +302,7 @@ insert_common :: proc "contextless" (r: ^Rax, s: []u8, data: rawptr, old: ^rawpt
 		separator_release(&out.sep)
 	}
 	r.root = root
-	r.numele += 1
+	r.stored += 1
 	r.version += 1
 	finger_settle(r, f, misses)
 	return true
@@ -447,7 +445,7 @@ remove :: proc "contextless" (r: ^Rax, s: []u8, old: ^rawptr = nil) -> bool {
 						old^ = entry_ptr(f, idx)
 					}
 					entry_remove(f, idx)
-					r.numele -= 1
+					r.stored -= 1
 					r.version += 1
 					r.stamp = r.version
 					return true
@@ -472,7 +470,7 @@ remove :: proc "contextless" (r: ^Rax, s: []u8, old: ^rawptr = nil) -> bool {
 		root = shrink_node(r, root)
 	}
 	r.root = root
-	r.numele -= 1
+	r.stored -= 1
 	r.version += 1
 	finger_settle(r, f, misses)
 	return true

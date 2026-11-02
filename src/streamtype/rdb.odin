@@ -11,7 +11,7 @@ rdb_type :: proc "contextless" (s: Stream) -> u8 {
 }
 
 rdb_save :: proc "contextless" (w: ^rdb.Writer, s: Stream) {
-	rdb.put_len(w, s.nodes.numele)
+	rdb.put_len(w, s.nodes.stored)
 	it: rx.Iterator
 	rx.start(&it, s.nodes)
 	rx.seek(&it, "^")
@@ -33,7 +33,7 @@ rdb_save :: proc "contextless" (w: ^rdb.Writer, s: Stream) {
 		rdb.put_len(w, 0)
 		return
 	}
-	rdb.put_len(w, s.groups.numele)
+	rdb.put_len(w, s.groups.stored)
 	gi: rx.Iterator
 	rx.start(&gi, s.groups)
 	rx.seek(&gi, "^")
@@ -43,7 +43,7 @@ rdb_save :: proc "contextless" (w: ^rdb.Writer, s: Stream) {
 		rdb.put_len(w, g.delivered.ms)
 		rdb.put_len(w, g.delivered.seq)
 		rdb.put_len(w, u64(g.reads))
-		rdb.put_len(w, g.pending.numele)
+		rdb.put_len(w, g.pending.stored)
 		pi: rx.Iterator
 		rx.start(&pi, g.pending)
 		rx.seek(&pi, "^")
@@ -54,7 +54,7 @@ rdb_save :: proc "contextless" (w: ^rdb.Writer, s: Stream) {
 			rdb.put_len(w, pe.times)
 		}
 		rx.stop(&pi)
-		rdb.put_len(w, g.members.numele)
+		rdb.put_len(w, g.members.stored)
 		ci: rx.Iterator
 		rx.start(&ci, g.members)
 		rx.seek(&ci, "^")
@@ -63,7 +63,7 @@ rdb_save :: proc "contextless" (w: ^rdb.Writer, s: Stream) {
 			rdb.put_string(w, rx.key(&ci))
 			rdb.put_ms(w, member.seen_ms)
 			rdb.put_ms(w, member.active_ms)
-			rdb.put_len(w, member.owned.numele)
+			rdb.put_len(w, member.owned.stored)
 			ki: rx.Iterator
 			rx.start(&ki, member.owned)
 			rx.seek(&ki, "^")
@@ -89,11 +89,14 @@ rdb_fail :: proc(r: ^rdb.Reader, s: Stream, msg: string, tail: string = "") -> S
 }
 
 @(private)
+UNKNOWN_LENGTH_MARK :: max(u64)
+
+@(private)
 rdb_len :: proc(r: ^rdb.Reader, v: ^u64) -> bool {
 	if !rdb_len_any(r, v) {
 		return false
 	}
-	return v^ != rdb.LENERR
+	return v^ != UNKNOWN_LENGTH_MARK
 }
 
 @(private)
@@ -119,7 +122,7 @@ rdb_len_any :: proc(r: ^rdb.Reader, v: ^u64) -> bool {
 		} else if b == 0x81 {
 			width = 8
 		} else {
-			v^ = rdb.LENERR
+			v^ = UNKNOWN_LENGTH_MARK
 			return true
 		}
 		raw, rgood := rdb.take(r, width)
@@ -153,7 +156,7 @@ node_int :: proc(p: [^]u8) -> (i64, bool) {
 	if tag < 0x80 || (tag >= 0xC0 && tag < 0xE0) || (tag >= 0xF1 && tag <= 0xF4) {
 		return elem_int(p), true
 	}
-	buf: [lp.LP_INTBUF_SIZE]u8
+	buf: [lp.DECIMAL_BUFFER_BYTES]u8
 	return integer.parse_i64(elem_bytes(p, &buf))
 }
 
@@ -394,7 +397,7 @@ rdb_load :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> Stream {
 		s.tomb = ID_MIN
 		s.head = boundary_id(s, .Head, false)
 	}
-	if deep && s.nodes.numele == 0 && s.live != 0 {
+	if deep && s.nodes.stored == 0 && s.live != 0 {
 		return rdb_fail(r, s, "Stream length inconsistent with empty listpack set")
 	}
 	groups: u64

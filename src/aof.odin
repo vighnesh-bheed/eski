@@ -3728,7 +3728,7 @@ aof_rewrite_stream :: proc(w: ^rdb.Writer, key: []u8, s: sm.Stream) {
 			rx.seek(&ci, "^")
 			for rx.next(&ci) {
 				consumer := (^sm.Member)(ci.data)
-				if consumer == nil || (consumer.owned != nil && consumer.owned.numele > 0) {
+				if consumer == nil || (consumer.owned != nil && consumer.owned.stored > 0) {
 					continue
 				}
 				aof_w_header(w, 5)

@@ -118,7 +118,7 @@ list_after_remove :: proc(key: []u8, e: ^Entry, l: lt.List, event: string) {
 		db_remove(key)
 		notify(.Generic, "del", key)
 	} else {
-		lt.try_conversion(l, .Shrinking)
+		lt.narrow_if_possible(l)
 		list_done(e, l)
 	}
 	signal_key(key)
@@ -177,7 +177,7 @@ push_generic :: proc(c: ^Conn, argv: [][]u8, where_: lt.Where, xx: bool) {
 		e, l = list_create(key)
 	}
 	pst.dirty += i64(len(argv) - 2)
-	lt.try_conversion_append_values(l, argv[2:])
+	lt.widen_for_values(l, argv[2:])
 	for v in argv[2:] {
 		lt.push(l, v, where_)
 	}
@@ -346,7 +346,7 @@ pop_generic :: proc(c: ^Conn, argv: [][]u8, where_: lt.Where, name: string) {
 	pst.dirty += i64(count)
 	start, n := lt.pop_range_bounds(l, where_, count)
 	lt.delete_range(l, start, n)
-	lt.try_conversion(l, .Shrinking)
+	lt.narrow_if_possible(l)
 	list_after_remove(argv[1], e, l, pop_event(where_))
 }
 
@@ -384,7 +384,7 @@ list_pop_with_key :: proc(c: ^Conn, key: []u8, e: ^Entry, l: lt.List, where_: lt
 	pst.dirty += i64(n)
 	start, actual := lt.pop_range_bounds(l, where_, n)
 	lt.delete_range(l, start, actual)
-	lt.try_conversion(l, .Shrinking)
+	lt.narrow_if_possible(l)
 	list_after_remove(key, e, l, pop_event(where_))
 }
 
@@ -548,7 +548,7 @@ lmove_generic :: proc(c: ^Conn, argv: [][]u8, wherefrom: lt.Where, whereto: lt.W
 	if same {
 		lt.pop_discard(src, wherefrom)
 	}
-	lt.try_conversion_append(dst, lt.moved_add_bytes(source_encoding, v, len(owned)), 1)
+	lt.widen_if_needed(dst, lt.moved_add_bytes(source_encoding, v, len(owned)), 1)
 	lt.push(dst, owned, whereto)
 	list_done(de, dst)
 	signal_key(destination)
@@ -646,7 +646,7 @@ list_sort_store :: proc(key: []u8, values: [][]u8) {
 	for v in values {
 		lt.push(l, v, .Tail)
 	}
-	lt.try_conversion(l, .Auto)
+	lt.settle_encoding(l)
 	e, _ := db_upsert(key)
 	l.acct = lt.memory_usage(l)
 	entry_object_attach(e, l, .List, list_obj_encoding(l), l.acct)

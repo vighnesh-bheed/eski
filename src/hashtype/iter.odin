@@ -24,10 +24,10 @@ iterator_live :: proc "contextless" (h: Hash, now: u64) -> Iterator {
 }
 
 pack_first :: #force_inline proc "contextless" (p: [^]u8) -> [^]u8 {
-	if p == nil || p[lp.LP_HDR_SIZE] == lp.LP_EOF {
+	if p == nil || p[lp.PACK_HEADER_BYTES] == lp.PACK_END {
 		return nil
 	}
-	return lp.padd(p, lp.LP_HDR_SIZE)
+	return lp.padd(p, lp.PACK_HEADER_BYTES)
 }
 
 pack_next :: #force_inline proc "contextless" (p: [^]u8) -> [^]u8 {
@@ -35,7 +35,7 @@ pack_next :: #force_inline proc "contextless" (p: [^]u8) -> [^]u8 {
 		return nil
 	}
 	n := lp.lp_skip(p)
-	if n[0] == lp.LP_EOF {
+	if n[0] == lp.PACK_END {
 		return nil
 	}
 	return n

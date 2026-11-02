@@ -173,7 +173,7 @@ keyspace_restore_decode :: proc(reader: ^rdb.Reader, payload: []u8) -> (out: Key
 	}
 	if code == rdb.TYPE_ZSET || code == rdb.TYPE_ZSET_2 {
 		declared := rdb.get_len(reader)
-		if declared == rdb.LENERR || declared > u64(len(payload)) {
+		if !rdb.ok(reader) || declared > u64(len(payload)) {
 			return
 		}
 		rdb.reader_destroy(reader)

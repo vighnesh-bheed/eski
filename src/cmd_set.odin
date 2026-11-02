@@ -5,7 +5,7 @@ import ht "hashtype"
 
 SRANDMEMBER_RANGE_ERROR :: "ERR value is out of range, value must between -9223372036854775807 and 9223372036854775807"
 
-set_vals: [dynamic]st.Value
+set_vals: [dynamic]st.Member
 
 set_pop: st.Popped
 
@@ -99,7 +99,7 @@ set_lookup :: proc(key: []u8, read: bool) -> (e: ^Entry, s: st.Set, wrong: bool)
 	return e, cast(st.Set)entry_object(e, .Set), false
 }
 
-reply_set_value :: proc(c: ^Conn, v: st.Value) {
+reply_set_value :: proc(c: ^Conn, v: st.Member) {
 	buf: [21]u8
 	reply_bulk(c, st.value_bytes(v, &buf))
 }
@@ -441,7 +441,7 @@ srandmember_with_count :: proc(c: ^Conn, argv: [][]u8) {
 		remaining := n
 		for remaining > 0 {
 			clear(&set_vals)
-			batch := min(remaining, st.SRANDMEMBER_RANDOM_SAMPLE_LIMIT)
+			batch := min(remaining, st.SRANDMEMBER_REPLY_BATCH)
 			st.random_with_repeats(s, int(batch), &set_vals)
 			for value in set_vals {
 				reply_set_value(c, value)

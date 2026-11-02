@@ -6,18 +6,18 @@ ZRANDMEMBER_SUB_STRATEGY_MUL :: 3
 
 ZRANDMEMBER_RANDOM_SAMPLE_LIMIT :: 1000
 
-item_from_entry :: proc "contextless" (e: lp.Entry) -> Item {
-	if e.sval == nil {
-		return Item{ival = e.lval, is_int = true}
+item_from_entry :: proc "contextless" (e: lp.Element) -> Item {
+	if e.text == nil {
+		return Item{ival = e.number, is_int = true}
 	}
-	return Item{str = e.sval[:int(e.slen)]}
+	return Item{str = e.text[:int(e.text_len)]}
 }
 
-score_from_entry :: proc "contextless" (e: lp.Entry) -> f64 {
-	if e.sval == nil {
-		return f64(e.lval)
+score_from_entry :: proc "contextless" (e: lp.Element) -> f64 {
+	if e.text == nil {
+		return f64(e.number)
 	}
-	return score_from_lp_string(e.sval[:int(e.slen)])
+	return score_from_lp_string(e.text[:int(e.text_len)])
 }
 
 random_element :: proc(z: Zset) -> Item {

@@ -85,7 +85,7 @@ record :: proc(cs: ^Compare_State, idx: int, args: [][]u8, mode: Mode, ok: bool,
 }
 
 value_string :: proc(v: ht.Value) -> string {
-	buf: [lp.LP_INTBUF_SIZE]u8
+	buf: [lp.DECIMAL_BUFFER_BYTES]u8
 	return strings.clone(string(ht.value_bytes(v, &buf)), context.temp_allocator)
 }
 
@@ -123,15 +123,15 @@ lpex_tolerant_equal :: proc(a, b: []u8) -> bool {
 		ea := lp.lp_get_entry(pa)
 		eb := lp.lp_get_entry(pb)
 		if idx % 3 == 2 {
-			if ea.sval != nil || eb.sval != nil {
+			if ea.text != nil || eb.text != nil {
 				return false
 			}
-			if ea.lval != eb.lval && (ea.lval == 0 || eb.lval == 0 || !near(ea.lval, eb.lval, TOLERANCE_MS)) {
+			if ea.number != eb.number && (ea.number == 0 || eb.number == 0 || !near(ea.number, eb.number, TOLERANCE_MS)) {
 				return false
 			}
 		} else {
-			fa: [lp.LP_INTBUF_SIZE]u8
-			fb: [lp.LP_INTBUF_SIZE]u8
+			fa: [lp.DECIMAL_BUFFER_BYTES]u8
+			fb: [lp.DECIMAL_BUFFER_BYTES]u8
 			if string(lp.entry_bytes(ea, &fa)) != string(lp.entry_bytes(eb, &fb)) {
 				return false
 			}

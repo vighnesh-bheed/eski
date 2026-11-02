@@ -4,7 +4,7 @@ import "core:testing"
 
 @(test)
 comparison_and_find_keep_numeric_adoption_strict_and_stride_relative :: proc(t: ^testing.T) {
-	entries := []Entry{entry_from_int(1), entry_from_bytes(transmute([]u8)string("01")), entry_from_int(2), entry_from_bytes(nil), entry_from_int(1)}
+	entries := []Element{entry_from_int(1), entry_from_bytes(transmute([]u8)string("01")), entry_from_int(2), entry_from_bytes(nil), entry_from_int(1)}
 	lp := test_pack(entries)
 	defer lp_free(lp)
 	testing.expect(t, lp_compare(lp_first(lp), transmute([]u8)string("1")))

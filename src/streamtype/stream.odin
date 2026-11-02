@@ -61,13 +61,13 @@ Append_Result :: enum u8 {
 }
 
 @(private)
-HDR :: lp.LP_HDR_SIZE
+HDR :: lp.PACK_HEADER_BYTES
 
 @(private)
-EOF :: lp.LP_EOF
+EOF :: lp.PACK_END
 
 @(private)
-NUMELE_UNKNOWN :: lp.LP_HDR_NUMELE_UNKNOWN
+NUMELE_UNKNOWN :: lp.COUNT_UNTRACKED
 
 @(cold)
 out_of_memory :: proc "contextless" () -> ! {
@@ -281,7 +281,7 @@ elem_skip :: #force_inline proc "contextless" (p: [^]u8, n: int) -> [^]u8 {
 }
 
 @(private)
-elem_bytes :: proc "contextless" (p: [^]u8, buf: ^[lp.LP_INTBUF_SIZE]u8) -> []u8 #no_bounds_check {
+elem_bytes :: proc "contextless" (p: [^]u8, buf: ^[lp.DECIMAL_BUFFER_BYTES]u8) -> []u8 #no_bounds_check {
 	tag := p[0]
 	switch {
 	case tag >= 0x80 && tag < 0xC0:
@@ -496,7 +496,7 @@ node_count :: #force_inline proc "contextless" (s: Stream) -> u64 {
 	if s == nil || s.nodes == nil {
 		return 0
 	}
-	return s.nodes.numele
+	return s.nodes.stored
 }
 
 rax_nodes :: #force_inline proc "contextless" (s: Stream) -> u64 {
@@ -510,12 +510,12 @@ group_count :: #force_inline proc "contextless" (s: Stream) -> u64 {
 	if s == nil || s.groups == nil {
 		return 0
 	}
-	return s.groups.numele
+	return s.groups.stored
 }
 
 @(private)
 radix_shape :: proc "contextless" (r: ^rx.Rax) -> u64 #no_bounds_check {
-	n := r.numele
+	n := r.stored
 	if n == 0 {
 		return 1
 	}
@@ -750,7 +750,7 @@ fields_match :: proc "contextless" (master: [^]u8, nfields: int, fv: [][]u8) -> 
 	if nfields * 2 != len(fv) {
 		return false
 	}
-	buf: [lp.LP_INTBUF_SIZE]u8
+	buf: [lp.DECIMAL_BUFFER_BYTES]u8
 	p := master
 	for i in 0 ..< nfields {
 		f := elem_bytes(p, &buf)
@@ -1090,7 +1090,7 @@ trim_inside :: proc "contextless" (s: Stream, spec: ^Trim_Spec, key: []u8, node:
 }
 
 trim :: proc(s: Stream, spec: ^Trim_Spec) -> i64 {
-	if spec.rule == .Off || s.nodes.numele == 0 {
+	if spec.rule == .Off || s.nodes.stored == 0 {
 		return 0
 	}
 	if spec.rule == .Max_Len && spec.max_len < 0 {
@@ -1143,7 +1143,7 @@ Cursor :: struct {
 	backward:   bool,
 	tombstones: bool,
 	finished:   bool,
-	scratch:    [2][lp.LP_INTBUF_SIZE]u8,
+	scratch:    [2][lp.DECIMAL_BUFFER_BYTES]u8,
 }
 
 cursor_open :: proc(c: ^Cursor, s: Stream, lo: ^ID, hi: ^ID, backward: bool) {
@@ -1252,7 +1252,7 @@ cursor_next :: proc(c: ^Cursor) -> (id: ID, fields: i64, ok: bool) {
 }
 
 @(private)
-take_elem :: #force_inline proc "contextless" (p: ^[^]u8, buf: ^[lp.LP_INTBUF_SIZE]u8) -> []u8 {
+take_elem :: #force_inline proc "contextless" (p: ^[^]u8, buf: ^[lp.DECIMAL_BUFFER_BYTES]u8) -> []u8 {
 	b := elem_bytes(p^, buf)
 	p^ = elem_next(p^)
 	return b
@@ -1319,7 +1319,7 @@ cursor_drop :: proc(c: ^Cursor) {
 
 @(private)
 find_entry :: proc "contextless" (s: Stream, id: ID) -> (node: [^]u8, key: [16]u8, flags_ptr: [^]u8, found: bool) {
-	if s.nodes == nil || s.nodes.numele == 0 {
+	if s.nodes == nil || s.nodes.stored == 0 {
 		return
 	}
 	target: [16]u8

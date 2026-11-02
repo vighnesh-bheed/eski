@@ -8,8 +8,8 @@ text_bytes :: proc(s: string) -> []u8 {
 	return raw_data(s)[:len(s)]
 }
 
-integer_value :: proc(n: i64) -> Value {
-	return {ival = n, is_int = true}
+integer_value :: proc(n: i64) -> Member {
+	return {number = n, numeric = true}
 }
 
 release_pending_maintenance :: proc() {
@@ -47,11 +47,11 @@ algebra_models :: proc(t: ^testing.T) {
 		}
 		testing.expect_value(t, inter_card(inputs, 0), 10)
 		testing.expect_value(t, inter_card(inputs, 4), 4)
-		values := make([dynamic]Value)
+		values := make([dynamic]Member)
 		append(&values, integer_value(-1))
 		testing.expect_value(t, inter_collect(inputs, &values), 10)
 		testing.expect_value(t, len(values), 11)
-		testing.expect(t, values[0].is_int && values[0].ival == -1)
+		testing.expect(t, values[0].numeric && values[0].number == -1)
 		delete(values)
 		both := []Set{a, b}
 		united := union_diff(both, .Union)
@@ -104,7 +104,7 @@ random_and_pop_complements :: proc(t: ^testing.T) {
 	for enc in Encoding {
 		for count in ([]int{1, 35, 65}) {
 			s := integer_set_with_encoding(enc, 70)
-			values: [dynamic]Value
+			values: [dynamic]Member
 			random_unique(s, 100, &values)
 			testing.expect_value(t, len(values), 70)
 			seen: [70]bool
@@ -176,7 +176,7 @@ popped_bytes_and_empty_helpers :: proc(t: ^testing.T) {
 	destroy(check)
 	popped_destroy(&popped)
 	empty := create_intset()
-	values: [dynamic]Value
+	values: [dynamic]Member
 	random_unique(empty, 8, &values)
 	random_with_repeats(empty, 8, &values)
 	testing.expect_value(t, len(values), 0)
@@ -197,7 +197,7 @@ scan_static_and_migrating :: proc(t: ^testing.T) {
 		cursor := u64(0)
 		calls := 0
 		for {
-			values: [dynamic]Value
+			values: [dynamic]Member
 			cursor = scan(s, cursor, 3, &values)
 			for value in values {
 				buf: [21]u8
@@ -227,7 +227,7 @@ scan_static_and_migrating :: proc(t: ^testing.T) {
 		cursor := u64(0)
 		count := 0
 		for {
-			cursor = cursor_next(cursor, mask)
+			cursor = reverse_increment(cursor, mask)
 			count += 1
 			if cursor == 0 {
 				break
@@ -319,7 +319,7 @@ scan_shrink_and_bucket_contract :: proc(t: ^testing.T) {
 	seen: [200]bool
 	cursor := u64(0)
 	for step in 0 ..< 10000 {
-		values: [dynamic]Value
+		values: [dynamic]Member
 		cursor = scan(s, cursor, 2, &values)
 		for value in values {
 			buf: [21]u8
@@ -343,11 +343,11 @@ scan_shrink_and_bucket_contract :: proc(t: ^testing.T) {
 		table_step(s.table, 64, 4)
 	}
 	for bucket in 0 ..< s.table.cap {
-		values: [dynamic]Value
+		values: [dynamic]Member
 		sampled := slots_scan_bucket(s.table.slots, s.table.cap, u64(bucket), &values)
 		testing.expect_value(t, sampled, len(values))
 		for value in values {
-			testing.expect_value(t, hash_member(value.str) & u64(s.table.cap - 1), u64(bucket))
+			testing.expect_value(t, hash_member(value.text) & u64(s.table.cap - 1), u64(bucket))
 		}
 		delete(values)
 	}
@@ -392,23 +392,23 @@ codec_empty_and_corrupt_frames :: proc(t: ^testing.T) {
 collectors_append_and_zero_scan :: proc(t: ^testing.T) {
 	for encoding in Encoding {
 		s := integer_set_with_encoding(encoding, 4)
-		values: [dynamic]Value
+		values: [dynamic]Member
 		append(&values, integer_value(999))
 		random_unique(s, 2, &values)
 		testing.expect_value(t, len(values), 3)
-		testing.expect(t, values[0].is_int && values[0].ival == 999)
+		testing.expect(t, values[0].numeric && values[0].number == 999)
 		random_with_repeats(s, 3, &values)
 		testing.expect_value(t, len(values), 6)
-		testing.expect(t, values[0].is_int && values[0].ival == 999)
+		testing.expect(t, values[0].numeric && values[0].number == 999)
 		clear(&values)
 		append(&values, integer_value(999))
 		next_cursor := scan(s, 0, 0, &values)
-		testing.expect(t, values[0].is_int && values[0].ival == 999)
+		testing.expect(t, values[0].numeric && values[0].number == 999)
 		if encoding == .Hashtable {
-			expected: [dynamic]Value
+			expected: [dynamic]Member
 			sampled := slots_scan_bucket(s.table.slots, s.table.cap, 0, &expected)
 			testing.expect_value(t, len(values), sampled + 1)
-			testing.expect_value(t, next_cursor, cursor_next(0, u64(s.table.cap - 1)))
+			testing.expect_value(t, next_cursor, reverse_increment(0, u64(s.table.cap - 1)))
 			delete(expected)
 		} else {
 			testing.expect_value(t, len(values), 5)
@@ -428,7 +428,7 @@ random_listpack_physical_order :: proc(t: ^testing.T) {
 	}
 	for count in 1 ..= size(s) {
 		for _ in 0 ..< 20 {
-			values: [dynamic]Value
+			values: [dynamic]Member
 			random_unique(s, count, &values)
 			testing.expect_value(t, len(values), count)
 			it := iterator(s)
@@ -438,7 +438,7 @@ random_listpack_physical_order :: proc(t: ^testing.T) {
 				if !ok {
 					break
 				}
-				if selected < len(values) && values[selected].is_int && values[selected].ival == value.ival {
+				if selected < len(values) && values[selected].numeric && values[selected].number == value.number {
 					selected += 1
 				}
 			}
@@ -470,8 +470,8 @@ listpack_pop_order_and_encoding :: proc(t: ^testing.T) {
 			previous := i64(101)
 			for index in 0 ..< popped_len(&popped) {
 				value := popped_get(&popped, index)
-				testing.expect(t, value.is_int && value.ival < previous)
-				previous = value.ival
+				testing.expect(t, value.numeric && value.number < previous)
+				previous = value.number
 				testing.expect(t, !is_member_aux(remaining, value))
 			}
 			previous = 101
@@ -481,8 +481,8 @@ listpack_pop_order_and_encoding :: proc(t: ^testing.T) {
 				if !ok {
 					break
 				}
-				testing.expect(t, value.is_int && value.ival < previous)
-				previous = value.ival
+				testing.expect(t, value.numeric && value.number < previous)
+				previous = value.number
 			}
 			destroy(s)
 			if replacement != nil {
@@ -504,7 +504,7 @@ listpack_pop_order_and_encoding :: proc(t: ^testing.T) {
 			value := popped_get(&popped, index)
 			found := -1
 			for text, position in ([]string{"first", "second", "third", "fourth", "fifth", "sixth"}) {
-				if set_bytes_equal(value.str, text_bytes(text)) {
+				if set_bytes_equal(value.text, text_bytes(text)) {
 					found = position
 				}
 			}
@@ -543,7 +543,7 @@ intersection_initial_listpack_policy :: proc(t: ^testing.T) {
 			it := iterator(result)
 			first, _ := next(&it)
 			second, _ := next(&it)
-			testing.expect(t, first.is_int && first.ival == 23 && second.is_int && second.ival == 2)
+			testing.expect(t, first.numeric && first.number == 23 && second.numeric && second.number == 2)
 		}
 		destroy(result)
 		set_max_intset_entries = 512
@@ -601,8 +601,8 @@ pop_strategy_integer_boundaries :: proc(t: ^testing.T) {
 					value := popped_get(&popped, index)
 					testing.expect(t, !is_member_aux(replacement, value))
 					if encoding == .Intset {
-						testing.expect(t, value.is_int && value.ival > previous)
-						previous = value.ival
+						testing.expect(t, value.numeric && value.number > previous)
+						previous = value.number
 					}
 				}
 			}

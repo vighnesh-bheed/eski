@@ -56,21 +56,21 @@ observed_mutations_match_literal_wires_counts_and_returned_cursors :: proc(t: ^t
 		{6, 0, 0, 3, -1, 0, "\x07\x00\x00\x00\x00\x00\xff"},
 	}
 	for fixture in fixtures {
-		lp := test_pack([]Entry{entry_from_bytes(transmute([]u8)string("a")), entry_from_bytes(transmute([]u8)string("b")), entry_from_bytes(transmute([]u8)string("c"))})
+		lp := test_pack([]Element{entry_from_bytes(transmute([]u8)string("a")), entry_from_bytes(transmute([]u8)string("b")), entry_from_bytes(transmute([]u8)string("c"))})
 		cursor: [^]u8
 		switch fixture.operation {
 		case 0:
-			lp = lp_insert_integer(lp, 17, lp_seek(lp, i64(fixture.index)), fixture.where_, &cursor)
+			lp = lp_insert_integer(lp, 17, lp_seek(lp, i64(fixture.index)), Placement(fixture.where_), &cursor)
 		case 1:
-			lp = lp_insert_string(lp, nil, padd(lp, lp_bytes(lp) - 1), LP_BEFORE, &cursor)
+			lp = lp_insert_string(lp, nil, padd(lp, lp_bytes(lp) - 1), Placement.Before, &cursor)
 		case 2:
 			lp = lp_delete(lp, lp_seek(lp, i64(fixture.index)), &cursor)
 		case 3:
 			cursor = lp_seek(lp, 1)
 			lp = lp_delete_range_with_entry(lp, &cursor, 99)
 		case 4:
-			batch := [4]Entry{entry_from_bytes(transmute([]u8)string("x")), entry_from_int(-8), entry_from_bytes(nil), entry_from_int(9)}
-			lp = lp_batch_insert(lp, lp_seek(lp, 1), fixture.where_, batch[:int(fixture.num)], &cursor)
+			batch := [4]Element{entry_from_bytes(transmute([]u8)string("x")), entry_from_int(-8), entry_from_bytes(nil), entry_from_int(9)}
+			lp = lp_batch_insert(lp, lp_seek(lp, 1), Placement(fixture.where_), batch[:int(fixture.num)], &cursor)
 		case 5:
 			lp = lp_delete_range(lp, i64(fixture.index), fixture.num)
 		case 6:

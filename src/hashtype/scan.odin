@@ -190,7 +190,7 @@ scan_packed :: proc(h: Hash, opts: ^Scan_Options, out: ^[dynamic]Value, now: u64
 	rows := iterator_live(h, now)
 	for next(&rows) {
 		field := current_field(&rows)
-		spelled: [lp.LP_INTBUF_SIZE]u8
+		spelled: [lp.DECIMAL_BUFFER_BYTES]u8
 		if !scan_wanted(opts, value_bytes(field, &spelled)) {
 			continue
 		}
