@@ -26,7 +26,7 @@ The verifier removes its previous success receipt before checking inputs. Runtim
 | `src/runtime_operations.odin` | Both legacy services drain before syslog-open mutation, closelog and borrowed ident destruction |
 | `src/cmd_persist.odin`, `src/lua_debug.odin`, `src/config.odin`, `src/main.odin` | Persistence/debugger fork callers, shutdown joins and early-startup/daemon lifecycle context |
 
-The source manifest pins these files, and the repository source digest pins the full qualified runtime inputs. The release checkpoint has source SHA-256 `9f9d5e5f8f79a74747a4da5a9c3c528892f9d2a974fc25a76b1171453ef7335d` and executable SHA-256 `6296faf2f8b6f0c2cd52dbafc1b2af15bb5f7b516590d261e07caff462459a0d`.
+The source manifest pins these files, and the repository source digest pins the full qualified runtime inputs. The release checkpoint has source SHA-256 `a73554637538d725ed785bb5e3c1ef1cabf0ae92d21f308efbd1db8a56c8d07b` and executable SHA-256 `2ed19688bc2f38d941aae69ddde96dffa48cf23d6081f7e831b74410055a4aa3`.
 
 ## Finite state spaces
 

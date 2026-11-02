@@ -1,8 +1,8 @@
 {
-  "qualification": "Final source23 local build and release installation identities",
-  "qualified_build_receipt_sha256": "b53d71c4b397a2bdd194e20776978e0e3c869ab383b28afedc15c148167a34c2",
-  "qualified_install_receipt_sha256": "b7aa054ca10e65a486dc93a42aca68bc4e4bda4174c22ae3361dc9fa271f5e41",
-  "release_sha256": "6296faf2f8b6f0c2cd52dbafc1b2af15bb5f7b516590d261e07caff462459a0d",
-  "source_sha256": "9f9d5e5f8f79a74747a4da5a9c3c528892f9d2a974fc25a76b1171453ef7335d",
-  "tsan_sha256": "9accedd0ebc3dee59384ed484e59ad730bd9ba9ebf07d0332b07f1b52688932c"
+  "qualification": "build.sh release and thread-sanitizer builds of the runtime source pinned in source-sha256.json; the receipt fields identify the release and thread-sanitizer build receipts",
+  "qualified_build_receipt_sha256": "a4871e50f4d30985ec6832038e7416facfe7f76ac2175073777781fcb8e8d763",
+  "qualified_install_receipt_sha256": "14f02dbf6e126d4bed0519f9a97e8604dc2b9905f6694aaea38903d5140f0b63",
+  "release_sha256": "2ed19688bc2f38d941aae69ddde96dffa48cf23d6081f7e831b74410055a4aa3",
+  "source_sha256": "a73554637538d725ed785bb5e3c1ef1cabf0ae92d21f308efbd1db8a56c8d07b",
+  "tsan_sha256": "f5dbb97bc5e3993205670cbccbfe1f1cad018595b0d943cdf3444a01bcd4cc89"
 }

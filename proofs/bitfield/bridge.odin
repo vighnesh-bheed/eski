@@ -81,7 +81,7 @@ main :: proc() {
 			assert((len(fields) - 1) % 6 == 0)
 			clear(&prog.ops)
 			for i := 1; i < len(fields); i += 6 {
-				op: bm.Bitfield_Op
+				op: bm.Field_Command
 				switch fields[i] {
 				case "G": op.opcode = .Get
 				case "S": op.opcode = .Set
