@@ -127,7 +127,7 @@ keyspace_object_import :: proc(db: ^Db, r: ^ks.Record) {
 	case .Stream: stream_copy_attach(e, r.object)
 	}
 	entry_set_expire(e, r.expire_at)
-	entry_set_lru(e, r.clock)
+	entry_set_access_word(e, r.clock)
 	r.object = nil
 	ks.release_external(&keyspace_pool, r.object_charge)
 	r.object_charge = 0

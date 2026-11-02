@@ -128,84 +128,184 @@ keyspace_restore_options :: proc "contextless" (argv: [][]u8) -> (options: Keysp
 	return options, true
 }
 
-keyspace_restore_execute :: proc(task: ^Keyspace_Task) {
-	argv := task.argv
-	options, parsed := keyspace_restore_options(argv)
-	if !parsed { task.failed = true; return }
-	r := task.records[0]
-	keyspace_expire(task, r); keyspace_touch(task, r)
-	if r.exists && !options.replace { task.failed = true; return }
-	ttl, numeric := parse_i64(argv[2])
-	if !numeric || ttl < 0 || !dump_verify(argv[3]) { task.failed = true; return }
-	payload := argv[3]
-	budget := u128(2 << 20) + u128(len(payload)) * (rdb.LZF_DECODE_MAX_RATIO + 64) * 512
-	if budget > u128(max(int)) || !ks.reserve_external(&keyspace_pool, int(budget)) { task.failed = true; return }
-	reservation := int(budget)
-	defer ks.release_external(&keyspace_pool, reservation)
-	reader: rdb.Reader
-	rdb.reader_init_mem(&reader, payload, false)
-	defer rdb.reader_destroy(&reader)
-	kind := rdb.get_type(&reader)
-	if kind == rdb.TYPE_ZSET || kind == rdb.TYPE_ZSET_2 {
-		count := rdb.get_len(&reader)
-		if count == rdb.LENERR || count > u64(len(payload)) { task.failed = true; return }
-		rdb.reader_destroy(&reader); rdb.reader_init_mem(&reader, payload, false); kind = rdb.get_type(&reader)
-	}
-	object: rawptr
-	object_kind := Obj_Type.String
-	string_value: []u8
-	switch kind {
+@(private = "file")
+Keyspace_Restored :: struct {
+	kind:   Obj_Type,
+	object: rawptr,
+	text:   []u8,
+}
+
+@(private = "file")
+keyspace_restore_kind :: proc "contextless" (code: int) -> (Obj_Type, bool) {
+	switch code {
 	case rdb.TYPE_STRING:
-		value, ok := rdb.get_string(&reader, 2); if !ok { task.failed = true; return }; string_value = value
+		return .String, true
 	case rdb.TYPE_LIST, rdb.TYPE_LIST_ZIPLIST, rdb.TYPE_LIST_QUICKLIST, rdb.TYPE_LIST_QUICKLIST_2:
-		object = lt.rdb_load(&reader, kind, true); object_kind = .List
+		return .List, true
 	case rdb.TYPE_SET, rdb.TYPE_SET_INTSET, rdb.TYPE_SET_LISTPACK:
-		object = st.rdb_load(&reader, kind, true); object_kind = .Set
+		return .Set, true
 	case rdb.TYPE_ZSET, rdb.TYPE_ZSET_2, rdb.TYPE_ZSET_ZIPLIST, rdb.TYPE_ZSET_LISTPACK:
-		object = zt.rdb_load(&reader, kind, true); object_kind = .Zset
+		return .Zset, true
 	case rdb.TYPE_HASH, rdb.TYPE_HASH_ZIPMAP, rdb.TYPE_HASH_ZIPLIST, rdb.TYPE_HASH_LISTPACK, rdb.TYPE_HASH_TABLE_EX_RC, rdb.TYPE_HASH_LISTPACK_EX_RC, rdb.TYPE_HASH_TABLE_EX, rdb.TYPE_HASH_LISTPACK_EX:
-		object = ht.rdb_load(&reader, kind, true); object_kind = .Hash
+		return .Hash, true
 	case rdb.TYPE_STREAM_LISTPACKS, rdb.TYPE_STREAM_LISTPACKS_2, rdb.TYPE_STREAM_LISTPACKS_3:
-		object = sm.rdb_load(&reader, kind, true); object_kind = .Stream
-	case: task.failed = true; return
+		return .Stream, true
 	}
-	defer { if object != nil { keyspace_object_destructor(object_kind)(object) } }
-	if reader.status != .Ok || (object_kind != .String && object == nil) { task.failed = true; return }
+	return .String, false
+}
+
+@(private = "file")
+keyspace_restore_reserve :: proc(payload_bytes: int) -> (held: int, ok: bool) {
+	need := u128(2 << 20) + u128(payload_bytes) * (rdb.LZF_DECODE_MAX_RATIO + 64) * 512
+	if need > u128(max(int)) || !ks.reserve_external(&keyspace_pool, int(need)) {
+		return 0, false
+	}
+	return int(need), true
+}
+
+@(private = "file")
+keyspace_restore_decode :: proc(reader: ^rdb.Reader, payload: []u8) -> (out: Keyspace_Restored, ok: bool) {
+	rdb.reader_init_mem(reader, payload, false)
+	code := rdb.get_type(reader)
+	kind, known := keyspace_restore_kind(code)
+	if !known {
+		return
+	}
+	if code == rdb.TYPE_ZSET || code == rdb.TYPE_ZSET_2 {
+		declared := rdb.get_len(reader)
+		if declared == rdb.LENERR || declared > u64(len(payload)) {
+			return
+		}
+		rdb.reader_destroy(reader)
+		rdb.reader_init_mem(reader, payload, false)
+		code = rdb.get_type(reader)
+	}
+	out.kind = kind
+	switch kind {
+	case .String:
+		text, read := rdb.get_string(reader, 2)
+		if !read {
+			return {}, false
+		}
+		out.text = text
+	case .List:
+		out.object = lt.rdb_load(reader, code, true)
+	case .Set:
+		out.object = st.rdb_load(reader, code, true)
+	case .Zset:
+		out.object = zt.rdb_load(reader, code, true)
+	case .Hash:
+		out.object = ht.rdb_load(reader, code, true)
+	case .Stream:
+		out.object = sm.rdb_load(reader, code, true)
+	}
+	if reader.status == .Ok && (kind == .String || out.object != nil) {
+		return out, true
+	}
+	if out.object != nil {
+		keyspace_object_destructor(kind)(out.object)
+	}
+	return {}, false
+}
+
+@(private = "file")
+keyspace_restore_deadline :: proc "contextless" (now, ttl: i64, absolute: bool) -> (at: i64, lapsed: bool) {
+	switch {
+	case ttl == 0:
+		return 0, false
+	case absolute:
+		return min(ttl, MAX_EXPIRE_MS), ttl <= now
+	case ttl > max(i64) - now:
+		return 0, true
+	}
+	return min(now + ttl, MAX_EXPIRE_MS), false
+}
+
+@(private = "file")
+keyspace_restore_access :: proc "contextless" (task: ^Keyspace_Task, word: u32, options: Keyspace_Restore) -> u32 {
+	fresh := memory_worker_access_touch(&task.access, word, true)
+	if task.access.counts_hits {
+		if options.freq < 0 {
+			return fresh
+		}
+		return transmute(u32)Access_Note{stamp = task.access.minute, tally = u8(options.freq)}
+	}
+	if options.idle < 0 {
+		return fresh
+	}
+	return transmute(u32)seconds_note(seconds_before(task.access.seconds, options.idle))
+}
+
+keyspace_restore_execute :: proc(task: ^Keyspace_Task) {
+	options, parsed := keyspace_restore_options(task.argv)
+	if !parsed {
+		task.failed = true
+		return
+	}
+	r := task.records[0]
+	keyspace_expire(task, r)
+	keyspace_touch(task, r)
+	ttl, numeric := parse_i64(task.argv[2])
+	payload := task.argv[3]
+	if (r.exists && !options.replace) || !numeric || ttl < 0 || !dump_verify(payload) {
+		task.failed = true
+		return
+	}
+	held, reserved := keyspace_restore_reserve(len(payload))
+	if !reserved {
+		task.failed = true
+		return
+	}
+	defer ks.release_external(&keyspace_pool, held)
+	reader: rdb.Reader
+	defer rdb.reader_destroy(&reader)
+	loaded, decoded := keyspace_restore_decode(&reader, payload)
+	if !decoded {
+		task.failed = true
+		return
+	}
+	defer {
+		if loaded.object != nil { keyspace_object_destructor(loaded.kind)(loaded.object) }
+	}
 	if task.restore_deep { task.sanitized = 1 }
-	at := ttl
-	lapsed := false
-	if ttl != 0 {
-		if options.absolute { lapsed = ttl <= task.now } else if ttl > max(i64) - task.now { lapsed = true } else { at += task.now }
-	}
+	at, lapsed := keyspace_restore_deadline(task.now, ttl, options.absolute)
 	if lapsed {
-		task.dirty = i64(r.exists)
-		if r.exists { keyspace_remove(r); keyspace_changed(task, r, .Generic, "del") }; task.ok = true; return
+		task.ok = true
+		if r.exists {
+			task.dirty = 1
+			keyspace_remove(r)
+			keyspace_changed(task, r, .Generic, "del")
+		}
+		return
 	}
-	if object_kind == .String {
-		if !keyspace_value(task, string_value) { return }
+	if loaded.kind == .String {
+		if !keyspace_value(task, loaded.text) {
+			return
+		}
 		rdb.reader_destroy(&reader)
-		ks.release_external(&keyspace_pool, reservation); reservation = 0
-		keyspace_save(task, r, task.values[0], min(at, MAX_EXPIRE_MS))
+		ks.release_external(&keyspace_pool, held)
+		held = 0
+		keyspace_save(task, r, task.values[0], at)
 	} else {
 		rdb.reader_destroy(&reader)
-		work := Keyspace_Object_Work{kind = object_kind, object = object, charge = reservation}; object = nil; reservation = 0
-		if object_kind == .Hash {
-			minimum := ht.min_expire(cast(ht.Hash)work.object, true)
-			if minimum != ht.NO_FIELD_DEADLINE { work.hash_minimum = minimum }
+		work := Keyspace_Object_Work{kind = loaded.kind, object = loaded.object, charge = held}
+		loaded.object, held = nil, 0
+		if work.kind == .Hash {
+			earliest := ht.min_expire(cast(ht.Hash)work.object, true)
+			if earliest != ht.NO_FIELD_DEADLINE { work.hash_minimum = earliest }
 		}
 		defer keyspace_object_discard(&work)
-		if !keyspace_object_commit(task, r, &work, true) { return }
-		r.expire_at = min(at, MAX_EXPIRE_MS)
+		if !keyspace_object_commit(task, r, &work, true) {
+			return
+		}
+		r.expire_at = at
 	}
-	r.clock = memory_worker_access_touch(&task.access, r.clock, true); r.touched = true
-	if options.idle >= 0 && !task.access.lfu {
-		clock := i64(task.job.clock) - options.idle
-		if clock < 0 { clock += LRU_CLOCK_MAX }
-		r.clock = u32(clock & LRU_CLOCK_MAX); r.touched = true
-	}
-	if options.freq >= 0 && task.access.lfu { r.clock = u32(task.access.minutes) << 8 | u32(options.freq) }
-	task.ok = true; task.dirty = 1
-	keyspace_changed(task, r, .Generic, "restore"); keyspace_key_wake(task, r)
+	r.clock = keyspace_restore_access(task, r.clock, options)
+	r.touched = true
+	task.ok = true
+	task.dirty = 1
+	keyspace_changed(task, r, .Generic, "restore")
+	keyspace_key_wake(task, r)
 }
 
 keyspace_key_wake :: proc(task: ^Keyspace_Task, r: ^ks.Record) {

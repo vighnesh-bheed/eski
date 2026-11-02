@@ -36,7 +36,7 @@ INLINE_BYTES :: 7
 
 Slot_Meta :: bit_field u64 {
 	expire_at: u64 | 48,
-	clock:     u16 | 16,
+	stamp:     u16 | 16,
 }
 
 Slot_Tag :: bit_field u8 {
@@ -72,14 +72,14 @@ Key_Handle :: struct #raw_union {
 
 Val_Small :: struct #packed {
 	bytes: [INLINE_BYTES]u8,
-	lfu:   u8,
+	tally: u8,
 }
 
 Val_Slab :: struct #packed {
 	offset: u32,
 	len:    u16,
 	info:   Val_Info,
-	lfu:    u8,
+	tally:  u8,
 }
 
 Val_Handle :: struct #raw_union {
@@ -104,7 +104,7 @@ Big_Str :: struct {
 }
 
 KEY_CMP_MASK :: u64(0x0FFF_FFFF_FFFF_FFFF)
-LFU_SHIFT :: 56
+TALLY_SHIFT :: 56
 MAX_EXPIRE_MS :: i64(1 << 48) - 1
 
 #assert(size_of(Slot_Meta) == 8)
@@ -115,7 +115,7 @@ MAX_EXPIRE_MS :: i64(1 << 48) - 1
 #assert(size_of(Key_Small) == 8 && size_of(Key_Slab) == 8)
 #assert(size_of(Val_Small) == 8 && size_of(Val_Slab) == 8)
 #assert(offset_of(Key_Small, tag) == 7 && offset_of(Key_Slab, tag) == 7)
-#assert(offset_of(Val_Small, lfu) == 7 && offset_of(Val_Slab, lfu) == 7)
+#assert(offset_of(Val_Small, tally) == 7 && offset_of(Val_Slab, tally) == 7)
 #assert(offset_of(Val_Slab, info) == 6)
 #assert(size_of(Slot) == 24)
 #assert(size_of(Slot_Meta) + size_of(Key_Handle) + size_of(Val_Handle) <= 24)
@@ -141,7 +141,7 @@ string_encoding_of :: proc "contextless" (v: []u8) -> Obj_Encoding {
 			return .Int
 		}
 	}
-	if len(v) <= EMBSTR_SIZE_LIMIT {
+	if len(v) <= EMBEDDED_STRING_MAX {
 		return .Embstr
 	}
 	return .Raw

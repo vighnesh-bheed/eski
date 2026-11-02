@@ -245,9 +245,9 @@ stale_keys_do_not_dirty :: proc(t: ^testing.T) {
 	defer close_client(a)
 	defer close_client(w)
 	reset_server(w)
-	saved := j.active_expire_enabled
-	j.active_expire_enabled = false
-	defer j.active_expire_enabled = saved
+	saved := j.expiry_sweep_on
+	j.expiry_sweep_on = false
+	defer j.expiry_sweep_on = saved
 	call(w, "SET", "st", "1", "PX", "1")
 	settle(10)
 	call(a, "WATCH", "st")
@@ -338,9 +338,9 @@ swapdb_dirties_keys_present_in_either_database :: proc(t: ^testing.T) {
 	defer close_client(a)
 	defer close_client(w)
 	reset_server(w)
-	saved := j.active_expire_enabled
-	j.active_expire_enabled = false
-	defer j.active_expire_enabled = saved
+	saved := j.expiry_sweep_on
+	j.expiry_sweep_on = false
+	defer j.expiry_sweep_on = saved
 	expect_call(t, w, "SET sk 1", "+OK\r\n")
 	expect_call(t, a, "WATCH sk", "+OK\r\n")
 	expect_call(t, w, "SWAPDB 0 1", "+OK\r\n")

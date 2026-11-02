@@ -152,7 +152,8 @@ cmd_debug :: proc(c: ^Conn, argv: [][]u8) {
 			addr = uintptr(sm)
 		}
 		size := debug_serialized_length(e, argv[2])
-		idle := entry_idle_seconds(e)
+		debug_lru := entry_debug_lru(e)
+		idle := lru_idle_ms_of(u32(debug_lru)) / 1000
 		clear(&scratch)
 		sb_str(&scratch, "Value at:0x")
 		hexd := "0123456789abcdef"
@@ -171,7 +172,7 @@ cmd_debug :: proc(c: ^Conn, argv: [][]u8) {
 		sb_str(&scratch, " serializedlength:")
 		sb_int(&scratch, i64(size))
 		sb_str(&scratch, " lru:")
-		sb_int(&scratch, i64(entry_lru(e)))
+		sb_int(&scratch, debug_lru)
 		sb_str(&scratch, " lru_seconds_idle:")
 		sb_int(&scratch, idle)
 		list_debug_object_extra(&scratch, e)
@@ -179,7 +180,7 @@ cmd_debug :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	if eq_nocase(argv[1], "set-active-expire") && len(argv) == 3 {
-		active_expire_enabled = c_atoi(argv[2]) != 0
+		expiry_sweep_on = c_atoi(argv[2]) != 0
 		reply_ok(c)
 		return
 	}

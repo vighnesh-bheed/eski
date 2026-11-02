@@ -267,7 +267,7 @@ hash_tick :: proc "contextless" () {
 		return
 	}
 	hash_tick_due = srv.now_ms + CRON_INTERVAL_MS
-	if !active_expire_enabled || expiry_deletion_paused() || len(dbs) == 0 {
+	if !expiry_sweep_on || expiry_deletion_paused() || len(dbs) == 0 {
 		return
 	}
 	effort := cfg.active_expire_effort - 1

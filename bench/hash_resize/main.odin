@@ -164,7 +164,7 @@ when HOST {
 		config_init()
 		update_clock()
 		db_init()
-		active_expire_enabled = false
+		expiry_sweep_on = false
 		ht.hash_max_listpack_entries = 0
 		ht.hash_max_listpack_value = 0
 		ht.set_hash_seed(0x738A0E43)

@@ -62,11 +62,11 @@ Dead :: struct {
 DB_COUNT :: 16
 DB_MAX :: 1024
 ENTRY_OVERHEAD :: 96
-EMBSTR_SIZE_LIMIT :: 44
+EMBEDDED_STRING_MAX :: 44
 MAX_STRING_LEN :: 512 * 1024 * 1024
 ENTRY_RING :: 8
 BIG_STR_BYTES :: size_of(Big_Str)
-SETRANGE_PREALLOC :: 1 << 20
+STRING_DOUBLING_LIMIT :: 1 << 20
 REHASH_OP_BATCH :: 16
 REHASH_OP_CREDIT :: 2
 REHASH_OP_URGENT :: 8
@@ -103,7 +103,7 @@ db_used_memory: int
 store_rehashing: int
 store_warming: int
 store_tick_commands: i64
-lru_now: u32
+access_seconds_now: u32
 entry_ring: [ENTRY_RING]Entry
 entry_next: uint
 graveyard: [GRAVEYARD_MAX]Release
@@ -193,10 +193,6 @@ now_ns :: #force_inline proc "contextless" () -> i64 {
 	return i64(ts.time_sec) * 1_000_000_000 + i64(ts.time_nsec)
 }
 
-lru_clock :: #force_inline proc "contextless" () -> u32 {
-	return lru_now
-}
-
 db_size_of :: #force_inline proc "contextless" (db: ^Db) -> int {
 	return db.t[0].live + db.t[1].live
 }
@@ -225,8 +221,8 @@ big_new :: proc "contextless" (db: ^Db, data: [^]u8, n: int, cap: int) -> ^Big_S
 }
 
 @(private = "file")
-big_attach :: #force_inline proc "contextless" (kp: ^Key_Handle, vp: ^Val_Handle, bs: ^Big_Str, lfu: u8) {
-	vp.bits = u64(lfu) << LFU_SHIFT
+big_attach :: #force_inline proc "contextless" (kp: ^Key_Handle, vp: ^Val_Handle, bs: ^Big_Str, tally: u8) {
+	vp.bits = u64(tally) << TALLY_SHIFT
 	vp.ref.addr = uintptr(bs)
 	kp.small.tag.val_form = FORM_HEAP
 }
@@ -272,7 +268,7 @@ val_release :: proc "contextless" (db: ^Db, kp: ^Key_Handle, vp: ^Val_Handle) {
 		db_used_memory -= n
 	}
 	kp.small.tag.val_form = FORM_NONE
-	vp.bits &= u64(0xFF) << LFU_SHIFT
+	vp.bits &= u64(0xFF) << TALLY_SHIFT
 }
 
 @(private = "file")
@@ -374,13 +370,13 @@ entry_store :: proc "contextless" (e: ^Entry, v: []u8, enc: Obj_Encoding, inline
 	vp := e.vp
 	n := len(v)
 	form := kp.small.tag.val_form
-	lfu := vp.small.lfu
+	tally := vp.small.tally
 	mc_meta_on_write(db, kp)
 	if n <= INLINE_BYTES && inline_ok && enc != .Raw {
 		if form >= FORM_SLAB {
 			val_release(db, kp, vp)
 		}
-		vp.bits = pack_small(v) | (u64(lfu) << LFU_SHIFT)
+		vp.bits = pack_small(v) | (u64(tally) << TALLY_SHIFT)
 		kp.small.tag.val_form = u8(n + FORM_INLINE)
 		e.val = ([^]u8)(vp)[:n]
 		e.cap = u32(n)
@@ -394,7 +390,7 @@ entry_store :: proc "contextless" (e: ^Entry, v: []u8, enc: Obj_Encoding, inline
 				val_release(db, kp, vp)
 			}
 			off := slab_alloc(&db.slab, n)
-			vp.bits = u64(lfu) << LFU_SHIFT
+			vp.bits = u64(tally) << TALLY_SHIFT
 			vp.slab.offset = off
 			kp.small.tag.val_form = FORM_SLAB
 		}
@@ -427,7 +423,7 @@ entry_store :: proc "contextless" (e: ^Entry, v: []u8, enc: Obj_Encoding, inline
 			val_release(db, kp, vp)
 		}
 		bs = big_new(db, mem_alloc(n), n, n)
-		big_attach(kp, vp, bs, lfu)
+		big_attach(kp, vp, bs, tally)
 	}
 	if bs.data == nil {
 		store_fatal("out of memory")
@@ -487,7 +483,7 @@ entry_append :: proc "contextless" (e: ^Entry, v: []u8) #no_bounds_check {
 	add := len(v)
 	newlen := cur + add
 	form := kp.small.tag.val_form
-	lfu := vp.small.lfu
+	tally := vp.small.tally
 	mc_meta_on_write(db, kp)
 	if newlen <= SLAB_MAX {
 		p: [^]u8
@@ -502,7 +498,7 @@ entry_append :: proc "contextless" (e: ^Entry, v: []u8) #no_bounds_check {
 			if form >= FORM_SLAB {
 				val_release(db, kp, vp)
 			}
-			vp.bits = u64(lfu) << LFU_SHIFT
+			vp.bits = u64(tally) << TALLY_SHIFT
 			vp.slab.offset = off
 			kp.small.tag.val_form = FORM_SLAB
 		}
@@ -546,7 +542,7 @@ entry_append :: proc "contextless" (e: ^Entry, v: []u8) #no_bounds_check {
 			val_release(db, kp, vp)
 		}
 		bs = big_new(db, data, cur, newcap)
-		big_attach(kp, vp, bs, lfu)
+		big_attach(kp, vp, bs, tally)
 	}
 	intrinsics.mem_copy_non_overlapping(&bs.data[cur], raw_data(v), add)
 	bs.len = u32(newlen)
@@ -604,7 +600,7 @@ entry_heap_close :: proc "contextless" (e: ^Entry) {
 	buf := raw_data(e.val)
 	cap := max(int(e.cap), n)
 	form := kp.small.tag.val_form
-	lfu := vp.small.lfu
+	tally := vp.small.tally
 	e.heap_tmp = false
 	mc_meta_on_write(db, kp)
 	if form == FORM_HEAP {
@@ -627,13 +623,13 @@ entry_heap_close :: proc "contextless" (e: ^Entry) {
 		db_used_memory -= d
 		mem_free(bs)
 		kp.small.tag.val_form = FORM_NONE
-		vp.bits = u64(lfu) << LFU_SHIFT
+		vp.bits = u64(tally) << TALLY_SHIFT
 	} else if n > SLAB_MAX {
 		if form != FORM_NONE {
 			val_release(db, kp, vp)
 		}
 		bs := big_new(db, buf, n, cap)
-		big_attach(kp, vp, bs, lfu)
+		big_attach(kp, vp, bs, tally)
 		vp.slab.info = Val_Info {
 			type = .String,
 			enc  = .Raw,
@@ -646,29 +642,37 @@ entry_heap_close :: proc "contextless" (e: ^Entry) {
 	mem_free(buf)
 }
 
+string_grown_capacity :: #force_inline proc "contextless" (had: u32, need: int) -> int {
+	switch {
+	case had == 0:
+		return need
+	case need >= STRING_DOUBLING_LIMIT:
+		return need + STRING_DOUBLING_LIMIT
+	}
+	return need * 2
+}
+
 entry_setrange :: proc "contextless" (e: ^Entry, off: int, v: []u8) {
-	newlen := max(len(e.val), off + len(v))
 	entry_heap_open(e, false)
-	cur := len(e.val)
-	if newlen > int(e.cap) {
-		newcap := newlen
-		if e.cap > 0 {
-			newcap = newlen * 2 if newlen < SETRANGE_PREALLOC else newlen + SETRANGE_PREALLOC
-		}
-		p := ([^]u8)(runtime.heap_resize(raw_data(e.val), newcap))
-		if p == nil {
+	held := len(e.val)
+	reach := off + len(v)
+	final := reach if reach > held else held
+	base := raw_data(e.val)
+	if final > int(e.cap) {
+		room := string_grown_capacity(e.cap, final)
+		base = ([^]u8)(runtime.heap_resize(base, room))
+		if base == nil {
 			store_fatal("out of memory")
 		}
-		e.val = p[:cur]
-		e.cap = u32(newcap)
+		e.cap = u32(room)
 	}
-	if newlen > cur {
-		intrinsics.mem_zero(&raw_data(e.val)[cur], newlen - cur)
+	if off > held {
+		intrinsics.mem_zero(&base[held], off - held)
 	}
-	e.val = raw_data(e.val)[:newlen]
 	if len(v) > 0 {
-		intrinsics.mem_copy_non_overlapping(&raw_data(e.val)[off], raw_data(v), len(v))
+		intrinsics.mem_copy_non_overlapping(&base[off], raw_data(v), len(v))
 	}
+	e.val = base[:final]
 	entry_heap_close(e)
 }
 
@@ -683,12 +687,12 @@ entry_object_attach :: proc "contextless" (e: ^Entry, obj: rawptr, type: Obj_Typ
 	db := e.db
 	kp := e.kp
 	vp := e.vp
-	lfu := vp.small.lfu
+	tally := vp.small.tally
 	mc_meta_on_write(db, kp)
 	if kp.small.tag.val_form >= FORM_SLAB {
 		val_release(db, kp, vp)
 	}
-	vp.bits = u64(lfu) << LFU_SHIFT
+	vp.bits = u64(tally) << TALLY_SHIFT
 	vp.ref.addr = uintptr(obj)
 	vp.slab.info = Val_Info {
 		type = type,
@@ -948,8 +952,11 @@ db_shrink :: #force_no_inline proc "contextless" (db: ^Db) {
 
 @(private = "file")
 db_maybe_shrink :: #force_inline proc "contextless" (db: ^Db) {
-	t := &db.t[0]
-	if db.rehash_idx < 0 && t.cap > TABLE_MIN_CAP && t.live * 8 < t.cap && dict_resizing {
+	if !dict_resizing || db.rehash_idx >= 0 {
+		return
+	}
+	primary := &db.t[0]
+	if primary.cap > TABLE_MIN_CAP && primary.live < primary.cap / 8 {
 		db_shrink(db)
 	}
 }
@@ -1039,7 +1046,7 @@ db_key_state :: proc(db: ^Db, key: []u8) -> (exists: bool, expired: bool) #no_bo
 	return true, exp != 0 && exp <= srv.now_ms
 }
 
-keyspace_store_seed :: proc(db: ^Db, key: []u8) -> (value: []u8, clock: u32, exists, eligible: bool) {
+keyspace_store_seed :: proc(db: ^Db, key: []u8) -> (value: []u8, access_word: u32, exists, eligible: bool) {
 	l := lookup_make(key)
 	t, i := db_locate(db, &l)
 	if i < 0 {
@@ -1052,7 +1059,7 @@ keyspace_store_seed :: proc(db: ^Db, key: []u8) -> (value: []u8, clock: u32, exi
 	if entry_type(e) != .String || mc_meta_get(db, e.kp) != nil {
 		return nil, 0, false, false
 	}
-	return e.val, entry_lru(e), true, true
+	return e.val, entry_access_word(e), true, true
 }
 
 mc_worker_key_admissible :: proc(db: ^Db, key: []u8) -> bool {
@@ -1070,7 +1077,7 @@ keyspace_store_pause_admissible :: proc(db: ^Db, key: []u8) -> bool {
 	return entry_type(e) != .Hash && (e.expire_at == 0 || e.expire_at > expire_now())
 }
 
-keyspace_store_seed_full :: proc(db: ^Db, key: []u8) -> (value: []u8, clock: u32, expires: i64, encoding: u8, exists, eligible: bool) {
+keyspace_store_seed_full :: proc(db: ^Db, key: []u8) -> (value: []u8, access_word: u32, expires: i64, encoding: u8, exists, eligible: bool) {
 	l := lookup_make(key)
 	t, i := db_locate(db, &l)
 	if i < 0 {
@@ -1080,10 +1087,10 @@ keyspace_store_seed_full :: proc(db: ^Db, key: []u8) -> (value: []u8, clock: u32
 	if entry_type(e) != .String || mc_meta_get(db, e.kp) != nil {
 		return nil, 0, 0, 0, false, false
 	}
-	return e.val, entry_lru(e), e.expire_at, u8(entry_obj_encoding(e)), true, true
+	return e.val, entry_access_word(e), e.expire_at, u8(entry_obj_encoding(e)), true, true
 }
 
-keyspace_store_import_full :: proc(db: ^Db, key, value: []u8, clock: u32, changed, exists: bool, expires: i64, encoding: u8) {
+keyspace_store_import_full :: proc(db: ^Db, key, value: []u8, access_word: u32, changed, exists: bool, expires: i64, encoding: u8) {
 	if changed && !exists {
 		db_remove_in(db, key)
 		return
@@ -1095,7 +1102,7 @@ keyspace_store_import_full :: proc(db: ^Db, key, value: []u8, clock: u32, change
 			entry_set_expire(entry_view(db, t, i), 0)
 		}
 	}
-	keyspace_store_import(db, key, value, clock, changed)
+	keyspace_store_import(db, key, value, access_word, changed)
 	if changed {
 		l := lookup_make(key)
 		t, i := db_locate(db, &l)
@@ -1107,7 +1114,7 @@ keyspace_store_import_full :: proc(db: ^Db, key, value: []u8, clock: u32, change
 	}
 }
 
-keyspace_store_seed_object :: proc(db: ^Db, key: []u8) -> (object: rawptr, kind: Obj_Type, clock: u32, expires: i64, eligible: bool) {
+keyspace_store_seed_object :: proc(db: ^Db, key: []u8) -> (object: rawptr, kind: Obj_Type, access_word: u32, expires: i64, eligible: bool) {
 	l := lookup_make(key)
 	t, i := db_locate(db, &l)
 	if i < 0 {
@@ -1118,7 +1125,7 @@ keyspace_store_seed_object :: proc(db: ^Db, key: []u8) -> (object: rawptr, kind:
 		return nil, entry_type(e), 0, 0, false
 	}
 	kind = entry_type(e)
-	return entry_object(e, kind), kind, entry_lru(e), e.expire_at, true
+	return entry_object(e, kind), kind, entry_access_word(e), e.expire_at, true
 }
 
 keyspace_store_string_copy :: proc(db: ^Db, key: []u8) -> bool {
@@ -1129,22 +1136,22 @@ keyspace_store_string_copy :: proc(db: ^Db, key: []u8) -> bool {
 	return entry_type(e) == .String && entry_obj_encoding(e) == .Int && !entry_shared_integer(e)
 }
 
-keyspace_store_import_copy :: proc(db: ^Db, key, value: []u8, clock: u32, expires: i64, encoding: u8) {
+keyspace_store_import_copy :: proc(db: ^Db, key, value: []u8, access_word: u32, expires: i64, encoding: u8) {
 	e := keyspace_store_object_destination(db, key)
 	enc := Obj_Encoding(encoding)
 	entry_copy_string(e, value, enc)
 	entry_set_encoding(e, enc)
 	entry_set_expire(e, expires)
-	entry_set_lru(e, clock)
+	entry_set_access_word(e, access_word)
 }
 
-keyspace_store_import_metadata :: proc(db: ^Db, key: []u8, clock: u32, expires: i64) {
+keyspace_store_import_metadata :: proc(db: ^Db, key: []u8, access_word: u32, expires: i64) {
 	l := lookup_make(key)
 	t, i := db_locate(db, &l)
 	if i >= 0 {
 		e := entry_view(db, t, i)
 		entry_set_expire(e, expires)
-		entry_set_lru(e, clock)
+		entry_set_access_word(e, access_word)
 	}
 }
 
@@ -1161,7 +1168,7 @@ keyspace_store_object_destination :: proc(db: ^Db, key: []u8) -> ^Entry {
 	return e
 }
 
-keyspace_store_import_list :: proc(db: ^Db, key: []u8, object: rawptr, clock: u32, expires: i64) {
+keyspace_store_import_list :: proc(db: ^Db, key: []u8, object: rawptr, access_word: u32, expires: i64) {
 	l := lookup_make(key)
 	t, i := db_locate(db, &l)
 	if i >= 0 {
@@ -1173,7 +1180,7 @@ keyspace_store_import_list :: proc(db: ^Db, key: []u8, object: rawptr, clock: u3
 	e, _ := db_upsert_in(db, key)
 	list_copy_attach(e, object)
 	entry_set_expire(e, expires)
-	entry_set_lru(e, clock)
+	entry_set_access_word(e, access_word)
 }
 
 lua_store_reply_bound :: proc(db: ^Db, key: []u8) -> u128 {
@@ -1189,21 +1196,21 @@ lua_store_reply_bound :: proc(db: ^Db, key: []u8) -> u128 {
 	return u128(entry_memory(e))*64 + 128
 }
 
-keyspace_store_import :: proc(db: ^Db, key, value: []u8, clock: u32, changed: bool) {
+keyspace_store_import :: proc(db: ^Db, key, value: []u8, access_word: u32, changed: bool) {
 	if changed {
 		saved := store_no_touch
 		store_no_touch = true
 		e, _ := db_upsert_in(db, key)
 		entry_assign(e, value)
 		entry_set_expire(e, 0)
-		entry_set_lru(e, clock)
+		entry_set_access_word(e, access_word)
 		store_no_touch = saved
 		return
 	}
 	l := lookup_make(key)
 	t, i := db_locate(db, &l)
 	if i >= 0 {
-		entry_set_lru(entry_view(db, t, i), clock)
+		entry_set_access_word(entry_view(db, t, i), access_word)
 	}
 }
 
@@ -1290,11 +1297,11 @@ db_upsert_in :: proc(db: ^Db, key: []u8) -> (^Entry, bool) #no_bounds_check {
 		}
 	}
 	key_store(db, &t.slots[i].key, key)
-	ck, lf := access_init()
+	fresh := access_fresh_note()
 	t.slots[i].meta = Slot_Meta {
-		clock = ck,
+		stamp = fresh.stamp,
 	}
-	t.slots[i].val = transmute(Val_Handle)(u64(lf) << LFU_SHIFT)
+	t.slots[i].val = transmute(Val_Handle)(u64(fresh.tally) << TALLY_SHIFT)
 	e := entry_view(db, t, i)
 	if !store_reconciling { notify_in(.New, "new", key, db) }
 	return e, true
@@ -1329,7 +1336,7 @@ db_rename :: proc(src: []u8, dst: []u8) -> bool #no_bounds_check {
 	val_release(db, e.kp, e.vp)
 	e.vp^ = vh
 	e.kp.small.tag.val_form = vform
-	e.mp.clock = meta.clock
+	e.mp.stamp = meta.stamp
 	entry_set_expire(e, i64(meta.expire_at))
 	return true
 }
@@ -1389,7 +1396,7 @@ db_move :: proc(src: ^Db, dst: ^Db, key: []u8) -> bool #no_bounds_check {
 	}
 	e.vp^ = vh
 	e.kp.small.tag.val_form = form
-	e.mp.clock = meta.clock
+	e.mp.stamp = meta.stamp
 	entry_set_expire(e, i64(meta.expire_at))
 	db_erase(src, t, i)
 	db_maybe_shrink(src)
@@ -1632,58 +1639,59 @@ db_tick :: proc "contextless" () {
 }
 
 @(private = "file")
+db_expire_slot :: proc(db: ^Db, t: ^Table, slot: int) {
+	if .Expired not_in notify_active && !key_hooks && !aof.feed {
+		db_erase_expired(db, t, slot)
+		return
+	}
+	expired_key_copy(&t.slots[slot].key, &db.slab)
+	db_erase_expired(db, t, slot)
+	key_expired_event(expired_key_buf[:], db)
+}
+
+@(private = "file")
 db_expire_scan :: proc(db: ^Db, deadline: i64) #no_bounds_check {
 	t := &db.t[1] if db.rehash_idx >= 0 else &db.t[0]
-	cap := t.cap
-	i := db.expire_cursor
-	if i >= cap {
-		i = 0
+	group := u64(db.expire_cursor) >> GROUP_SHIFT
+	if group > t.gmask {
+		group = 0
 	}
+	budget := min(t.cap, expire_slots_limit) >> GROUP_SHIFT
+	pause_every := EXPIRE_CHUNK >> GROUP_SHIFT
 	now := srv.now_ms
-	limit := min(cap, expire_slots_limit)
-	scanned := 0
-	ttl_sum: i64 = 0
-	ttl_samples: i64 = 0
-	for scanned < limit && db.expires > 0 {
-		chunk := min(EXPIRE_CHUNK, limit - scanned, cap - i)
-		for j in i ..< i + chunk {
-			exp := i64(t.slots[j].meta.expire_at)
-			if exp == 0 {
-				continue
-			}
-			if exp <= now {
+	remaining_total: i64
+	live_timed: i64
+	for visited := 1; visited <= budget && db.expires > 0; visited += 1 {
+		occupied := group_full(group_load(t.ctrl, group))
+		for occupied != 0 {
+			slot := int(group << GROUP_SHIFT) + int(intrinsics.count_trailing_zeros(occupied))
+			occupied &= occupied - 1
+			due := i64(t.slots[slot].meta.expire_at)
+			switch {
+			case due == 0:
+			case due > now:
+				remaining_total += due - now
+				live_timed += 1
+			case:
 				expire_cycle_expired += 1
-				if .Expired in notify_active || key_hooks || aof.feed {
-					expired_key_copy(&t.slots[j].key, &db.slab)
-					db_erase_expired(db, t, j)
-					key_expired_event(expired_key_buf[:], db)
-				} else {
-					db_erase_expired(db, t, j)
-				}
-			} else {
-				ttl_sum += exp - now
-				ttl_samples += 1
+				db_expire_slot(db, t, slot)
 			}
 		}
-		scanned += chunk
-		i += chunk
-		if i >= cap {
-			i = 0
-		}
-		if now_ns() >= deadline {
+		group = (group + 1) & t.gmask
+		if visited % pause_every == 0 && now_ns() >= deadline {
 			break
 		}
 	}
-	db.expire_cursor = i
-	expire_cycle_sampled += ttl_samples
-	if ttl_samples > 0 {
-		avg := ttl_sum / ttl_samples
-		db.avg_ttl = avg if db.avg_ttl == 0 else db.avg_ttl / 50 * 49 + avg / 50
+	db.expire_cursor = int(group << GROUP_SHIFT)
+	expire_cycle_sampled += live_timed
+	if live_timed > 0 {
+		fresh := remaining_total / live_timed
+		db.avg_ttl = fresh if db.avg_ttl == 0 else (db.avg_ttl / 50) * 49 + fresh / 50
 	}
 	db_maybe_shrink(db)
 }
 
-active_expire_enabled := true
+expiry_sweep_on := true
 expire_slots_limit := EXPIRE_SLOTS_PER_TICK
 expire_cycle_expired: i64
 expire_cycle_sampled: i64
@@ -1700,7 +1708,7 @@ expiry_deletion_paused :: #force_inline proc "contextless" () -> bool {
 }
 
 db_active_expire :: proc() {
-	if !active_expire_enabled || expiry_deletion_paused() {
+	if !expiry_sweep_on || expiry_deletion_paused() {
 		return
 	}
 	n := len(dbs)
@@ -1797,91 +1805,121 @@ db_keys :: proc(pat: []u8, all: bool) #no_bounds_check {
 }
 
 @(private = "file")
-scan_home :: proc(db: ^Db, t: ^Table, home: u64, pat: []u8, has_pat: bool, collect: bool) -> i64 #no_bounds_check {
-	gmask := t.gmask
-	now := srv.now_ms
-	g := home
-	step: u64 = 0
-	seen: i64 = 0
+Scan_Pass :: struct {
+	db:       ^Db,
+	pattern:  []u8,
+	filtered: bool,
+	now:      i64,
+	examined: i64,
+}
+
+@(private = "file")
+scan_offer :: proc(pass: ^Scan_Pass, t: ^Table, slot: int, name: []u8) #no_bounds_check {
+	if pass.filtered && !glob_match(pass.pattern, name, false) {
+		return
+	}
+	due := i64(t.slots[slot].meta.expire_at) if pass.db.expires > 0 else 0
+	if due != 0 && due <= pass.now {
+		append(&scan_expired, ..name)
+		append(&scan_expired_ends, len(scan_expired))
+		return
+	}
+	append(&key_scratch, transmute(string)name)
+}
+
+@(private = "file")
+scan_take_home :: proc(pass: ^Scan_Pass, t: ^Table, home: u64) #no_bounds_check {
+	group := home
+	hop: u64
 	for {
-		grp := group_load(t.ctrl, g)
-		full := group_full(grp)
-		for full != 0 {
-			i := int(g << GROUP_SHIFT) + int(intrinsics.count_trailing_zeros(full))
-			full &= full - 1
-			kb := key_bytes(&t.slots[i].key, &db.slab)
-			if hash_home(hash_bytes(kb), gmask) != home {
-				continue
+		ctrl := group_load(t.ctrl, group)
+		occupied := group_full(ctrl)
+		for occupied != 0 {
+			slot := int(group << GROUP_SHIFT) + int(intrinsics.count_trailing_zeros(occupied))
+			occupied &= occupied - 1
+			name := key_bytes(&t.slots[slot].key, &pass.db.slab)
+			if hash_home(hash_bytes(name), t.gmask) == home {
+				pass.examined += 1
+				scan_offer(pass, t, slot, name)
 			}
-			seen += 1
-			if !collect {
-				continue
-			}
-			if has_pat && !glob_match(pat, kb, false) {
-				continue
-			}
-			if db.expires > 0 {
-				exp := i64(t.slots[i].meta.expire_at)
-				if exp != 0 && exp <= now {
-					append(&scan_expired, ..kb)
-					append(&scan_expired_ends, len(scan_expired))
-					continue
-				}
-			}
-			append(&key_scratch, transmute(string)kb)
 		}
-		if group_empty(grp) != 0 {
-			return seen
+		if group_empty(ctrl) != 0 {
+			return
 		}
-		step += 1
-		g = (g + step) & gmask
+		hop += 1
+		group = (group + hop) & t.gmask
 	}
 }
 
 @(private = "file")
-cursor_next :: #force_inline proc "contextless" (v: u64, mask: u64) -> u64 {
-	return intrinsics.reverse_bits(intrinsics.reverse_bits(v | ~mask) + 1)
+scan_cursor_step :: proc "contextless" (cursor: u64, mask: u64) -> u64 {
+	bit := mask ~ (mask >> 1)
+	next := cursor & mask
+	for bit != 0 {
+		if next & bit == 0 {
+			return next | bit
+		}
+		next &~= bit
+		bit >>= 1
+	}
+	return 0
 }
 
-db_scan :: proc(cursor: u64, count: i64, pat: []u8, has_pat: bool, collect: bool) -> u64 {
-	db := cur_db()
-	clear(&key_scratch)
-	clear(&scan_expired)
-	clear(&scan_expired_ends)
-	if db_size_of(db) == 0 || cursor > max(db.scan_mask_max, db.t[0].gmask) {
+@(private = "file")
+scan_round :: proc(pass: ^Scan_Pass, cursor: u64) -> u64 {
+	db := pass.db
+	if db.rehash_idx < 0 {
+		only := &db.t[0]
+		scan_take_home(pass, only, cursor & only.gmask)
+		return scan_cursor_step(cursor, only.gmask)
+	}
+	narrow, wide := &db.t[0], &db.t[1]
+	if narrow.gmask > wide.gmask {
+		narrow, wide = wide, narrow
+	}
+	scan_take_home(pass, narrow, cursor & narrow.gmask)
+	spread := narrow.gmask ~ wide.gmask
+	at := cursor
+	for {
+		scan_take_home(pass, wide, at & wide.gmask)
+		at = scan_cursor_step(at, wide.gmask)
+		if at & spread == 0 {
+			return at
+		}
+	}
+}
+
+db_scan :: proc(cursor: u64, count: i64, pat: []u8, has_pat: bool) -> u64 {
+	pass := Scan_Pass{db = cur_db(), pattern = pat, filtered = has_pat, now = srv.now_ms}
+	scan_reset()
+	if !scan_cursor_known(pass.db, cursor) {
 		return 0
 	}
-	v := cursor
-	budget := count * 10 if count < I64_MAX / 10 else I64_MAX
-	visited: i64 = 0
-	for {
-		if db.rehash_idx < 0 {
-			t := &db.t[0]
-			visited += scan_home(db, t, v & t.gmask, pat, has_pat, collect)
-			v = cursor_next(v, t.gmask)
-		} else {
-			small := &db.t[0]
-			big := &db.t[1]
-			if small.gmask > big.gmask {
-				small, big = big, small
-			}
-			m0 := small.gmask
-			m1 := big.gmask
-			visited += scan_home(db, small, v & m0, pat, has_pat, collect)
-			for {
-				visited += scan_home(db, big, v & m1, pat, has_pat, collect)
-				v = cursor_next(v, m1)
-				if v & (m0 ~ m1) == 0 {
-					break
-				}
-			}
-		}
-		budget -= 1
-		if v == 0 || visited >= count || budget <= 0 {
+	rounds := I64_MAX if count >= I64_MAX / 10 else count * 10
+	at := cursor
+	for rounds > 0 {
+		at = scan_round(&pass, at)
+		rounds -= 1
+		if at == 0 || pass.examined >= count {
 			break
 		}
 	}
-	return v
+	return at
+}
+
+@(private = "file")
+scan_reset :: proc() {
+	clear(&scan_expired_ends)
+	clear(&scan_expired)
+	clear(&key_scratch)
+}
+
+@(private = "file")
+scan_cursor_known :: proc "contextless" (db: ^Db, cursor: u64) -> bool {
+	if db_size_of(db) == 0 {
+		return false
+	}
+	return cursor <= max(db.scan_mask_max, db.t[0].gmask)
 }
 
 @(private = "file")
@@ -1915,52 +1953,83 @@ db_htstats :: proc(b: ^[dynamic]u8, id: int) {
 	sb_str(b, "\n")
 }
 
-LRU_CLOCK_MAX :: (1 << 24) - 1
-LFU_TIME_MAX :: 65535
-LFU_INIT_VAL :: 5
-OBJ_SHARED_INTEGERS :: 10000
+SECONDS_STAMP_MASK :: (1 << 24) - 1
+MINUTE_STAMP_WRAP :: 65535
+TALLY_START :: 5
+TALLY_CEILING :: 255
+SHARED_INTEGER_LIMIT :: 10000
 
 store_no_touch: bool
 store_reconciling: bool
-lfu_policy: bool
-lfu_log_factor := 10
-lfu_decay_time := 1
+access_counts_hits: bool
+tally_log_factor := 10
+tally_decay_minutes := 1
 
-lfu_minutes :: #force_inline proc "contextless" () -> u16 {
-	return u16(srv.now_ms / 60000)
+Access_Note :: bit_field u32 {
+	stamp: u16 | 16,
+	tally: u8  | 8,
 }
 
-access_init :: #force_inline proc "contextless" () -> (clock: u16, lfu: u8) {
-	if lfu_policy {
-		return lfu_minutes(), LFU_INIT_VAL
+#assert(size_of(Access_Note) == 4)
+
+access_minute_now :: #force_inline proc "contextless" () -> u16 {
+	return u16((srv.now_ms / 60_000) & 0xFFFF)
+}
+
+seconds_note :: #force_inline proc "contextless" (seconds: u32) -> Access_Note {
+	return Access_Note{stamp = u16(seconds & 0xFFFF), tally = u8((seconds >> 16) & 0xFF)}
+}
+
+note_seconds :: #force_inline proc "contextless" (note: Access_Note) -> u32 {
+	return u32(note.tally) << 16 | u32(note.stamp)
+}
+
+seconds_before :: proc "contextless" (now: u32, idle: i64) -> u32 {
+	borrow := i64(1) if idle > i64(now) else 0
+	return u32((i64(now) - idle - borrow) & SECONDS_STAMP_MASK)
+}
+
+access_fresh_note :: #force_inline proc "contextless" () -> Access_Note {
+	if access_counts_hits {
+		return Access_Note{stamp = access_minute_now(), tally = TALLY_START}
 	}
-	c := lru_clock()
-	return u16(c >> 8), u8(c)
+	return seconds_note(access_seconds_now)
 }
 
-@(private = "file")
-meta_clock :: #force_inline proc "contextless" (mp: ^Slot_Meta) -> ^u16 {
-	return (^u16)(rawptr(uintptr(mp) + 6))
+entry_note :: #force_inline proc "contextless" (e: ^Entry) -> Access_Note {
+	return Access_Note{stamp = e.mp.stamp, tally = e.vp.small.tally}
 }
 
-entry_lru :: #force_inline proc "contextless" (e: ^Entry) -> u32 {
-	return u32(meta_clock(e.mp)^) << 8 | u32(e.vp.small.lfu)
+entry_keep_note :: #force_inline proc "contextless" (e: ^Entry, note: Access_Note) {
+	e.mp.stamp = note.stamp
+	e.vp.small.tally = note.tally
 }
 
-entry_set_lru :: #force_inline proc "contextless" (e: ^Entry, v: u32) {
-	meta_clock(e.mp)^ = u16(v >> 8)
-	e.vp.small.lfu = u8(v)
+entry_access_word :: #force_inline proc "contextless" (e: ^Entry) -> u32 {
+	return transmute(u32)entry_note(e)
+}
+
+entry_set_access_word :: #force_inline proc "contextless" (e: ^Entry, word: u32) {
+	entry_keep_note(e, transmute(Access_Note)word)
+}
+
+entry_debug_lru :: proc "contextless" (e: ^Entry) -> i64 {
+	note := entry_note(e)
+	if access_counts_hits {
+		return i64(note.stamp) << 8 | i64(note.tally)
+	}
+	return i64(note_seconds(note))
 }
 
 entry_touch :: #force_inline proc "contextless" (e: ^Entry) {
 	if store_no_touch {
 		return
 	}
-	if lfu_policy {
-		entry_lfu_update(e)
+	if access_counts_hits {
+		entry_count_hit(e)
 		return
 	}
-	entry_set_lru(e, lru_clock())
+	entry_keep_note(e, seconds_note(access_seconds_now))
 }
 
 entry_touched :: #force_inline proc "contextless" (e: ^Entry) -> ^Entry {
@@ -1969,13 +2038,11 @@ entry_touched :: #force_inline proc "contextless" (e: ^Entry) -> ^Entry {
 }
 
 entry_access_init :: proc "contextless" (e: ^Entry) {
-	ck, lf := access_init()
-	meta_clock(e.mp)^ = ck
-	e.vp.small.lfu = lf
+	entry_keep_note(e, access_fresh_note())
 }
 
 entry_idle_ms :: proc "contextless" (e: ^Entry) -> i64 {
-	return lru_idle_ms_of(entry_lru(e))
+	return lru_idle_ms_of(note_seconds(entry_note(e)))
 }
 
 entry_idle_seconds :: proc "contextless" (e: ^Entry) -> i64 {
@@ -1983,53 +2050,60 @@ entry_idle_seconds :: proc "contextless" (e: ^Entry) -> i64 {
 }
 
 entry_restore_idle :: proc "contextless" (e: ^Entry, idle: i64) {
-	abs := i64(lru_clock()) - idle
-	if abs < 0 {
-		abs += LRU_CLOCK_MAX
-	}
-	entry_set_lru(e, u32(abs & LRU_CLOCK_MAX))
+	entry_keep_note(e, seconds_note(seconds_before(access_seconds_now, idle)))
 }
 
-entry_lfu_value :: proc "contextless" (e: ^Entry) -> i64 {
-	return lfu_value_of(meta_clock(e.mp)^, e.vp.small.lfu)
+entry_restore_tally :: proc "contextless" (e: ^Entry, tally: i64) {
+	entry_keep_note(e, Access_Note{stamp = access_minute_now(), tally = u8(clamp(tally, 0, TALLY_CEILING))})
 }
 
-lru_idle_ms_of :: #force_inline proc "contextless" (lru: u32) -> i64 {
-	now := i64(lru_clock())
-	v := i64(lru)
-	if now >= v {
-		return (now - v) * 1000
-	}
-	return (now + (LRU_CLOCK_MAX - v)) * 1000
+entry_tally :: proc "contextless" (e: ^Entry) -> i64 {
+	note := entry_note(e)
+	return lfu_value_of(note.tally, note.stamp, access_minute_now(), tally_decay_minutes)
 }
 
-lfu_value_of :: proc "contextless" (clock: u16, lfu: u8) -> i64 {
-	counter := i64(lfu)
-	if lfu_decay_time <= 0 {
-		return counter
+lru_idle_ms_of :: #force_inline proc "contextless" (seconds: u32) -> i64 {
+	now := access_seconds_now
+	span := i64(now - seconds) if seconds <= now else i64(now) + SECONDS_STAMP_MASK - i64(seconds)
+	return span * 1000
+}
+
+minutes_between :: #force_inline proc "contextless" (then, now: u16) -> i64 {
+	if then <= now {
+		return i64(now - then)
 	}
-	ldt := i64(clock)
-	now := i64(lfu_minutes())
-	elapsed := now - ldt if now >= ldt else LFU_TIME_MAX - ldt + now
-	periods := elapsed / i64(lfu_decay_time)
-	if periods > 0 {
-		counter = 0 if periods > counter else counter - periods
+	return MINUTE_STAMP_WRAP - i64(then) + i64(now)
+}
+
+lfu_value_of :: proc "contextless" (tally: u8, stamp: u16, minute: u16, decay_minutes: int) -> i64 {
+	if decay_minutes <= 0 {
+		return i64(tally)
 	}
-	return counter
+	lost := minutes_between(stamp, minute) / i64(decay_minutes)
+	return max(i64(tally) - lost, 0)
+}
+
+unit_fraction :: #force_inline proc "contextless" (draw: u64) -> f64 {
+	return f64(draw >> 11) * (1.0 / f64(u64(1) << 53))
+}
+
+tally_climbs :: proc "contextless" (tally: i64, fraction: f64, log_factor: int) -> bool {
+	excess := tally - TALLY_START
+	if excess <= 0 {
+		return true
+	}
+	return fraction * (f64(excess) * f64(log_factor) + 1) < 1
 }
 
 @(cold)
-entry_lfu_update :: #force_no_inline proc "contextless" (e: ^Entry) {
-	counter := entry_lfu_value(e)
-	if counter < 255 {
-		r := f64(rng_next() >> 11) / f64(u64(1) << 53)
-		base := max(f64(counter - LFU_INIT_VAL), 0)
-		if r < 1.0 / (base * f64(lfu_log_factor) + 1) {
-			counter += 1
-		}
+entry_count_hit :: #force_no_inline proc "contextless" (e: ^Entry) {
+	minute := access_minute_now()
+	note := entry_note(e)
+	level := lfu_value_of(note.tally, note.stamp, minute, tally_decay_minutes)
+	if level < TALLY_CEILING && tally_climbs(level, unit_fraction(rng_next()), tally_log_factor) {
+		level += 1
 	}
-	e.vp.small.lfu = u8(counter)
-	meta_clock(e.mp)^ = lfu_minutes()
+	entry_keep_note(e, Access_Note{stamp = minute, tally = u8(level)})
 }
 
 db_find_raw_in :: proc(db: ^Db, key: []u8) -> ^Entry {
@@ -2067,13 +2141,13 @@ entry_shared_integer :: proc "contextless" (e: ^Entry) -> bool {
 		return false
 	}
 	v, ok := parse_i64(e.val)
-	return ok && v >= 0 && v < OBJ_SHARED_INTEGERS
+	return ok && v >= 0 && v < SHARED_INTEGER_LIMIT
 }
 
 entry_copy_string :: proc "contextless" (e: ^Entry, v: []u8, enc: Obj_Encoding) {
 	inline_ok := enc != .Raw
 	if enc == .Int {
-		if n, ok := parse_i64(v); ok && n >= 0 && n < OBJ_SHARED_INTEGERS {
+		if n, ok := parse_i64(v); ok && n >= 0 && n < SHARED_INTEGER_LIMIT {
 			inline_ok = false
 		}
 	}
@@ -2156,35 +2230,46 @@ db_evict_sample :: proc(db: ^Db, out: []Evict_Sample, volatile: bool, score: Evi
 }
 
 @(private = "file")
-table_evict_sample :: proc(db: ^Db, t: ^Table, out: []Evict_Sample, volatile: bool, score: Evict_Score) -> int #no_bounds_check {
-	if t.live == 0 {
-		return 0
+slot_evict_rank :: #force_inline proc "contextless" (meta: Slot_Meta, val: Val_Handle, score: Evict_Score) -> u64 {
+	note := Access_Note{stamp = meta.stamp, tally = val.small.tally}
+	switch score {
+	case .Lru:
+		return u64(lru_idle_ms_of(note_seconds(note)))
+	case .Lfu:
+		return u64(TALLY_CEILING - lfu_value_of(note.tally, note.stamp, access_minute_now(), tally_decay_minutes))
+	case .Ttl:
+		return max(u64) - u64(meta.expire_at)
 	}
-	want := len(out)
-	limit := t.cap if volatile else min(want * 10, t.cap)
-	mask := t.cap - 1
-	i := int(rng_next() & u64(mask))
-	n := 0
-	for steps := 0; steps < limit && n < want; steps += 1 {
-		if t.ctrl[i] & 0x80 != 0 {
-			meta := t.slots[i].meta
-			if !volatile || meta.expire_at != 0 {
-				v: u64
-				switch score {
-				case .Lru:
-					v = u64(lru_idle_ms_of(u32(meta.clock) << 8 | u32(t.slots[i].val.small.lfu)))
-				case .Lfu:
-					v = u64(255 - lfu_value_of(meta.clock, t.slots[i].val.small.lfu))
-				case .Ttl:
-					v = max(u64) - u64(meta.expire_at)
-				}
-				out[n] = {v, key_bytes(&t.slots[i].key, &db.slab)}
-				n += 1
+	return 0
+}
+
+@(private = "file")
+table_evict_sample :: proc(db: ^Db, table: ^Table, picks: []Evict_Sample, timed_only: bool, rank: Evict_Score) -> int #no_bounds_check {
+	taken, window, at := 0, 0, 0
+	if table.live > 0 {
+		window = table.cap if timed_only else min(len(picks) * 10, table.cap)
+		at = int(rng_next() & u64(table.cap - 1))
+	}
+	for window > 0 && taken < len(picks) {
+		group := u64(at >> GROUP_SHIFT)
+		lane := at & (GROUP_SLOTS - 1)
+		span := min(GROUP_SLOTS - lane, window)
+		lanes := ((u32(1) << u32(span)) - 1) << u32(lane)
+		occupied := group_full(group_load(table.ctrl, group)) & lanes
+		for occupied != 0 && taken < len(picks) {
+			slot := int(group << GROUP_SHIFT) + int(intrinsics.count_trailing_zeros(occupied))
+			occupied &= occupied - 1
+			meta := table.slots[slot].meta
+			if timed_only && meta.expire_at == 0 {
+				continue
 			}
+			picks[taken] = {slot_evict_rank(meta, table.slots[slot].val, rank), key_bytes(&table.slots[slot].key, &db.slab)}
+			taken += 1
 		}
-		i = (i + 1) & mask
+		window -= span
+		at = (at + span) & (table.cap - 1)
 	}
-	return n
+	return taken
 }
 
 db_evict_has :: proc(db: ^Db, key: []u8, volatile: bool) -> bool {

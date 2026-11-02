@@ -393,7 +393,7 @@ persist_write_rdb :: proc(w: ^rdb.Writer, aof_base: bool = false) -> bool {
 							rdb.put_len(w, u64(max(entry_idle_seconds(&e), 0)))
 						} else {
 							rdb.put_u8(w, rdb.OPCODE_FREQ)
-							rdb.put_u8(w, u8(clamp(entry_lfu_value(&e), 0, 255)))
+							rdb.put_u8(w, u8(clamp(entry_tally(&e), 0, 255)))
 						}
 					}
 					v := persist_slot_value(&db, kp, &t.slots[i].val)
@@ -1020,7 +1020,7 @@ persist_apply_access_hint :: proc(e: ^Entry, hint: Access_Hint) {
 	case .None:
 	case .Frequency:
 		if counting {
-			entry_set_lru(e, u32(lfu_minutes()) << 8 | u32(min(hint.value, 255)))
+			entry_restore_tally(e, hint.value)
 		}
 	case .Idle_Seconds:
 		if !counting {

@@ -321,7 +321,7 @@ info_server :: proc(b: ^[dynamic]u8) {
 	info_line_int(b, "uptime_in_days", uptime / 86400)
 	info_line_int(b, "hz", config_hz_current)
 	info_line_int(b, "configured_hz", cfg.hz)
-	info_line_int(b, "lru_clock", i64(lru_now))
+	info_line_int(b, "lru_clock", i64(access_seconds_now))
 	info_line_str(b, "executable", info_executable)
 	info_line_str(b, "config_file", config_file)
 	info_line_int(b, "io_threads_active", 0)
