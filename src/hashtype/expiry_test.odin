@@ -19,9 +19,8 @@ expiry_make :: proc(table: bool) -> Hash {
 }
 
 expiry_set :: proc(t: ^testing.T, h: Hash, field: []u8, deadline: u64) {
-	minimum := NO_FIELD_DEADLINE
-	deleted, updated: int
-	result := set_ex_field(h, field, deadline, .None, 0, &minimum, &deleted, &updated)
+	tally := expire_tally()
+	result := retime_field(h, field, deadline, .None, 0, &tally)
 	testing.expect_value(t, result, i64(EXPIRE_SET))
 }
 
@@ -198,8 +197,8 @@ expiry_exact_now_read_persist_and_active_contracts :: proc(t: ^testing.T) {
 		} else {
 			testing.expect_value(t, out[0], i64(-2))
 		}
-		_, res := get(h, fields[0], 100)
-		testing.expect_value(t, res, Get_Result.Ok)
+		_, read := get(h, fields[0], 100)
+		testing.expect_value(t, read, Field_Read{.Live})
 		testing.expect(t, !expire_if_needed(h, 100))
 		clear(&out)
 		testing.expect(t, persist_fields(h, fields, 100, &out))
@@ -207,8 +206,8 @@ expiry_exact_now_read_persist_and_active_contracts :: proc(t: ^testing.T) {
 		testing.expect_value(t, registered_expire(h), u64(100))
 		expiry_set(t, h, fields[0], 100)
 		quota := 1
-		next_deadline, removed := hash_type_expire(h, 100, &quota, true)
-		testing.expect(t, next_deadline == 0 && removed == 1 && quota == 0)
+		swept := sweep_and_rebook(h, 100, &quota)
+		testing.expect(t, swept.emptied && swept.next == DEADLINE_UNSET && swept.removed == 1 && quota == 0)
 		testing.expect(t, !is_registered(h))
 	}
 }
@@ -250,14 +249,14 @@ expiry_large_borrowed_pack_values_and_reordering :: proc(t: ^testing.T) {
 	testing.expect(t, set(h, borrowed_field, borrowed_value[1:], true))
 	updated_value, updated_deadline, updated_found := get_raw(h, field)
 	testing.expect(t, updated_found && updated_deadline == 500 && value_eq(updated_value, value[1:]))
-	fp, vp, _, _ = lpex_locate(h, field)
-	lpex_update_expiry(h, value_from_lp(fp).str, fp, vp, 0)
+	fp, _, _, _ = lpex_locate(h, field)
+	pack_retime(h, fp, DEADLINE_UNSET)
 	last := iterator(h)
 	last_deadline := u64(0)
 	seen_zero := false
 	for next(&last) {
 		d := current_expire(&last)
-		if d == NO_FIELD_DEADLINE {
+		if d == DEADLINE_UNSET {
 			seen_zero = true
 		} else {
 			testing.expect(t, !seen_zero && d >= last_deadline)
@@ -285,7 +284,7 @@ expiry_pack_value_updates_keep_position :: proc(t: ^testing.T) {
 	}
 	expiry_set(t, h, ordinary_bytes("b"), 300)
 	expiry_set(t, h, ordinary_bytes("d"), 300)
-	none := NO_FIELD_DEADLINE
+	none := DEADLINE_UNSET
 	expiry_pack_order(t, h, {"d", "b", "a", "c"}, {300, 300, none, none})
 	testing.expect(t, set(h, ordinary_bytes("a"), ordinary_bytes("plain")))
 	expiry_pack_order(t, h, {"d", "b", "a", "c"}, {300, 300, none, none})
@@ -335,8 +334,8 @@ expiry_active_quota_and_stale_registry_roots :: proc(t: ^testing.T) {
 	testing.expect_value(t, active_expire(&reg, max(u64), 0, &out), 0)
 	testing.expect_value(t, len(out), 0)
 	quota := 1
-	deadline, count := hash_type_expire(a, 100, &quota, true)
-	testing.expect(t, deadline == 0 && count == 1 && quota == 0)
+	swept := sweep_and_rebook(a, 100, &quota)
+	testing.expect(t, swept.emptied && swept.removed == 1 && quota == 0)
 	testing.expect_value(t, active_expire(&reg, max(u64), 10, &out), 0)
 }
 
@@ -420,9 +419,9 @@ expiry_metadata_codecs_truncation_and_duplicates :: proc(t: ^testing.T) {
 					testing.expect(t, h != nil && r.status == .Ok)
 					if h != nil {
 						testing.expect(t, h.hfe != nil && !is_registered(h))
-						testing.expect(t, h.hfe.reg_index == -1 && h.hfe.reg_expire == NO_FIELD_DEADLINE && key_ref(h) == nil)
-						testing.expect_value(t, min_expire(h, false), NO_FIELD_DEADLINE)
-						testing.expect_value(t, min_expire(h, true), u64(200))
+						testing.expect(t, h.hfe.reg_index == -1 && h.hfe.reg_expire == DEADLINE_UNSET && key_ref(h) == nil)
+						testing.expect_value(t, registered_expire(h), DEADLINE_UNSET)
+						testing.expect_value(t, earliest_deadline(h), u64(200))
 						v, deadline, found := get_raw(h, ordinary_bytes("a\x00field"))
 						testing.expect(t, found && deadline == 200 && value_eq(v, ordinary_bytes("one\x00value")))
 						testing.expect_value(t, length(h), 2)
@@ -459,7 +458,7 @@ expiry_metadata_codecs_truncation_and_duplicates :: proc(t: ^testing.T) {
 expiry_invalid_metadata_boundaries :: proc(t: ^testing.T) {
 	w: rdb.Writer
 	rdb.writer_init_mem(&w, false, false)
-	rdb.put_ms(&w, i64(NO_FIELD_DEADLINE + 1))
+	rdb.put_ms(&w, i64(FIELD_DEADLINE_MAX + 2))
 	r: rdb.Reader
 	rdb.reader_init_mem(&r, rdb.writer_bytes(&w), false)
 	h := rdb_load_meta(&r, rdb.TYPE_HASH_TABLE_EX, true)
@@ -470,7 +469,7 @@ expiry_invalid_metadata_boundaries :: proc(t: ^testing.T) {
 	rdb.writer_destroy(&w)
 	rdb.writer_init_mem(&w, false, false)
 	rdb.put_len(&w, 1)
-	rdb.put_len(&w, NO_FIELD_DEADLINE)
+	rdb.put_len(&w, FIELD_DEADLINE_MAX + 1)
 	rdb.reader_init_mem(&r, rdb.writer_bytes(&w), false)
 	h = rdb_load_meta(&r, rdb.TYPE_HASH_TABLE_EX_RC, true)
 	testing.expect(t, h == nil && r.status == .Corrupt)
@@ -493,16 +492,16 @@ expiry_condition_matrix_checks_before_immediate_delete :: proc(t: ^testing.T) {
 						expiry_set(t, h, ordinary_bytes("f"), 100)
 					}
 					allowed := condition == .None || (condition == .NX && !volatile) || (condition == .XX && volatile) || (condition == .GT && volatile && deadline > 100) || (condition == .LT && (!volatile || deadline < 100))
-					minimum := NO_FIELD_DEADLINE
-					deleted, updated: int
-					result := set_ex_field(h, ordinary_bytes("f"), deadline, condition, 10, &minimum, &deleted, &updated)
+					tally := expire_tally()
+					result := retime_field(h, ordinary_bytes("f"), deadline, condition, 10, &tally)
+					deleted, updated := tally.deleted, tally.updated
 					_, actual, found := get_raw(h, ordinary_bytes("f"))
 					if !allowed {
 						testing.expect(t, result == 0 && deleted == 0 && updated == 0 && found)
 						if volatile {
 							testing.expect_value(t, actual, u64(100))
 						} else {
-							testing.expect_value(t, actual, NO_FIELD_DEADLINE)
+							testing.expect_value(t, actual, DEADLINE_UNSET)
 						}
 					} else if deadline <= 10 {
 						testing.expect(t, result == 2 && deleted == 1 && updated == 0 && !found)
@@ -569,9 +568,9 @@ expiry_elapsed_physical_records_obey_conditions :: proc(t: ^testing.T) {
 				deadline = 50
 				expected = 2
 			}
-			minimum := NO_FIELD_DEADLINE
-			deleted, updated: int
-			result := set_ex_field(h, ordinary_bytes("f"), deadline, condition, 150, &minimum, &deleted, &updated)
+			tally := expire_tally()
+			result := retime_field(h, ordinary_bytes("f"), deadline, condition, 150, &tally)
+			deleted, updated := tally.deleted, tally.updated
 			testing.expect_value(t, result, expected)
 			_, actual, found := get_raw(h, ordinary_bytes("f"))
 			if expected == 0 {
@@ -583,22 +582,6 @@ expiry_elapsed_physical_records_obey_conditions :: proc(t: ^testing.T) {
 			}
 		}
 	}
-}
-
-@(test)
-expiry_dry_run_uses_strict_deadline_boundary :: proc(t: ^testing.T) {
-	h := expiry_make(false)
-	defer destroy(h)
-	set(h, ordinary_bytes("earlier"), ordinary_bytes("1"))
-	set(h, ordinary_bytes("equal"), ordinary_bytes("2"))
-	set(h, ordinary_bytes("persistent"), ordinary_bytes("3"))
-	expiry_set(t, h, ordinary_bytes("earlier"), 50)
-	expiry_set(t, h, ordinary_bytes("equal"), 100)
-	testing.expect_value(t, lpex_dry_run(h.lp, 50), 0)
-	testing.expect_value(t, lpex_dry_run(h.lp, 100), 1)
-	testing.expect_value(t, lpex_dry_run(h.lp, 101), 2)
-	testing.expect_value(t, length(h), 3)
-	testing.expect_value(t, min_expire(h, true), u64(50))
 }
 
 @(test)
@@ -614,16 +597,16 @@ expiry_zero_removal_preserves_cached_registry_membership :: proc(t: ^testing.T) 
 		expiry_set(t, h, ordinary_bytes("volatile"), 200)
 		registry_add(&reg, h, 100)
 		quota := 0
-		next_deadline, removed := hash_type_expire(h, 1000, &quota, true)
-		testing.expect(t, next_deadline == 200 && removed == 0 && quota == 0)
+		swept := sweep_and_rebook(h, 1000, &quota)
+		testing.expect(t, swept.next == 200 && swept.removed == 0 && quota == 0)
 		testing.expect_value(t, registered_expire(h), u64(100))
 		testing.expect_value(t, registry_len(&reg), 1)
 		quota = 5
-		next_deadline, removed = hash_type_expire(h, 199, &quota, true)
-		testing.expect(t, next_deadline == 200 && removed == 0 && quota == 5)
+		swept = sweep_and_rebook(h, 199, &quota)
+		testing.expect(t, swept.next == 200 && swept.removed == 0 && quota == 5)
 		testing.expect_value(t, registered_expire(h), u64(100))
-		next_deadline, removed = hash_type_expire(h, 200, &quota, true)
-		testing.expect(t, next_deadline == NO_FIELD_DEADLINE && removed == 1 && quota == 4)
+		swept = sweep_and_rebook(h, 200, &quota)
+		testing.expect(t, swept.next == DEADLINE_UNSET && !swept.emptied && swept.removed == 1 && quota == 4)
 		testing.expect(t, !is_registered(h))
 		testing.expect_value(t, length(h), 1)
 	}
@@ -637,7 +620,7 @@ expiry_invalid_registration_preserves_membership_and_storage :: proc(t: ^testing
 	h := expiry_make(false)
 	defer destroy(h)
 	registry_add(&source, h, 100)
-	for invalid in ([3]u64{NO_FIELD_DEADLINE, NO_FIELD_DEADLINE + 1, max(u64)}) {
+	for invalid in ([3]u64{FIELD_DEADLINE_MAX + 1, FIELD_DEADLINE_MAX + 2, DEADLINE_UNSET}) {
 		meta := h.hfe
 		index := meta.reg_index
 		registry_add(&destination, h, invalid)
@@ -660,20 +643,20 @@ expiry_invalid_registration_preserves_membership_and_storage :: proc(t: ^testing
 }
 
 @(test)
-expiry_dump_minimum_preserves_table_sentinel :: proc(t: ^testing.T) {
+expiry_dump_header_reports_zero_without_a_schedule :: proc(t: ^testing.T) {
 	reg: Registry
 	defer registry_destroy(&reg)
 	defer ordinary_cleanup()
 	h := expiry_make(true)
 	defer destroy(h)
 	set(h, ordinary_bytes("f"), ordinary_bytes("v"))
-	testing.expect_value(t, dump_min_expire(h), NO_FIELD_DEADLINE)
+	testing.expect_value(t, dump_min_expire(h), u64(0))
 	expiry_set(t, h, ordinary_bytes("f"), 200)
 	registry_add(&reg, h, 100)
 	testing.expect_value(t, dump_min_expire(h), u64(200))
 	testing.expect_value(t, registered_expire(h), u64(100))
 	set(h, ordinary_bytes("f"), ordinary_bytes("noTTL"))
-	testing.expect_value(t, dump_min_expire(h), NO_FIELD_DEADLINE)
+	testing.expect_value(t, dump_min_expire(h), u64(0))
 	testing.expect_value(t, registered_expire(h), u64(100))
 	packed := create()
 	defer destroy(packed)

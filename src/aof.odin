@@ -2500,7 +2500,7 @@ aof_tr_hincrbyfloat :: proc(c: ^Conn, argv: [][]u8, reply: []u8, field_deadline:
 		deadline = 0
 		if h != nil {
 			_, expires, found := ht.get_raw(h, argv[2])
-			if found && expires != ht.NO_FIELD_DEADLINE { deadline = i64(expires) }
+			if found && expires != ht.DEADLINE_UNSET { deadline = i64(expires) }
 		}
 	}
 	b := aof_sink(db.id, 4)
@@ -3595,7 +3595,7 @@ aof_rewrite_hash :: proc(w: ^rdb.Writer, key: []u8, h: ht.Hash, now: u64) {
 	probe := ht.iterator_live(h, now)
 	for ht.next(&probe) {
 		e := ht.current_expire(&probe)
-		if e != 0 && e != ht.NO_FIELD_DEADLINE {
+		if e != 0 && e != ht.DEADLINE_UNSET {
 			has_ttl = true
 			break
 		}
@@ -3630,7 +3630,7 @@ aof_rewrite_hash :: proc(w: ^rdb.Writer, key: []u8, h: ht.Hash, now: u64) {
 		aof_w_arg(w, field)
 		aof_w_arg(w, ht.value_bytes(ht.current_value(&it), cast(^[21]u8)&vbuf))
 		e := ht.current_expire(&it)
-		if e != 0 && e != ht.NO_FIELD_DEADLINE {
+		if e != 0 && e != ht.DEADLINE_UNSET {
 			aof_w_header(w, 6)
 			aof_w_str(w, "HPEXPIREAT")
 			aof_w_arg(w, key)

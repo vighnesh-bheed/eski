@@ -37,12 +37,12 @@ ordinary_binary_ownership :: proc(t: ^testing.T) {
 	testing.expect_value(t, length(h), 4)
 	for field, i in fields {
 		v, res := get(h, field, 0)
-		testing.expect_value(t, res, Get_Result.Ok)
+		testing.expect_value(t, res, Field_Read{.Live})
 		testing.expect(t, value_eq(v, values[i]))
 	}
 	d, expiry := duplicate(h)
 	defer destroy(d)
-	testing.expect_value(t, expiry, NO_FIELD_DEADLINE)
+	testing.expect_value(t, expiry, DEADLINE_UNSET)
 	set(h, fields[1], ordinary_bytes("changed"))
 	v, _, found := get_raw(d, fields[1])
 	testing.expect(t, found && value_eq(v, values[1]))
@@ -226,9 +226,8 @@ ordinary_expiry_and_increments :: proc(t: ^testing.T) {
 		} else {
 			convert_to_ex(h)
 		}
-		minf := NO_FIELD_DEADLINE
-		deleted, changed: int
-		testing.expect_value(t, set_ex_field(h, ordinary_bytes("f"), 100, .None, 0, &minf, &deleted, &changed), i64(1))
+		tally := expire_tally()
+		testing.expect_value(t, retime_field(h, ordinary_bytes("f"), 100, .None, 0, &tally), i64(1))
 		registry_add(&reg, h, 100)
 		v, expiry, ok := get_raw(h, ordinary_bytes("f"))
 		testing.expect(t, ok && expiry == 100 && value_eq(v, ordinary_bytes("7")))
@@ -240,7 +239,7 @@ ordinary_expiry_and_increments :: proc(t: ^testing.T) {
 		d, minexp := duplicate(h)
 		testing.expect_value(t, minexp, u64(100))
 		_, res := get(h, ordinary_bytes("f"), 101)
-		testing.expect_value(t, res, Get_Result.Expired)
+		testing.expect_value(t, res, Field_Read{.Reaped})
 		testing.expect_value(t, length(h), 1)
 		testing.expect(t, is_registered(h))
 		testing.expect_value(t, registered_expire(h), u64(100))
@@ -523,9 +522,8 @@ ordinary_metadata_copy_and_reset_accounting :: proc(t: ^testing.T) {
 			}
 			testing.expect(t, h.hfe != nil)
 			if volatile {
-				minf := NO_FIELD_DEADLINE
-				deleted, updated: int
-				set_ex_field(h, ordinary_bytes("f"), 100, .None, 0, &minf, &deleted, &updated)
+				tally := expire_tally()
+				retime_field(h, ordinary_bytes("f"), 100, .None, 0, &tally)
 				registry_add(&source_reg, h, 100)
 			}
 			source_ref, copy_ref: u8
@@ -570,9 +568,8 @@ ordinary_loaded_metadata_precedes_attachment :: proc(t: ^testing.T) {
 	defer ordinary_cleanup()
 	set(h, ordinary_bytes("f"), ordinary_bytes("v"))
 	convert_to_ex(h)
-	minf := NO_FIELD_DEADLINE
-	deleted, updated: int
-	set_ex_field(h, ordinary_bytes("f"), 100, .None, 0, &minf, &deleted, &updated)
+	tally := expire_tally()
+	retime_field(h, ordinary_bytes("f"), 100, .None, 0, &tally)
 	w: rdb.Writer
 	rdb.writer_init_mem(&w, false, false)
 	defer rdb.writer_destroy(&w)
@@ -656,7 +653,7 @@ ordinary_small_table_samples_keep_earlier_rows :: proc(t: ^testing.T) {
 ordinary_capacity_arithmetic_and_bounded_reader_count :: proc(t: ^testing.T) {
 	for n in ([4]int{0, 1, 4, 4096}) {
 		capacity, valid := checked_table_capacity(n)
-		testing.expect(t, valid && capacity >= max(n, TABLE_INITIAL_SIZE))
+		testing.expect(t, valid && capacity >= max(n, TABLE_FLOOR_SLOTS))
 		testing.expect(t, capacity <= TABLE_MAX_CAPACITY && capacity & (capacity - 1) == 0)
 	}
 	capacity, valid := checked_table_capacity(TABLE_MAX_CAPACITY)
@@ -918,10 +915,9 @@ ordinary_persistence_minimum_header_by_encoding :: proc(t: ^testing.T) {
 			minimum, ok := ordinary_saved_minimum(h)
 			testing.expect(t, ok && minimum == 0)
 		}
-		minf := NO_FIELD_DEADLINE
-		deleted, updated: int
-		set_ex_field(h, ordinary_bytes("f"), 200, .None, 0, &minf, &deleted, &updated)
-		set_ex_field(h, ordinary_bytes("g"), 900, .None, 0, &minf, &deleted, &updated)
+		tally := expire_tally()
+		retime_field(h, ordinary_bytes("f"), 200, .None, 0, &tally)
+		retime_field(h, ordinary_bytes("g"), 900, .None, 0, &tally)
 		for registered in ([2]u64{100, 300}) {
 			registry_add(&reg, h, registered)
 			minimum, ok := ordinary_saved_minimum(h)
@@ -996,9 +992,8 @@ ordinary_increments_reset_expired_last_field :: proc(t: ^testing.T) {
 				} else {
 					convert_to_ex(h)
 				}
-				minf := NO_FIELD_DEADLINE
-				deleted, updated: int
-				set_ex_field(h, ordinary_bytes("f"), 100, .None, 0, &minf, &deleted, &updated)
+				tally := expire_tally()
+				retime_field(h, ordinary_bytes("f"), 100, .None, 0, &tally)
 				registry_add(&reg, h, 100)
 				if floating {
 					increment, valid := ld.parse(ordinary_bytes("0.5"))
@@ -1021,7 +1016,7 @@ ordinary_increments_reset_expired_last_field :: proc(t: ^testing.T) {
 				testing.expect_value(t, registry_len(&reg), 0)
 				testing.expect_value(t, length(h), 1)
 				_, expiry, found := get_raw(h, ordinary_bytes("f"))
-				testing.expect(t, found && expiry == NO_FIELD_DEADLINE)
+				testing.expect(t, found && expiry == DEADLINE_UNSET)
 			}
 		}
 	}
@@ -1042,9 +1037,8 @@ ordinary_copy_preserves_stale_registered_minimum :: proc(t: ^testing.T) {
 		} else {
 			convert_to_ex(h)
 		}
-		minf := NO_FIELD_DEADLINE
-		deleted, updated: int
-		set_ex_field(h, ordinary_bytes("f"), 200, .None, 0, &minf, &deleted, &updated)
+		tally := expire_tally()
+		retime_field(h, ordinary_bytes("f"), 200, .None, 0, &tally)
 		registry_add(&reg, h, 100)
 		d, minimum := duplicate(h)
 		testing.expect_value(t, minimum, u64(100))
@@ -1084,9 +1078,8 @@ ordinary_registry_transitions_preserve_stale_headers :: proc(t: ^testing.T) {
 		} else {
 			convert_to_ex(h)
 		}
-		minf := NO_FIELD_DEADLINE
-		deleted, updated: int
-		set_ex_field(h, ordinary_bytes("a"), 200, .None, 0, &minf, &deleted, &updated)
+		tally := expire_tally()
+		retime_field(h, ordinary_bytes("a"), 200, .None, 0, &tally)
 		registry_add(&reg, h, 100)
 		set(h, ordinary_bytes("a"), ordinary_bytes("3"))
 		testing.expect(t, is_registered(h) && registered_expire(h) == 100)
@@ -1098,13 +1091,13 @@ ordinary_registry_transitions_preserve_stale_headers :: proc(t: ^testing.T) {
 		deleted_count, empty := hdel(h, [][]u8{ordinary_bytes("b")})
 		testing.expect(t, deleted_count == 1 && !empty && is_registered(h) && registered_expire(h) == 100)
 		set(h, ordinary_bytes("b"), ordinary_bytes("2"))
-		minf = NO_FIELD_DEADLINE
-		set_ex_field(h, ordinary_bytes("a"), 200, .None, 0, &minf, &deleted, &updated)
+		tally = expire_tally()
+		retime_field(h, ordinary_bytes("a"), 200, .None, 0, &tally)
 		deleted_count, empty = hdel(h, [][]u8{ordinary_bytes("zz"), ordinary_bytes("a")})
 		testing.expect(t, deleted_count == 1 && !empty && !is_registered(h))
 		set(h, ordinary_bytes("a"), ordinary_bytes("1"))
-		minf = NO_FIELD_DEADLINE
-		set_ex_field(h, ordinary_bytes("a"), 200, .None, 0, &minf, &deleted, &updated)
+		tally = expire_tally()
+		retime_field(h, ordinary_bytes("a"), 200, .None, 0, &tally)
 		registry_add(&reg, h, 100)
 		testing.expect(t, delete_field(h, ordinary_bytes("a")))
 		testing.expect(t, is_registered(h) && registered_expire(h) == 100)
@@ -1126,10 +1119,9 @@ ordinary_packed_unique_sample_keeps_pack_order :: proc(t: ^testing.T) {
 		}
 		if extended {
 			convert_to_ex(h)
-			minf := NO_FIELD_DEADLINE
-			deleted, updated: int
-			set_ex_field(h, ordinary_bytes("9"), 500, .None, 0, &minf, &deleted, &updated)
-			set_ex_field(h, ordinary_bytes("4"), 300, .None, 0, &minf, &deleted, &updated)
+			tally := expire_tally()
+			retime_field(h, ordinary_bytes("9"), 500, .None, 0, &tally)
+			retime_field(h, ordinary_bytes("4"), 300, .None, 0, &tally)
 		}
 		position: [12]int
 		it := iterator(h)
@@ -1261,15 +1253,14 @@ ordinary_blob_replacement_preserves_borrowed_inputs :: proc(t: ^testing.T) {
 	value, _, _ := get_raw(h, key)
 	testing.expect(t, set(h, key, value.str[1:], true))
 	after, expiry, found := get_raw(h, key)
-	testing.expect(t, found && expiry == NO_FIELD_DEADLINE && value_eq(after, ordinary_bytes("ield\x00value")))
-	minf := NO_FIELD_DEADLINE
-	deleted, updated: int
-	set_ex_field(h, key, 200, .None, 0, &minf, &deleted, &updated)
+	testing.expect(t, found && expiry == DEADLINE_UNSET && value_eq(after, ordinary_bytes("ield\x00value")))
+	tally := expire_tally()
+	retime_field(h, key, 200, .None, 0, &tally)
 	borrowed, _, _ := get_raw(h, key)
 	set(h, borrowed.str, key)
 	set(h, key, ordinary_bytes("resized replacement"), true)
 	new_value, new_expiry, present := get_raw(h, key)
 	testing.expect(t, present && new_expiry == 200 && value_eq(new_value, ordinary_bytes("resized replacement")))
 	independent, no_expiry, exists_new := get_raw(h, ordinary_bytes("ield\x00value"))
-	testing.expect(t, exists_new && no_expiry == NO_FIELD_DEADLINE && value_eq(independent, key))
+	testing.expect(t, exists_new && no_expiry == DEADLINE_UNSET && value_eq(independent, key))
 }

@@ -24,12 +24,12 @@ parse_incrbyfloat_increment :: proc "contextless" (arg: []u8) -> (ld.F80, Error)
 }
 
 incrby :: proc(h: Hash, field: []u8, incr: i64, now: u64) -> (result: i64, err: Error) {
-	v, res := get(h, field, now)
-	if res == .Expired_Hash {
+	v, read := get(h, field, now)
+	if .Emptied in read {
 		reset(h)
 	}
 	old: i64
-	if res == .Ok {
+	if .Live in read {
 		if v.is_int {
 			old = v.ival
 		} else {
@@ -51,12 +51,12 @@ incrby :: proc(h: Hash, field: []u8, incr: i64, now: u64) -> (result: i64, err: 
 }
 
 incrbyfloat :: proc(h: Hash, field: []u8, incr: ld.F80, buf: []u8, now: u64) -> (result: []u8, err: Error) {
-	v, res := get(h, field, now)
-	if res == .Expired_Hash {
+	v, read := get(h, field, now)
+	if .Emptied in read {
 		reset(h)
 	}
 	old := ld.zero(false)
-	if res == .Ok {
+	if .Live in read {
 		if v.is_int {
 			old = ld.from_i64(v.ival)
 		} else {

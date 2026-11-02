@@ -4,9 +4,9 @@ import lp "../listpack"
 
 Iterator :: struct {
 	h: Hash,
-	fptr: [^]u8,
-	vptr: [^]u8,
-	tptr: [^]u8,
+	at_field: [^]u8,
+	at_value: [^]u8,
+	at_deadline: [^]u8,
 	idx: int,
 	expire: u64,
 	skip_expired: bool,
@@ -46,7 +46,7 @@ next :: proc "contextless" (it: ^Iterator) -> bool {
 		return false
 	}
 	for {
-		it.expire = NO_FIELD_DEADLINE
+		it.expire = DEADLINE_UNSET
 		if it.h.encoding == .Hashtable {
 			for {
 				slots, cap := table_bank(it.h.table, it.bank)
@@ -67,34 +67,34 @@ next :: proc "contextless" (it: ^Iterator) -> bool {
 			}
 		} else {
 			if it.idx == -1 {
-				it.fptr = pack_first(it.h.lp)
+				it.at_field = pack_first(it.h.lp)
 			} else {
-				last := it.vptr
+				last := it.at_value
 				if it.h.encoding == .Listpack_Ex {
-					last = it.tptr
+					last = it.at_deadline
 				}
-				it.fptr = pack_next(last)
+				it.at_field = pack_next(last)
 			}
-			if it.fptr == nil {
+			if it.at_field == nil {
 				return false
 			}
 			it.idx += 1
-			it.vptr = pack_next(it.fptr)
-			if it.vptr == nil {
+			it.at_value = pack_next(it.at_field)
+			if it.at_value == nil {
 				return false
 			}
 			if it.h.encoding == .Listpack_Ex {
-				it.tptr = pack_next(it.vptr)
-				if it.tptr == nil {
+				it.at_deadline = pack_next(it.at_value)
+				if it.at_deadline == nil {
 					return false
 				}
-				v := value_from_lp(it.tptr)
+				v := value_from_lp(it.at_deadline)
 				if v.ival != 0 {
 					it.expire = u64(v.ival)
 				}
 			}
 		}
-		if !it.skip_expired || it.expire == NO_FIELD_DEADLINE || it.expire >= it.now {
+		if !it.skip_expired || it.expire == DEADLINE_UNSET || it.expire >= it.now {
 			return true
 		}
 	}
@@ -104,23 +104,16 @@ current_field :: proc "contextless" (it: ^Iterator) -> Value {
 	if it.h.encoding == .Hashtable {
 		return Value{str = blob_field(it.blob)}
 	}
-	return value_from_lp(it.fptr)
+	return value_from_lp(it.at_field)
 }
 
 current_value :: proc "contextless" (it: ^Iterator) -> Value {
 	if it.h.encoding == .Hashtable {
 		return Value{str = blob_value(it.blob)}
 	}
-	return value_from_lp(it.vptr)
+	return value_from_lp(it.at_value)
 }
 
 current_expire :: proc "contextless" (it: ^Iterator) -> u64 {
 	return it.expire
-}
-
-current :: proc "contextless" (it: ^Iterator, what: int) -> Value {
-	if what == OBJ_HASH_KEY {
-		return current_field(it)
-	}
-	return current_value(it)
 }

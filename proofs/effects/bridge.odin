@@ -31,10 +31,10 @@ proof_hash_state :: proc(h: ht.Hash, live: bool = false) {
 		if !found { continue }
 		if live {
 			_, status := ht.get(h, buf[:n], u64(srv.now_ms), false)
-			if status != .Ok { continue }
+			if .Live not_in status { continue }
 		}
 		vb: [21]u8
-		if deadline == ht.NO_FIELD_DEADLINE { deadline = 0 }
+		if deadline == ht.DEADLINE_UNSET { deadline = 0 }
 		fmt.printf("%d=%s@%d,", f, ht.value_bytes(v, &vb), deadline)
 	}
 }
@@ -173,7 +173,7 @@ proof_exact_now_fixtures :: proc() {
 		out: [dynamic]i64
 		ht.expire_fields(&reg, nil, h, [][]u8{proof_bytes("0")}, 100, .None, 1, &out)
 		_, status := ht.get(h, proof_bytes("0"), 100, false)
-		assert(status == .Ok && !ht.expire_if_needed(h, 100))
+		assert(.Live in status && !ht.expire_if_needed(h, 100))
 		clear(&out)
 		ht.ttl_fields(h, [][]u8{proof_bytes("0")}, .Pttl, 100, &out)
 		ttl := out[0]

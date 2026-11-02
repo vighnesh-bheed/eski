@@ -25,8 +25,8 @@ vstr :: proc(v: ht.Value) -> string {
 NOW :: u64(1_800_000_000_000)
 
 get_s :: proc(h: ht.Hash, f: string, now: u64 = NOW) -> (string, bool) {
-	v, res := ht.get(h, b(f), now)
-	if res != .Ok {
+	v, read := ht.get(h, b(f), now)
+	if .Live not_in read {
 		return "", false
 	}
 	return vstr(v), true

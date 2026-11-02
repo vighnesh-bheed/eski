@@ -128,9 +128,9 @@ hash_sort_field :: proc(key: []u8, e: ^Entry, field: []u8) -> (val: []u8, ok: bo
 	if h == nil {
 		return nil, false
 	}
-	v, res := ht.get(h, field, hash_now())
-	if res != .Ok {
-		hash_lazy(key, e, h, res)
+	v, read := ht.get(h, field, hash_now())
+	if .Live not_in read {
+		hash_lazy(key, e, h, read)
 		return nil, false
 	}
 	return ht.value_bytes(v, &hash_sort_buf), true
@@ -139,7 +139,7 @@ hash_sort_field :: proc(key: []u8, e: ^Entry, field: []u8) -> (val: []u8, ok: bo
 hash_copy_dup :: proc(src: ^Entry) -> (obj: rawptr, min_expire: u64, ok: bool) {
 	h := ht.Hash(entry_object(src, .Hash))
 	if h == nil {
-		return nil, ht.NO_FIELD_DEADLINE, false
+		return nil, ht.DEADLINE_UNSET, false
 	}
 	d, at := ht.duplicate(h)
 	d.acct = ht.memory_usage(d)
@@ -150,7 +150,7 @@ hash_copy_attach :: proc(dst: ^Entry, key: []u8, obj: rawptr, min_expire: u64) {
 	h := ht.Hash(obj)
 	entry_object_attach(dst, h, .Hash, hash_obj_encoding(h), h.acct)
 	ht.maintenance_bind(h, dst.db.hreg)
-	if min_expire != ht.NO_FIELD_DEADLINE {
+	if min_expire != ht.DEADLINE_UNSET {
 		ht.set_key_ref(h, hash_key_ref_new(key, dst.db.hreg))
 		ht.registry_add(dst.db.hreg, h, min_expire)
 	}

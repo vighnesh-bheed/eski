@@ -42,18 +42,18 @@ cmd_hsetnx :: proc(c: ^Conn, argv: [][]u8) {
 		reply_wrongtype(c)
 		return
 	}
-	_, res := ht.get(h, argv[2], hash_now())
-	if res == .Ok {
+	_, read := ht.get(h, argv[2], hash_now())
+	if .Live in read {
 		reply_int(c, 0)
 		return
 	}
-	if res == .Expired || res == .Expired_Hash {
+	if .Reaped in read {
 		stat_expired_subkeys += 1
-		if res == .Expired_Hash {
+		if .Emptied in read {
 			hash_reset(e, h)
 		}
-		hash_notify_lazy(key, res)
-		if res == .Expired_Hash {
+		hash_notify_lazy(key, read)
+		if .Emptied in read {
 			notify(.New, "new", key)
 		}
 	}
@@ -76,12 +76,12 @@ cmd_hget :: proc(c: ^Conn, argv: [][]u8) {
 		reply_null(c)
 		return
 	}
-	v, res := ht.get(h, argv[2], hash_now(), !expiry_deletion_paused())
-	if res == .Ok {
+	v, read := ht.get(h, argv[2], hash_now(), !expiry_deletion_paused())
+	if .Live in read {
 		reply_hash_value(c, v)
 	} else {
 		reply_null(c)
-		hash_lazy(key, e, h, res)
+		hash_lazy(key, e, h, read)
 	}
 }
 
@@ -108,17 +108,17 @@ cmd_hmget :: proc(c: ^Conn, argv: [][]u8) {
 			reply_null(c)
 			continue
 		}
-		v, res := ht.get(h, field, now, !expiry_deletion_paused())
-		if res == .Ok {
+		v, read := ht.get(h, field, now, !expiry_deletion_paused())
+		if .Live in read {
 			reply_hash_value(c, v)
 		} else {
 			reply_null(c)
-			if res == .Expired || res == .Expired_Hash {
+			if .Reaped in read {
 				stat_expired_subkeys += 1
 				signal_key_expired(key, cur_db())
 				changed = true
-				empty = res == .Expired_Hash
-				notify_expired = notify_expired || res == .Expired
+				empty = .Emptied in read
+				notify_expired = notify_expired || .Emptied not_in read
 			}
 		}
 	}
@@ -199,9 +199,9 @@ cmd_hexists :: proc(c: ^Conn, argv: [][]u8) {
 		reply_int(c, 0)
 		return
 	}
-	found, res := ht.exists(h, argv[2], hash_now(), !expiry_deletion_paused())
+	found, read := ht.exists(h, argv[2], hash_now(), !expiry_deletion_paused())
 	reply_int(c, i64(found))
-	hash_lazy(key, e, h, res)
+	hash_lazy(key, e, h, read)
 }
 
 cmd_hstrlen :: proc(c: ^Conn, argv: [][]u8) {
@@ -215,9 +215,9 @@ cmd_hstrlen :: proc(c: ^Conn, argv: [][]u8) {
 		reply_int(c, 0)
 		return
 	}
-	n, res := ht.field_strlen(h, argv[2], hash_now(), !expiry_deletion_paused())
+	n, read := ht.field_strlen(h, argv[2], hash_now(), !expiry_deletion_paused())
 	reply_int(c, i64(n))
-	hash_lazy(key, e, h, res)
+	hash_lazy(key, e, h, read)
 }
 
 cmd_hdel :: proc(c: ^Conn, argv: [][]u8) {
@@ -255,14 +255,14 @@ hash_incr_prepare :: proc(c: ^Conn, key: []u8, field: []u8) -> (e: ^Entry, h: ht
 		reply_wrongtype(c)
 		return nil, nil, false
 	}
-	_, res := ht.get(h, field, hash_now())
-	if res == .Expired || res == .Expired_Hash {
+	_, read := ht.get(h, field, hash_now())
+	if .Reaped in read {
 		stat_expired_subkeys += 1
-		if res == .Expired_Hash {
+		if .Emptied in read {
 			hash_reset(e, h)
 		}
-		hash_notify_lazy(key, res)
-		if res == .Expired_Hash {
+		hash_notify_lazy(key, read)
+		if .Emptied in read {
 			notify(.New, "new", key)
 		}
 	}

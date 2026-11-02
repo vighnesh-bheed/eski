@@ -23,37 +23,38 @@ hash_move_registry :: proc "contextless" (h: ht.Hash, from: ^Db, to: ^Db) {
 	hash_key_ref_move(ht.key_ref(h), to.hreg)
 	ht.maintenance_bind(h, to.hreg)
 	minimum := ht.registered_expire(h)
-	if minimum == ht.NO_FIELD_DEADLINE || from.hreg == to.hreg {
+	if minimum == ht.DEADLINE_UNSET || from.hreg == to.hreg {
 		return
 	}
 	ht.registry_remove(h)
 	ht.registry_add(to.hreg, h, minimum)
 }
 
-hash_notify_lazy :: proc(key: []u8, res: ht.Get_Result) {
-	if res != .Expired && res != .Expired_Hash {
+hash_notify_lazy :: proc(key: []u8, read: ht.Field_Read) {
+	if .Reaped not_in read {
 		return
 	}
 	notify(.Hash, "hexpired", key)
-	if res == .Expired_Hash {
+	if .Emptied in read {
 		notify(.Generic, "del", key)
 	}
 	signal_key_expired(key, cur_db())
 }
 
-hash_lazy :: proc(key: []u8, e: ^Entry, h: ht.Hash, res: ht.Get_Result) -> (deleted: bool) {
-	if res == .Expired {
-		stat_expired_subkeys += 1
-		hash_sync(e.db, h)
-		hash_notify_lazy(key, res)
-	} else if res == .Expired_Hash {
+hash_lazy :: proc(key: []u8, e: ^Entry, h: ht.Hash, read: ht.Field_Read) -> (deleted: bool) {
+	if .Emptied in read {
 		stat_expired_subkeys += 1
 		owned := make([]u8, len(key))
 		defer delete(owned)
 		copy(owned, key)
 		db_remove_in(e.db, owned)
-		hash_notify_lazy(owned, res)
+		hash_notify_lazy(owned, read)
 		return true
+	}
+	if .Reaped in read {
+		stat_expired_subkeys += 1
+		hash_sync(e.db, h)
+		hash_notify_lazy(key, read)
 	}
 	return false
 }
@@ -70,14 +71,14 @@ hash_expire_if_needed :: proc(key: []u8, e: ^Entry, h: ht.Hash) -> (deleted: boo
 		defer delete(owned)
 		copy(owned, key)
 		db_remove_in(e.db, owned)
-		hash_notify_lazy(owned, .Expired_Hash)
+		hash_notify_lazy(owned, {.Reaped, .Emptied})
 		return true
 	}
 	removed := before - ht.length(h)
 	if removed > 0 {
 		stat_expired_subkeys += i64(removed)
 		hash_done(e, h)
-		hash_notify_lazy(key, .Expired)
+		hash_notify_lazy(key, {.Reaped})
 	}
 	return false
 }
