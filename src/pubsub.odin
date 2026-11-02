@@ -67,6 +67,7 @@ ps_new_entry :: proc(kind: Ps_Kind, name: []u8) -> ^Ps_Entry {
 	if kind == .Pattern {
 		append(&ps_patterns, e)
 	}
+	mem_registry_changed()
 	return e
 }
 
@@ -241,6 +242,7 @@ ps_reply_notice :: proc(c: ^Conn, kind: Ps_Kind, sub: bool, name: []u8, has_name
 	append(b, ':')
 	ps_put_int(b, count)
 	append(b, '\r', '\n')
+	mem_registry_changed()
 	ps_emit(c, b[:])
 }
 
@@ -293,6 +295,7 @@ ps_publish :: proc(channel: []u8, message: []u8, kind: Ps_Kind) -> int {
 		delete(ps_frame)
 		ps_frame = nil
 	}
+	mem_registry_changed()
 	return receivers
 }
 

@@ -154,10 +154,11 @@ lua_function_find :: proc(name: []u8, omit: ^Lua_Library = nil) -> (library: ^Lu
 }
 
 lua_library_memory :: proc "contextless" () -> (host, vm: int) {
-	host = lua_library_host_bytes + lua_retirement_count*size_of(Lua_Retirement)
-	host += (len(lua_library_index)+len(lua_function_index))*size_of(rawptr)
-	vm = int(lr.functions_stats().current_bytes)
-	return
+	return lua_library_host_memory(), int(lr.functions_stats().current_bytes)
+}
+
+lua_library_host_memory :: #force_inline proc "contextless" () -> int {
+	return lua_library_host_bytes + lua_retirement_count*size_of(Lua_Retirement) + (len(lua_library_index)+len(lua_function_index))*size_of(rawptr)
 }
 
 lua_library_free :: proc(library: ^Lua_Library) {
@@ -165,6 +166,7 @@ lua_library_free :: proc(library: ^Lua_Library) {
 		return
 	}
 	lr.library_free(library.handle)
+	mem_registry_changed()
 	retirement := library.retirement
 	count := library.count
 	if library.accounted {
@@ -263,6 +265,7 @@ lua_library_flush :: proc(asynchronous: bool, reset_engine: bool = true) {
 	}
 	if reset_engine {
 		lr.functions_reset()
+		mem_registry_changed()
 	}
 	if !deferred {
 		lua_library_reap(max(int))
@@ -322,6 +325,7 @@ lua_library_prepare :: proc(code: []u8, client: ^Conn) -> ^Lua_Library {
 		return nil
 	}
 	options := lua_options()
+	defer mem_registry_changed()
 	loaded := lr.library_load(lua_arg(body), &options)
 	defer lr.free_result(&loaded.result)
 	if loaded.library == nil || loaded.result.status != lr.OK {

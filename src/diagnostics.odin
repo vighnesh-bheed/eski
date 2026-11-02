@@ -79,7 +79,9 @@ diagnostics_hex :: proc "contextless" (line: ^Log_Line, value: uintptr) {
 
 diagnostics_capture_command :: proc(name: string, arguments: [][]u8) {
 	if intrinsics.atomic_load_explicit(&diagnostic_initialized, .Acquire) == 0 { return }
-	intrinsics.atomic_add_explicit(&diagnostic_sequence, 1, .Acq_Rel)
+	sequence := intrinsics.atomic_load_explicit(&diagnostic_sequence, .Relaxed)
+	intrinsics.atomic_store_explicit(&diagnostic_sequence, sequence + 1, .Relaxed)
+	intrinsics.atomic_thread_fence(.Release)
 	n := min(len(name), len(diagnostic_command_bytes))
 	for index in 0 ..< n {
 		value := name[index]
@@ -91,7 +93,7 @@ diagnostics_capture_command :: proc(name: string, arguments: [][]u8) {
 	for index in 0 ..< min(len(arguments), len(diagnostic_argument_lengths)) {
 		intrinsics.atomic_store_explicit(&diagnostic_argument_lengths[index], i64(len(arguments[index])), .Relaxed)
 	}
-	intrinsics.atomic_add_explicit(&diagnostic_sequence, 1, .Release)
+	intrinsics.atomic_store_explicit(&diagnostic_sequence, sequence + 2, .Release)
 }
 
 diagnostics_command_line :: proc "contextless" (flags: u32) {
@@ -103,7 +105,8 @@ diagnostics_command_line :: proc "contextless" (flags: u32) {
 	count := intrinsics.atomic_load_explicit(&diagnostic_argument_count, .Relaxed)
 	lengths: [16]i64
 	for index in 0 ..< min(max(int(count), 0), len(lengths)) { lengths[index] = intrinsics.atomic_load_explicit(&diagnostic_argument_lengths[index], .Relaxed) }
-	if sequence != intrinsics.atomic_load_explicit(&diagnostic_sequence, .Acquire) { return }
+	intrinsics.atomic_thread_fence(.Acquire)
+	if sequence != intrinsics.atomic_load_explicit(&diagnostic_sequence, .Relaxed) { return }
 	line: Log_Line
 	ll_str(&line, "Coordinator command: argv[0]=")
 	ll_bytes(&line, name[:n])

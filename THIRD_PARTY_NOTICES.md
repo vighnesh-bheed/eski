@@ -130,7 +130,7 @@ src/server.odin: server_open_listeners from listenToPort in src/server.c, and qb
 
 src/dispatch.odin: rename_command from the rename-command directive of loadServerConfigFromString.
 
-src/evict.odin: evict_pool_insert and evict_pool_populate from evictionPoolPopulate, perform_evictions, evict_pick_pool, evict_pick_random, evict_delete and evict_update_metrics from performEvictions, evict_time_limit_us from evictionTimeLimitUs, memory_state_over from getMaxmemoryState, and evict_timer_step from evictionTimeProc and startEvictionTimeProc in src/evict.c.
+src/evict.odin: evict_pool_insert and evict_pool_populate from evictionPoolPopulate, perform_evictions, evict_over_limit, evict_pick_pool, evict_pick_random, evict_delete and evict_update_metrics from performEvictions, evict_time_limit_us from evictionTimeLimitUs, memory_state_over from getMaxmemoryState, and evict_timer_step from evictionTimeProc and startEvictionTimeProc in src/evict.c.
 
 src/memory.odin: mem_overhead from getMemoryOverheadData, memory_doctor from getMemoryDoctorReport and cmd_memory from memoryCommand in src/object.c, info_memory from the memory section of genValkeyInfoString, mem_cron from cronUpdateMemoryStats, sb_human from bytesToHuman, and client_bucket, client_bucket_note and client_buckets_apply from getMemUsageBucket, updateClientMemUsageAndBucket, removeClientFromMemUsageBucket and clientEvictionAllowed in src/server.c, mem_not_counted from freeMemoryGetNotCountedMemory in src/evict.c, and client_eviction_limit and evict_clients from getClientEvictionLimit and evictClients, and the bucket removal of CLIENT NO-EVICT from clientNoEvictCommand, in src/networking.c.
 

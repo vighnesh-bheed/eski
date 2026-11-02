@@ -565,6 +565,7 @@ watch_key :: proc(c: ^Conn, db: ^Db, key: []u8) {
 		copy(owned, key)
 		wk.key = string(owned)
 		m[wk.key] = wk
+		mem_registry_changed()
 		watch_total += 1
 		if watch_total == 1 {
 			key_hooks_update()

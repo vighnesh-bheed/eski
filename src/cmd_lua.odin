@@ -120,13 +120,19 @@ lua_outer_persistence_write :: proc(cmd: ^Command, argv: [][]u8) -> bool {
 }
 
 lua_memory_used :: proc "contextless" () -> int {
-	library_host, library_vm := lua_library_memory()
-	eval_vm := int(lr.eval_stats().current_bytes)
-	total := lua_cache_bytes + lua_retired_bytes + library_host + library_vm + eval_vm + int(lr.detached_memory())
+	return lua_host_memory_used() + lua_vm_memory_used()
+}
+
+lua_host_memory_used :: #force_inline proc "contextless" () -> int {
+	total := lua_cache_bytes + lua_retired_bytes + lua_library_host_memory()
 	if run := lua_active; run != nil {
 		total += size_of(Lua_Invocation) + run.host_bytes + run.temporary_bytes + run.capture.wcap + lua_busy_memory(&run.busy) + cap(run.debug.input) + cap(run.debug.frame) + len(run.debug.parser.args)*size_of([]u8)
 	}
 	return total
+}
+
+lua_vm_memory_used :: proc "contextless" () -> int {
+	return int(lr.functions_stats().current_bytes) + int(lr.eval_stats().current_bytes) + int(lr.detached_memory())
 }
 
 lua_note_runtime :: proc(run: ^Lua_Invocation, stats: ^lr.Stats) {
@@ -253,6 +259,7 @@ lua_source_compile :: proc(client: ^Conn, body: []u8) -> bool {
 		return false
 	}
 	options := lua_options()
+	defer mem_registry_changed()
 	result := lr.compile(lua_arg(text), &options)
 	defer lr.free_result(&result)
 	lua_connection_time_floor = max(lua_connection_time_floor, lua_wallclock_ms())
@@ -598,6 +605,7 @@ lua_eval_common :: proc(client: ^Conn, argv: [][]u8, digest_only, readonly: bool
 }
 
 lua_invoke :: proc(client: ^Conn, argv: [][]u8, numkeys: int, text: []u8, readonly: bool, flags: u32, flagged: bool, library: ^Lua_Library, index: int, identifier: []u8) {
+	defer mem_registry_changed()
 	keyspace_fence()
 	debug_mode := client.lua_debug_mode if library == nil else 0
 	debug_child := false
@@ -806,6 +814,7 @@ cmd_script :: proc(client: ^Conn, argv: [][]u8) {
 			return
 		}
 		lr.reset()
+		mem_registry_changed()
 		lua_cache_flush(asynchronous)
 		reply_ok(client)
 	case eq_nocase(sub, "kill"):

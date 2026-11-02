@@ -119,6 +119,19 @@ memory_state_over :: #force_inline proc "contextless" () -> (over: bool, tofree:
 	return true, used - int(maxmemory_bytes)
 }
 
+memory_state_over_current :: #force_inline proc "contextless" () -> bool {
+	if maxmemory_bytes == 0 || u64(mem_used_current()) <= maxmemory_bytes {
+		return false
+	}
+	return memory_state_over_exact()
+}
+
+@(cold)
+memory_state_over_exact :: #force_no_inline proc "contextless" () -> bool {
+	over, _ := memory_state_over()
+	return over
+}
+
 @(private = "file")
 evict_memory_ok :: proc() -> bool {
 	over, _ := memory_state_over()
@@ -281,12 +294,17 @@ perform_evictions :: proc() -> Evict_Result {
 	if aof.loading || srv.pause_end_ms > srv.now_ms {
 		return .Ok
 	}
-	over, tofree := memory_state_over()
-	if !over {
+	if !memory_state_over_current() {
 		return evict_update_metrics(.Ok)
 	}
+	return evict_over_limit()
+}
+
+@(private = "file")
+@(cold)
+evict_over_limit :: #force_no_inline proc() -> Evict_Result {
 	keyspace_fence()
-	over, tofree = memory_state_over()
+	over, tofree := memory_state_over()
 	if !over {
 		return evict_update_metrics(.Ok)
 	}

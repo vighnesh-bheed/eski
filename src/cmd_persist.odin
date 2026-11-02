@@ -1355,6 +1355,7 @@ persist_finish_shutdown :: proc(flags: Shutdown_Flags) -> bool {
 	if lua_active == nil {
 		lua_library_flush(false)
 		lr.reset()
+		mem_registry_changed()
 	}
 	remove_pid_file()
 	plog(LOG_WARNING, "Eski is now ready to exit, bye bye...")
