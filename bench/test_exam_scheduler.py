@@ -26,6 +26,20 @@ def sample():
                 availability=dict(cpu=True, process_scan=True, ac=True, throttle=True))
 
 
+def server_sample():
+    value = sample()
+    value.update(ac_online={}, power_supply={})
+    value['availability'].update(ac=False, power_supply=True)
+    return value
+
+
+def laptop_sample():
+    value = sample()
+    value['power_supply'] = {'AC': dict(type='Mains', online=1), 'BAT0': dict(type='Battery', online=None)}
+    value['availability']['power_supply'] = True
+    return value
+
+
 class Clock:
     latest = 100
 
@@ -552,6 +566,97 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(state['cases'][0]['state'], 'invalid')
         self.assertIn('latency_sanity_unmeasured', state['cases'][0]['attempts'][0]['details']['reasons'])
 
+    def case_samples(self, engine, row):
+        return [json.loads(line) for line in (engine.output / row['attempts'][0]['directory'] / 'metrics.jsonl').read_text().splitlines()]
+
+    def test_mains_power_source_is_the_default_and_keeps_the_mains_rule(self):
+        self.assertEqual(self.args.power_source, 'mains')
+        self.assertEqual(self.scheduler().model['identity']['config']['power_source'], 'mains')
+        undeclared = type('Args', (), dict(max_temp_c=90))()
+        for args in (self.args, undeclared):
+            with self.subTest(args=args):
+                self.assertEqual(scheduler.sample_problems(laptop_sample(), args), [])
+                self.assertEqual(scheduler.sample_problems(dict(laptop_sample(), ac_online={'AC': 0}), args), ['ac_not_online'])
+                self.assertEqual(scheduler.sample_problems(server_sample(), args), ['ac_sensor_unavailable'])
+        self.args.power_source = 'battery'
+        with self.assertRaisesRegex(ValueError, 'power source must be one of mains, no-power-supply-devices'):
+            self.scheduler()
+
+    def test_no_power_supply_devices_accepts_only_an_empty_readable_class(self):
+        self.args.power_source = 'no-power-supply-devices'
+        self.assertEqual(scheduler.sample_problems(server_sample(), self.args), [])
+        cases = [({'BAT0': dict(type='Battery', online=None)}, ['battery_present']),
+                 ({'AC': dict(type='Mains', online=1)}, ['mains_present']),
+                 ({'ucsi-source-psy-USBC000:001': dict(type='USB', online=1)}, ['power_supply_device_present']),
+                 ({'BAT0': dict(type='Battery', online=None), 'AC': dict(type='Mains', online=0), 'unknown': dict(type=None, online=None)},
+                  ['battery_present', 'mains_present', 'power_supply_device_present'])]
+        for devices, expected in cases:
+            with self.subTest(devices=devices):
+                self.assertEqual(scheduler.sample_problems(dict(server_sample(), power_supply=devices), self.args), expected)
+        self.assertEqual(scheduler.sample_problems(laptop_sample(), self.args), ['battery_present', 'mains_present'])
+        unreadable = server_sample()
+        unreadable['power_supply'] = None
+        unreadable['availability']['power_supply'] = False
+        for row in (unreadable, sample()):
+            with self.subTest(row=row):
+                self.assertEqual(scheduler.sample_problems(row, self.args), ['power_supply_telemetry_unavailable'])
+
+    def test_no_power_supply_devices_holds_a_laptop_before_any_case(self):
+        self.args.power_source = 'no-power-supply-devices'
+        self.reader.rows = [laptop_sample()]
+        state = self.scheduler().run()
+        self.assertEqual(state['state'], 'paused')
+        self.assertEqual(state['cases'][0]['state'], 'pending')
+        self.assertEqual(state['pause']['reasons'], ['battery_present', 'mains_present'])
+        self.assertEqual(self.cleanups, [])
+
+    def test_battery_appearing_mid_case_invalidates_under_no_power_supply_devices(self):
+        self.args.power_source = 'no-power-supply-devices'
+        self.reader.rows = [server_sample()]
+        original = self.reader.sample
+        def battery(*args):
+            value = original(*args)
+            if args:
+                value['power_supply'] = {'BAT0': dict(type='Battery', online=None)}
+            return value
+        self.reader.sample = battery
+        engine = self.scheduler()
+        state = engine.run()
+        self.assertEqual(engine.model['identity']['config']['power_source'], 'no-power-supply-devices')
+        self.assertTrue(all(row['state'] == 'invalid' for row in state['cases']))
+        self.assertTrue(all('battery_present' in row['attempts'][0]['details']['reasons'] for row in state['cases']))
+        gates = [json.loads(line) for line in (engine.output / 'gates.jsonl').read_text().splitlines()]
+        self.assertTrue(gates)
+        for record in gates:
+            self.assertEqual((record['problems'], record['sample']['power_source'], record['sample']['power_supply']), ([], 'no-power-supply-devices', {}))
+        for row in state['cases']:
+            samples = self.case_samples(engine, row)
+            self.assertTrue(samples)
+            self.assertTrue(all(value['power_source'] == 'no-power-supply-devices' and 'BAT0' in value['power_supply'] for value in samples))
+
+    def test_server_without_power_supply_devices_measures_under_its_declared_gate(self):
+        self.args.power_source = 'no-power-supply-devices'
+        self.reader.rows = [server_sample()]
+        state = self.scheduler().run()
+        self.assertEqual(state['state'], 'finished')
+        self.assertTrue(all(row['state'] == 'successful' for row in state['cases']))
+
+    def test_mains_device_disappearing_mid_case_invalidates_under_mains(self):
+        original = self.reader.sample
+        def unplugged(*args):
+            value = original(*args)
+            if args:
+                value['ac_online'] = {}
+                value['availability']['ac'] = False
+            return value
+        self.reader.sample = unplugged
+        engine = self.scheduler()
+        state = engine.run()
+        self.assertTrue(all(row['state'] == 'invalid' for row in state['cases']))
+        self.assertTrue(all('ac_sensor_unavailable' in row['attempts'][0]['details']['reasons'] for row in state['cases']))
+        for row in state['cases']:
+            self.assertTrue(all(value['power_source'] == 'mains' for value in self.case_samples(engine, row)))
+
 
 class MetricsTests(unittest.TestCase):
     def test_physical_sibling_overlap(self):
@@ -659,6 +764,31 @@ class MetricsTests(unittest.TestCase):
             rows = scheduler.owner_rows(path)
             self.assertEqual(rows[0]['event'], 'malformed')
             self.assertTrue(rows[1]['recovered_partial_tail'])
+
+
+    def test_reader_lists_every_power_supply_device(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reader = m.Reader(root=root)
+            row = reader.sample()
+            self.assertIsNone(row['power_supply'])
+            self.assertFalse(row['availability']['power_supply'])
+            self.assertFalse(row['availability']['ac'])
+            supplies = root / 'sys/class/power_supply'
+            supplies.mkdir(parents=True)
+            row = reader.sample()
+            self.assertEqual(row['power_supply'], {})
+            self.assertTrue(row['availability']['power_supply'])
+            for name, kind, online in (('AC', 'Mains', '1'), ('BAT0', 'Battery', None)):
+                (supplies / name).mkdir()
+                (supplies / name / 'type').write_text(kind + '\n')
+                if online:
+                    (supplies / name / 'online').write_text(online + '\n')
+            row = reader.sample()
+            self.assertEqual(row['power_supply'], {'AC': dict(type='Mains', online=1), 'BAT0': dict(type='Battery', online=None)})
+            self.assertEqual(row['ac_online'], {'AC': 1})
+            self.assertTrue(row['availability']['ac'])
+            self.assertEqual(m.power_supplies(root / 'sys'), row['power_supply'])
 
 
 if __name__ == '__main__':

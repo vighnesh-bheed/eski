@@ -136,7 +136,7 @@ def machine_context(protocol, identity):
                 product=' '.join(value for value in (hardware.get('sys_vendor'), hardware.get('product_name')) if value) or None,
                 cpus=config.get('cpus'), topology=topology, server_memory=config.get('server_memory'), client_memory=config.get('client_memory'),
                 maxmemory=config.get('maxmemory'), dragonfly_threads=config.get('dragonfly_threads'),
-                frequency_policy=host.get('frequency_policy'), sensor=config.get('sensor'))
+                frequency_policy=host.get('frequency_policy'), sensor=config.get('sensor'), power_source=config.get('power_source', 'mains'))
 
 
 def fill_result(path):

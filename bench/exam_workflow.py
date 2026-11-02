@@ -27,7 +27,7 @@ EXPERIMENT_FIELDS = ('targets', 'server_cpus', 'client_cpus', 'control_cpus', 's
                      'repetitions', 'sensor_chip', 'sensor_label', 'cool_temp_c', 'max_temp_c', 'min_idle', 'min_rest',
                      'stable_seconds', 'max_wait', 'sample_seconds', 'min_free_bytes', 'resource_policy',
                      'max_client_utilization_pct', 'max_latency_seconds')
-OPTIONAL_FIELDS = ('package_sensor',)
+OPTIONAL_FIELDS = ('package_sensor', 'power_source')
 ACTIVE = ('STARTING', 'RUNNING')
 FINISHED = ('DONE', 'DONE WITH EXCLUSIONS')
 EXPORTED_DIRECTORIES = ('control', 'calibration/results', 'benchmark/results')
@@ -237,10 +237,8 @@ def machine_description(root, module):
         words = line.split()
         if len(words) > 1 and words[0] in ('MemTotal:', 'MemAvailable:'):
             memory[words[0][:-1]] = int(words[1]) * 1024
-    ac = {}
-    for directory in Path('/sys/class/power_supply').glob('*'):
-        if source.read(directory / 'type') == 'Mains':
-            ac[directory.name] = source.number(directory / 'online')
+    supplies = source.power_supplies()
+    ac = {name: device['online'] for name, device in (supplies or {}).items() if device['type'] == 'Mains'}
     sensor = source.Reader(config.get('package_sensor'), config.get('sensor_chip', 'coretemp'), config.get('sensor_label', 'Package id 0')).sensor()
     engines_path = root / 'engines.json'
     engines = load(engines_path).get('engines', []) if engines_path.exists() else []
@@ -251,6 +249,7 @@ def machine_description(root, module):
                 physical_cores=len(physical) or None, logical_cores=len(processors) or os.cpu_count(),
                 ram_total_bytes=memory.get('MemTotal'), ram_available_bytes=memory.get('MemAvailable'),
                 disk_free_bytes=shutil.disk_usage(root).free, package_temperature=sensor, ac_online=ac,
+                power_source=config.get('power_source') or 'mains', power_supplies=supplies,
                 configured_cpus={role: config.get(role + '_cpus') for role in ('server', 'client', 'control')},
                 configured_limits={name: config.get(name) for name in ('server_memory', 'client_memory', 'maxmemory')},
                 engines=engines, source=dict(revision=profile.get('source_revision'), tree_sha256=profile.get('source_sha256')),
@@ -296,6 +295,9 @@ def show(root, as_json=False, error=None):
     temperature = '%.1f C' % sensor['celsius'] if sensor.get('available') else 'unavailable'
     ac = ', '.join('%s=%s' % (key, 'online' if value == 1 else 'offline' if value == 0 else 'unavailable') for key, value in machine['ac_online'].items()) or 'not exposed'
     print('CPU package: %s | AC: %s' % (temperature, ac))
+    devices = machine['power_supplies']
+    listed = 'unreadable' if devices is None else ', '.join('%s=%s' % (name, device.get('type') or 'unknown type') for name, device in sorted(devices.items())) or 'none'
+    print('Power gate: %s | power supply devices: %s' % (machine['power_source'], listed))
     print('CPU masks: ' + ' | '.join('%s=%s' % (role, value or 'unavailable') for role, value in machine['configured_cpus'].items()))
     limits = machine['configured_limits']
     print('Limits: server container %s | client container %s | maxmemory %s bytes' % (limits['server_memory'], limits['client_memory'], limits['maxmemory']))
