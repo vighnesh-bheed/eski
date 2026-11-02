@@ -319,7 +319,7 @@ info_line_ratio :: proc(b: ^[dynamic]u8, name: string, v: f32, percent: bool) {
 info_memory :: proc(b: ^[dynamic]u8) {
 	library_host, _ := lua_library_memory()
 	library_vm := int(lr.functions_active_stats().current_bytes)
-	eval_vm := int(lr.eval_stats().current_bytes)
+	eval_vm := int(lr.eval_active_stats().current_bytes)
 	mem_note_peak()
 	mh := mem_overhead()
 	used := i64(mh.total)

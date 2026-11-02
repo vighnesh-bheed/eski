@@ -36,7 +36,7 @@ typedef struct es_context {
     es_block *blocks;
     es_block *temporaries;
     lua_State *L;
-    eslua_arg source;
+    eslua_arg source, digest;
     const eslua_arg *keys, *args;
     size_t numkeys, argc;
     uint64_t started;
@@ -50,7 +50,7 @@ typedef struct es_context {
     struct eslua_library *library;
     size_t function_index;
     int loading, calling, eval_reuse, compile_failed, load_plain;
-    int globals_reference, cleanup_reference, load_globals_reference;
+    int globals_reference, cleanup_reference, load_globals_reference, scripts_reference;
     struct es_debug_state *debug;
     uint64_t random_state;
 } es_context;

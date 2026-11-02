@@ -9,7 +9,7 @@ static _Thread_local uint64_t es_random_state;
 static _Thread_local int es_random_initialized;
 static eslua_number_fn es_number_hook;
 static eslua_log_fn es_load_log_hook;
-void es_module_bind(lua_State *L);
+lua_State *es_module_bind(lua_State *L);
 
 void eslua_set_number_format(eslua_number_fn format) { es_number_hook = format; }
 void eslua_set_load_log(eslua_log_fn log) { es_load_log_hook = log; }
@@ -400,7 +400,7 @@ struct eslua_library {
     size_t count;
     eslua_library *engine, *engine_next;
     size_t references;
-    int retired;
+    int retired, active;
 };
 
 static _Thread_local eslua_library *es_functions_engine, *es_functions_engines;
@@ -691,6 +691,25 @@ static void es_setup(lua_State *L) {
     lua_pop(L, 2);
 }
 
+static void es_load(lua_State *L, es_context *ctx) {
+    const char *source = ctx->source.data ? (const char *)ctx->source.data : "";
+    int status = luaL_loadbuffer(L, source, ctx->source.len, ctx->library ? "@user_function" : "@user_script");
+    if (status != LUA_OK) { ctx->compile_failed=1; lua_error(L); }
+}
+
+static void es_load_cached(lua_State *L, es_context *ctx) {
+    if (!ctx->scripts_reference) { lua_newtable(L); ctx->scripts_reference = luaL_ref(L, LUA_REGISTRYINDEX); }
+    lua_rawgeti(L, LUA_REGISTRYINDEX, ctx->scripts_reference);
+    lua_pushlstring(L, (const char *)ctx->digest.data, ctx->digest.len);
+    lua_pushvalue(L, -1); lua_rawget(L, -3);
+    if (lua_type(L, -1) != LUA_TFUNCTION) {
+        lua_pop(L, 1);
+        es_load(L, ctx);
+        lua_pushvalue(L, -2); lua_pushvalue(L, -2); lua_rawset(L, -5);
+    }
+    lua_replace(L, -3); lua_pop(L, 1);
+}
+
 static int es_run(lua_State *L) {
     es_context *ctx = es_context_of(L);
     if (!ctx->compile_only && !ctx->library) es_debug_begin(L);
@@ -706,7 +725,7 @@ static int es_run(lua_State *L) {
     }
     if (ctx->loading && ctx->globals_reference) es_setup_load_environment(L);
     else if (!ctx->compile_only && !ctx->eval_reuse) es_setup(L);
-    if (ctx->eval_reuse) {
+    if (ctx->eval_reuse && !ctx->compile_only) {
         lua_rawgeti(L, LUA_REGISTRYINDEX, ctx->globals_reference);
         int globals = lua_gettop(L);
         lua_enablereadonlytable(L, globals, 0);
@@ -719,9 +738,10 @@ static int es_run(lua_State *L) {
         lua_enablereadonlytable(L, globals, 1); lua_pop(L, 1);
     }
     es_check_abort(L);
-    const char *source = ctx->source.data ? (const char *)ctx->source.data : "";
-    int status = luaL_loadbuffer(L, source, ctx->source.len, ctx->library ? "@user_function" : "@user_script");
-    if (status != LUA_OK) { ctx->compile_failed=1; return lua_error(L); }
+    if (ctx->digest.len) {
+        es_load_cached(L, ctx);
+        if (!ctx->compile_only) { lua_pushvalue(L, LUA_GLOBALSINDEX); lua_setfenv(L, -2); }
+    } else es_load(L, ctx);
     es_check_abort(L);
     if (ctx->compile_only) { es_append(L, &ctx->output, "+OK\r\n", 5); return 0; }
     lua_sethook(L, es_hook, LUA_MASKCOUNT | (ctx->debug ? LUA_MASKLINE : 0), (int)ctx->options.hook_count);
@@ -1041,32 +1061,98 @@ eslua_stats eslua_library_stats(eslua_library *library) { return library ? es_li
 static _Thread_local eslua_library *es_eval_engine;
 
 eslua_stats eslua_eval_stats(void) { return es_eval_engine ? es_eval_engine->context.stats : (eslua_stats){0}; }
+eslua_stats eslua_eval_active_stats(void) {
+    if (!es_eval_engine || !es_eval_engine->context.L) return (eslua_stats){0};
+    es_context *ctx = &es_eval_engine->context;
+    eslua_stats stats = ctx->stats;
+    stats.current_bytes = (size_t)lua_gc(ctx->L, LUA_GCCOUNT, 0)*1024 + (size_t)lua_gc(ctx->L, LUA_GCCOUNTB, 0);
+    return stats;
+}
 void eslua_reset(void) { eslua_library_free(es_eval_engine); es_eval_engine = NULL; }
 
-eslua_result eslua_eval(eslua_arg source, size_t numkeys, const eslua_arg *keys, size_t argc,
-                       const eslua_arg *args, int32_t client_resp, const eslua_options *options,
-                       const eslua_callbacks *callbacks) {
-    if ((!source.data && source.len) || (numkeys && !keys) || (argc && !args) || numkeys > INT_MAX || argc > INT_MAX || (client_resp != 2 && client_resp != 3)) return (eslua_result){.status = ESLUA_ARGUMENT};
+static int es_eval_open(const eslua_options *options) {
+    if (es_eval_engine) return 1;
+    es_eval_engine = calloc(1, sizeof(*es_eval_engine));
+    if (!es_eval_engine) return 0;
+    es_eval_engine->context.options = es_options(options);
+    es_eval_engine->context.L = lua_newstate(es_lua_allocate, &es_eval_engine->context);
+    if (!es_eval_engine->context.L) { eslua_reset(); return 0; }
+    return 1;
+}
+
+static eslua_result es_eval(eslua_arg source, eslua_arg digest, size_t numkeys, const eslua_arg *keys, size_t argc,
+                            const eslua_arg *args, int32_t client_resp, const eslua_options *options,
+                            const eslua_callbacks *callbacks) {
+    if ((!source.data && source.len) || (!digest.data && digest.len) || (numkeys && !keys) || (argc && !args) || numkeys > INT_MAX || argc > INT_MAX || (client_resp != 2 && client_resp != 3)) return (eslua_result){.status = ESLUA_ARGUMENT};
     for (size_t i = 0; i < numkeys; i++) if (!keys[i].data && keys[i].len) return (eslua_result){.status = ESLUA_ARGUMENT};
     for (size_t i = 0; i < argc; i++) if (!args[i].data && args[i].len) return (eslua_result){.status = ESLUA_ARGUMENT};
     if (!es_inputs_fit(es_options(options).memory_limit, source, numkeys, keys, argc, args)) return (eslua_result){.status = ESLUA_ARGUMENT};
-    if (!es_eval_engine) {
-        es_eval_engine = calloc(1, sizeof(*es_eval_engine));
-        if (!es_eval_engine) return (eslua_result){.status = ESLUA_MEMORY};
-        es_eval_engine->context.options = es_options(options);
-        es_eval_engine->context.L = lua_newstate(es_lua_allocate, &es_eval_engine->context);
-        if (!es_eval_engine->context.L) { eslua_reset(); return (eslua_result){.status = ESLUA_MEMORY}; }
-    }
+    if (es_eval_engine && es_eval_engine->active) return (eslua_result){.status = ESLUA_ARGUMENT};
+    if (!es_eval_open(options)) return (eslua_result){.status = ESLUA_MEMORY};
     es_context *ctx = &es_eval_engine->context;
-    ctx->options = es_options(options); ctx->source = source; ctx->keys = keys; ctx->numkeys = numkeys; ctx->args = args; ctx->argc = argc; ctx->client_resp = client_resp;
+    ctx->options = es_options(options); ctx->source = source; ctx->digest = digest; ctx->keys = keys; ctx->numkeys = numkeys; ctx->args = args; ctx->argc = argc; ctx->client_resp = client_resp;
     if (callbacks) ctx->callbacks = *callbacks;
+    es_eval_engine->active = 1;
     eslua_result result = es_library_invoke(es_eval_engine);
+    es_eval_engine->active = 0;
     if (ctx->globals_reference) {
         lua_rawgeti(ctx->L, LUA_REGISTRYINDEX, ctx->globals_reference);
         lua_enablereadonlytable(ctx->L, -1, 1); lua_pop(ctx->L, 1); ctx->eval_reuse = 1;
     } else eslua_reset();
-    if (es_eval_engine) es_eval_engine->context.source = (eslua_arg){0};
+    if (es_eval_engine) es_eval_engine->context.source = es_eval_engine->context.digest = (eslua_arg){0};
     return result;
+}
+
+eslua_result eslua_eval(eslua_arg source, size_t numkeys, const eslua_arg *keys, size_t argc,
+                       const eslua_arg *args, int32_t client_resp, const eslua_options *options,
+                       const eslua_callbacks *callbacks) {
+    return es_eval(source, (eslua_arg){0}, numkeys, keys, argc, args, client_resp, options, callbacks);
+}
+
+eslua_result eslua_eval_cached(eslua_arg source, eslua_arg digest, size_t numkeys, const eslua_arg *keys, size_t argc,
+                              const eslua_arg *args, int32_t client_resp, const eslua_options *options,
+                              const eslua_callbacks *callbacks) {
+    return es_eval(source, digest, numkeys, keys, argc, args, client_resp, options, callbacks);
+}
+
+eslua_result eslua_eval_prepare(eslua_arg source, eslua_arg digest, const eslua_options *options) {
+    lua_State *bound = es_module_bind(NULL);
+    eslua_result result;
+    if ((!source.data && source.len) || !digest.data || !digest.len || source.len > es_options(options).memory_limit ||
+        (es_eval_engine && es_eval_engine->active) || !es_eval_open(options)) {
+        result = eslua_compile(source, options);
+    } else {
+        es_context *ctx = &es_eval_engine->context;
+        ctx->options = es_options(options); ctx->source = source; ctx->digest = digest; ctx->compile_only = 1; ctx->client_resp = 2;
+        result = es_library_invoke(es_eval_engine);
+        ctx->compile_only = 0; ctx->source = ctx->digest = (eslua_arg){0};
+    }
+    es_module_bind(bound);
+    return result;
+}
+
+static int es_forget(lua_State *L) {
+    es_context *ctx = es_context_of(L);
+    const eslua_arg *digest = lua_touserdata(L, 1);
+    lua_rawgeti(L, LUA_REGISTRYINDEX, ctx->scripts_reference);
+    lua_pushlstring(L, (const char *)digest->data, digest->len);
+    lua_pushvalue(L, -1); lua_rawget(L, -3);
+    if (lua_isnil(L, -1)) return 0;
+    lua_pop(L, 1); lua_pushnil(L); lua_rawset(L, -3);
+    return 0;
+}
+
+void eslua_eval_forget(eslua_arg digest) {
+    if (!es_eval_engine || es_eval_engine->active || !es_eval_engine->context.L || !es_eval_engine->context.scripts_reference || !digest.data || !digest.len) return;
+    es_context *ctx = &es_eval_engine->context;
+    int32_t sticky = ctx->sticky;
+    const char *failure = ctx->failure;
+    lua_State *bound = es_module_bind(ctx->L);
+    lua_settop(ctx->L, 0);
+    lua_cpcall(ctx->L, es_forget, &digest);
+    lua_settop(ctx->L, 0);
+    ctx->sticky = sticky; ctx->failure = failure;
+    es_module_bind(bound);
 }
 
 void eslua_free_result(eslua_result *result) {

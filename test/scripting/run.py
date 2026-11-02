@@ -587,6 +587,41 @@ class Parity(Fixture):
         fill(510, 700000)
         self.assertEqual(self.client.call('SCRIPT', 'EXISTS', digest('return "a"')), [1])
 
+    def test_cached_scripts_repeat_errors_arguments_and_compile_failures_identically(self):
+        for source in ("error('planned')", 'undeclared_global=1', 'return undeclared_global',
+                       "redis.call('SET',KEYS[1],'text'); return redis.call('INCR',KEYS[1])"):
+            digest = hashlib.sha1(source.encode()).hexdigest()
+            first = str(self.error(('EVAL', source, 1, 'cached:key')))
+            self.assertEqual(str(self.error(('EVAL', source, 1, 'cached:key'))), first)
+            self.assertEqual(str(self.error(('EVALSHA', digest, 1, 'cached:key'))), first)
+            self.assertEqual(str(self.error(('EVALSHA', digest, 1, 'cached:key'))), first)
+        source = "return {#KEYS,#ARGV,KEYS[1] or '',ARGV[1] or ''}"
+        digest = hashlib.sha1(source.encode()).hexdigest()
+        self.assertEqual(self.client.call('EVAL', source, 1, 'k1', 'a1'), [1, 1, b'k1', b'a1'])
+        self.assertEqual(self.client.call('EVALSHA', digest, 0, 'a2', 'a3'), [0, 2, b'', b'a2'])
+        self.assertEqual(self.client.call('EVALSHA', digest, 2, 'k3', 'k4'), [2, 0, b'k3', b''])
+        bad = 'return function('
+        digest = hashlib.sha1(bad.encode()).hexdigest()
+        first = str(self.error(('EVAL', bad, 0)))
+        self.assertIn('Error compiling script', first)
+        self.assertEqual(str(self.error(('EVAL', bad, 0))), first)
+        self.assertEqual(str(self.error(('SCRIPT', 'LOAD', bad))), first)
+        self.assertEqual(self.client.call('SCRIPT', 'EXISTS', digest), [0])
+        self.error(('EVALSHA', digest, 0), 'NOSCRIPT')
+        self.healthy()
+
+    def test_script_load_compiles_into_eval_memory_and_flush_releases_it(self):
+        self.client.call('SCRIPT', 'FLUSH', 'SYNC')
+        before = int(info(self.client, 'memory')['used_memory_vm_eval'])
+        source = 'local t={}\n' + 't[#t+1]=#t\n'*2000 + 'return #t'
+        digest = self.client.call('SCRIPT', 'LOAD', source)
+        loaded = int(info(self.client, 'memory')['used_memory_vm_eval'])
+        self.assertGreater(loaded-before, 16 << 10)
+        self.assertEqual(self.client.call('EVALSHA', digest, 0), 2000)
+        self.assertEqual(self.client.call('EVAL', source, 0), 2000)
+        self.client.call('SCRIPT', 'FLUSH', 'SYNC')
+        self.assertLess(int(info(self.client, 'memory')['used_memory_vm_eval']), loaded-(16 << 10))
+
     def test_acl_failures_inside_scripts_name_user_command_key_or_channel(self):
         users = ('parity_cmd', 'parity_key', 'parity_chan')
         for user in users:
@@ -733,6 +768,16 @@ class Integration(Fixture):
         source = "local n=0;do local p=newproxy(true);getmetatable(p).__gc=function()n=n+1 end end;collectgarbage('collect');return n"
         self.assertEqual(client.call('EVAL', source, 0), 1)
         self.error(('CONFIG', 'SET', 'lua-enable-deprecated-api', 'no'), 'immutable', client)
+        self.healthy(client)
+
+    def test_cached_script_environment_is_restored_after_setfenv(self):
+        server = self.new_server(('--lua-enable-deprecated-api', 'yes'))
+        client = server.client()
+        source = 'local before=type(redis);setfenv(1,{});return before'
+        digest = hashlib.sha1(source.encode()).hexdigest()
+        self.assertEqual(client.call('SCRIPT', 'LOAD', source), digest.encode())
+        for command in (('EVALSHA', digest, 0), ('EVAL', source, 0), ('EVALSHA', digest, 0)):
+            self.assertEqual(client.call(*command), b'table')
         self.healthy(client)
 
     def test_large_argument_vectors_and_invalid_inner_values_are_atomic(self):

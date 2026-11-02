@@ -1,6 +1,7 @@
 package main
 
 import "core:crypto/legacy/sha1"
+import lr "lua_runtime"
 
 LUA_CACHE_BUCKETS :: 1024
 LUA_EVAL_CACHE_LIMIT :: 500
@@ -56,6 +57,16 @@ lua_digest_parse :: proc(bytes: []u8) -> (digest: [40]u8, ok: bool) {
 		digest[i] = byte
 	}
 	return digest, true
+}
+
+lua_digest_key :: proc "contextless" (hex: []u8) -> (key: [20]u8) {
+	for i in 0 ..< min(len(hex)/2, len(key)) {
+		high, low := hex[2*i], hex[2*i+1]
+		high = high-'0' if high <= '9' else high-'a'+10
+		low = low-'0' if low <= '9' else low-'a'+10
+		key[i] = high<<4 | low
+	}
+	return
 }
 
 lua_lru_remove :: proc(entry: ^Lua_Source) {
@@ -130,6 +141,8 @@ lua_cache_remove :: proc(entry: ^Lua_Source) {
 	}
 	lua_cache_count -= 1
 	lua_cache_bytes -= size_of(Lua_Source) + len(entry.body)
+	key := lua_digest_key(entry.digest[:])
+	lr.eval_forget(lua_arg(key[:]))
 	delete(entry.body)
 	free(entry)
 }
@@ -152,8 +165,7 @@ lua_cache_reap :: proc(limit: int) {
 	}
 }
 
-lua_cache_store :: proc(body: []u8, pinned: bool) -> ^Lua_Source {
-	digest := lua_digest(body)
+lua_cache_store :: proc(body: []u8, digest: [40]u8, pinned: bool) -> ^Lua_Source {
 	if entry := lua_cache_find(digest, !pinned); entry != nil {
 		return entry
 	}
@@ -174,7 +186,7 @@ lua_cache_store :: proc(body: []u8, pinned: bool) -> ^Lua_Source {
 	}
 	entry := new(Lua_Source)
 	entry.digest, entry.body, entry.pinned = digest, clone_bytes(body), pinned
-	bucket := int(hash_bytes(digest[:]) & (LUA_CACHE_BUCKETS-1))
+	bucket := int(hash_bytes(entry.digest[:]) & (LUA_CACHE_BUCKETS-1))
 	entry.bucket_next = lua_sources[bucket]
 	lua_sources[bucket] = entry
 	entry.previous = lua_sources_tail
