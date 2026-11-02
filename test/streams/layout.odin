@@ -92,10 +92,10 @@ expect_info :: proc(t: ^testing.T, s: st.Stream, length: u64, keys: u64, nodes: 
 	testing.expect_value(t, st.length(s), length, loc = loc)
 	testing.expect_value(t, st.node_count(s), keys, loc = loc)
 	testing.expect_value(t, st.rax_nodes(s), nodes, loc = loc)
-	testing.expect_value(t, s.last_id, last, loc = loc)
-	testing.expect_value(t, s.max_deleted_entry_id, maxdel, loc = loc)
-	testing.expect_value(t, s.entries_added, added, loc = loc)
-	testing.expect_value(t, s.first_id, first, loc = loc)
+	testing.expect_value(t, s.top, last, loc = loc)
+	testing.expect_value(t, s.tomb, maxdel, loc = loc)
+	testing.expect_value(t, s.added, added, loc = loc)
+	testing.expect_value(t, s.head, first, loc = loc)
 }
 
 @(test)
@@ -241,8 +241,8 @@ dup_and_memory :: proc(t: ^testing.T) {
 		xadd(s, fmt.tprintf("%d-%d", i, i), "a", "1", "b", fmt.tprintf("%d", i * 7))
 	}
 	xdel(s, "3-3", "9-9")
-	cg := st.create_cg(s, bytes_of("g"), st.ID{5, 5}, 3)
-	consumer := st.create_consumer(s, cg, bytes_of("alice"), 1000)
+	cg := st.add_group(s, bytes_of("g"), st.ID{5, 5}, 3)
+	consumer := st.add_member(s, cg, bytes_of("alice"), 1000)
 	st.group_deliver(s, cg, consumer, st.ID{6, 6}, false, 2000)
 	d := st.dup(s)
 	defer st.destroy(d)

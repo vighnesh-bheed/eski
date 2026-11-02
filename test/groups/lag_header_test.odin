@@ -10,7 +10,7 @@ lag_after_xsetid_sequence :: proc(t: ^testing.T) {
 	defer st.destroy(s)
 	add(t, s, 1, 1)
 	add(t, s, 1, 2)
-	g := st.create_cg(s, b("g"), id(0), -1)
+	g := st.add_group(s, b("g"), id(0), -1)
 	st.group_set_id(g, id(1, 2), 2)
 	expect_lag(t, s, g, 0)
 	setid :: proc(s: st.Stream, x: st.ID, added: i64, md: st.ID) -> st.Error {
@@ -51,26 +51,26 @@ lag_with_corrupt_header_values :: proc(t: ^testing.T) {
 	defer st.destroy(s)
 	add(t, s, 1, 1)
 	add(t, s, 1, 2)
-	g := st.create_cg(s, b("g"), id(1, 2), 2)
-	s.max_deleted_entry_id = st.ID{max(u64), 0}
+	g := st.add_group(s, b("g"), id(1, 2), 2)
+	s.tomb = st.ID{max(u64), 0}
 	expect_lag_unknown(t, s, g)
-	s.max_deleted_entry_id = id(5)
+	s.tomb = id(5)
 	expect_lag_unknown(t, s, g)
-	s.max_deleted_entry_id = id(1)
+	s.tomb = id(1)
 	expect_lag(t, s, g, 0)
-	s.max_deleted_entry_id = id(0, 5)
+	s.tomb = id(0, 5)
 	expect_lag(t, s, g, 0)
-	s.max_deleted_entry_id = id(0)
-	s.entries_added = 0
+	s.tomb = id(0)
+	s.added = 0
 	expect_lag(t, s, g, 0)
-	s.entries_added = 1
+	s.added = 1
 	expect_lag(t, s, g, -1)
-	s.entries_added = max(u64)
+	s.added = max(u64)
 	expect_lag(t, s, g, -3)
 	st.group_set_id(g, id(1, 2), -1)
 	expect_lag_unknown(t, s, g)
 	st.group_set_id(g, id(1, 1), -1)
-	s.entries_added = 7
+	s.added = 7
 	expect_lag(t, s, g, 1)
 }
 
@@ -98,8 +98,8 @@ lag_of_oracle_payloads_with_odd_headers :: proc(t: ^testing.T) {
 			testing.expectf(t, false, "%s: payload did not load", c.name)
 			continue
 		}
-		g := st.lookup_cg(s, b("g"))
-		lag, known := st.cg_lag(s, g)
+		g := st.find_group(s, b("g"))
+		lag, known := st.group_lag(s, g)
 		want, has := c.lag.?
 		testing.expectf(t, known == has && (!has || lag == want), "%s: lag %v known %v want %v", c.name, lag, known, c.lag)
 		st.destroy(s)

@@ -5,35 +5,42 @@ import "base:runtime"
 
 ENTRIES_READ_UNKNOWN :: -1
 AUTOCLAIM_MAX_COUNT :: max(i64) / 16
-AUTOCLAIM_ATTEMPTS_FACTOR :: 10
+AUTOCLAIM_SCAN_MULTIPLIER :: 10
+CLAIM_UNSET :: -1
 
-CG :: struct {
-	last_id:      ID,
-	entries_read: i64,
-	pel:          ^rx.Rax,
-	consumers:    ^rx.Rax,
+Group :: struct {
+	pending:   ^rx.Rax,
+	members:   ^rx.Rax,
+	delivered: ID,
+	reads:     i64,
 }
 
-Consumer :: struct {
-	seen_time:   i64,
-	active_time: i64,
-	name:        []u8,
-	pel:         ^rx.Rax,
+Member :: struct {
+	name:      []u8,
+	owned:     ^rx.Rax,
+	seen_ms:   i64,
+	active_ms: i64,
 }
 
-NACK :: struct {
-	delivery_time:  i64,
-	delivery_count: u64,
-	consumer:       ^Consumer,
+Delivery :: struct {
+	owner:   ^Member,
+	sent_ms: i64,
+	times:   u64,
 }
 
-Claim_Args :: struct {
-	minidle:      i64,
-	force:        bool,
-	justid:       bool,
-	retrycount:   i64,
-	deliverytime: i64,
-	last_id:      ID,
+Claim_Flag :: enum u8 {
+	Force,
+	Ids_Only,
+}
+
+Claim_Flags :: bit_set[Claim_Flag;u8]
+
+Claim_Options :: struct {
+	raise_to:   ID,
+	idle_floor: i64,
+	stamp:      i64,
+	tries:      i64,
+	flags:      Claim_Flags,
 }
 
 XGROUP_HELP := [?]string {
@@ -97,21 +104,21 @@ Claim_Result :: enum u8 {
 }
 
 @(private)
-cg_alloc :: proc "contextless" (s: Stream, size: int) -> rawptr {
+group_alloc :: proc "contextless" (s: Stream, size: int) -> rawptr {
 	p := runtime.heap_alloc(size, true)
 	if p == nil {
 		out_of_memory()
 	}
-	s.cg_mem += usable(p)
+	s.group_bytes += usable(p)
 	return p
 }
 
 @(private)
-cg_release :: proc "contextless" (s: Stream, p: rawptr) {
+group_release :: proc "contextless" (s: Stream, p: rawptr) {
 	if p == nil {
 		return
 	}
-	s.cg_mem -= usable(p)
+	s.group_bytes -= usable(p)
 	runtime.heap_free(p)
 }
 
@@ -121,272 +128,309 @@ id_key :: #force_inline proc "contextless" (id: ID) -> (key: [16]u8) {
 	return
 }
 
-lookup_cg :: proc "contextless" (s: Stream, name: []u8) -> ^CG {
-	if s == nil || s.cgroups == nil {
+find_group :: proc "contextless" (s: Stream, name: []u8) -> ^Group {
+	if s == nil || s.groups == nil {
 		return nil
 	}
-	v, found := rx.find(s.cgroups, name)
+	v, found := rx.find(s.groups, name)
 	if !found {
 		return nil
 	}
-	return (^CG)(v)
+	return (^Group)(v)
 }
 
-create_cg :: proc "contextless" (s: Stream, name: []u8, id: ID, entries_read: i64) -> ^CG {
-	if s.cgroups == nil {
-		s.cgroups = rx.create(&s.cg_mem)
+add_group :: proc "contextless" (s: Stream, name: []u8, id: ID, entries_read: i64) -> ^Group {
+	if s.groups == nil {
+		s.groups = rx.create(&s.group_bytes)
 	}
-	if _, found := rx.find(s.cgroups, name); found {
+	if _, found := rx.find(s.groups, name); found {
 		return nil
 	}
-	cg := (^CG)(cg_alloc(s, size_of(CG)))
-	cg.last_id = id
-	cg.entries_read = entries_read
-	cg.pel = rx.create(&s.cg_mem)
-	cg.consumers = rx.create(&s.cg_mem)
-	rx.insert(s.cgroups, name, cg)
-	return cg
+	g := (^Group)(group_alloc(s, size_of(Group)))
+	g.delivered = id
+	g.reads = entries_read
+	g.pending = rx.create(&s.group_bytes)
+	g.members = rx.create(&s.group_bytes)
+	rx.insert(s.groups, name, g)
+	return g
 }
 
 @(private)
-free_consumer :: proc "contextless" (s: Stream, c: ^Consumer) {
-	rx.destroy(c.pel)
-	cg_release(s, c)
+release_member :: proc "contextless" (s: Stream, m: ^Member) {
+	rx.destroy(m.owned)
+	group_release(s, m)
 }
 
 @(private)
-free_cg :: proc "contextless" (s: Stream, cg: ^CG) {
+release_group :: proc "contextless" (s: Stream, g: ^Group) {
 	it: rx.Iterator
-	rx.start(&it, cg.pel)
+	rx.start(&it, g.pending)
 	rx.seek(&it, "^")
 	for rx.next(&it) {
-		cg_release(s, it.data)
+		group_release(s, it.data)
 	}
 	rx.stop(&it)
-	rx.destroy(cg.pel)
-	rx.start(&it, cg.consumers)
+	rx.destroy(g.pending)
+	rx.start(&it, g.members)
 	rx.seek(&it, "^")
 	for rx.next(&it) {
-		free_consumer(s, (^Consumer)(it.data))
+		release_member(s, (^Member)(it.data))
 	}
 	rx.stop(&it)
-	rx.destroy(cg.consumers)
-	cg_release(s, cg)
+	rx.destroy(g.members)
+	group_release(s, g)
 }
 
-destroy_cg :: proc "contextless" (s: Stream, name: []u8) -> bool {
-	if s.cgroups == nil {
+drop_group :: proc "contextless" (s: Stream, name: []u8) -> bool {
+	if s.groups == nil {
 		return false
 	}
 	old: rawptr
-	if !rx.remove(s.cgroups, name, &old) {
+	if !rx.remove(s.groups, name, &old) {
 		return false
 	}
-	free_cg(s, (^CG)(old))
+	release_group(s, (^Group)(old))
 	return true
 }
 
 free_groups :: proc "contextless" (s: Stream) {
-	if s == nil || s.cgroups == nil {
+	if s == nil || s.groups == nil {
 		return
 	}
 	it: rx.Iterator
-	rx.start(&it, s.cgroups)
+	rx.start(&it, s.groups)
 	rx.seek(&it, "^")
 	for rx.next(&it) {
-		free_cg(s, (^CG)(it.data))
+		release_group(s, (^Group)(it.data))
 	}
 	rx.stop(&it)
-	rx.destroy(s.cgroups)
-	s.cgroups = nil
+	rx.destroy(s.groups)
+	s.groups = nil
 }
 
-lookup_consumer :: proc "contextless" (cg: ^CG, name: []u8) -> ^Consumer {
-	if cg == nil {
+find_member :: proc "contextless" (g: ^Group, name: []u8) -> ^Member {
+	if g == nil {
 		return nil
 	}
-	v, found := rx.find(cg.consumers, name)
+	v, found := rx.find(g.members, name)
 	if !found {
 		return nil
 	}
-	return (^Consumer)(v)
+	return (^Member)(v)
 }
 
-create_consumer :: proc "contextless" (s: Stream, cg: ^CG, name: []u8, now: i64) -> ^Consumer {
-	if _, found := rx.find(cg.consumers, name); found {
+add_member :: proc "contextless" (s: Stream, g: ^Group, name: []u8, now: i64) -> ^Member {
+	if _, found := rx.find(g.members, name); found {
 		return nil
 	}
-	p := cg_alloc(s, size_of(Consumer) + len(name))
-	c := (^Consumer)(p)
-	text := ([^]u8)(uintptr(p) + size_of(Consumer))
+	p := group_alloc(s, size_of(Member) + len(name))
+	m := (^Member)(p)
+	text := ([^]u8)(uintptr(p) + size_of(Member))
 	for i in 0 ..< len(name) {
 		text[i] = name[i]
 	}
-	c.name = text[:len(name)]
-	c.seen_time = now
-	c.active_time = -1
-	c.pel = rx.create(&s.cg_mem)
-	rx.insert(cg.consumers, c.name, c)
-	return c
+	m.name = text[:len(name)]
+	m.seen_ms = now
+	m.active_ms = -1
+	m.owned = rx.create(&s.group_bytes)
+	rx.insert(g.members, m.name, m)
+	return m
 }
 
-lookup_or_create_consumer :: proc "contextless" (s: Stream, cg: ^CG, name: []u8, now: i64) -> (c: ^Consumer, created: bool) {
-	c = lookup_consumer(cg, name)
-	if c != nil {
-		return c, false
+member_for :: proc "contextless" (s: Stream, g: ^Group, name: []u8, now: i64) -> (m: ^Member, created: bool) {
+	m = find_member(g, name)
+	if m != nil {
+		return m, false
 	}
-	return create_consumer(s, cg, name, now), true
+	return add_member(s, g, name, now), true
 }
 
-del_consumer :: proc "contextless" (s: Stream, cg: ^CG, c: ^Consumer) -> u64 {
-	dropped := c.pel.numele
+drop_member :: proc "contextless" (s: Stream, g: ^Group, m: ^Member) -> u64 {
+	dropped := m.owned.numele
 	it: rx.Iterator
-	rx.start(&it, c.pel)
+	rx.start(&it, m.owned)
 	rx.seek(&it, "^")
 	for rx.next(&it) {
 		old: rawptr
-		if rx.remove(cg.pel, rx.key(&it), &old) {
-			cg_release(s, old)
+		if rx.remove(g.pending, rx.key(&it), &old) {
+			group_release(s, old)
 		}
 	}
 	rx.stop(&it)
-	rx.remove(cg.consumers, c.name)
-	free_consumer(s, c)
+	rx.remove(g.members, m.name)
+	release_member(s, m)
 	return dropped
 }
 
-create_nack :: proc "contextless" (s: Stream, consumer: ^Consumer, now: i64) -> ^NACK {
-	n := (^NACK)(cg_alloc(s, size_of(NACK)))
-	n.delivery_time = now
-	n.delivery_count = 1
-	n.consumer = consumer
-	return n
+new_delivery :: proc "contextless" (s: Stream, owner: ^Member, now: i64) -> ^Delivery {
+	d := (^Delivery)(group_alloc(s, size_of(Delivery)))
+	d.sent_ms = now
+	d.times = 1
+	d.owner = owner
+	return d
 }
 
-lookup_nack :: proc "contextless" (cg: ^CG, id: ID) -> ^NACK {
+find_delivery :: proc "contextless" (g: ^Group, id: ID) -> ^Delivery {
 	key := id_key(id)
-	v, found := rx.find(cg.pel, key[:])
+	v, found := rx.find(g.pending, key[:])
 	if !found {
 		return nil
 	}
-	return (^NACK)(v)
+	return (^Delivery)(v)
 }
 
 @(private)
-nack_assign :: proc "contextless" (nack: ^NACK, key: []u8, to: ^Consumer) {
-	if nack.consumer == to {
+hand_over :: proc "contextless" (d: ^Delivery, key: []u8, to: ^Member) {
+	if d.owner == to {
 		return
 	}
-	if nack.consumer != nil {
-		rx.remove(nack.consumer.pel, key)
+	if d.owner != nil {
+		rx.remove(d.owner.owned, key)
 	}
-	rx.insert(to.pel, key, nack)
-	nack.consumer = to
+	rx.insert(to.owned, key, d)
+	d.owner = to
 }
 
 @(private)
-nack_drop :: proc "contextless" (s: Stream, cg: ^CG, nack: ^NACK, key: []u8) {
-	if nack.consumer != nil {
-		rx.remove(nack.consumer.pel, key)
+forget_delivery :: proc "contextless" (s: Stream, g: ^Group, d: ^Delivery, key: []u8) {
+	if d.owner != nil {
+		rx.remove(d.owner.owned, key)
 	}
-	rx.remove(cg.pel, key)
-	cg_release(s, nack)
+	rx.remove(g.pending, key)
+	group_release(s, d)
 }
 
-ack :: proc "contextless" (s: Stream, cg: ^CG, id: ID) -> bool {
+ack :: proc "contextless" (s: Stream, g: ^Group, id: ID) -> bool {
 	key := id_key(id)
-	v, found := rx.find(cg.pel, key[:])
+	v, found := rx.find(g.pending, key[:])
 	if !found {
 		return false
 	}
-	nack_drop(s, cg, (^NACK)(v), key[:])
+	forget_delivery(s, g, (^Delivery)(v), key[:])
 	return true
 }
 
 @(private)
-tombstones_from :: #force_inline proc "contextless" (s: Stream, id: ID) -> bool {
+holes_after :: #force_inline proc "contextless" (s: Stream, id: ID) -> bool {
 	lo := id
-	return range_has_tombstones(s, &lo, nil)
-}
-
-cg_lag :: proc "contextless" (s: Stream, cg: ^CG) -> (lag: i64, valid: bool) {
-	if s.entries_added == 0 || s.length == 0 {
-		return 0, true
-	}
-	if compare_id(cg.last_id, s.first_id) < 0 && !tombstones_from(s, s.first_id) {
-		return i64(s.length), true
-	}
-	if cg.entries_read != ENTRIES_READ_UNKNOWN && !tombstones_from(s, cg.last_id) {
-		return i64(s.entries_added) - cg.entries_read, true
-	}
-	estimate := estimate_distance(s, cg.last_id)
-	if estimate == ENTRIES_READ_UNKNOWN {
-		return 0, false
-	}
-	return i64(s.entries_added) - estimate, true
-}
-
-estimate_distance :: proc "contextless" (s: Stream, id: ID) -> i64 {
-	if s.entries_added == 0 {
-		return 0
-	}
-	switch compare_id(id, s.last_id) {
-	case 0:
-		if s.length > 0 && !id_is_zero(s.max_deleted_entry_id) && compare_id(s.max_deleted_entry_id, s.last_id) > 0 {
-			return ENTRIES_READ_UNKNOWN
-		}
-		return i64(s.entries_added)
-	case 1:
-		return ENTRIES_READ_UNKNOWN
-	}
-	if tombstones_from(s, s.first_id) {
-		return ENTRIES_READ_UNKNOWN
-	}
-	switch compare_id(id, s.first_id) {
-	case -1:
-		return i64(s.entries_added - s.length)
-	case 0:
-		return i64(s.entries_added - s.length) + 1
-	}
-	return ENTRIES_READ_UNKNOWN
+	return may_hold_tombstones(s, &lo, nil)
 }
 
 @(private)
-advance_entries_read :: proc "contextless" (s: Stream, cg: ^CG, id: ID) {
-	if compare_id(cg.last_id, s.first_id) >= 0 && cg.entries_read != ENTRIES_READ_UNKNOWN && !tombstones_from(s, cg.last_id) {
-		cg.entries_read += 1
-		return
-	}
-	cg.entries_read = estimate_distance(s, id)
+Id_Place :: enum u8 {
+	Before_Head,
+	At_Head,
+	Inside,
+	At_Top,
+	Past_Top,
 }
 
-group_deliver :: proc "contextless" (s: Stream, cg: ^CG, consumer: ^Consumer, id: ID, noack: bool, now: i64) {
-	if compare_id(id, cg.last_id) > 0 {
-		advance_entries_read(s, cg, id)
-		cg.last_id = id
+@(private)
+place_of :: proc "contextless" (s: Stream, id: ID) -> Id_Place {
+	switch compare_id(id, s.top) {
+	case 0:
+		return .At_Top
+	case 1:
+		return .Past_Top
 	}
-	if noack || consumer == nil {
+	switch compare_id(id, s.head) {
+	case -1:
+		return .Before_Head
+	case 0:
+		return .At_Head
+	}
+	return .Inside
+}
+
+added_through :: proc "contextless" (s: Stream, id: ID) -> (reached: i64, known: bool) {
+	if s.added == 0 {
+		return 0, true
+	}
+	place := place_of(s, id)
+	switch place {
+	case .At_Top:
+		if s.live > 0 && !id_is_zero(s.tomb) && compare_id(s.tomb, s.top) > 0 {
+			return 0, false
+		}
+		reached = i64(s.added)
+	case .Before_Head, .At_Head:
+		if holes_after(s, s.head) {
+			return 0, false
+		}
+		reached = i64(s.added - s.live)
+		if place == .At_Head {
+			reached += 1
+		}
+	case .Inside, .Past_Top:
+		return 0, false
+	}
+	return reached, reached != ENTRIES_READ_UNKNOWN
+}
+
+@(private)
+exact_reads :: #force_inline proc "contextless" (s: Stream, g: ^Group) -> (i64, bool) {
+	if g.reads == ENTRIES_READ_UNKNOWN || holes_after(s, g.delivered) {
+		return 0, false
+	}
+	return g.reads, true
+}
+
+group_lag :: proc "contextless" (s: Stream, g: ^Group) -> (lag: i64, known: bool) {
+	if s.added == 0 || s.live == 0 {
+		return 0, true
+	}
+	if compare_id(g.delivered, s.head) < 0 && !holes_after(s, s.head) {
+		return i64(s.live), true
+	}
+	if reads, exact := exact_reads(s, g); exact {
+		return i64(s.added) - reads, true
+	}
+	reached, found := added_through(s, g.delivered)
+	if !found {
+		return 0, false
+	}
+	return i64(s.added) - reached, true
+}
+
+@(private)
+note_delivery :: proc "contextless" (s: Stream, g: ^Group, id: ID) {
+	if compare_id(g.delivered, s.head) >= 0 {
+		if _, exact := exact_reads(s, g); exact {
+			g.reads += 1
+			return
+		}
+	}
+	reached, known := added_through(s, id)
+	g.reads = reached if known else ENTRIES_READ_UNKNOWN
+}
+
+group_deliver :: proc "contextless" (s: Stream, g: ^Group, member: ^Member, id: ID, noack: bool, now: i64) {
+	if compare_id(id, g.delivered) > 0 {
+		note_delivery(s, g, id)
+		g.delivered = id
+	}
+	if noack || member == nil {
 		return
 	}
 	key := id_key(id)
-	v, found := rx.find(cg.pel, key[:])
-	nack: ^NACK
+	v, found := rx.find(g.pending, key[:])
+	d: ^Delivery
 	if found {
-		nack = (^NACK)(v)
-		nack.delivery_time = now
-		nack.delivery_count = 1
+		d = (^Delivery)(v)
+		d.sent_ms = now
+		d.times = 1
 	} else {
-		nack = create_nack(s, nil, now)
-		rx.insert(cg.pel, key[:], nack)
+		d = new_delivery(s, nil, now)
+		rx.insert(g.pending, key[:], d)
 	}
-	nack_assign(nack, key[:], consumer)
-	consumer.active_time = now
+	hand_over(d, key[:], member)
+	member.active_ms = now
 }
 
-pel_history :: proc(c: ^Consumer, start: ID, count: int, out: ^[dynamic]ID) {
+pel_history :: proc(m: ^Member, start: ID, count: int, out: ^[dynamic]ID) {
 	key := id_key(start)
 	it: rx.Iterator
-	rx.start(&it, c.pel)
+	rx.start(&it, m.owned)
 	rx.seek(&it, ">=", key[:])
 	for (count <= 0 || len(out) < count) && rx.next(&it) {
 		append(out, decode_id(rx.key(&it)))
@@ -394,64 +438,64 @@ pel_history :: proc(c: ^Consumer, start: ID, count: int, out: ^[dynamic]ID) {
 	rx.stop(&it)
 }
 
-pel_touch :: proc "contextless" (c: ^Consumer, id: ID, now: i64) {
+pel_touch :: proc "contextless" (m: ^Member, id: ID, now: i64) {
 	key := id_key(id)
-	v, found := rx.find(c.pel, key[:])
+	v, found := rx.find(m.owned, key[:])
 	if !found {
 		return
 	}
-	nack := (^NACK)(v)
-	nack.delivery_time = now
-	nack.delivery_count += 1
+	d := (^Delivery)(v)
+	d.sent_ms = now
+	d.times += 1
 }
 
-group_set_id :: proc "contextless" (cg: ^CG, id: ID, entries_read: i64) {
-	cg.last_id = id
-	cg.entries_read = entries_read
+group_set_id :: proc "contextless" (g: ^Group, id: ID, entries_read: i64) {
+	g.delivered = id
+	g.reads = entries_read
 }
 
-group_raise_last_id :: proc "contextless" (cg: ^CG, id: ID) -> bool {
-	if compare_id(id, cg.last_id) > 0 {
-		cg.last_id = id
+group_raise_last_id :: proc "contextless" (g: ^Group, id: ID) -> bool {
+	if compare_id(id, g.delivered) > 0 {
+		g.delivered = id
 		return true
 	}
 	return false
 }
 
-claim_entry :: proc(s: Stream, cg: ^CG, consumer: ^Consumer, id: ID, a: ^Claim_Args, now: i64) -> Claim_Result {
+claim_entry :: proc(s: Stream, g: ^Group, member: ^Member, id: ID, a: ^Claim_Options, now: i64) -> Claim_Result {
 	key := id_key(id)
-	v, found := rx.find(cg.pel, key[:])
-	nack := (^NACK)(v)
+	v, found := rx.find(g.pending, key[:])
+	d := (^Delivery)(v)
 	forced := false
 	if !found {
-		if !a.force || !entry_exists(s, id) {
+		if .Force not_in a.flags || !entry_exists(s, id) {
 			return .Skipped
 		}
-		nack = create_nack(s, nil, now)
-		rx.insert(cg.pel, key[:], nack)
+		d = new_delivery(s, nil, now)
+		rx.insert(g.pending, key[:], d)
 		forced = true
 	} else if !entry_exists(s, id) {
-		nack_drop(s, cg, nack, key[:])
+		forget_delivery(s, g, d, key[:])
 		return .Deleted
 	}
-	if !forced && a.minidle > 0 {
-		idle := now - nack.delivery_time
-		if idle < a.minidle {
+	if !forced && a.idle_floor > 0 {
+		idle := now - d.sent_ms
+		if idle < a.idle_floor {
 			return .Skipped
 		}
 	}
 	when_ms := now
-	if a.deliverytime != -1 {
-		when_ms = min(a.deliverytime, now)
+	if a.stamp != CLAIM_UNSET {
+		when_ms = min(a.stamp, now)
 	}
-	nack.delivery_time = when_ms
-	if a.retrycount >= 0 {
-		nack.delivery_count = u64(a.retrycount)
-	} else if !a.justid {
-		nack.delivery_count += 1
+	d.sent_ms = when_ms
+	if a.tries >= 0 {
+		d.times = u64(a.tries)
+	} else if .Ids_Only not_in a.flags {
+		d.times += 1
 	}
-	nack_assign(nack, key[:], consumer)
-	consumer.active_time = now
+	hand_over(d, key[:], member)
+	member.active_ms = now
 	return .Claimed
 }
 
@@ -460,37 +504,37 @@ Autoclaim_Step :: struct {
 	result: Claim_Result,
 }
 
-autoclaim_scan :: proc(s: Stream, cg: ^CG, consumer: ^Consumer, a: ^Autoclaim_Args, now: i64, out: ^[dynamic]Autoclaim_Step) -> (next: ID) {
-	attempts := a.count * AUTOCLAIM_ATTEMPTS_FACTOR
+autoclaim_scan :: proc(s: Stream, g: ^Group, member: ^Member, a: ^Autoclaim_Args, now: i64, out: ^[dynamic]Autoclaim_Step) -> (next: ID) {
+	attempts := a.count * AUTOCLAIM_SCAN_MULTIPLIER
 	budget := a.count
 	start := id_key(a.start)
 	it: rx.Iterator
-	rx.start(&it, cg.pel)
+	rx.start(&it, g.pending)
 	rx.seek(&it, ">=", start[:])
 	more := rx.next(&it)
 	for more && attempts > 0 && budget > 0 {
 		attempts -= 1
 		id := decode_id(rx.key(&it))
-		nack := (^NACK)(it.data)
+		d := (^Delivery)(it.data)
 		if !entry_exists(s, id) {
 			key := id_key(id)
-			nack_drop(s, cg, nack, key[:])
+			forget_delivery(s, g, d, key[:])
 			append(out, Autoclaim_Step{id, .Deleted})
 			budget -= 1
 			more = rx.next(&it)
 			continue
 		}
-		if a.minidle > 0 && now - nack.delivery_time < a.minidle {
+		if a.minidle > 0 && now - d.sent_ms < a.minidle {
 			more = rx.next(&it)
 			continue
 		}
 		key := id_key(id)
-		nack.delivery_time = now
+		d.sent_ms = now
 		if !a.justid {
-			nack.delivery_count += 1
+			d.times += 1
 		}
-		nack_assign(nack, key[:], consumer)
-		consumer.active_time = now
+		hand_over(d, key[:], member)
+		member.active_ms = now
 		append(out, Autoclaim_Step{id, .Claimed})
 		budget -= 1
 		more = rx.next(&it)
@@ -502,24 +546,24 @@ autoclaim_scan :: proc(s: Stream, cg: ^CG, consumer: ^Consumer, a: ^Autoclaim_Ar
 	return
 }
 
-claim :: proc(s: Stream, cg: ^CG, name: []u8, a: ^Claim_Args, ids: []ID, now: i64, claimed: ^[dynamic]ID) {
-	consumer, _ := lookup_or_create_consumer(s, cg, name, now)
-	consumer.seen_time = now
-	group_raise_last_id(cg, a.last_id)
+claim :: proc(s: Stream, g: ^Group, name: []u8, a: ^Claim_Options, ids: []ID, now: i64, claimed: ^[dynamic]ID) {
+	member, _ := member_for(s, g, name, now)
+	member.seen_ms = now
+	group_raise_last_id(g, a.raise_to)
 	for id in ids {
-		if claim_entry(s, cg, consumer, id, a, now) == .Claimed {
+		if claim_entry(s, g, member, id, a, now) == .Claimed {
 			append(claimed, id)
 		}
 	}
 }
 
-autoclaim :: proc(s: Stream, cg: ^CG, name: []u8, minidle: i64, start: ID, count: i64, justid: bool, now: i64, claimed: ^[dynamic]ID, deleted: ^[dynamic]ID) -> ID {
-	consumer, _ := lookup_or_create_consumer(s, cg, name, now)
-	consumer.seen_time = now
+autoclaim :: proc(s: Stream, g: ^Group, name: []u8, minidle: i64, start: ID, count: i64, justid: bool, now: i64, claimed: ^[dynamic]ID, deleted: ^[dynamic]ID) -> ID {
+	member, _ := member_for(s, g, name, now)
+	member.seen_ms = now
 	a := Autoclaim_Args{minidle = minidle, start = start, count = count, justid = justid}
 	steps: [dynamic]Autoclaim_Step
 	defer delete(steps)
-	next := autoclaim_scan(s, cg, consumer, &a, now, &steps)
+	next := autoclaim_scan(s, g, member, &a, now, &steps)
 	for step in steps {
 		if step.result == .Claimed {
 			append(claimed, step.id)
@@ -548,48 +592,46 @@ pel_first_last :: proc "contextless" (r: ^rx.Rax) -> (first: ID, last: ID, ok: b
 	return first, last, true
 }
 
-dup_groups :: proc "contextless" (s: Stream, d: Stream) {
-	if s.cgroups == nil {
+@(private)
+copy_group :: proc "contextless" (into: Stream, name: []u8, src: ^Group) {
+	dst := add_group(into, name, src.delivered, src.reads)
+	mw: rx.Iterator
+	rx.start(&mw, src.members)
+	rx.seek(&mw, "^")
+	for rx.next(&mw) {
+		m := (^Member)(mw.data)
+		twin := add_member(into, dst, m.name, m.seen_ms)
+		twin.active_ms = m.active_ms
+	}
+	rx.stop(&mw)
+	pw: rx.Iterator
+	rx.start(&pw, src.pending)
+	rx.seek(&pw, "^")
+	for rx.next(&pw) {
+		d := (^Delivery)(pw.data)
+		owner: ^Member
+		if d.owner != nil {
+			owner = find_member(dst, d.owner.name)
+		}
+		twin := new_delivery(into, owner, d.sent_ms)
+		twin.times = d.times
+		rx.insert(dst.pending, rx.key(&pw), twin)
+		if owner != nil {
+			rx.insert(owner.owned, rx.key(&pw), twin)
+		}
+	}
+	rx.stop(&pw)
+}
+
+copy_groups :: proc "contextless" (from: Stream, into: Stream) {
+	if from.groups == nil {
 		return
 	}
-	gi: rx.Iterator
-	rx.start(&gi, s.cgroups)
-	rx.seek(&gi, "^")
-	for rx.next(&gi) {
-		src := (^CG)(gi.data)
-		dst := create_cg(d, rx.key(&gi), src.last_id, src.entries_read)
-		pi: rx.Iterator
-		rx.start(&pi, src.pel)
-		rx.seek(&pi, "^")
-		for rx.next(&pi) {
-			sn := (^NACK)(pi.data)
-			dn := create_nack(d, nil, sn.delivery_time)
-			dn.delivery_count = sn.delivery_count
-			rx.insert(dst.pel, rx.key(&pi), dn)
-		}
-		rx.stop(&pi)
-		ci: rx.Iterator
-		rx.start(&ci, src.consumers)
-		rx.seek(&ci, "^")
-		for rx.next(&ci) {
-			sc := (^Consumer)(ci.data)
-			dc := create_consumer(d, dst, sc.name, sc.seen_time)
-			dc.active_time = sc.active_time
-			ki: rx.Iterator
-			rx.start(&ki, sc.pel)
-			rx.seek(&ki, "^")
-			for rx.next(&ki) {
-				v, found := rx.find(dst.pel, rx.key(&ki))
-				if !found {
-					continue
-				}
-				dn := (^NACK)(v)
-				dn.consumer = dc
-				rx.insert(dc.pel, rx.key(&ki), dn)
-			}
-			rx.stop(&ki)
-		}
-		rx.stop(&ci)
+	gw: rx.Iterator
+	rx.start(&gw, from.groups)
+	rx.seek(&gw, "^")
+	for rx.next(&gw) {
+		copy_group(into, rx.key(&gw), (^Group)(gw.data))
 	}
-	rx.stop(&gi)
+	rx.stop(&gw)
 }

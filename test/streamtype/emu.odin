@@ -24,7 +24,7 @@ Model :: struct {
 	time:   i64,
 	ids:    [dynamic]st.ID,
 	ids2:   [dynamic]st.ID,
-	groups: [dynamic]^st.CG,
+	groups: [dynamic]^st.Group,
 	served: [dynamic]st.Stream,
 }
 

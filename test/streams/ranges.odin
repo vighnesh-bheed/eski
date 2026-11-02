@@ -8,21 +8,23 @@ import "core:testing"
 collect :: proc(s: st.Stream, start: ^st.ID, end: ^st.ID, count: int, rev: bool) -> string {
 	sb: strings.Builder
 	strings.builder_init(&sb, context.temp_allocator)
-	si: st.Iterator
-	st.iterator_start(&si, s, start, end, rev)
-	id: st.ID
-	nf: i64
+	si: st.Cursor
+	st.cursor_open(&si, s, start, end, rev)
 	n := 0
-	for (count <= 0 || n < count) && st.iterator_get_id(&si, &id, &nf) {
+	for count <= 0 || n < count {
+		id, nf, more := st.cursor_next(&si)
+		if !more {
+			break
+		}
 		fmt.sbprintf(&sb, "%d-%d", id.ms, id.seq)
 		for _ in 0 ..< nf {
-			f, v := st.iterator_get_field(&si)
+			f, v := st.cursor_field(&si)
 			fmt.sbprintf(&sb, " %s=%s", string(f), string(v))
 		}
 		strings.write_string(&sb, ";")
 		n += 1
 	}
-	st.iterator_stop(&si)
+	st.cursor_close(&si)
 	return strings.to_string(sb)
 }
 
@@ -61,33 +63,31 @@ range_walks_nodes_both_ways :: proc(t: ^testing.T) {
 	testing.expect_value(t, collect(s, &c, &d, 0, false), "")
 	testing.expect_value(t, st.range_count(s, nil, nil, 0, false), 4)
 	testing.expect_value(t, st.range_count(s, nil, nil, 3, true), 3)
-	si: st.Iterator
-	st.iterator_start(&si, s, nil, nil, false)
-	si.skip_tombstones = false
-	id: st.ID
-	nf: i64
+	si: st.Cursor
+	st.cursor_open(&si, s, nil, nil, false)
+	si.tombstones = true
 	all := 0
-	for st.iterator_get_id(&si, &id, &nf) {
+	for _ in st.cursor_next(&si) {
 		all += 1
 	}
-	st.iterator_stop(&si)
+	st.cursor_close(&si)
 	testing.expect_value(t, all, 7)
-	st.iterator_start(&si, s, nil, nil, false)
-	got := st.iterator_get_id(&si, &id, &nf)
+	st.cursor_open(&si, s, nil, nil, false)
+	id, nf, got := st.cursor_next(&si)
 	testing.expect(t, got && id == st.ID{2, 1} && nf == 2)
-	st.iterator_skip_fields(&si, nf)
-	got = st.iterator_get_id(&si, &id, &nf)
+	st.cursor_skip(&si, nf)
+	id, nf, got = st.cursor_next(&si)
 	testing.expect(t, got && id == st.ID{3, 2} && nf == 1)
-	got = st.iterator_get_id(&si, &id, &nf)
+	id, nf, got = st.cursor_next(&si)
 	testing.expect(t, got && id == st.ID{6, 2})
-	f, v := st.iterator_get_field(&si)
+	f, v := st.cursor_field(&si)
 	testing.expect(t, string(f) == "item" && string(v) == "-12345678901")
-	st.iterator_stop(&si)
-	testing.expect(t, st.range_has_tombstones(s, nil, nil))
+	st.cursor_close(&si)
+	testing.expect(t, st.may_hold_tombstones(s, nil, nil))
 	after := st.ID{6, 0}
-	testing.expect(t, !st.range_has_tombstones(s, &after, nil))
+	testing.expect(t, !st.may_hold_tombstones(s, &after, nil))
 	before := st.ID{4, 0}
-	testing.expect(t, st.range_has_tombstones(s, &before, nil))
+	testing.expect(t, st.may_hold_tombstones(s, &before, nil))
 }
 
 @(test)
@@ -103,19 +103,17 @@ range_large_and_wide_values :: proc(t: ^testing.T) {
 	xadd(s, "1-3", "big", "-4096", "mid", "-4097")
 	xadd(s, "1-4", "n", "9223372036854775807", "m", "-9223372036854775808")
 	xadd(s, "1-5", "n", "8388607", "m", "-8388609")
-	si: st.Iterator
-	st.iterator_start(&si, s, nil, nil, false)
-	id: st.ID
-	nf: i64
+	si: st.Cursor
+	st.cursor_open(&si, s, nil, nil, false)
 	values: [dynamic]string
 	defer delete(values)
-	for st.iterator_get_id(&si, &id, &nf) {
+	for _, nf in st.cursor_next(&si) {
 		for _ in 0 ..< nf {
-			_, v := st.iterator_get_field(&si)
+			_, v := st.cursor_field(&si)
 			append(&values, strings.clone(string(v), context.temp_allocator))
 		}
 	}
-	st.iterator_stop(&si)
+	st.cursor_close(&si)
 	testing.expect_value(t, len(values), 10)
 	testing.expect(t, values[0] == big && values[1] == mid)
 	testing.expect_value(t, values[2], "1")
@@ -152,7 +150,7 @@ many_entries_stay_consistent :: proc(t: ^testing.T) {
 	testing.expect_value(t, st.range_count(s, nil, nil, 0, false), 70000)
 	testing.expect_value(t, st.range_count(s, nil, nil, 0, true), 70000)
 	last := st.last_valid_id(s)
-	testing.expect(t, last == s.last_id)
+	testing.expect(t, last == s.top)
 	restore_limits(Node_Limits{0, 0})
 	u := st.create()
 	defer st.destroy(u)

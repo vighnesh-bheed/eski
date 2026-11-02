@@ -29,7 +29,7 @@ trimming_matches_transcript :: proc(t: ^testing.T) {
 	start := st.ID_MIN
 	end := st.ID_MAX
 	testing.expect_value(t, st.range_count(s, &start, &end, 2, false), 2)
-	testing.expect(t, s.first_id == st.ID{15, 0})
+	testing.expect(t, s.head == st.ID{15, 0})
 	n, _ = xtrim(s, "MAXLEN", "=", "3")
 	testing.expect_value(t, n, 3)
 	n, _ = xtrim(s, "MAXLEN", "~", "0", "LIMIT", "1")
@@ -73,7 +73,7 @@ approximate_trim_limit_counts_live_entries :: proc(t: ^testing.T) {
 	testing.expect_value(t, n, 9)
 	n, _ = xtrim(s, "MINID", "~", "33")
 	testing.expect_value(t, n, 3)
-	testing.expect(t, s.first_id == st.ID{32, 0})
+	testing.expect(t, s.head == st.ID{32, 0})
 	restore_limits(Node_Limits{4096, 0})
 	u := st.create()
 	defer st.destroy(u)
@@ -119,16 +119,16 @@ deletion_tracks_first_and_nodes :: proc(t: ^testing.T) {
 		xadd(s, fmt.tprintf("%d-0", i), "f", fmt.tprintf("%d", i))
 	}
 	testing.expect_value(t, xdel(s, "1-0"), 1)
-	testing.expect(t, s.first_id == st.ID{2, 0})
+	testing.expect(t, s.head == st.ID{2, 0})
 	testing.expect_value(t, xdel(s, "2-0", "3-0"), 2)
 	testing.expect_value(t, st.node_count(s), 2)
-	testing.expect(t, s.first_id == st.ID{4, 0})
-	testing.expect(t, s.max_deleted_entry_id == st.ID{3, 0})
+	testing.expect(t, s.head == st.ID{4, 0})
+	testing.expect(t, s.tomb == st.ID{3, 0})
 	testing.expect_value(t, xdel(s, "5-0", "5-0", "100-0"), 1)
-	testing.expect(t, s.max_deleted_entry_id == st.ID{5, 0})
+	testing.expect(t, s.tomb == st.ID{5, 0})
 	testing.expect_value(t, xdel(s, "4-0"), 1)
-	testing.expect(t, s.max_deleted_entry_id == st.ID{5, 0})
-	testing.expect(t, s.first_id == st.ID{6, 0})
+	testing.expect(t, s.tomb == st.ID{5, 0})
+	testing.expect(t, s.head == st.ID{6, 0})
 	testing.expect(t, !st.entry_exists(s, st.ID{4, 0}))
 	testing.expect(t, st.entry_exists(s, st.ID{6, 0}))
 	testing.expect(t, !st.entry_exists(s, st.ID{6, 1}))
@@ -136,20 +136,20 @@ deletion_tracks_first_and_nodes :: proc(t: ^testing.T) {
 	testing.expect(t, st.last_valid_id(s) == st.ID{9, 0})
 	testing.expect_value(t, xdel(s, "9-0"), 1)
 	testing.expect(t, st.last_valid_id(s) == st.ID{8, 0})
-	testing.expect(t, s.last_id == st.ID{9, 0})
-	testing.expect(t, st.get_edge_id(s, false, false) == st.ID{9, 0})
-	testing.expect(t, st.get_edge_id(s, true, false) == st.ID{4, 0})
+	testing.expect(t, s.top == st.ID{9, 0})
+	testing.expect(t, st.boundary_id(s, .Tail, true) == st.ID{9, 0})
+	testing.expect(t, st.boundary_id(s, .Head, true) == st.ID{4, 0})
 	testing.expect(t, st.delete_item(s, st.ID{6, 0}))
 	testing.expect(t, !st.delete_item(s, st.ID{6, 0}))
-	testing.expect(t, s.first_id == st.ID{7, 0})
+	testing.expect(t, s.head == st.ID{7, 0})
 	xdel(s, "7-0", "8-0")
 	testing.expect_value(t, st.length(s), 0)
 	testing.expect_value(t, st.node_count(s), 0)
-	testing.expect(t, s.first_id == st.ID_MIN)
-	testing.expect(t, st.get_edge_id(s, true, true) == st.ID_MAX)
-	testing.expect(t, st.get_edge_id(s, false, true) == st.ID_MIN)
+	testing.expect(t, s.head == st.ID_MIN)
+	testing.expect(t, st.boundary_id(s, .Head, false) == st.ID_MAX)
+	testing.expect(t, st.boundary_id(s, .Tail, false) == st.ID_MIN)
 	xadd(s, "10-0", "f", "v")
-	testing.expect(t, s.first_id == st.ID{10, 0})
+	testing.expect(t, s.head == st.ID{10, 0})
 }
 
 @(test)
@@ -161,27 +161,25 @@ iterator_removal_keeps_walking :: proc(t: ^testing.T) {
 	for i in 1 ..= 10 {
 		xadd(s, fmt.tprintf("%d-0", i), "f", "v")
 	}
-	si: st.Iterator
-	st.iterator_start(&si, s, nil, nil, false)
-	id: st.ID
-	nf: i64
+	si: st.Cursor
+	st.cursor_open(&si, s, nil, nil, false)
 	seen := 0
-	for st.iterator_get_id(&si, &id, &nf) {
+	for id in st.cursor_next(&si) {
 		seen += 1
 		if id.ms % 2 == 0 {
-			st.iterator_remove_entry(&si, &id)
+			st.cursor_drop(&si)
 		}
 	}
-	st.iterator_stop(&si)
+	st.cursor_close(&si)
 	testing.expect_value(t, seen, 10)
 	testing.expect_value(t, st.length(s), 5)
-	st.iterator_start(&si, s, nil, nil, true)
+	st.cursor_open(&si, s, nil, nil, true)
 	seen = 0
-	for st.iterator_get_id(&si, &id, &nf) {
+	for _ in st.cursor_next(&si) {
 		seen += 1
-		st.iterator_remove_entry(&si, &id)
+		st.cursor_drop(&si)
 	}
-	st.iterator_stop(&si)
+	st.cursor_close(&si)
 	testing.expect_value(t, seen, 5)
 	testing.expect_value(t, st.length(s), 0)
 	testing.expect_value(t, st.node_count(s), 0)
@@ -233,7 +231,7 @@ change_counting_cases_from_transcript :: proc(t: ^testing.T) {
 	testing.expect(t, err == .None && id == st.ID{51, 0})
 	changes += 1
 	testing.expect_value(t, changes, 8)
-	testing.expect_value(t, s.entries_added, 8)
+	testing.expect_value(t, s.added, 8)
 	removed, _ = xtrim(s, "MAXLEN", "0")
 	testing.expect_value(t, removed, 1)
 	removed, _ = xtrim(s, "MAXLEN", "0")

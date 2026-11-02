@@ -13,11 +13,16 @@ foreign libc {
 	libc_usable_size :: proc "c" (ptr: rawptr) -> uint ---
 }
 
-ITEM_FLAG_NONE :: 0
-ITEM_FLAG_DELETED :: 1 << 0
-ITEM_FLAG_SAMEFIELDS :: 1 << 1
-LISTPACK_MAX_PRE_ALLOCATE :: 4096
-LISTPACK_MAX_SIZE :: 1 << 30
+Entry_Mark :: enum u8 {
+	Tombstone,
+	Shared_Fields,
+}
+
+Entry_Marks :: bit_set[Entry_Mark;u8]
+
+NODE_RESERVE_CAP :: 4096
+NODE_SIZE_CEILING :: 1 << 30
+NODE_GROW_SLACK :: 16
 NODE_MAX_BYTES_DEFAULT :: 4096
 NODE_MAX_ENTRIES_DEFAULT :: 100
 ID_TEXT_MAX :: 41
@@ -34,20 +39,20 @@ ID :: struct {
 ID_MIN :: ID{0, 0}
 ID_MAX :: ID{max(u64), max(u64)}
 
-Stream_Object :: struct {
-	rax:                  ^rx.Rax,
-	length:               u64,
-	last_id:              ID,
-	first_id:             ID,
-	max_deleted_entry_id: ID,
-	entries_added:        u64,
-	cgroups:              ^rx.Rax,
-	lp_mem:               int,
-	cg_mem:               int,
-	acct:                 int,
+Stream_Log :: struct {
+	nodes:       ^rx.Rax,
+	groups:      ^rx.Rax,
+	live:        u64,
+	added:       u64,
+	head:        ID,
+	top:         ID,
+	tomb:        ID,
+	node_bytes:  int,
+	group_bytes: int,
+	acct:        int,
 }
 
-Stream :: ^Stream_Object
+Stream :: ^Stream_Log
 
 Append_Result :: enum u8 {
 	Ok,
@@ -406,7 +411,7 @@ lp_alloc :: proc "contextless" (s: Stream, size: int) -> [^]u8 {
 	if p == nil {
 		out_of_memory()
 	}
-	s.lp_mem += usable(p)
+	s.node_bytes += usable(p)
 	return ([^]u8)(p)
 }
 
@@ -414,14 +419,14 @@ lp_alloc :: proc "contextless" (s: Stream, size: int) -> [^]u8 {
 lp_grow :: proc "contextless" (s: Stream, p: [^]u8, need: int) -> [^]u8 {
 	old := usable(p)
 	grown := max(need, old + old / 2)
-	if grown > LISTPACK_MAX_SIZE + 64 {
+	if grown > NODE_SIZE_CEILING + 64 {
 		grown = need
 	}
 	q := runtime.heap_resize(p, grown)
 	if q == nil {
 		out_of_memory()
 	}
-	s.lp_mem += usable(q) - old
+	s.node_bytes += usable(q) - old
 	return ([^]u8)(q)
 }
 
@@ -436,13 +441,13 @@ lp_fit :: proc "contextless" (s: Stream, p: [^]u8) -> [^]u8 {
 	if q == nil {
 		return p
 	}
-	s.lp_mem += usable(q) - old
+	s.node_bytes += usable(q) - old
 	return ([^]u8)(q)
 }
 
 @(private)
 lp_release :: proc "contextless" (s: Stream, p: [^]u8) {
-	s.lp_mem -= usable(p)
+	s.node_bytes -= usable(p)
 	runtime.heap_free(p)
 }
 
@@ -452,12 +457,12 @@ free_lp :: proc "contextless" (p: rawptr) {
 }
 
 create :: proc "contextless" () -> Stream {
-	p := runtime.heap_alloc(size_of(Stream_Object), true)
+	p := runtime.heap_alloc(size_of(Stream_Log), true)
 	if p == nil {
 		out_of_memory()
 	}
 	s := Stream(p)
-	s.rax = rx.create(&s.lp_mem)
+	s.nodes = rx.create(&s.node_bytes)
 	return s
 }
 
@@ -465,9 +470,9 @@ destroy :: proc "contextless" (s: Stream) {
 	if s == nil {
 		return
 	}
-	if s.rax != nil {
-		rx.destroy(s.rax, free_lp)
-		s.rax = nil
+	if s.nodes != nil {
+		rx.destroy(s.nodes, free_lp)
+		s.nodes = nil
 	}
 	free_groups(s)
 	runtime.heap_free(s)
@@ -477,35 +482,35 @@ memory_usage :: proc "contextless" (s: Stream) -> int {
 	if s == nil {
 		return 0
 	}
-	return usable(s) + s.lp_mem + s.cg_mem
+	return usable(s) + s.node_bytes + s.group_bytes
 }
 
 length :: #force_inline proc "contextless" (s: Stream) -> u64 {
 	if s == nil {
 		return 0
 	}
-	return s.length
+	return s.live
 }
 
 node_count :: #force_inline proc "contextless" (s: Stream) -> u64 {
-	if s == nil || s.rax == nil {
+	if s == nil || s.nodes == nil {
 		return 0
 	}
-	return s.rax.numele
+	return s.nodes.numele
 }
 
 rax_nodes :: #force_inline proc "contextless" (s: Stream) -> u64 {
-	if s == nil || s.rax == nil {
+	if s == nil || s.nodes == nil {
 		return 1
 	}
-	return radix_shape(s.rax)
+	return radix_shape(s.nodes)
 }
 
 group_count :: #force_inline proc "contextless" (s: Stream) -> u64 {
-	if s == nil || s.cgroups == nil {
+	if s == nil || s.groups == nil {
 		return 0
 	}
-	return s.cgroups.numele
+	return s.groups.numele
 }
 
 @(private)
@@ -577,32 +582,32 @@ radix_shape :: proc "contextless" (r: ^rx.Rax) -> u64 #no_bounds_check {
 dup :: proc(s: Stream) -> Stream {
 	d := create()
 	it: rx.Iterator
-	rx.start(&it, s.rax)
+	rx.start(&it, s.nodes)
 	rx.seek(&it, "^")
 	for rx.next(&it) {
 		src := ([^]u8)(it.data)
 		size := lp_total(src)
 		q := lp_alloc(d, size)
 		intrinsics.mem_copy_non_overlapping(q, src, size)
-		rx.insert(d.rax, rx.key(&it), q)
+		rx.insert(d.nodes, rx.key(&it), q)
 	}
 	rx.stop(&it)
-	d.length = s.length
-	d.last_id = s.last_id
-	d.first_id = s.first_id
-	d.max_deleted_entry_id = s.max_deleted_entry_id
-	d.entries_added = s.entries_added
-	dup_groups(s, d)
+	d.live = s.live
+	d.top = s.top
+	d.head = s.head
+	d.tomb = s.tomb
+	d.added = s.added
+	copy_groups(s, d)
 	return d
 }
 
 @(private)
 entry_skip :: proc "contextless" (flags_ptr: [^]u8, nfields: int) -> [^]u8 {
-	flags := elem_int(flags_ptr)
+	marks := marks_at(flags_ptr)
 	p := elem_next(flags_ptr)
 	p = elem_next(p)
 	p = elem_next(p)
-	if flags & ITEM_FLAG_SAMEFIELDS != 0 {
+	if .Shared_Fields in marks {
 		p = elem_skip(p, nfields)
 	} else {
 		n := int(elem_int(p))
@@ -651,40 +656,93 @@ entry_before :: proc "contextless" (flags_ptr: [^]u8) -> [^]u8 {
 	return elem_skip_back(lc, back)
 }
 
-lp_get_edge_stream_id :: proc(p: [^]u8, first: bool, master_id: ID) -> (edge: ID, ok: bool) {
-	if p == nil {
-		return
-	}
-	h := node_header(p)
-	if h.entries[0] == EOF {
-		return
-	}
-	if first {
-		return entry_id_at(h.entries, master_id), true
-	}
-	return entry_id_at(entry_last(p), master_id), true
+@(private)
+Entry_Head :: struct {
+	id:     ID,
+	fields: int,
+	marks:  Entry_Marks,
+	body:   [^]u8,
 }
 
-get_edge_id :: proc(s: Stream, first: bool, skip_tombstones: bool) -> ID {
-	si: Iterator
-	iterator_start(&si, s, nil, nil, !first)
-	si.skip_tombstones = skip_tombstones
-	id: ID
-	numfields: i64
-	found := iterator_get_id(&si, &id, &numfields)
-	iterator_stop(&si)
-	if !found {
-		return first ? ID_MAX : ID_MIN
+@(private)
+marks_at :: #force_inline proc "contextless" (at: [^]u8) -> Entry_Marks {
+	return transmute(Entry_Marks)u8(elem_int(at))
+}
+
+@(private)
+mark_tombstone :: #force_inline proc "contextless" (at: [^]u8, marks: Entry_Marks) {
+	at[0] = transmute(u8)(marks + {.Tombstone})
+}
+
+@(private)
+read_entry_head :: proc "contextless" (at: [^]u8, base: ID, width: int) -> (h: Entry_Head) {
+	h.marks = marks_at(at)
+	p := elem_next(at)
+	h.id.ms = base.ms + u64(elem_int(p))
+	p = elem_next(p)
+	h.id.seq = base.seq + u64(elem_int(p))
+	p = elem_next(p)
+	h.fields = width
+	if .Shared_Fields not_in h.marks {
+		h.fields = int(elem_int(p))
+		p = elem_next(p)
 	}
-	return id
+	h.body = p
+	return
+}
+
+@(private)
+entry_end :: proc "contextless" (h: Entry_Head) -> [^]u8 {
+	span := h.fields
+	if .Shared_Fields not_in h.marks {
+		span *= 2
+	}
+	return elem_next(elem_skip(h.body, span))
+}
+
+End :: enum u8 {
+	Head,
+	Tail,
+}
+
+boundary_id :: proc(s: Stream, side: End, tombstones: bool) -> ID {
+	from_tail := side == .Tail
+	walk: rx.Iterator
+	rx.start(&walk, s.nodes)
+	defer rx.stop(&walk)
+	rx.seek(&walk, from_tail ? "$" : "^")
+	for from_tail ? rx.prev(&walk) : rx.next(&walk) {
+		node := ([^]u8)(walk.data)
+		h := node_header(node)
+		if h.entries[0] == EOF {
+			continue
+		}
+		base := decode_id(rx.key(&walk))
+		at := from_tail ? entry_last(node) : h.entries
+		for at != nil {
+			e := read_entry_head(at, base, h.nfields)
+			if tombstones || .Tombstone not_in e.marks {
+				return e.id
+			}
+			if from_tail {
+				at = entry_before(at)
+				continue
+			}
+			at = entry_end(e)
+			if at[0] == EOF {
+				at = nil
+			}
+		}
+	}
+	return from_tail ? ID_MIN : ID_MAX
 }
 
 @(private)
 first_live_or_zero :: proc(s: Stream) -> ID {
-	if s.length == 0 {
+	if s.live == 0 {
 		return ID_MIN
 	}
-	return get_edge_id(s, true, true)
+	return boundary_id(s, .Head, false)
 }
 
 @(private)
@@ -705,185 +763,225 @@ fields_match :: proc "contextless" (master: [^]u8, nfields: int, fv: [][]u8) -> 
 }
 
 @(private)
-new_node_size :: proc "contextless" (fv: [][]u8) -> (size: int, elems: int) #no_bounds_check {
-	nfields := len(fv) / 2
-	size = int_size(1) + int_size(0) + int_size(i64(nfields))
-	for i in 0 ..< nfields {
-		size += str_size(fv[2 * i])
+Entry_Plan :: struct {
+	marks:    Entry_Marks,
+	ms_step:  i64,
+	seq_step: i64,
+	tally:    i64,
+	bytes:    int,
+	elements: int,
+}
+
+@(private)
+plan_entry_layout :: proc "contextless" (id: ID, base: ID, shared: bool, fv: [][]u8) -> (p: Entry_Plan) #no_bounds_check {
+	pairs := len(fv) / 2
+	p.ms_step = i64(id.ms - base.ms)
+	p.seq_step = i64(id.seq - base.seq)
+	if shared {
+		p.marks = {.Shared_Fields}
+		p.tally = i64(3 + pairs)
+		for i := 1; i < 2 * pairs; i += 2 {
+			p.bytes += str_size(fv[i])
+		}
+	} else {
+		p.tally = i64(4 + 2 * pairs)
+		p.bytes = int_size(i64(pairs))
+		for a in fv[:2 * pairs] {
+			p.bytes += str_size(a)
+		}
 	}
-	size += int_size(0)
-	size += int_size(ITEM_FLAG_SAMEFIELDS) + int_size(0) + int_size(0)
-	for i in 0 ..< nfields {
-		size += str_size(fv[2 * i + 1])
-	}
-	size += int_size(i64(3 + nfields))
-	elems = 2 * nfields + 8
+	p.bytes += int_size(i64(transmute(u8)p.marks)) + int_size(p.ms_step) + int_size(p.seq_step) + int_size(p.tally)
+	p.elements = int(p.tally) + 1
 	return
 }
 
 @(private)
-write_new_node :: proc "contextless" (dst: [^]u8, fv: [][]u8, size: int, elems: int) #no_bounds_check {
-	nfields := len(fv) / 2
-	total := HDR + size + 1
-	lp_set_total(dst, total)
-	dst[4] = 0
-	dst[5] = 0
-	lp_add_count(dst, elems)
-	o := HDR
-	o += put_int(&dst[o], 1)
-	o += put_int(&dst[o], 0)
-	o += put_int(&dst[o], i64(nfields))
-	for i in 0 ..< nfields {
-		o += put_str(&dst[o], fv[2 * i])
+emit_entry :: proc "contextless" (dst: [^]u8, p: Entry_Plan, fv: [][]u8) -> int #no_bounds_check {
+	pairs := len(fv) / 2
+	o := put_int(dst, i64(transmute(u8)p.marks))
+	o += put_int(&dst[o], p.ms_step)
+	o += put_int(&dst[o], p.seq_step)
+	if .Shared_Fields in p.marks {
+		for i := 1; i < 2 * pairs; i += 2 {
+			o += put_str(&dst[o], fv[i])
+		}
+	} else {
+		o += put_int(&dst[o], i64(pairs))
+		for a in fv[:2 * pairs] {
+			o += put_str(&dst[o], a)
+		}
 	}
-	o += put_int(&dst[o], 0)
-	o += put_int(&dst[o], ITEM_FLAG_SAMEFIELDS)
-	o += put_int(&dst[o], 0)
-	o += put_int(&dst[o], 0)
-	for i in 0 ..< nfields {
-		o += put_str(&dst[o], fv[2 * i + 1])
-	}
-	o += put_int(&dst[o], i64(3 + nfields))
-	dst[o] = EOF
+	o += put_int(&dst[o], p.tally)
+	return o
 }
 
-append_item :: proc(s: Stream, fv: [][]u8, use_id: ^ID, seq_given: bool, now_ms: u64) -> (added: ID, res: Append_Result) #no_bounds_check {
-	nfields := len(fv) / 2
-	if nfields == 0 {
+@(private)
+master_bytes :: proc "contextless" (fv: [][]u8) -> int #no_bounds_check {
+	pairs := len(fv) / 2
+	n := int_size(1) + int_size(0) + int_size(i64(pairs)) + int_size(0)
+	for i := 0; i < 2 * pairs; i += 2 {
+		n += str_size(fv[i])
+	}
+	return n
+}
+
+@(private)
+emit_master :: proc "contextless" (dst: [^]u8, fv: [][]u8) -> int #no_bounds_check {
+	pairs := len(fv) / 2
+	o := put_int(dst, 1)
+	o += put_int(&dst[o], 0)
+	o += put_int(&dst[o], i64(pairs))
+	for i := 0; i < 2 * pairs; i += 2 {
+		o += put_str(&dst[o], fv[i])
+	}
+	o += put_int(&dst[o], 0)
+	return o
+}
+
+@(private)
+pick_entry_id :: proc "contextless" (s: Stream, mode: Xadd_Id_Mode, want: ID, now_ms: u64) -> (id: ID, fresh: bool) {
+	switch mode {
+	case .Generated:
+		id = next_id(s.top, now_ms)
+	case .Generated_Seq:
+		id = ID{want.ms, 0}
+		if want.ms == s.top.ms {
+			if s.top.seq == max(u64) {
+				return
+			}
+			id.seq = s.top.seq + 1
+		}
+	case .Explicit:
+		id = want
+	}
+	return id, compare_id(id, s.top) > 0
+}
+
+@(private)
+payload_bytes :: proc "contextless" (fv: [][]u8) -> int {
+	n := 0
+	for a in fv {
+		n += len(a)
+	}
+	return n
+}
+
+@(private)
+Tail :: struct {
+	node: [^]u8,
+	key:  [16]u8,
+}
+
+@(private)
+find_tail :: proc "contextless" (s: Stream) -> (t: Tail, found: bool) {
+	walk: rx.Iterator
+	rx.start(&walk, s.nodes)
+	rx.seek(&walk, "$")
+	if rx.next(&walk) {
+		t.node = ([^]u8)(walk.data)
+		copy(t.key[:], rx.key(&walk))
+		found = true
+	}
+	rx.stop(&walk)
+	return
+}
+
+@(private)
+node_accepts :: proc "contextless" (node: [^]u8, incoming: int) -> bool {
+	if stream_node_max_bytes != 0 && lp_total(node) + incoming >= stream_node_max_bytes {
+		return false
+	}
+	if stream_node_max_entries == 0 {
+		return true
+	}
+	h := node_header(node)
+	return h.count + h.deleted < stream_node_max_entries
+}
+
+@(private)
+seal_tail :: proc "contextless" (s: Stream, t: ^Tail) {
+	t.node = lp_fit(s, t.node)
+	rx.insert(s.nodes, t.key[:], t.node)
+}
+
+@(private)
+open_node :: proc "contextless" (s: Stream, id: ID, fv: [][]u8) -> bool #no_bounds_check {
+	first := plan_entry_layout(id, id, true, fv)
+	size := HDR + master_bytes(fv) + first.bytes + 1
+	if size > NODE_SIZE_CEILING {
+		return false
+	}
+	reserve := NODE_RESERVE_CAP
+	if stream_node_max_bytes > 0 {
+		reserve = min(reserve, stream_node_max_bytes)
+	}
+	node := lp_alloc(s, max(size, reserve))
+	end := HDR
+	end += emit_master(&node[end], fv)
+	end += emit_entry(&node[end], first, fv)
+	node[end] = EOF
+	lp_set_total(node, end + 1)
+	node[4] = 0
+	node[5] = 0
+	lp_add_count(node, 4 + len(fv) / 2 + first.elements)
+	key: [16]u8
+	encode_id(&key, id)
+	rx.insert(s.nodes, key[:], node)
+	return true
+}
+
+@(private)
+extend_node :: proc "contextless" (s: Stream, t: ^Tail, id: ID, fv: [][]u8) -> bool #no_bounds_check {
+	h := node_header(t.node)
+	plan := plan_entry_layout(id, decode_id(t.key[:]), fields_match(h.fields, h.nfields, fv), fv)
+	used := lp_total(t.node)
+	want := used + plan.bytes + NODE_GROW_SLACK
+	if want > NODE_SIZE_CEILING {
+		return false
+	}
+	if want > usable(t.node) {
+		t.node = lp_grow(s, t.node, want)
+		rx.insert(s.nodes, t.key[:], t.node)
+	}
+	end := used - 1
+	end += emit_entry(&t.node[end], plan, fv)
+	t.node[end] = EOF
+	lp_set_total(t.node, end + 1)
+	lp_add_count(t.node, plan.elements)
+	held := t.node
+	node_rewrite_int(s, &t.node, HDR, h.count + 1)
+	if t.node != held {
+		rx.insert(s.nodes, t.key[:], t.node)
+	}
+	return true
+}
+
+append_entry :: proc(s: Stream, fv: [][]u8, mode: Xadd_Id_Mode, want: ID, now_ms: u64) -> (ID, Append_Result) {
+	if len(fv) < 2 {
 		return {}, .Entry_Too_Large
 	}
-	id: ID
-	if use_id == nil {
-		id = next_id(s.last_id, now_ms)
-	} else if !seq_given {
-		if use_id.ms == s.last_id.ms {
-			if s.last_id.seq == max(u64) {
-				return {}, .Id_Not_Greater
-			}
-			id = ID{use_id.ms, s.last_id.seq + 1}
-		} else {
-			id = ID{use_id.ms, 0}
-		}
-	} else {
-		id = use_id^
-	}
-	if compare_id(id, s.last_id) <= 0 {
+	id, fresh := pick_entry_id(s, mode, want, now_ms)
+	if !fresh {
 		return {}, .Id_Not_Greater
 	}
-	raw := 0
-	for a in fv {
-		raw += len(a)
-	}
-	if raw > LISTPACK_MAX_SIZE {
+	incoming := payload_bytes(fv)
+	if incoming > NODE_SIZE_CEILING {
 		return {}, .Entry_Too_Large
 	}
-	tail: [^]u8
-	tail_key: [16]u8
-	{
-		it: rx.Iterator
-		rx.start(&it, s.rax)
-		rx.seek(&it, "$")
-		if rx.next(&it) {
-			tail = ([^]u8)(it.data)
-			copy(tail_key[:], rx.key(&it))
-		}
-		rx.stop(&it)
+	tail, has_tail := find_tail(s)
+	if has_tail && !node_accepts(tail.node, incoming) {
+		seal_tail(s, &tail)
+		has_tail = false
 	}
-	if tail != nil {
-		h := node_header(tail)
-		cur := lp_total(tail)
-		if stream_node_max_bytes != 0 && cur + raw >= stream_node_max_bytes {
-			tail = lp_fit(s, tail)
-			rx.insert(s.rax, tail_key[:], tail)
-			tail = nil
-		} else if stream_node_max_entries != 0 && h.count + h.deleted >= stream_node_max_entries {
-			tail = lp_fit(s, tail)
-			rx.insert(s.rax, tail_key[:], tail)
-			tail = nil
-		}
+	stored := extend_node(s, &tail, id, fv) if has_tail else open_node(s, id, fv)
+	if !stored {
+		return {}, .Entry_Too_Large
 	}
-	if tail == nil {
-		size, elems := new_node_size(fv)
-		total := HDR + size + 1
-		if total > LISTPACK_MAX_SIZE {
-			return {}, .Entry_Too_Large
-		}
-		reserve := total
-		pre := LISTPACK_MAX_PRE_ALLOCATE
-		if stream_node_max_bytes > 0 && stream_node_max_bytes < pre {
-			pre = stream_node_max_bytes
-		}
-		if reserve < pre {
-			reserve = pre
-		}
-		node := lp_alloc(s, reserve)
-		write_new_node(node, fv, size, elems)
-		key: [16]u8
-		encode_id(&key, id)
-		rx.insert(s.rax, key[:], node)
-	} else {
-		h := node_header(tail)
-		master := decode_id(tail_key[:])
-		same := fields_match(h.fields, h.nfields, fv)
-		msd := i64(id.ms - master.ms)
-		seqd := i64(id.seq - master.seq)
-		esize := int_size(same ? ITEM_FLAG_SAMEFIELDS : ITEM_FLAG_NONE) + int_size(msd) + int_size(seqd)
-		elems := 3
-		lpcount: i64
-		if same {
-			for i in 0 ..< nfields {
-				esize += str_size(fv[2 * i + 1])
-			}
-			lpcount = i64(3 + nfields)
-			elems += nfields
-		} else {
-			esize += int_size(i64(nfields))
-			for a in fv {
-				esize += str_size(a)
-			}
-			lpcount = i64(4 + 2 * nfields)
-			elems += 1 + 2 * nfields
-		}
-		esize += int_size(lpcount)
-		elems += 1
-		total := lp_total(tail)
-		if total + esize + 16 > LISTPACK_MAX_SIZE {
-			return {}, .Entry_Too_Large
-		}
-		need := total + esize + 16
-		if need > usable(tail) {
-			tail = lp_grow(s, tail, need)
-			rx.insert(s.rax, tail_key[:], tail)
-		}
-		o := total - 1
-		o += put_int(&tail[o], same ? ITEM_FLAG_SAMEFIELDS : ITEM_FLAG_NONE)
-		o += put_int(&tail[o], msd)
-		o += put_int(&tail[o], seqd)
-		if same {
-			for i in 0 ..< nfields {
-				o += put_str(&tail[o], fv[2 * i + 1])
-			}
-		} else {
-			o += put_int(&tail[o], i64(nfields))
-			for a in fv {
-				o += put_str(&tail[o], a)
-			}
-		}
-		o += put_int(&tail[o], lpcount)
-		tail[o] = EOF
-		lp_set_total(tail, o + 1)
-		lp_add_count(tail, elems)
-		before := tail
-		node_rewrite_int(s, &tail, HDR, h.count + 1)
-		if tail != before {
-			rx.insert(s.rax, tail_key[:], tail)
-		}
-	}
-	s.length += 1
-	s.entries_added += 1
-	s.last_id = id
-	if s.length == 1 {
-		s.first_id = id
+	s.live += 1
+	s.added += 1
+	s.top = id
+	if s.live == 1 {
+		s.head = id
 	}
 	return id, .Ok
 }
@@ -912,7 +1010,7 @@ Xadd_Spec :: struct {
 
 @(private)
 node_remove :: proc "contextless" (s: Stream, key: []u8, p: [^]u8) {
-	rx.remove(s.rax, key)
+	rx.remove(s.nodes, key)
 	lp_release(s, p)
 }
 
@@ -925,352 +1023,309 @@ node_counts_store :: proc "contextless" (s: Stream, node: ^[^]u8, count: i64, de
 	node_rewrite_int(s, node, HDR, count)
 }
 
-trim :: proc(s: Stream, args: ^Trim_Spec) -> i64 #no_bounds_check {
-	if args.rule == .Off || s.rax.numele == 0 {
-		return 0
-	}
-	maxlen := args.rule == .Max_Len
-	if maxlen && args.max_len < 0 {
-		return 0
-	}
-	removed: i64
-	limit := args.limit
-	it: rx.Iterator
-	rx.start(&it, s.rax)
-	rx.seek(&it, "^")
-	for rx.next(&it) {
-		if maxlen && s.length <= u64(args.max_len) {
-			break
-		}
-		node := ([^]u8)(it.data)
-		key: [16]u8
-		copy(key[:], rx.key(&it))
-		h := node_header(node)
-		if limit > 0 && removed + h.count > limit {
-			break
-		}
-		master := decode_id(key[:])
-		whole := false
-		if h.entries[0] == EOF {
-			whole = true
-		} else if maxlen {
-			whole = s.length - u64(h.count) >= u64(args.max_len)
-		} else {
-			last := entry_id_at(entry_last(node), master)
-			whole = compare_id(last, args.min_id) < 0
-		}
-		if whole {
-			s.length -= u64(h.count)
-			removed += h.count
-			node_remove(s, key[:], node)
-			continue
-		}
-		if args.nearly {
-			break
-		}
-		count := h.count
-		deleted := h.deleted
-		e := h.entries
-		for e[0] != EOF {
-			flags := elem_int(e)
-			next := entry_skip(e, h.nfields)
-			if flags & ITEM_FLAG_DELETED == 0 {
-				if maxlen {
-					if s.length <= u64(args.max_len) {
-						break
-					}
-				} else {
-					if compare_id(entry_id_at(e, master), args.min_id) >= 0 {
-						break
-					}
-				}
-				e[0] = u8(flags | ITEM_FLAG_DELETED)
-				count -= 1
-				deleted += 1
-				s.length -= 1
-				removed += 1
-			}
-			e = next
-		}
-		if count == 0 {
-			node_remove(s, key[:], node)
-		} else {
-			before := node
-			node_counts_store(s, &node, count, deleted)
-			if node != before {
-				rx.insert(s.rax, key[:], node)
-			}
-		}
-		break
-	}
-	rx.stop(&it)
-	if removed > 0 {
-		s.first_id = first_live_or_zero(s)
-	}
-	return removed
-}
-
-Iterator :: struct {
-	stream:              Stream,
-	master_id:           ID,
-	master_fields_count: u64,
-	master_fields_start: [^]u8,
-	master_fields_ptr:   [^]u8,
-	entry_flags:         i64,
-	rev:                 bool,
-	skip_tombstones:     bool,
-	start_id:            ID,
-	end_id:              ID,
-	ri:                  rx.Iterator,
-	cur_lp:              [^]u8,
-	lp_ele:              [^]u8,
-	lp_flags:            [^]u8,
-	field_buf:           [lp.LP_INTBUF_SIZE]u8,
-	value_buf:           [lp.LP_INTBUF_SIZE]u8,
+@(private)
+Trim_Verdict :: enum u8 {
+	Stop,
+	Drop,
+	Cut,
 }
 
 @(private)
-ITER_DONE :: -1
-
-iterator_start :: proc(si: ^Iterator, s: Stream, start: ^ID, end: ^ID, rev: bool) {
-	si.stream = s
-	si.start_id = start != nil ? start^ : ID_MIN
-	si.end_id = end != nil ? end^ : ID_MAX
-	si.rev = rev
-	si.skip_tombstones = true
-	si.cur_lp = nil
-	si.lp_ele = nil
-	si.lp_flags = nil
-	si.master_fields_ptr = nil
-	si.master_fields_start = nil
-	si.master_fields_count = 0
-	si.entry_flags = 0
-	rx.start(&si.ri, s.rax)
-	key: [16]u8
-	if !rev {
-		encode_id(&key, si.start_id)
-		rx.seek(&si.ri, "<=", key[:])
-		if rx.eof(&si.ri) {
-			rx.seek(&si.ri, "^")
-		}
-	} else {
-		encode_id(&key, si.end_id)
-		rx.seek(&si.ri, "<=", key[:])
+trim_verdict :: proc "contextless" (s: Stream, spec: ^Trim_Spec, node: [^]u8, base: ID, h: Node_Header, evicted: i64) -> Trim_Verdict {
+	by_length := spec.rule == .Max_Len
+	if by_length && s.live <= u64(spec.max_len) {
+		return .Stop
 	}
-	if compare_id(si.start_id, si.end_id) > 0 {
-		si.entry_flags = ITER_DONE
+	if spec.limit > 0 && evicted + h.count > spec.limit {
+		return .Stop
 	}
-}
-
-@(private)
-iterator_load_node :: proc(si: ^Iterator) -> bool {
-	more := si.rev ? rx.prev(&si.ri) : rx.next(&si.ri)
-	if !more {
-		return false
-	}
-	node := ([^]u8)(si.ri.data)
-	si.master_id = decode_id(rx.key(&si.ri))
-	if !si.rev && compare_id(si.master_id, si.end_id) > 0 {
-		return false
-	}
-	h := node_header(node)
-	si.cur_lp = node
-	si.master_fields_count = u64(h.nfields)
-	si.master_fields_start = h.fields
-	si.lp_flags = nil
 	if h.entries[0] == EOF {
-		si.lp_ele = nil
-		return true
+		return .Drop
 	}
-	if si.rev {
-		si.lp_ele = entry_last(node)
-	} else {
-		si.lp_ele = h.entries
+	if by_length {
+		if s.live - u64(h.count) >= u64(spec.max_len) {
+			return .Drop
+		}
+	} else if compare_id(entry_id_at(entry_last(node), base), spec.min_id) < 0 {
+		return .Drop
+	}
+	return .Stop if spec.nearly else .Cut
+}
+
+@(private)
+trim_satisfied :: #force_inline proc "contextless" (s: Stream, spec: ^Trim_Spec, id: ID) -> bool {
+	if spec.rule == .Max_Len {
+		return s.live <= u64(spec.max_len)
+	}
+	return compare_id(id, spec.min_id) >= 0
+}
+
+@(private)
+trim_inside :: proc "contextless" (s: Stream, spec: ^Trim_Spec, key: []u8, node: [^]u8, base: ID, h: Node_Header) -> i64 {
+	remaining := h.count
+	at := h.entries
+	for at[0] != EOF {
+		e := read_entry_head(at, base, h.nfields)
+		if .Tombstone not_in e.marks {
+			if trim_satisfied(s, spec, e.id) {
+				break
+			}
+			mark_tombstone(at, e.marks)
+			remaining -= 1
+			s.live -= 1
+		}
+		at = entry_end(e)
+	}
+	cut := h.count - remaining
+	if remaining == 0 {
+		node_remove(s, key, node)
+		return cut
+	}
+	moved := node
+	node_counts_store(s, &moved, remaining, h.deleted + cut)
+	if moved != node {
+		rx.insert(s.nodes, key, moved)
+	}
+	return cut
+}
+
+trim :: proc(s: Stream, spec: ^Trim_Spec) -> i64 {
+	if spec.rule == .Off || s.nodes.numele == 0 {
+		return 0
+	}
+	if spec.rule == .Max_Len && spec.max_len < 0 {
+		return 0
+	}
+	evicted: i64
+	walk: rx.Iterator
+	rx.start(&walk, s.nodes)
+	rx.seek(&walk, "^")
+	scan: for rx.next(&walk) {
+		node := ([^]u8)(walk.data)
+		key: [16]u8
+		copy(key[:], rx.key(&walk))
+		base := decode_id(key[:])
+		h := node_header(node)
+		switch trim_verdict(s, spec, node, base, h, evicted) {
+		case .Stop:
+			break scan
+		case .Drop:
+			s.live -= u64(h.count)
+			evicted += h.count
+			node_remove(s, key[:], node)
+		case .Cut:
+			evicted += trim_inside(s, spec, key[:], node, base, h)
+			break scan
+		}
+	}
+	rx.stop(&walk)
+	if evicted > 0 {
+		s.head = first_live_or_zero(s)
+	}
+	return evicted
+}
+
+Cursor :: struct {
+	walk:       rx.Iterator,
+	log:        Stream,
+	lo:         ID,
+	hi:         ID,
+	held:       ID,
+	base:       ID,
+	node:       [^]u8,
+	names:      [^]u8,
+	name_at:    [^]u8,
+	value_at:   [^]u8,
+	width:      int,
+	next_at:    int,
+	held_at:    int,
+	marks:      Entry_Marks,
+	backward:   bool,
+	tombstones: bool,
+	finished:   bool,
+	scratch:    [2][lp.LP_INTBUF_SIZE]u8,
+}
+
+cursor_open :: proc(c: ^Cursor, s: Stream, lo: ^ID, hi: ^ID, backward: bool) {
+	c.log = s
+	c.lo = lo^ if lo != nil else ID_MIN
+	c.hi = hi^ if hi != nil else ID_MAX
+	c.backward = backward
+	c.tombstones = false
+	c.node = nil
+	c.next_at = 0
+	c.held_at = 0
+	c.finished = compare_id(c.lo, c.hi) > 0
+	rx.start(&c.walk, s.nodes)
+	if c.finished {
+		return
+	}
+	anchor: [16]u8
+	encode_id(&anchor, c.hi if backward else c.lo)
+	rx.seek(&c.walk, "<=", anchor[:])
+	if !backward && rx.eof(&c.walk) {
+		rx.seek(&c.walk, "^")
+	}
+}
+
+cursor_close :: #force_inline proc(c: ^Cursor) {
+	rx.stop(&c.walk)
+}
+
+@(private)
+cursor_offset :: #force_inline proc "contextless" (c: ^Cursor, p: [^]u8) -> int {
+	return int(uintptr(p) - uintptr(c.node))
+}
+
+@(private)
+cursor_enter :: proc(c: ^Cursor) -> bool {
+	moved := rx.prev(&c.walk) if c.backward else rx.next(&c.walk)
+	if !moved {
+		return false
+	}
+	c.base = decode_id(rx.key(&c.walk))
+	if !c.backward && compare_id(c.base, c.hi) > 0 {
+		return false
+	}
+	c.node = ([^]u8)(c.walk.data)
+	h := node_header(c.node)
+	c.names = h.fields
+	c.width = h.nfields
+	c.next_at = 0
+	if h.entries[0] != EOF {
+		c.next_at = cursor_offset(c, entry_last(c.node) if c.backward else h.entries)
 	}
 	return true
 }
 
-iterator_get_id :: proc(si: ^Iterator, id: ^ID, numfields: ^i64) -> bool #no_bounds_check {
-	if si.entry_flags == ITER_DONE {
-		return false
+@(private)
+cursor_step :: proc "contextless" (c: ^Cursor, at: [^]u8, e: Entry_Head) -> int {
+	if c.backward {
+		prior := entry_before(at)
+		return 0 if prior == nil else cursor_offset(c, prior)
 	}
-	if si.lp_flags != nil {
-		cur := si.lp_flags
-		si.lp_flags = nil
-		si.lp_ele = entry_after(cur, si.rev, int(si.master_fields_count))
-		if si.lp_ele == nil {
-			si.cur_lp = nil
-		}
-	}
-	for {
-		if si.cur_lp == nil || si.lp_ele == nil {
-			si.cur_lp = nil
-			if !iterator_load_node(si) {
-				si.entry_flags = ITER_DONE
-				return false
-			}
-			if si.lp_ele == nil {
-				si.cur_lp = nil
-				continue
-			}
-		}
-		e := si.lp_ele
-		flags := elem_int(e)
-		p := elem_next(e)
-		ms := u64(elem_int(p))
-		p = elem_next(p)
-		seq := u64(elem_int(p))
-		p = elem_next(p)
-		cur := ID{si.master_id.ms + ms, si.master_id.seq + seq}
-		nf: i64
-		if flags & ITEM_FLAG_SAMEFIELDS != 0 {
-			nf = i64(si.master_fields_count)
-		} else {
-			nf = elem_int(p)
-			p = elem_next(p)
-		}
-		if !si.rev {
-			if compare_id(cur, si.end_id) > 0 {
-				si.entry_flags = ITER_DONE
-				return false
-			}
-		} else {
-			if compare_id(cur, si.start_id) < 0 {
-				si.entry_flags = ITER_DONE
-				return false
-			}
-		}
-		in_range := si.rev ? compare_id(cur, si.end_id) <= 0 : compare_id(cur, si.start_id) >= 0
-		if in_range && (flags & ITEM_FLAG_DELETED == 0 || !si.skip_tombstones) {
-			si.lp_flags = e
-			si.lp_ele = p
-			si.entry_flags = flags
-			si.master_fields_ptr = si.master_fields_start
-			id^ = cur
-			numfields^ = nf
-			return true
-		}
-		si.lp_ele = entry_after(e, si.rev, int(si.master_fields_count))
-	}
+	after := entry_end(e)
+	return 0 if after[0] == EOF else cursor_offset(c, after)
 }
 
 @(private)
-entry_after :: #force_inline proc "contextless" (e: [^]u8, rev: bool, nfields: int) -> [^]u8 {
-	if rev {
-		return entry_before(e)
+cursor_passed :: #force_inline proc "contextless" (c: ^Cursor, id: ID) -> bool {
+	if c.backward {
+		return compare_id(id, c.lo) < 0
 	}
-	nx := entry_skip(e, nfields)
-	if nx[0] == EOF {
-		return nil
-	}
-	return nx
+	return compare_id(id, c.hi) > 0
 }
 
-iterator_get_field :: proc(si: ^Iterator) -> (field: []u8, value: []u8) {
-	if si.entry_flags & ITEM_FLAG_SAMEFIELDS != 0 {
-		field = elem_bytes(si.master_fields_ptr, &si.field_buf)
-		si.master_fields_ptr = elem_next(si.master_fields_ptr)
-	} else {
-		field = elem_bytes(si.lp_ele, &si.field_buf)
-		si.lp_ele = elem_next(si.lp_ele)
+@(private)
+cursor_short :: #force_inline proc "contextless" (c: ^Cursor, id: ID) -> bool {
+	if c.backward {
+		return compare_id(id, c.hi) > 0
 	}
-	value = elem_bytes(si.lp_ele, &si.value_buf)
-	si.lp_ele = elem_next(si.lp_ele)
+	return compare_id(id, c.lo) < 0
+}
+
+cursor_next :: proc(c: ^Cursor) -> (id: ID, fields: i64, ok: bool) {
+	for !c.finished {
+		if c.next_at == 0 {
+			c.finished = !cursor_enter(c)
+			continue
+		}
+		at := ([^]u8)(&c.node[c.next_at])
+		e := read_entry_head(at, c.base, c.width)
+		c.next_at = cursor_step(c, at, e)
+		if cursor_passed(c, e.id) {
+			c.finished = true
+			break
+		}
+		if cursor_short(c, e.id) || (.Tombstone in e.marks && !c.tombstones) {
+			continue
+		}
+		c.held_at = cursor_offset(c, at)
+		c.held = e.id
+		c.marks = e.marks
+		c.name_at = c.names
+		c.value_at = e.body
+		return e.id, i64(e.fields), true
+	}
+	c.held_at = 0
 	return
 }
 
-iterator_skip_fields :: proc(si: ^Iterator, numfields: i64) {
-	n := int(numfields)
-	if si.entry_flags & ITEM_FLAG_SAMEFIELDS != 0 {
-		si.lp_ele = elem_skip(si.lp_ele, n)
-		si.master_fields_ptr = elem_skip(si.master_fields_ptr, n)
-	} else {
-		si.lp_ele = elem_skip(si.lp_ele, 2 * n)
-	}
+@(private)
+take_elem :: #force_inline proc "contextless" (p: ^[^]u8, buf: ^[lp.LP_INTBUF_SIZE]u8) -> []u8 {
+	b := elem_bytes(p^, buf)
+	p^ = elem_next(p^)
+	return b
 }
 
-iterator_remove_entry :: proc(si: ^Iterator, current: ^ID) {
-	s := si.stream
-	if si.lp_flags == nil || si.cur_lp == nil {
+cursor_field :: proc(c: ^Cursor) -> (field: []u8, value: []u8) {
+	source := &c.value_at
+	if .Shared_Fields in c.marks {
+		source = &c.name_at
+	}
+	field = take_elem(source, &c.scratch[0])
+	value = take_elem(&c.value_at, &c.scratch[1])
+	return
+}
+
+cursor_skip :: proc(c: ^Cursor, pairs: i64) {
+	n := int(pairs)
+	if .Shared_Fields in c.marks {
+		c.name_at = elem_skip(c.name_at, n)
+		c.value_at = elem_skip(c.value_at, n)
 		return
 	}
-	node := si.cur_lp
-	flags := elem_int(si.lp_flags)
-	if flags & ITEM_FLAG_DELETED != 0 {
+	c.value_at = elem_skip(c.value_at, 2 * n)
+}
+
+cursor_drop :: proc(c: ^Cursor) {
+	if c.held_at == 0 || c.node == nil {
 		return
 	}
+	at := ([^]u8)(&c.node[c.held_at])
+	marks := marks_at(at)
+	if .Tombstone in marks {
+		return
+	}
+	s := c.log
+	c.held_at = 0
+	mark_tombstone(at, marks)
+	s.live -= 1
 	key: [16]u8
-	encode_id(&key, si.master_id)
-	h := node_header(node)
-	si.lp_flags[0] = u8(flags | ITEM_FLAG_DELETED)
-	si.lp_flags = nil
-	s.length -= 1
+	encode_id(&key, c.base)
+	h := node_header(c.node)
 	if h.count == 1 {
-		node_remove(s, key[:], node)
-		si.cur_lp = nil
-		si.lp_ele = nil
+		node_remove(s, key[:], c.node)
+		c.node = nil
+		c.next_at = 0
 	} else {
-		before := node
+		shift := cursor_offset(c, h.entries)
+		node := c.node
 		node_counts_store(s, &node, h.count - 1, h.deleted + 1)
-		if node != before {
-			rx.insert(s.rax, key[:], node)
+		if node != c.node {
+			rx.insert(s.nodes, key[:], node)
 		}
-		si.cur_lp = node
-		nh := node_header(node)
-		if si.rev {
-			si.lp_ele = locate_entry_rev(node, nh, si.master_id, current^)
-		} else {
-			si.lp_ele = locate_entry_fwd(node, nh, si.master_id, current^)
-		}
-		if si.lp_ele == nil {
-			si.cur_lp = nil
+		c.node = node
+		fresh := node_header(node)
+		c.names = fresh.fields
+		if c.next_at != 0 {
+			c.next_at += cursor_offset(c, fresh.entries) - shift
 		}
 	}
-	if compare_id(current^, s.first_id) == 0 {
-		s.first_id = first_live_or_zero(s)
+	if compare_id(c.held, s.head) == 0 {
+		s.head = first_live_or_zero(s)
 	}
-}
-
-@(private)
-locate_entry_fwd :: proc "contextless" (node: [^]u8, h: Node_Header, master: ID, after: ID) -> [^]u8 {
-	e := h.entries
-	for e[0] != EOF {
-		if compare_id(entry_id_at(e, master), after) > 0 {
-			return e
-		}
-		e = entry_skip(e, h.nfields)
-	}
-	return nil
-}
-
-@(private)
-locate_entry_rev :: proc "contextless" (node: [^]u8, h: Node_Header, master: ID, before: ID) -> [^]u8 {
-	if h.entries[0] == EOF {
-		return nil
-	}
-	e := entry_last(node)
-	for e != nil {
-		if compare_id(entry_id_at(e, master), before) < 0 {
-			return e
-		}
-		e = entry_before(e)
-	}
-	return nil
-}
-
-iterator_stop :: #force_inline proc(si: ^Iterator) {
-	rx.stop(&si.ri)
 }
 
 @(private)
 find_entry :: proc "contextless" (s: Stream, id: ID) -> (node: [^]u8, key: [16]u8, flags_ptr: [^]u8, found: bool) {
-	if s.rax == nil || s.rax.numele == 0 {
+	if s.nodes == nil || s.nodes.numele == 0 {
 		return
 	}
 	target: [16]u8
 	encode_id(&target, id)
 	it: rx.Iterator
-	rx.start(&it, s.rax)
+	rx.start(&it, s.nodes)
 	rx.seek(&it, "<=", target[:])
 	if rx.next(&it) {
 		node = ([^]u8)(it.data)
@@ -1301,7 +1356,7 @@ entry_exists :: proc(s: Stream, id: ID) -> bool {
 	if !found {
 		return false
 	}
-	return elem_int(flags_ptr) & ITEM_FLAG_DELETED == 0
+	return .Tombstone not_in marks_at(flags_ptr)
 }
 
 delete_item :: proc(s: Stream, id: ID) -> bool {
@@ -1309,57 +1364,59 @@ delete_item :: proc(s: Stream, id: ID) -> bool {
 	if !found {
 		return false
 	}
-	flags := elem_int(flags_ptr)
-	if flags & ITEM_FLAG_DELETED != 0 {
+	marks := marks_at(flags_ptr)
+	if .Tombstone in marks {
 		return false
 	}
-	flags_ptr[0] = u8(flags | ITEM_FLAG_DELETED)
+	mark_tombstone(flags_ptr, marks)
 	h := node_header(node)
-	s.length -= 1
+	s.live -= 1
 	if h.count - 1 == 0 {
 		node_remove(s, key[:], node)
 	} else {
 		n := node
 		node_counts_store(s, &n, h.count - 1, h.deleted + 1)
 		if n != node {
-			rx.insert(s.rax, key[:], n)
+			rx.insert(s.nodes, key[:], n)
 		}
 	}
-	if compare_id(id, s.first_id) == 0 {
-		s.first_id = first_live_or_zero(s)
+	if compare_id(id, s.head) == 0 {
+		s.head = first_live_or_zero(s)
 	}
 	return true
 }
 
 last_valid_id :: proc(s: Stream) -> (maxid: ID) {
-	if s.length == 0 {
+	if s.live == 0 {
 		return ID_MIN
 	}
-	return get_edge_id(s, false, true)
+	return boundary_id(s, .Tail, false)
 }
 
-range_has_tombstones :: proc "contextless" (s: Stream, start: ^ID, end: ^ID) -> bool {
-	if s.length == 0 || id_is_zero(s.max_deleted_entry_id) {
+may_hold_tombstones :: proc "contextless" (s: Stream, lo: ^ID, hi: ^ID) -> bool {
+	if s.live == 0 || id_is_zero(s.tomb) {
 		return false
 	}
-	lo := start != nil ? start^ : ID_MIN
-	hi := end != nil ? end^ : ID_MAX
-	return compare_id(lo, s.max_deleted_entry_id) <= 0 && compare_id(s.max_deleted_entry_id, hi) <= 0
+	if lo != nil && compare_id(s.tomb, lo^) < 0 {
+		return false
+	}
+	if hi != nil && compare_id(s.tomb, hi^) > 0 {
+		return false
+	}
+	return true
 }
 
 range_count :: proc(s: Stream, start: ^ID, end: ^ID, count: int, rev: bool) -> int {
-	si: Iterator
-	iterator_start(&si, s, start, end, rev)
+	c: Cursor
+	cursor_open(&c, s, start, end, rev)
+	defer cursor_close(&c)
 	n := 0
-	id: ID
-	numfields: i64
-	for iterator_get_id(&si, &id, &numfields) {
+	for _ in cursor_next(&c) {
 		n += 1
 		if count > 0 && n >= count {
 			break
 		}
 	}
-	iterator_stop(&si)
 	return n
 }
 
@@ -1370,7 +1427,7 @@ Node_Info :: struct {
 
 node_listpacks :: proc(s: Stream, out: ^[dynamic]Node_Info) {
 	it: rx.Iterator
-	rx.start(&it, s.rax)
+	rx.start(&it, s.nodes)
 	rx.seek(&it, "^")
 	for rx.next(&it) {
 		info: Node_Info

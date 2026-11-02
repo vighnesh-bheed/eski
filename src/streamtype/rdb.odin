@@ -11,9 +11,9 @@ rdb_type :: proc "contextless" (s: Stream) -> u8 {
 }
 
 rdb_save :: proc "contextless" (w: ^rdb.Writer, s: Stream) {
-	rdb.put_len(w, s.rax.numele)
+	rdb.put_len(w, s.nodes.numele)
 	it: rx.Iterator
-	rx.start(&it, s.rax)
+	rx.start(&it, s.nodes)
 	rx.seek(&it, "^")
 	for rx.next(&it) {
 		node := ([^]u8)(it.data)
@@ -21,51 +21,51 @@ rdb_save :: proc "contextless" (w: ^rdb.Writer, s: Stream) {
 		rdb.put_string(w, node[:lp_total(node)])
 	}
 	rx.stop(&it)
-	rdb.put_len(w, s.length)
-	rdb.put_len(w, s.last_id.ms)
-	rdb.put_len(w, s.last_id.seq)
-	rdb.put_len(w, s.first_id.ms)
-	rdb.put_len(w, s.first_id.seq)
-	rdb.put_len(w, s.max_deleted_entry_id.ms)
-	rdb.put_len(w, s.max_deleted_entry_id.seq)
-	rdb.put_len(w, s.entries_added)
-	if s.cgroups == nil {
+	rdb.put_len(w, s.live)
+	rdb.put_len(w, s.top.ms)
+	rdb.put_len(w, s.top.seq)
+	rdb.put_len(w, s.head.ms)
+	rdb.put_len(w, s.head.seq)
+	rdb.put_len(w, s.tomb.ms)
+	rdb.put_len(w, s.tomb.seq)
+	rdb.put_len(w, s.added)
+	if s.groups == nil {
 		rdb.put_len(w, 0)
 		return
 	}
-	rdb.put_len(w, s.cgroups.numele)
+	rdb.put_len(w, s.groups.numele)
 	gi: rx.Iterator
-	rx.start(&gi, s.cgroups)
+	rx.start(&gi, s.groups)
 	rx.seek(&gi, "^")
 	for rx.next(&gi) {
-		cg := (^CG)(gi.data)
+		g := (^Group)(gi.data)
 		rdb.put_string(w, rx.key(&gi))
-		rdb.put_len(w, cg.last_id.ms)
-		rdb.put_len(w, cg.last_id.seq)
-		rdb.put_len(w, u64(cg.entries_read))
-		rdb.put_len(w, cg.pel.numele)
+		rdb.put_len(w, g.delivered.ms)
+		rdb.put_len(w, g.delivered.seq)
+		rdb.put_len(w, u64(g.reads))
+		rdb.put_len(w, g.pending.numele)
 		pi: rx.Iterator
-		rx.start(&pi, cg.pel)
+		rx.start(&pi, g.pending)
 		rx.seek(&pi, "^")
 		for rx.next(&pi) {
-			nack := (^NACK)(pi.data)
+			pe := (^Delivery)(pi.data)
 			rdb.put_raw(w, rx.key(&pi))
-			rdb.put_ms(w, nack.delivery_time)
-			rdb.put_len(w, nack.delivery_count)
+			rdb.put_ms(w, pe.sent_ms)
+			rdb.put_len(w, pe.times)
 		}
 		rx.stop(&pi)
-		rdb.put_len(w, cg.consumers.numele)
+		rdb.put_len(w, g.members.numele)
 		ci: rx.Iterator
-		rx.start(&ci, cg.consumers)
+		rx.start(&ci, g.members)
 		rx.seek(&ci, "^")
 		for rx.next(&ci) {
-			consumer := (^Consumer)(ci.data)
+			member := (^Member)(ci.data)
 			rdb.put_string(w, rx.key(&ci))
-			rdb.put_ms(w, consumer.seen_time)
-			rdb.put_ms(w, consumer.active_time)
-			rdb.put_len(w, consumer.pel.numele)
+			rdb.put_ms(w, member.seen_ms)
+			rdb.put_ms(w, member.active_ms)
+			rdb.put_len(w, member.owned.numele)
 			ki: rx.Iterator
-			rx.start(&ki, consumer.pel)
+			rx.start(&ki, member.owned)
 			rx.seek(&ki, "^")
 			for rx.next(&ki) {
 				rdb.put_raw(w, rx.key(&ki))
@@ -252,7 +252,7 @@ walk_done :: #force_inline proc(w: ^Node_Walk) -> bool {
 
 @(private)
 node_check :: proc(node: [^]u8, size: u64, deep: bool) -> bool {
-	if size < HDR + 1 || size > LISTPACK_MAX_SIZE + 1024 {
+	if size < HDR + 1 || size > NODE_SIZE_CEILING + 1024 {
 		return false
 	}
 	if u64(lp_total(node)) != size || node[size - 1] != EOF {
@@ -284,7 +284,7 @@ node_check :: proc(node: [^]u8, size: u64, deep: bool) -> bool {
 			return false
 		}
 		in_entry: i64 = 3
-		if flags & ITEM_FLAG_SAMEFIELDS != 0 {
+		if .Shared_Fields in transmute(Entry_Marks)u8(flags) {
 			if !walk_skip(&w, nfields) {
 				return false
 			}
@@ -344,7 +344,7 @@ load_node :: proc(r: ^rdb.Reader, s: Stream, deep: bool) -> (ok: bool, reason: s
 		lp_release(s, node)
 		return false, "Stream listpack integrity check failed"
 	}
-	if !rx.try_insert(s.rax, keybuf[:], node) {
+	if !rx.try_insert(s.nodes, keybuf[:], node) {
 		lp_release(s, node)
 		return false, "Listpack re-added with existing key"
 	}
@@ -367,34 +367,34 @@ rdb_load :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> Stream {
 	if !rdb_len_any(r, &length) {
 		return rdb_fail(r, s, "Stream length loading failed")
 	}
-	s.length = length
+	s.live = length
 	last, lgood := rdb_get_id(r)
 	if !lgood {
 		return rdb_fail(r, s, "Stream last id loading failed")
 	}
-	s.last_id = last
+	s.top = last
 	if rdbtype >= rdb.TYPE_STREAM_LISTPACKS_2 {
 		first, fgood := rdb_get_id(r)
 		if !fgood {
 			return rdb_fail(r, s, "Stream first id loading failed")
 		}
-		s.first_id = first
+		s.head = first
 		maxdel, mgood := rdb_get_id(r)
 		if !mgood {
 			return rdb_fail(r, s, "Stream max deleted id loading failed")
 		}
-		s.max_deleted_entry_id = maxdel
+		s.tomb = maxdel
 		added: u64
 		if !rdb_len_any(r, &added) {
 			return rdb_fail(r, s, "Stream entries added loading failed")
 		}
-		s.entries_added = added
+		s.added = added
 	} else {
-		s.entries_added = s.length
-		s.max_deleted_entry_id = ID_MIN
-		s.first_id = get_edge_id(s, true, true)
+		s.added = s.live
+		s.tomb = ID_MIN
+		s.head = boundary_id(s, .Head, false)
 	}
-	if deep && s.rax.numele == 0 && s.length != 0 {
+	if deep && s.nodes.numele == 0 && s.live != 0 {
 		return rdb_fail(r, s, "Stream length inconsistent with empty listpack set")
 	}
 	groups: u64
@@ -421,10 +421,11 @@ rdb_load :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> Stream {
 			}
 			entries_read = i64(er)
 		} else {
-			entries_read = estimate_distance(s, gid)
+			reached, known := added_through(s, gid)
+			entries_read = reached if known else ENTRIES_READ_UNKNOWN
 		}
-		cg := create_cg(s, gname, gid, entries_read)
-		if cg == nil {
+		g := add_group(s, gname, gid, entries_read)
+		if g == nil {
 			return rdb_fail(r, s, "Duplicated consumer group name")
 		}
 		pel_size: u64
@@ -446,10 +447,10 @@ rdb_load :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> Stream {
 			if !rdb_len_any(r, &delivered) {
 				return rdb_fail(r, s, "Stream PEL NACK loading failed")
 			}
-			nack := create_nack(s, nil, when_ms)
-			nack.delivery_count = delivered
-			if !rx.try_insert(cg.pel, idkey[:], nack) {
-				cg_release(s, nack)
+			pe := new_delivery(s, nil, when_ms)
+			pe.times = delivered
+			if !rx.try_insert(g.pending, idkey[:], pe) {
+				group_release(s, pe)
 				return rdb_fail(r, s, "Duplicated global PEL entry loading stream consumer group")
 			}
 		}
@@ -462,23 +463,23 @@ rdb_load :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> Stream {
 			if !cgood || !rdb.ok(r) {
 				return rdb_fail(r, s, "Error reading the consumer name from Stream group")
 			}
-			consumer := create_consumer(s, cg, cname, 0)
-			if consumer == nil {
+			member := add_member(s, g, cname, 0)
+			if member == nil {
 				return rdb_fail(r, s, "Duplicate stream consumer detected")
 			}
 			seen, sgood := rdb.get_ms(r)
 			if !sgood {
 				return rdb_fail(r, s, "Stream short read reading seen time")
 			}
-			consumer.seen_time = seen
+			member.seen_ms = seen
 			if rdbtype >= rdb.TYPE_STREAM_LISTPACKS_3 {
 				active, agood := rdb.get_ms(r)
 				if !agood {
 					return rdb_fail(r, s, "Stream short read reading active time")
 				}
-				consumer.active_time = active
+				member.active_ms = active
 			} else {
-				consumer.active_time = seen
+				member.active_ms = seen
 			}
 			owned: u64
 			if !rdb_len(r, &owned) {
@@ -491,27 +492,27 @@ rdb_load :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> Stream {
 				}
 				idkey: [16]u8
 				copy(idkey[:], raw)
-				v, found := rx.find(cg.pel, idkey[:])
+				v, found := rx.find(g.pending, idkey[:])
 				if !found {
 					return rdb_fail(r, s, "Consumer entry not found in group global PEL")
 				}
-				nack := (^NACK)(v)
-				if nack.consumer != nil {
+				pe := (^Delivery)(v)
+				if pe.owner != nil {
 					return rdb_fail(r, s, "Duplicated consumer PEL entry loading a stream consumer group")
 				}
-				nack.consumer = consumer
-				if !rx.try_insert(consumer.pel, idkey[:], nack) {
+				pe.owner = member
+				if !rx.try_insert(member.owned, idkey[:], pe) {
 					return rdb_fail(r, s, "Duplicated consumer PEL entry loading a stream consumer group")
 				}
 			}
 		}
 		{
 			pi: rx.Iterator
-			rx.start(&pi, cg.pel)
+			rx.start(&pi, g.pending)
 			rx.seek(&pi, "^")
 			orphan := false
 			for rx.next(&pi) {
-				if (^NACK)(pi.data).consumer == nil {
+				if (^Delivery)(pi.data).owner == nil {
 					orphan = true
 					break
 				}

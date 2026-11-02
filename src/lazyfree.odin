@@ -161,11 +161,11 @@ lazyfree_effort :: proc(type: Obj_Type, obj: rawptr) -> int {
 		effort := 2 * int(sm.node_count(s)) + 1
 		if groups := int(sm.group_count(s)); groups > 0 {
 			it: rx.Iterator
-			rx.start(&it, s.cgroups)
+			rx.start(&it, s.groups)
 			rx.seek(&it, "^")
 			pel := 0
 			if rx.next(&it) {
-				pel = int((^sm.CG)(it.data).pel.numele)
+				pel = int((^sm.Group)(it.data).pending.numele)
 			}
 			rx.stop(&it)
 			effort += groups * (1 + pel)

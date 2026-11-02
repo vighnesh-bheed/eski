@@ -29,7 +29,7 @@ b :: #force_inline proc(s: string) -> []u8 {
 add :: proc(t: ^testing.T, s: st.Stream, ms: u64, seq: u64 = 0, field := "f", value := "v") {
 	use := st.ID{ms, seq}
 	fv := [2][]u8{b(field), b(value)}
-	_, res := st.append_item(s, fv[:], &use, true, 0)
+	_, res := st.append_entry(s, fv[:], .Explicit, use, 0)
 	testing.expectf(t, res == .Ok, "append %d-%d failed: %v", ms, seq, res)
 }
 
@@ -42,25 +42,27 @@ stream_1_to :: proc(t: ^testing.T, n: u64) -> st.Stream {
 }
 
 baseline :: proc(s: st.Stream) -> int {
-	return s.cg_mem
+	return s.group_bytes
 }
 
-deliver :: proc(s: st.Stream, cg: ^st.CG, c: ^st.Consumer, count: int, noack: bool, now: i64) -> []st.ID {
+deliver :: proc(s: st.Stream, cg: ^st.Group, c: ^st.Member, count: int, noack: bool, now: i64) -> []st.ID {
 	out := make([dynamic]st.ID, context.temp_allocator)
-	start := cg.last_id
+	start := cg.delivered
 	if !st.incr_id(&start) {
 		return out[:]
 	}
-	si: st.Iterator
-	st.iterator_start(&si, s, &start, nil, false)
-	cur: st.ID
-	nf: i64
-	for (count <= 0 || len(out) < count) && st.iterator_get_id(&si, &cur, &nf) {
-		st.iterator_skip_fields(&si, nf)
+	si: st.Cursor
+	st.cursor_open(&si, s, &start, nil, false)
+	for count <= 0 || len(out) < count {
+		cur, nf, more := st.cursor_next(&si)
+		if !more {
+			break
+		}
+		st.cursor_skip(&si, nf)
 		st.group_deliver(s, cg, c, cur, noack, now)
 		append(&out, cur)
 	}
-	st.iterator_stop(&si)
+	st.cursor_close(&si)
 	return out[:]
 }
 
@@ -76,13 +78,13 @@ pel_ids :: proc(r: ^rx.Rax) -> []st.ID {
 	return out[:]
 }
 
-consumer_names :: proc(cg: ^st.CG) -> []string {
+consumer_names :: proc(cg: ^st.Group) -> []string {
 	out := make([dynamic]string, context.temp_allocator)
 	it: rx.Iterator
-	rx.start(&it, cg.consumers)
+	rx.start(&it, cg.members)
 	rx.seek(&it, "^")
 	for rx.next(&it) {
-		append(&out, string((^st.Consumer)(it.data).name))
+		append(&out, string((^st.Member)(it.data).name))
 	}
 	rx.stop(&it)
 	return out[:]
@@ -90,11 +92,11 @@ consumer_names :: proc(cg: ^st.CG) -> []string {
 
 group_names :: proc(s: st.Stream) -> []string {
 	out := make([dynamic]string, context.temp_allocator)
-	if s.cgroups == nil {
+	if s.groups == nil {
 		return out[:]
 	}
 	it: rx.Iterator
-	rx.start(&it, s.cgroups)
+	rx.start(&it, s.groups)
 	rx.seek(&it, "^")
 	for rx.next(&it) {
 		append(&out, fmt.tprintf("%s", rx.key(&it)))
@@ -127,24 +129,24 @@ same_strings :: proc(a: []string, b: []string) -> bool {
 	return true
 }
 
-lag_of :: proc(s: st.Stream, cg: ^st.CG) -> (lag: i64, known: bool) {
-	return st.cg_lag(s, cg)
+lag_of :: proc(s: st.Stream, cg: ^st.Group) -> (lag: i64, known: bool) {
+	return st.group_lag(s, cg)
 }
 
-expect_lag :: proc(t: ^testing.T, s: st.Stream, cg: ^st.CG, want: i64, loc := #caller_location) {
-	lag, known := st.cg_lag(s, cg)
+expect_lag :: proc(t: ^testing.T, s: st.Stream, cg: ^st.Group, want: i64, loc := #caller_location) {
+	lag, known := st.group_lag(s, cg)
 	testing.expectf(t, known && lag == want, "lag: got %v known %v, want %v", lag, known, want, loc = loc)
 }
 
-expect_lag_unknown :: proc(t: ^testing.T, s: st.Stream, cg: ^st.CG, loc := #caller_location) {
-	lag, known := st.cg_lag(s, cg)
+expect_lag_unknown :: proc(t: ^testing.T, s: st.Stream, cg: ^st.Group, loc := #caller_location) {
+	lag, known := st.group_lag(s, cg)
 	testing.expectf(t, !known, "lag: got %v, want unknown", lag, loc = loc)
 }
 
-expect_read :: proc(t: ^testing.T, cg: ^st.CG, want: i64, loc := #caller_location) {
-	testing.expectf(t, cg.entries_read == want, "entries read: got %v want %v", cg.entries_read, want, loc = loc)
+expect_read :: proc(t: ^testing.T, cg: ^st.Group, want: i64, loc := #caller_location) {
+	testing.expectf(t, cg.reads == want, "entries read: got %v want %v", cg.reads, want, loc = loc)
 }
 
-claim_args :: proc(minidle: i64 = 0) -> st.Claim_Args {
-	return st.Claim_Args{minidle = minidle, deliverytime = -1, retrycount = -1}
+claim_args :: proc(minidle: i64 = 0) -> st.Claim_Options {
+	return st.Claim_Options{idle_floor = minidle, stamp = st.CLAIM_UNSET, tries = st.CLAIM_UNSET}
 }

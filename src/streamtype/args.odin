@@ -626,21 +626,21 @@ parse_xsetid_args :: proc "contextless" (argv: [][]u8) -> (a: Setid_Args, err: E
 }
 
 xsetid_apply :: proc(s: Stream, a: ^Setid_Args) -> Error {
-	if compare_id(a.id, s.max_deleted_entry_id) < 0 {
+	if compare_id(a.id, s.tomb) < 0 {
 		return .Setid_Current_Max_Deleted
 	}
-	if s.length > 0 && compare_id(a.id, last_valid_id(s)) < 0 {
+	if s.live > 0 && compare_id(a.id, last_valid_id(s)) < 0 {
 		return .Setid_Top
 	}
-	if a.entries_added != -1 && u64(a.entries_added) < s.length {
+	if a.entries_added != -1 && u64(a.entries_added) < s.live {
 		return .Setid_Entries_Added
 	}
-	s.last_id = a.id
+	s.top = a.id
 	if a.entries_added != -1 {
-		s.entries_added = u64(a.entries_added)
+		s.added = u64(a.entries_added)
 	}
 	if !id_is_zero(a.max_deleted_id) {
-		s.max_deleted_entry_id = a.max_deleted_id
+		s.tomb = a.max_deleted_id
 	}
 	return .None
 }
@@ -676,8 +676,8 @@ xdel_apply :: proc(s: Stream, ids: []ID) -> int {
 	for id in ids {
 		if delete_item(s, id) {
 			deleted += 1
-			if compare_id(id, s.max_deleted_entry_id) > 0 {
-				s.max_deleted_entry_id = id
+			if compare_id(id, s.tomb) > 0 {
+				s.tomb = id
 			}
 		}
 	}
@@ -685,15 +685,11 @@ xdel_apply :: proc(s: Stream, ids: []ID) -> int {
 }
 
 xadd_apply :: proc(s: Stream, spec: ^Xadd_Spec, fv: [][]u8, now_ms: u64) -> (id: ID, err: Error) {
-	if compare_id(s.last_id, ID_MAX) == 0 {
+	if compare_id(s.top, ID_MAX) == 0 {
 		err = .Id_Exhausted
 		return
 	}
-	wanted: ^ID
-	if spec.id_mode != .Generated {
-		wanted = &spec.id
-	}
-	added, outcome := append_item(s, fv, wanted, spec.id_mode != .Generated_Seq, now_ms)
+	added, outcome := append_entry(s, fv, spec.id_mode, spec.id, now_ms)
 	switch outcome {
 	case .Ok:
 		return added, .None
@@ -805,9 +801,9 @@ parse_xpending_args :: proc "contextless" (argv: [][]u8) -> (a: Xpending_Args, e
 	return
 }
 
-parse_xclaim_args :: proc(argv: [][]u8, now: i64, ids: ^[dynamic]ID) -> (a: Claim_Args, bad: int, err: Error) {
-	a.retrycount = -1
-	a.deliverytime = -1
+parse_xclaim_args :: proc(argv: [][]u8, now: i64, ids: ^[dynamic]ID) -> (a: Claim_Options, bad: int, err: Error) {
+	a.tries = CLAIM_UNSET
+	a.stamp = CLAIM_UNSET
 	n := len(argv)
 	if n < 6 {
 		err = .Syntax
@@ -818,7 +814,7 @@ parse_xclaim_args :: proc(argv: [][]u8, now: i64, ids: ^[dynamic]ID) -> (a: Clai
 		err = .Claim_Min_Idle
 		return
 	}
-	a.minidle = minidle < 0 ? 0 : minidle
+	a.idle_floor = minidle < 0 ? 0 : minidle
 	j := 5
 	for j < n {
 		id, good := parse_exact_id(argv[j])
@@ -832,16 +828,16 @@ parse_xclaim_args :: proc(argv: [][]u8, now: i64, ids: ^[dynamic]ID) -> (a: Clai
 		more := n - 1 - j
 		opt := argv[j]
 		if opt_is(opt, "force") {
-			a.force = true
+			a.flags += {.Force}
 		} else if opt_is(opt, "justid") {
-			a.justid = true
+			a.flags += {.Ids_Only}
 		} else if opt_is(opt, "idle") && more >= 1 {
 			v, good := parse_ll(argv[j + 1])
 			if !good {
 				err = .Claim_Idle
 				return
 			}
-			a.deliverytime = now - v
+			a.stamp = now - v
 			j += 1
 		} else if opt_is(opt, "time") && more >= 1 {
 			v, good := parse_ll(argv[j + 1])
@@ -849,7 +845,7 @@ parse_xclaim_args :: proc(argv: [][]u8, now: i64, ids: ^[dynamic]ID) -> (a: Clai
 				err = .Claim_Time
 				return
 			}
-			a.deliverytime = v
+			a.stamp = v
 			j += 1
 		} else if opt_is(opt, "retrycount") && more >= 1 {
 			v, good := parse_ll(argv[j + 1])
@@ -857,7 +853,7 @@ parse_xclaim_args :: proc(argv: [][]u8, now: i64, ids: ^[dynamic]ID) -> (a: Clai
 				err = .Claim_Retry
 				return
 			}
-			a.retrycount = v
+			a.tries = v
 			j += 1
 		} else if opt_is(opt, "lastid") && more >= 1 {
 			id, good := parse_exact_id(argv[j + 1])
@@ -865,7 +861,7 @@ parse_xclaim_args :: proc(argv: [][]u8, now: i64, ids: ^[dynamic]ID) -> (a: Clai
 				err = .Invalid_ID
 				return
 			}
-			a.last_id = id
+			a.raise_to = id
 			j += 1
 		} else {
 			bad = j
