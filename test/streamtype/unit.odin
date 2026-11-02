@@ -186,7 +186,7 @@ unit_stream :: proc() {
 	fv := [][]u8{b("f"), b("v")}
 	for i in 1 ..= 10 {
 		use := st.ID{u64(i), 0}
-		got, res := st.append_item(s, fv, &use, true, 0)
+		got, res := st.append_entry(s, fv, .Explicit, use, 0)
 		check(res == .Ok && got == use, "append explicit id")
 	}
 	check(st.node_count(s) == 4, fmt.tprintf("ten entries at three per node make four nodes, got %d", st.node_count(s)))
@@ -207,25 +207,25 @@ unit_stream :: proc() {
 	}
 	removed := st.trim(s, &args)
 	check(removed == 3, fmt.tprintf("approximate trim removes whole nodes only, got %d", removed))
-	check(s.first_id == st.ID{5, 0}, "first id follows the trim")
+	check(s.head == st.ID{5, 0}, "first id follows the trim")
 	for i in 11 ..= 400 {
 		use := st.ID{u64(i), 0}
-		st.append_item(s, fv, &use, true, 0)
+		st.append_entry(s, fv, .Explicit, use, 0)
 	}
-	before := rx.memory(s.rax)
+	before := rx.memory(s.nodes)
 	check(before > 0, "rax memory is tracked")
 	d := st.dup(s)
 	check(st.node_count(d) == st.node_count(s) && st.rax_nodes(d) == st.rax_nodes(s), "dup keeps the node layout")
 	check(st.memory_usage(d) > 0, "dup memory")
 	st.destroy(d)
-	_, res := st.append_item(s, fv, nil, false, 5)
+	_, res := st.append_entry(s, fv, .Generated, {}, 5)
 	check(res == .Ok, "auto id below the last id increments the sequence")
-	check(s.last_id == st.ID{400, 1}, fmt.tprintf("auto id is %s", id_str(s.last_id)))
+	check(s.top == st.ID{400, 1}, fmt.tprintf("auto id is %s", id_str(s.top)))
 	use := st.ID{400, 0}
-	_, res = st.append_item(s, fv, &use, false, 0)
-	check(res == .Ok && s.last_id == st.ID{400, 2}, "partial id continues the sequence")
+	_, res = st.append_entry(s, fv, .Generated_Seq, use, 0)
+	check(res == .Ok && s.top == st.ID{400, 2}, "partial id continues the sequence")
 	use = st.ID{399, 0}
-	_, res = st.append_item(s, fv, &use, false, 0)
+	_, res = st.append_entry(s, fv, .Generated_Seq, use, 0)
 	check(res == .Id_Not_Greater, "partial id in the past fails")
 }
 
@@ -235,36 +235,36 @@ unit_groups :: proc() {
 	fv := [][]u8{b("f"), b("v")}
 	for i in 1 ..= 5 {
 		use := st.ID{u64(i), 0}
-		st.append_item(s, fv, &use, true, 0)
+		st.append_entry(s, fv, .Explicit, use, 0)
 	}
-	before := s.cg_mem
-	cg := st.create_cg(s, b("g"), st.ID_MIN, st.ENTRIES_READ_UNKNOWN)
+	before := s.group_bytes
+	cg := st.add_group(s, b("g"), st.ID_MIN, st.ENTRIES_READ_UNKNOWN)
 	check(cg != nil, "create a group")
-	check(st.create_cg(s, b("g"), st.ID_MIN, 0) == nil, "duplicate group")
-	lag, ok := st.cg_lag(s, cg)
+	check(st.add_group(s, b("g"), st.ID_MIN, 0) == nil, "duplicate group")
+	lag, ok := st.group_lag(s, cg)
 	check(ok && lag == 5, fmt.tprintf("lag of a fresh group is the length, got %d", lag))
-	alice := st.create_consumer(s, cg, b("alice"), 100)
-	check(alice != nil && alice.seen_time == 100 && alice.active_time == -1, "consumer times")
+	alice := st.add_member(s, cg, b("alice"), 100)
+	check(alice != nil && alice.seen_ms == 100 && alice.active_ms == -1, "consumer times")
 	for i in 1 ..= 3 {
 		st.group_deliver(s, cg, alice, st.ID{u64(i), 0}, false, 200)
 	}
-	check(cg.entries_read == 3 && cg.last_id == st.ID{3, 0}, fmt.tprintf("entries read %d", cg.entries_read))
-	lag, ok = st.cg_lag(s, cg)
+	check(cg.reads == 3 && cg.delivered == st.ID{3, 0}, fmt.tprintf("entries read %d", cg.reads))
+	lag, ok = st.group_lag(s, cg)
 	check(ok && lag == 2, "lag after three reads")
-	check(cg.pel.numele == 3 && alice.pel.numele == 3 && alice.active_time == 200, "pending entries")
+	check(cg.pending.numele == 3 && alice.owned.numele == 3 && alice.active_ms == 200, "pending entries")
 	check(st.ack(s, cg, st.ID{2, 0}) && !st.ack(s, cg, st.ID{2, 0}), "ack once")
 	check(st.xdel_apply(s, {st.ID{4, 0}}) == 1, "delete ahead of the group")
-	lag, ok = st.cg_lag(s, cg)
+	lag, ok = st.group_lag(s, cg)
 	check(!ok, "lag is unknown with a tombstone ahead")
-	args := st.Claim_Args {
-		retrycount   = -1,
-		deliverytime = -1,
+	args := st.Claim_Options {
+		tries = -1,
+		stamp = -1,
 	}
 	claimed := make([dynamic]st.ID, context.temp_allocator)
 	st.claim(s, cg, b("bob"), &args, {st.ID{1, 0}, st.ID{3, 0}, st.ID{9, 0}}, 300, &claimed)
-	check(len(claimed) == 2 && alice.pel.numele == 0, fmt.tprintf("claimed %d", len(claimed)))
-	bob := st.lookup_consumer(cg, b("bob"))
-	check(bob != nil && bob.pel.numele == 2, "bob owns the claimed entries")
+	check(len(claimed) == 2 && alice.owned.numele == 0, fmt.tprintf("claimed %d", len(claimed)))
+	bob := st.find_member(cg, b("bob"))
+	check(bob != nil && bob.owned.numele == 2, "bob owns the claimed entries")
 	st.group_deliver(s, cg, alice, st.ID{5, 0}, false, 400)
 	st.xdel_apply(s, {st.ID{5, 0}})
 	clear(&claimed)
@@ -275,14 +275,14 @@ unit_groups :: proc() {
 	cursor = st.autoclaim(s, cg, b("carol"), 0, cursor, 2, false, 500, &claimed, &deleted)
 	check(len(claimed) == 0 && len(deleted) == 1 && cursor == st.ID_MIN, "autoclaim drops a deleted entry")
 	d := st.dup(s)
-	dcg := st.lookup_cg(d, b("g"))
-	check(dcg != nil && dcg.pel.numele == cg.pel.numele && dcg.consumers.numele == cg.consumers.numele, "dup keeps groups")
+	dcg := st.find_group(d, b("g"))
+	check(dcg != nil && dcg.pending.numele == cg.pending.numele && dcg.members.numele == cg.members.numele, "dup keeps groups")
 	st.destroy(d)
-	carol := st.lookup_consumer(cg, b("carol"))
-	check(st.del_consumer(s, cg, carol) == 2 && cg.pel.numele == 0, "deleting a consumer drops its pending entries")
-	check(st.destroy_cg(s, b("g")), "destroy the group")
+	carol := st.find_member(cg, b("carol"))
+	check(st.drop_member(s, cg, carol) == 2 && cg.pending.numele == 0, "deleting a consumer drops its pending entries")
+	check(st.drop_group(s, b("g")), "destroy the group")
 	st.free_groups(s)
-	check(s.cg_mem == before, fmt.tprintf("group memory returns to %d, got %d", before, s.cg_mem))
+	check(s.group_bytes == before, fmt.tprintf("group memory returns to %d, got %d", before, s.group_bytes))
 }
 
 run_unit :: proc() -> bool {

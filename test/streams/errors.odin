@@ -214,11 +214,11 @@ xsetid_rules :: proc(t: ^testing.T) {
 	testing.expect_value(t, apply(s, "XSETID", "s", "5-3", "ENTRIESADDED", "2"), st.Error.Setid_Entries_Added)
 	testing.expect_value(t, apply(s, "XSETID", "s", "5-3", "ENTRIESADDED", "3"), st.Error.None)
 	testing.expect_value(t, apply(s, "XSETID", "s", "6", "ENTRIESADDED", "10", "MAXDELETEDID", "5-9"), st.Error.None)
-	testing.expect(t, s.last_id == st.ID{6, 0} && s.entries_added == 10 && s.max_deleted_entry_id == st.ID{5, 9})
+	testing.expect(t, s.top == st.ID{6, 0} && s.added == 10 && s.tomb == st.ID{5, 9})
 	testing.expect_value(t, apply(s, "XSETID", "s", "5-8"), st.Error.Setid_Current_Max_Deleted)
 	testing.expect_value(t, apply(s, "XSETID", "s", "5-9"), st.Error.None)
 	testing.expect_value(t, apply(s, "XSETID", "s", "7-0", "MAXDELETEDID", "0-0"), st.Error.None)
-	testing.expect(t, s.max_deleted_entry_id == st.ID{5, 9})
+	testing.expect(t, s.tomb == st.ID{5, 9})
 	testing.expect_value(t, apply(s, "XSETID", "s", "100-0", "ENTRIESADDED", "3", "MAXDELETEDID", "0-0"), st.Error.None)
 	testing.expect_value(t, apply(s, "XSETID", "s", "1-1", "ENTRIESADDED", "1"), st.Error.Setid_Current_Max_Deleted)
 	testing.expect_value(t, apply(s, "XSETID", "s", "5-8", "MAXDELETEDID", "5-1"), st.Error.Setid_Current_Max_Deleted)
@@ -226,7 +226,7 @@ xsetid_rules :: proc(t: ^testing.T) {
 	d := new_stream_from({{"XADD", "d", "5-1", "a", "1"}, {"XADD", "d", "5-2", "a", "2"}, {"XADD", "d", "5-3", "a", "3"}})
 	defer st.destroy(d)
 	testing.expect_value(t, st.xdel_apply(d, {st.ID{5, 3}}), 1)
-	testing.expect(t, d.max_deleted_entry_id == st.ID{5, 3} && d.length == 2)
+	testing.expect(t, d.tomb == st.ID{5, 3} && d.live == 2)
 	testing.expect_value(t, apply(d, "XSETID", "d", "5-1"), st.Error.Setid_Current_Max_Deleted)
 	testing.expect_value(t, apply(d, "XSETID", "d", "5-2"), st.Error.Setid_Current_Max_Deleted)
 	testing.expect_value(t, apply(d, "XSETID", "d", "5-2", "ENTRIESADDED", "0"), st.Error.Setid_Current_Max_Deleted)
@@ -375,10 +375,10 @@ pending_and_claim_parsing :: proc(t: ^testing.T) {
 	ids: [dynamic]st.ID
 	defer delete(ids)
 	a, _, err := st.parse_xclaim_args(args_of("XCLAIM", "p", "g", "d", "-5", "4-0", "IDLE", "5000", "RETRYCOUNT", "9", "JUSTID", "LASTID", "50-0"), 6000, &ids)
-	testing.expect(t, err == .None && a.minidle == 0 && a.deliverytime == 1000 && a.retrycount == 9 && a.justid && a.last_id == st.ID{50, 0})
+	testing.expect(t, err == .None && a.idle_floor == 0 && a.stamp == 1000 && a.tries == 9 && .Ids_Only in a.flags && a.raise_to == st.ID{50, 0})
 	clear(&ids)
 	a, _, err = st.parse_xclaim_args(args_of("XCLAIM", "p", "g", "d", "0", "4-0", "TIME", "1000", "FORCE"), 6000, &ids)
-	testing.expect(t, err == .None && a.deliverytime == 1000 && a.force && a.retrycount == -1)
+	testing.expect(t, err == .None && a.stamp == 1000 && .Force in a.flags && a.tries == -1)
 	Auto_Case :: struct {
 		argv: []string,
 		err:  st.Error,

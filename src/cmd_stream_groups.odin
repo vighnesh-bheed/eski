@@ -10,7 +10,7 @@ group_errbuf: [dynamic]u8
 group_steps: [dynamic]st.Autoclaim_Step
 
 @(private = "file")
-group_consumers: [dynamic]^st.Consumer
+group_consumers: [dynamic]^st.Member
 
 @(private = "file")
 group_history: [dynamic]bool
@@ -35,17 +35,17 @@ reply_nogroup :: proc(c: ^Conn, form: st.Nogroup_Form, key: []u8, group: []u8) {
 }
 
 @(private = "file")
-reply_entries_read :: proc(c: ^Conn, cg: ^st.CG) {
-	if cg.entries_read == st.ENTRIES_READ_UNKNOWN {
+reply_entries_read :: proc(c: ^Conn, cg: ^st.Group) {
+	if cg.reads == st.ENTRIES_READ_UNKNOWN {
 		reply_null(c)
 	} else {
-		reply_int(c, cg.entries_read)
+		reply_int(c, cg.reads)
 	}
 }
 
 @(private = "file")
-reply_lag :: proc(c: ^Conn, s: st.Stream, cg: ^st.CG) {
-	lag, valid := st.cg_lag(s, cg)
+reply_lag :: proc(c: ^Conn, s: st.Stream, cg: ^st.Group) {
+	lag, valid := st.group_lag(s, cg)
 	if valid {
 		reply_int(c, lag)
 	} else {
@@ -63,8 +63,8 @@ pel_limit :: #force_inline proc "contextless" (r: ^rx.Rax, count: i64) -> int {
 }
 
 @(private = "file")
-consumer_create_noted :: proc(s: st.Stream, cg: ^st.CG, name: []u8, key: []u8) -> (consumer: ^st.Consumer, created: bool) {
-	consumer, created = st.lookup_or_create_consumer(s, cg, name, srv.now_ms)
+consumer_create_noted :: proc(s: st.Stream, cg: ^st.Group, name: []u8, key: []u8) -> (consumer: ^st.Member, created: bool) {
+	consumer, created = st.member_for(s, cg, name, srv.now_ms)
 	if created {
 		notify(.Stream, "xgroup-createconsumer", key)
 	}
@@ -73,23 +73,23 @@ consumer_create_noted :: proc(s: st.Stream, cg: ^st.CG, name: []u8, key: []u8) -
 
 xinfo_groups :: proc(c: ^Conn, s: st.Stream) {
 	reply_array(c, int(st.group_count(s)))
-	if s.cgroups == nil {
+	if s.groups == nil {
 		return
 	}
 	it: rx.Iterator
-	rx.start(&it, s.cgroups)
+	rx.start(&it, s.groups)
 	rx.seek(&it, "^")
 	for rx.next(&it) {
-		cg := (^st.CG)(it.data)
+		cg := (^st.Group)(it.data)
 		reply_map(c, 6)
 		reply_bulk_str(c, "name")
 		reply_bulk(c, rx.key(&it))
 		reply_bulk_str(c, "consumers")
-		reply_int(c, i64(cg.consumers.numele))
+		reply_int(c, i64(cg.members.numele))
 		reply_bulk_str(c, "pending")
-		reply_int(c, i64(cg.pel.numele))
+		reply_int(c, i64(cg.pending.numele))
 		reply_bulk_str(c, "last-delivered-id")
-		reply_stream_id(c, cg.last_id)
+		reply_stream_id(c, cg.delivered)
 		reply_bulk_str(c, "entries-read")
 		reply_entries_read(c, cg)
 		reply_bulk_str(c, "lag")
@@ -99,30 +99,30 @@ xinfo_groups :: proc(c: ^Conn, s: st.Stream) {
 }
 
 xinfo_consumers :: proc(c: ^Conn, argv: [][]u8, s: st.Stream) {
-	cg := st.lookup_cg(s, argv[3])
+	cg := st.find_group(s, argv[3])
 	if cg == nil {
 		reply_nogroup(c, .For_Key_Name, argv[2], argv[3])
 		return
 	}
 	now := srv.now_ms
-	reply_array(c, int(cg.consumers.numele))
+	reply_array(c, int(cg.members.numele))
 	it: rx.Iterator
-	rx.start(&it, cg.consumers)
+	rx.start(&it, cg.members)
 	rx.seek(&it, "^")
 	for rx.next(&it) {
-		consumer := (^st.Consumer)(it.data)
+		consumer := (^st.Member)(it.data)
 		reply_map(c, 4)
 		reply_bulk_str(c, "name")
 		reply_bulk(c, consumer.name)
 		reply_bulk_str(c, "pending")
-		reply_int(c, i64(consumer.pel.numele))
+		reply_int(c, i64(consumer.owned.numele))
 		reply_bulk_str(c, "idle")
-		reply_int(c, now - consumer.seen_time)
+		reply_int(c, now - consumer.seen_ms)
 		reply_bulk_str(c, "inactive")
-		if consumer.active_time == -1 {
+		if consumer.active_ms == -1 {
 			reply_int(c, -1)
 		} else {
-			reply_int(c, now - consumer.active_time)
+			reply_int(c, now - consumer.active_ms)
 		}
 	}
 	rx.stop(&it)
@@ -130,68 +130,68 @@ xinfo_consumers :: proc(c: ^Conn, argv: [][]u8, s: st.Stream) {
 
 xinfo_full_groups :: proc(c: ^Conn, s: st.Stream, count: i64) {
 	reply_array(c, int(st.group_count(s)))
-	if s.cgroups == nil {
+	if s.groups == nil {
 		return
 	}
 	gi: rx.Iterator
-	rx.start(&gi, s.cgroups)
+	rx.start(&gi, s.groups)
 	rx.seek(&gi, "^")
 	for rx.next(&gi) {
-		cg := (^st.CG)(gi.data)
+		cg := (^st.Group)(gi.data)
 		reply_map(c, 7)
 		reply_bulk_str(c, "name")
 		reply_bulk(c, rx.key(&gi))
 		reply_bulk_str(c, "last-delivered-id")
-		reply_stream_id(c, cg.last_id)
+		reply_stream_id(c, cg.delivered)
 		reply_bulk_str(c, "entries-read")
 		reply_entries_read(c, cg)
 		reply_bulk_str(c, "lag")
 		reply_lag(c, s, cg)
 		reply_bulk_str(c, "pel-count")
-		reply_int(c, i64(cg.pel.numele))
+		reply_int(c, i64(cg.pending.numele))
 		reply_bulk_str(c, "pending")
-		limit := pel_limit(cg.pel, count)
+		limit := pel_limit(cg.pending, count)
 		reply_array(c, limit)
 		pi: rx.Iterator
-		rx.start(&pi, cg.pel)
+		rx.start(&pi, cg.pending)
 		rx.seek(&pi, "^")
 		for n := 0; n < limit && rx.next(&pi); n += 1 {
-			nack := (^st.NACK)(pi.data)
+			nack := (^st.Delivery)(pi.data)
 			reply_array(c, 4)
 			reply_stream_id(c, st.decode_id(rx.key(&pi)))
-			reply_bulk(c, nack.consumer.name)
-			reply_int(c, nack.delivery_time)
-			reply_int(c, i64(nack.delivery_count))
+			reply_bulk(c, nack.owner.name)
+			reply_int(c, nack.sent_ms)
+			reply_int(c, i64(nack.times))
 		}
 		rx.stop(&pi)
 		reply_bulk_str(c, "consumers")
-		reply_array(c, int(cg.consumers.numele))
+		reply_array(c, int(cg.members.numele))
 		ci: rx.Iterator
-		rx.start(&ci, cg.consumers)
+		rx.start(&ci, cg.members)
 		rx.seek(&ci, "^")
 		for rx.next(&ci) {
-			consumer := (^st.Consumer)(ci.data)
+			consumer := (^st.Member)(ci.data)
 			reply_map(c, 5)
 			reply_bulk_str(c, "name")
 			reply_bulk(c, consumer.name)
 			reply_bulk_str(c, "seen-time")
-			reply_int(c, consumer.seen_time)
+			reply_int(c, consumer.seen_ms)
 			reply_bulk_str(c, "active-time")
-			reply_int(c, consumer.active_time)
+			reply_int(c, consumer.active_ms)
 			reply_bulk_str(c, "pel-count")
-			reply_int(c, i64(consumer.pel.numele))
+			reply_int(c, i64(consumer.owned.numele))
 			reply_bulk_str(c, "pending")
-			climit := pel_limit(consumer.pel, count)
+			climit := pel_limit(consumer.owned, count)
 			reply_array(c, climit)
 			ki: rx.Iterator
-			rx.start(&ki, consumer.pel)
+			rx.start(&ki, consumer.owned)
 			rx.seek(&ki, "^")
 			for n := 0; n < climit && rx.next(&ki); n += 1 {
-				nack := (^st.NACK)(ki.data)
+				nack := (^st.Delivery)(ki.data)
 				reply_array(c, 3)
 				reply_stream_id(c, st.decode_id(rx.key(&ki)))
-				reply_int(c, nack.delivery_time)
-				reply_int(c, i64(nack.delivery_count))
+				reply_int(c, nack.sent_ms)
+				reply_int(c, i64(nack.times))
 			}
 			rx.stop(&ki)
 		}
@@ -204,7 +204,7 @@ xinfo_full_groups :: proc(c: ^Conn, s: st.Stream, count: i64) {
 group_replay_ids: [dynamic]st.ID
 
 @(private = "file")
-group_pending_after :: proc(consumer: ^st.Consumer, after: st.ID, limit: int) {
+group_pending_after :: proc(consumer: ^st.Member, after: st.ID, limit: int) {
 	clear(&group_replay_ids)
 	first := after
 	if !st.incr_id(&first) {
@@ -213,7 +213,7 @@ group_pending_after :: proc(consumer: ^st.Consumer, after: st.ID, limit: int) {
 	lower: [16]u8
 	st.encode_id(&lower, first)
 	walk: rx.Iterator
-	rx.start(&walk, consumer.pel)
+	rx.start(&walk, consumer.owned)
 	defer rx.stop(&walk)
 	rx.seek(&walk, ">=", lower[:])
 	for (limit <= 0 || len(group_replay_ids) < limit) && rx.next(&walk) {
@@ -222,7 +222,7 @@ group_pending_after :: proc(consumer: ^st.Consumer, after: st.ID, limit: int) {
 }
 
 @(private = "file")
-reply_group_replay :: proc(c: ^Conn, s: st.Stream, consumer: ^st.Consumer, after: st.ID, limit: int) {
+reply_group_replay :: proc(c: ^Conn, s: st.Stream, consumer: ^st.Member, after: st.ID, limit: int) {
 	group_pending_after(consumer, after, limit)
 	reply_array(c, len(group_replay_ids))
 	stamp := srv.now_ms
@@ -266,7 +266,7 @@ cmd_xreadgroup :: proc(c: ^Conn, argv: [][]u8) {
 		}
 		group_entries[i] = e
 		group_streams[i] = s
-		cg := st.lookup_cg(s, group)
+		cg := st.find_group(s, group)
 		if cg == nil {
 			reply_nogroup(c, .Xreadgroup, key, group)
 			return
@@ -304,7 +304,7 @@ cmd_xreadgroup :: proc(c: ^Conn, argv: [][]u8) {
 			stream_sync(e.db, s)
 			signal_key(key)
 		}
-		consumer.seen_time = srv.now_ms
+		consumer.seen_ms = srv.now_ms
 		group_consumers[i] = consumer
 	}
 	mark := defer_mark(c)
@@ -324,14 +324,14 @@ cmd_xreadgroup :: proc(c: ^Conn, argv: [][]u8) {
 			served += 1
 			continue
 		}
-		if s.length == 0 || st.compare_id(st.last_valid_id(s), cg.last_id) <= 0 {
+		if s.live == 0 || st.compare_id(st.last_valid_id(s), cg.delivered) <= 0 {
 			continue
 		}
 		if c.resp == RESP2 {
 			reply_array(c, 2)
 		}
 		reply_bulk(c, key)
-		start := cg.last_id
+		start := cg.delivered
 		st.incr_id(&start)
 		delivery := Stream_Delivery{cg, consumer, a.noack}
 		stream_reply_entries(c, s, &start, nil, int(a.count), false, &delivery)
@@ -483,11 +483,11 @@ cmd_xgroup :: proc(c: ^Conn, argv: [][]u8) {
 		e, s = stream_create(key)
 	}
 	if dollar {
-		id = s.last_id
+		id = s.top
 	}
 	switch op {
 	case .Create:
-		if st.create_cg(s, group, id, entries_read) == nil {
+		if st.add_group(s, group, id, entries_read) == nil {
 			stream_sync(e.db, s)
 			reply_stream_error(c, .Busygroup)
 			return
@@ -498,7 +498,7 @@ cmd_xgroup :: proc(c: ^Conn, argv: [][]u8) {
 		notify(.Stream, "xgroup-create", key)
 		group_changes(1)
 	case .Setid:
-		cg := st.lookup_cg(s, group)
+		cg := st.find_group(s, group)
 		if cg == nil {
 			reply_nogroup(c, .For_Key_Name, key, group)
 			return
@@ -510,7 +510,7 @@ cmd_xgroup :: proc(c: ^Conn, argv: [][]u8) {
 		block_signal_key(e.db, key, .Stream)
 		group_changes(1)
 	case .Destroy:
-		if st.destroy_cg(s, group) {
+		if st.drop_group(s, group) {
 			stream_sync(e.db, s)
 			reply_int(c, 1)
 			signal_key(key)
@@ -521,7 +521,7 @@ cmd_xgroup :: proc(c: ^Conn, argv: [][]u8) {
 			reply_int(c, 0)
 		}
 	case .Createconsumer:
-		cg := st.lookup_cg(s, group)
+		cg := st.find_group(s, group)
 		if cg == nil {
 			reply_nogroup(c, .For_Key_Name, key, group)
 			return
@@ -536,17 +536,17 @@ cmd_xgroup :: proc(c: ^Conn, argv: [][]u8) {
 			reply_int(c, 0)
 		}
 	case .Delconsumer:
-		cg := st.lookup_cg(s, group)
+		cg := st.find_group(s, group)
 		if cg == nil {
 			reply_nogroup(c, .For_Key_Name, key, group)
 			return
 		}
-		consumer := st.lookup_consumer(cg, argv[4])
+		consumer := st.find_member(cg, argv[4])
 		if consumer == nil {
 			reply_int(c, 0)
 			return
 		}
-		dropped := st.del_consumer(s, cg, consumer)
+		dropped := st.drop_member(s, cg, consumer)
 		stream_sync(e.db, s)
 		reply_int(c, i64(dropped))
 		signal_key(key)
@@ -564,7 +564,7 @@ cmd_xack :: proc(c: ^Conn, argv: [][]u8) {
 		reply_wrongtype(c)
 		return
 	}
-	cg := st.lookup_cg(s, argv[2])
+	cg := st.find_group(s, argv[2])
 	if cg == nil {
 		reply_int(c, 0)
 		return
@@ -605,7 +605,7 @@ cmd_xpending :: proc(c: ^Conn, argv: [][]u8) {
 		reply_wrongtype(c)
 		return
 	}
-	cg := st.lookup_cg(s, group)
+	cg := st.find_group(s, group)
 	if cg == nil {
 		reply_nogroup(c, .Key_Or_Group, key, group)
 		return
@@ -618,14 +618,14 @@ cmd_xpending :: proc(c: ^Conn, argv: [][]u8) {
 		reply_array(c, 0)
 		return
 	}
-	source := cg.pel
+	source := cg.pending
 	if a.consumer_idx > 0 {
-		consumer := st.lookup_consumer(cg, argv[a.consumer_idx])
+		consumer := st.find_member(cg, argv[a.consumer_idx])
 		if consumer == nil {
 			reply_array(c, 0)
 			return
 		}
-		source = consumer.pel
+		source = consumer.owned
 	}
 	now := srv.now_ms
 	mark := defer_mark(c)
@@ -641,16 +641,16 @@ cmd_xpending :: proc(c: ^Conn, argv: [][]u8) {
 			if st.compare_id(id, a.end) > 0 {
 				break
 			}
-			nack := (^st.NACK)(it.data)
-			idle := now - nack.delivery_time
+			nack := (^st.Delivery)(it.data)
+			idle := now - nack.sent_ms
 			if a.minidle > 0 && idle < a.minidle {
 				continue
 			}
 			reply_array(c, 4)
 			reply_stream_id(c, id)
-			reply_bulk(c, nack.consumer.name)
+			reply_bulk(c, nack.owner.name)
 			reply_int(c, idle)
-			reply_int(c, i64(nack.delivery_count))
+			reply_int(c, i64(nack.times))
 			emitted += 1
 		}
 		rx.stop(&it)
@@ -659,10 +659,10 @@ cmd_xpending :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 @(private = "file")
-xpending_summary :: proc(c: ^Conn, cg: ^st.CG) {
+xpending_summary :: proc(c: ^Conn, cg: ^st.Group) {
 	reply_array(c, 4)
-	reply_int(c, i64(cg.pel.numele))
-	first, last, any := st.pel_first_last(cg.pel)
+	reply_int(c, i64(cg.pending.numele))
+	first, last, any := st.pel_first_last(cg.pending)
 	if !any {
 		reply_null(c)
 		reply_null(c)
@@ -674,16 +674,16 @@ xpending_summary :: proc(c: ^Conn, cg: ^st.CG) {
 	mark := defer_mark(c)
 	listed := 0
 	it: rx.Iterator
-	rx.start(&it, cg.consumers)
+	rx.start(&it, cg.members)
 	rx.seek(&it, "^")
 	for rx.next(&it) {
-		consumer := (^st.Consumer)(it.data)
-		if consumer.pel.numele == 0 {
+		consumer := (^st.Member)(it.data)
+		if consumer.owned.numele == 0 {
 			continue
 		}
 		reply_array(c, 2)
 		reply_bulk(c, consumer.name)
-		reply_bulk_int(c, i64(consumer.pel.numele))
+		reply_bulk_int(c, i64(consumer.owned.numele))
 		listed += 1
 	}
 	rx.stop(&it)
@@ -725,7 +725,7 @@ cmd_xclaim :: proc(c: ^Conn, argv: [][]u8) {
 		reply_wrongtype(c)
 		return
 	}
-	cg := st.lookup_cg(s, group)
+	cg := st.find_group(s, group)
 	if cg == nil {
 		reply_nogroup(c, .Key_Or_Group, key, group)
 		return
@@ -735,15 +735,15 @@ cmd_xclaim :: proc(c: ^Conn, argv: [][]u8) {
 	if created {
 		changes += 1
 	}
-	consumer.seen_time = now
-	raised := st.group_raise_last_id(cg, a.last_id)
+	consumer.seen_ms = now
+	raised := st.group_raise_last_id(cg, a.raise_to)
 	mark := defer_mark(c)
 	claimed := 0
 	deleted := 0
 	for id in stream_ids {
 		switch st.claim_entry(s, cg, consumer, id, &a, now) {
 		case .Claimed:
-			reply_claimed_entry(c, s, id, a.justid)
+			reply_claimed_entry(c, s, id, .Ids_Only in a.flags)
 			claimed += 1
 		case .Deleted:
 			deleted += 1
@@ -776,7 +776,7 @@ cmd_xautoclaim :: proc(c: ^Conn, argv: [][]u8) {
 		reply_wrongtype(c)
 		return
 	}
-	cg := st.lookup_cg(s, group)
+	cg := st.find_group(s, group)
 	if cg == nil {
 		reply_nogroup(c, .Key_Or_Group, key, group)
 		return
@@ -787,7 +787,7 @@ cmd_xautoclaim :: proc(c: ^Conn, argv: [][]u8) {
 	if created {
 		changes += 1
 	}
-	consumer.seen_time = now
+	consumer.seen_ms = now
 	clear(&group_steps)
 	next := st.autoclaim_scan(s, cg, consumer, &a, now, &group_steps)
 	reply_array(c, 3)

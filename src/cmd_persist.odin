@@ -1782,17 +1782,15 @@ digest_hash :: proc(hv: ht.Hash) -> (total: Digest) {
 
 @(private = "file")
 digest_stream :: proc(h: ^blake2b.Context, s: sm.Stream) {
-	walk: sm.Iterator
-	sm.iterator_start(&walk, s, nil, nil, false)
-	defer sm.iterator_stop(&walk)
-	id: sm.ID
-	pairs: i64
-	for sm.iterator_get_id(&walk, &id, &pairs) {
+	walk: sm.Cursor
+	sm.cursor_open(&walk, s, nil, nil, false)
+	defer sm.cursor_close(&walk)
+	for id, pairs in sm.cursor_next(&walk) {
 		digest_word(h, id.ms)
 		digest_word(h, id.seq)
 		digest_word(h, u64(pairs))
 		for _ in 0 ..< pairs {
-			field, value := sm.iterator_get_field(&walk)
+			field, value := sm.cursor_field(&walk)
 			digest_text(h, field)
 			digest_text(h, value)
 		}

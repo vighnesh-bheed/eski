@@ -60,13 +60,13 @@ FUZZ_LIVE_51 :: "150110000000000000000500000000000000051d1d0000000a0033010001010
 legacy_types_record_the_first_entry :: proc(t: ^testing.T) {
 	empty15 := []u8{15, 0, 0, 5, 5, 0}
 	e15, _ := load_payload(empty15, true)
-	testing.expect(t, e15 != nil && e15.first_id == st.ID_MAX && e15.last_id == st.ID{5, 5})
+	testing.expect(t, e15 != nil && e15.head == st.ID_MAX && e15.top == st.ID{5, 5})
 	empty19 := []u8{19, 0, 0, 5, 5, 0, 0, 0, 0, 0, 0}
 	e19, _ := load_payload(empty19, true)
-	testing.expect(t, e19 != nil && e19.first_id == st.ID_MIN)
+	testing.expect(t, e19 != nil && e19.head == st.ID_MIN)
 	stored19 := []u8{19, 0, 0, 5, 5, 7, 7, 0, 0, 0, 0}
 	k19, _ := load_payload(stored19, true)
-	testing.expect(t, k19 != nil && k19.first_id == st.ID{7, 7})
+	testing.expect(t, k19 != nil && k19.head == st.ID{7, 7})
 	s := new_stream_from({{"XADD", "s", "1-1", "a", "1"}, {"XADD", "s", "1-2", "a", "2"}, {"XADD", "s", "1-3", "a", "3"}})
 	defer st.destroy(s)
 	testing.expect_value(t, st.xdel_apply(s, {st.ID{1, 1}}), 1)
@@ -80,12 +80,12 @@ legacy_types_record_the_first_entry :: proc(t: ^testing.T) {
 	append(&p15, ..body[n - 9:n - 6])
 	append(&p15, 0)
 	f15, _ := load_payload(p15[:], true)
-	testing.expect(t, f15 != nil && f15.first_id == st.ID{1, 2} && st.length(f15) == 2)
+	testing.expect(t, f15 != nil && f15.head == st.ID{1, 2} && st.length(f15) == 2)
 	p19 := make([]u8, n, context.temp_allocator)
 	copy(p19, body)
 	p19[0] = 19
 	f19, _ := load_payload(p19, true)
-	testing.expect(t, f19 != nil && f19.first_id == st.ID{1, 2})
+	testing.expect(t, f19 != nil && f19.head == st.ID{1, 2})
 	for x in ([]st.Stream{e15, e19, k19, f15, f19}) {
 		if x != nil {
 			st.destroy(x)
@@ -97,8 +97,8 @@ legacy_types_record_the_first_entry :: proc(t: ^testing.T) {
 grouped_payload :: proc() -> []u8 {
 	s := new_stream_from({{"XADD", "s", "1-1", "a", "1"}, {"XADD", "s", "1-2", "a", "2"}})
 	defer st.destroy(s)
-	cg := st.create_cg(s, bytes_of("g"), st.ID{1, 2}, 2)
-	c := st.create_consumer(s, cg, bytes_of("c"), 1700000000000)
+	cg := st.add_group(s, bytes_of("g"), st.ID{1, 2}, 2)
+	c := st.add_member(s, cg, bytes_of("c"), 1700000000000)
 	st.group_deliver(s, cg, c, st.ID{1, 2}, false, 1700000000000)
 	return dump_payload(s, context.temp_allocator)
 }
@@ -159,11 +159,11 @@ header_lengths_decode_leniently :: proc(t: ^testing.T) {
 	a := read(base, h, 0x82)
 	testing.expect(t, a != nil && st.length(a) == max(u64))
 	b := read(base, h + 1, 0xc5)
-	testing.expect(t, b != nil && b.last_id == st.ID{5, 2})
+	testing.expect(t, b != nil && b.top == st.ID{5, 2})
 	c := read(base, h + 4, 0xbf)
-	testing.expect(t, c != nil && c.first_id == st.ID{1, max(u64)})
+	testing.expect(t, c != nil && c.head == st.ID{1, max(u64)})
 	d := read(base, h + 7, 0xc0)
-	testing.expect(t, d != nil && d.entries_added == 0)
+	testing.expect(t, d != nil && d.added == 0)
 	for x in ([]st.Stream{a, b, c, d}) {
 		if x != nil {
 			st.destroy(x)
@@ -230,7 +230,7 @@ deep_loads_accept_what_the_reader_accepts :: proc(t: ^testing.T) {
 	}
 	none := []u8{21, 0, 0, 1, 1, 0, 0xd8, 1, 1, 1, 0}
 	ok, _ := load_payload(none, true)
-	testing.expect(t, ok != nil && ok.first_id == st.ID{0, 24} && ok.max_deleted_entry_id == st.ID{1, 1})
+	testing.expect(t, ok != nil && ok.head == st.ID{0, 24} && ok.tomb == st.ID{1, 1})
 	if ok != nil {
 		st.destroy(ok)
 	}
@@ -240,14 +240,14 @@ deep_loads_accept_what_the_reader_accepts :: proc(t: ^testing.T) {
 groups_survive_codec :: proc(t: ^testing.T) {
 	s := new_stream_from({{"XADD", "s", "1-1", "a", "1"}, {"XADD", "s", "2-2", "a", "2"}, {"XADD", "s", "3-3", "b", "3"}})
 	defer st.destroy(s)
-	g1 := st.create_cg(s, bytes_of("g1"), st.ID{0, 0}, st.ENTRIES_READ_UNKNOWN)
-	g2 := st.create_cg(s, bytes_of("12345"), st.ID{2, 2}, 2)
-	alice := st.create_consumer(s, g1, bytes_of("alice"), 1000)
-	bob := st.create_consumer(s, g1, bytes_of("-7"), 1100)
+	g1 := st.add_group(s, bytes_of("g1"), st.ID{0, 0}, st.ENTRIES_READ_UNKNOWN)
+	g2 := st.add_group(s, bytes_of("12345"), st.ID{2, 2}, 2)
+	alice := st.add_member(s, g1, bytes_of("alice"), 1000)
+	bob := st.add_member(s, g1, bytes_of("-7"), 1100)
 	st.group_deliver(s, g1, alice, st.ID{1, 1}, false, 2000)
 	st.group_deliver(s, g1, bob, st.ID{2, 2}, false, 2100)
 	st.group_deliver(s, g1, alice, st.ID{3, 3}, false, 2200)
-	st.create_consumer(s, g2, bytes_of(""), 3000)
+	st.add_member(s, g2, bytes_of(""), 3000)
 	payload := dump_payload(s, context.temp_allocator)
 	back, consumed := load_payload(payload, true)
 	testing.expect(t, back != nil && consumed == len(payload) - 10)
@@ -256,13 +256,13 @@ groups_survive_codec :: proc(t: ^testing.T) {
 	}
 	defer st.destroy(back)
 	testing.expect(t, string(dump_payload(back, context.temp_allocator)) == string(payload))
-	cg := st.lookup_cg(back, bytes_of("g1"))
-	testing.expect(t, cg != nil && cg.pel.numele == 3 && cg.consumers.numele == 2)
-	a := st.lookup_consumer(cg, bytes_of("alice"))
-	testing.expect(t, a != nil && a.pel.numele == 2 && a.seen_time == 1000 && a.active_time == 2200)
-	testing.expect(t, st.lookup_cg(back, bytes_of("12345")).last_id == st.ID{2, 2})
+	cg := st.find_group(back, bytes_of("g1"))
+	testing.expect(t, cg != nil && cg.pending.numele == 3 && cg.members.numele == 2)
+	a := st.find_member(cg, bytes_of("alice"))
+	testing.expect(t, a != nil && a.owned.numele == 2 && a.seen_ms == 1000 && a.active_ms == 2200)
+	testing.expect(t, st.find_group(back, bytes_of("12345")).delivered == st.ID{2, 2})
 	key: [16]u8
 	st.encode_id(&key, st.ID{2, 2})
-	v, found := rx.find(cg.pel, key[:])
-	testing.expect(t, found && (^st.NACK)(v).consumer == st.lookup_consumer(cg, bytes_of("-7")))
+	v, found := rx.find(cg.pending, key[:])
+	testing.expect(t, found && (^st.Delivery)(v).owner == st.find_member(cg, bytes_of("-7")))
 }

@@ -10,7 +10,7 @@ stream_ids: [dynamic]st.ID
 stream_ids2: [dynamic]st.ID
 
 @(private)
-stream_groups: [dynamic]^st.CG
+stream_groups: [dynamic]^st.Group
 
 @(private = "file")
 stream_reads: [dynamic]st.Stream
@@ -153,28 +153,27 @@ reply_stream_id :: proc(c: ^Conn, id: st.ID) {
 }
 
 Stream_Delivery :: struct {
-	group:    ^st.CG,
-	consumer: ^st.Consumer,
+	group:    ^st.Group,
+	consumer: ^st.Member,
 	noack:    bool,
 }
 
 @(private)
 stream_emit_entries :: proc(c: ^Conn, s: st.Stream, from: ^st.ID, to: ^st.ID, limit: int, backwards: bool, delivery: ^Stream_Delivery = nil) -> (sent: int) {
-	walk: st.Iterator
-	st.iterator_start(&walk, s, from, to, backwards)
-	defer st.iterator_stop(&walk)
+	walk: st.Cursor
+	st.cursor_open(&walk, s, from, to, backwards)
+	defer st.cursor_close(&walk)
 	stamp := srv.now_ms
 	for limit <= 0 || sent < limit {
-		id: st.ID
-		pairs: i64
-		if !st.iterator_get_id(&walk, &id, &pairs) {
+		id, pairs, more := st.cursor_next(&walk)
+		if !more {
 			break
 		}
 		reply_array(c, 2)
 		reply_stream_id(c, id)
 		reply_array(c, int(pairs) * 2)
 		for _ in 0 ..< pairs {
-			field, value := st.iterator_get_field(&walk)
+			field, value := st.cursor_field(&walk)
 			reply_bulk(c, field)
 			reply_bulk(c, value)
 		}
@@ -391,7 +390,7 @@ xinfo_help := [?]string {
 
 @(private = "file")
 reply_edge_entry :: proc(c: ^Conn, s: st.Stream, last: bool) {
-	if s.length == 0 || stream_emit_entries(c, s, nil, nil, 1, last) == 0 {
+	if s.live == 0 || stream_emit_entries(c, s, nil, nil, 1, last) == 0 {
 		reply_null(c)
 	}
 }
@@ -409,19 +408,19 @@ xinfo_stream :: proc(c: ^Conn, argv: [][]u8, s: st.Stream) {
 	}
 	reply_map(c, full ? 9 : 10)
 	reply_bulk_str(c, "length")
-	reply_int(c, i64(s.length))
+	reply_int(c, i64(s.live))
 	reply_bulk_str(c, "radix-tree-keys")
 	reply_int(c, i64(st.node_count(s)))
 	reply_bulk_str(c, "radix-tree-nodes")
 	reply_int(c, i64(st.rax_nodes(s)))
 	reply_bulk_str(c, "last-generated-id")
-	reply_stream_id(c, s.last_id)
+	reply_stream_id(c, s.top)
 	reply_bulk_str(c, "max-deleted-entry-id")
-	reply_stream_id(c, s.max_deleted_entry_id)
+	reply_stream_id(c, s.tomb)
 	reply_bulk_str(c, "entries-added")
-	reply_int(c, i64(s.entries_added))
+	reply_int(c, i64(s.added))
 	reply_bulk_str(c, "recorded-first-entry-id")
-	reply_stream_id(c, s.first_id)
+	reply_stream_id(c, s.head)
 	if !full {
 		reply_bulk_str(c, "groups")
 		reply_int(c, i64(st.group_count(s)))
@@ -510,10 +509,10 @@ xread_starting_points :: proc(c: ^Conn, keys: [][]u8, marks: [][]u8, replay: boo
 			at = st.ID{saved[0], saved[1]}
 		case st.is_byte(mark, '$'):
 			if s != nil {
-				at = s.last_id
+				at = s.top
 			}
 		case st.is_byte(mark, '+'):
-			if s != nil && s.length > 0 {
+			if s != nil && s.live > 0 {
 				at = st.last_valid_id(s)
 				st.decr_id(&at)
 			}
@@ -538,7 +537,7 @@ xread_collect_ready :: proc(keys: [][]u8) -> (ready: int) {
 	clear(&stream_reads)
 	for key, n in keys {
 		_, s, _ := stream_lookup(key, true)
-		if s != nil && (s.length == 0 || st.compare_id(st.last_valid_id(s), stream_ids[n]) <= 0) {
+		if s != nil && (s.live == 0 || st.compare_id(st.last_valid_id(s), stream_ids[n]) <= 0) {
 			s = nil
 		}
 		if s != nil {

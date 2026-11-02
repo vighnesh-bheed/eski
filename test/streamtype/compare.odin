@@ -169,48 +169,48 @@ expected_stream_dump :: proc(s: st.Stream, nodes: []st.Node_Info) -> []u8 {
 		rdb_put_string(&out, n.key[:])
 		rdb_put_string(&out, n.lp)
 	}
-	rdb_put_len(&out, s.length)
-	rdb_put_len(&out, s.last_id.ms)
-	rdb_put_len(&out, s.last_id.seq)
-	rdb_put_len(&out, s.first_id.ms)
-	rdb_put_len(&out, s.first_id.seq)
-	rdb_put_len(&out, s.max_deleted_entry_id.ms)
-	rdb_put_len(&out, s.max_deleted_entry_id.seq)
-	rdb_put_len(&out, s.entries_added)
+	rdb_put_len(&out, s.live)
+	rdb_put_len(&out, s.top.ms)
+	rdb_put_len(&out, s.top.seq)
+	rdb_put_len(&out, s.head.ms)
+	rdb_put_len(&out, s.head.seq)
+	rdb_put_len(&out, s.tomb.ms)
+	rdb_put_len(&out, s.tomb.seq)
+	rdb_put_len(&out, s.added)
 	rdb_put_len(&out, st.group_count(s))
-	if s.cgroups != nil {
+	if s.groups != nil {
 		gi: rx.Iterator
-		rx.start(&gi, s.cgroups)
+		rx.start(&gi, s.groups)
 		rx.seek(&gi, "^")
 		for rx.next(&gi) {
-			cg := (^st.CG)(gi.data)
+			cg := (^st.Group)(gi.data)
 			rdb_put_string(&out, rx.key(&gi))
-			rdb_put_len(&out, cg.last_id.ms)
-			rdb_put_len(&out, cg.last_id.seq)
-			rdb_put_len(&out, u64(cg.entries_read))
-			rdb_put_len(&out, cg.pel.numele)
+			rdb_put_len(&out, cg.delivered.ms)
+			rdb_put_len(&out, cg.delivered.seq)
+			rdb_put_len(&out, u64(cg.reads))
+			rdb_put_len(&out, cg.pending.numele)
 			pi: rx.Iterator
-			rx.start(&pi, cg.pel)
+			rx.start(&pi, cg.pending)
 			rx.seek(&pi, "^")
 			for rx.next(&pi) {
-				nack := (^st.NACK)(pi.data)
+				nack := (^st.Delivery)(pi.data)
 				append(&out, ..rx.key(&pi))
-				rdb_put_ms(&out, nack.delivery_time)
-				rdb_put_len(&out, nack.delivery_count)
+				rdb_put_ms(&out, nack.sent_ms)
+				rdb_put_len(&out, nack.times)
 			}
 			rx.stop(&pi)
-			rdb_put_len(&out, cg.consumers.numele)
+			rdb_put_len(&out, cg.members.numele)
 			ci: rx.Iterator
-			rx.start(&ci, cg.consumers)
+			rx.start(&ci, cg.members)
 			rx.seek(&ci, "^")
 			for rx.next(&ci) {
-				c := (^st.Consumer)(ci.data)
+				c := (^st.Member)(ci.data)
 				rdb_put_string(&out, rx.key(&ci))
-				rdb_put_ms(&out, c.seen_time)
-				rdb_put_ms(&out, c.active_time)
-				rdb_put_len(&out, c.pel.numele)
+				rdb_put_ms(&out, c.seen_ms)
+				rdb_put_ms(&out, c.active_ms)
+				rdb_put_len(&out, c.owned.numele)
 				ki: rx.Iterator
-				rx.start(&ki, c.pel)
+				rx.start(&ki, c.owned)
 				rx.seek(&ki, "^")
 				for rx.next(&ki) {
 					append(&out, ..rx.key(&ki))
@@ -499,11 +499,11 @@ count_entry_flags :: proc(cs: ^Compare_State, nodes: []st.Node_Info) {
 		}
 		e = lp.lp_next(p, e)
 		for e != nil {
-			flags := st.lp_get_integer(e)
-			if flags & st.ITEM_FLAG_DELETED != 0 {
+			marks := transmute(st.Entry_Marks)u8(st.lp_get_integer(e))
+			if .Tombstone in marks {
 				cs.tombstones += 1
 			}
-			if flags & st.ITEM_FLAG_SAMEFIELDS != 0 {
+			if .Shared_Fields in marks {
 				cs.samefields += 1
 			} else {
 				cs.plainfields += 1
@@ -513,7 +513,7 @@ count_entry_flags :: proc(cs: ^Compare_State, nodes: []st.Node_Info) {
 			e = lp.lp_next(p, e)
 			nf := mfc
 			skip := mfc
-			if flags & st.ITEM_FLAG_SAMEFIELDS == 0 {
+			if .Shared_Fields not_in marks {
 				nf = st.lp_get_integer(e)
 				e = lp.lp_next(p, e)
 				skip = nf * 2
