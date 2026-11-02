@@ -409,5 +409,24 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(environment['PATH'].startswith(str((self.root / 'workspace' / 'tools' / 'bin').resolve())))
 
 
+    def test_power_source_is_optional_and_reaches_the_scheduler_and_status(self):
+        with patch.dict(os.environ, self.env, clear=True):
+            _, arguments, _ = workflow.phase_arguments(self.root, 'benchmark')
+        self.assertNotIn('--power-source', arguments)
+        status = json.loads(self.invoke('status', '--json').stdout)
+        self.assertEqual(status['machine']['power_source'], 'mains')
+        self.assertIn('Power gate: mains | power supply devices: ', self.invoke('status').stdout)
+        path = self.root / 'workspace' / 'plans' / 'benchmark' / 'experiment.json'
+        config = json.loads(path.read_text())
+        config['power_source'] = 'no-power-supply-devices'
+        path.write_text(json.dumps(config))
+        self.assertEqual(workflow.experiment(self.root, 'benchmark')['power_source'], 'no-power-supply-devices')
+        with patch.dict(os.environ, self.env, clear=True):
+            _, arguments, _ = workflow.phase_arguments(self.root, 'benchmark')
+        self.assertEqual(arguments[arguments.index('--power-source') + 1], 'no-power-supply-devices')
+        status = json.loads(self.invoke('status', '--json').stdout)
+        self.assertEqual(status['machine']['power_source'], 'no-power-supply-devices')
+        self.assertIn('Power gate: no-power-supply-devices | power supply devices: ', self.invoke('status').stdout)
+
 if __name__ == '__main__':
     unittest.main()

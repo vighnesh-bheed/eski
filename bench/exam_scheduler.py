@@ -30,6 +30,8 @@ SCHEMA = 'eski-exam-v1'
 TERMINAL = {'successful', 'invalid', 'failed', 'skipped'}
 TARGETS = {'redis', 'valkey', 'dragonfly', 'eski', 'eski-docker'}
 TARGET_ORDER = ('eski-docker', 'eski', 'redis', 'valkey', 'dragonfly')
+POWER_SOURCES = ('mains', 'no-power-supply-devices')
+PRESENT_POWER_SUPPLY = {'Battery': 'battery_present', 'Mains': 'mains_present'}
 
 
 def sha(path):
@@ -285,6 +287,8 @@ def validate(args, reader):
     dragonfly_threads = profile.get('dragonfly_threads', 4)
     if 'dragonfly_threads' in profile and (type(dragonfly_threads) is not int or not 1 <= dragonfly_threads <= len(roles['server'])):
         raise ValueError('profile dragonfly_threads must be positive and no larger than the server CPU pool')
+    if args.power_source not in POWER_SOURCES:
+        raise ValueError('power source must be one of ' + ', '.join(POWER_SOURCES))
     if args.repetitions < 1 or args.maxmemory < 1 or args.min_free_bytes < 0 or not 0 <= args.min_idle <= 100:
         raise ValueError('invalid repetitions, maxmemory or idle threshold')
     if args.max_client_utilization_pct is not None and not (math.isfinite(args.max_client_utilization_pct) and 0 < args.max_client_utilization_pct <= 100):
@@ -345,7 +349,7 @@ def validate(args, reader):
     host['frequency_policy'] = metrics.frequency_policy(union)
     if any(not policy['scaling_governor'] or not policy['scaling_driver'] or not policy['scaling_min_freq'] or not policy['scaling_max_freq'] for policy in host['frequency_policy'].values()):
         raise ValueError('CPU frequency policy unavailable for an admitted CPU')
-    config = {name: getattr(args, name) for name in ('repetitions', 'server_memory', 'client_memory', 'maxmemory', 'cool_temp_c', 'max_temp_c', 'min_idle', 'min_rest', 'stable_seconds', 'max_wait', 'sample_seconds', 'min_free_bytes', 'resource_policy')}
+    config = {name: getattr(args, name) for name in ('repetitions', 'server_memory', 'client_memory', 'maxmemory', 'cool_temp_c', 'max_temp_c', 'min_idle', 'min_rest', 'stable_seconds', 'max_wait', 'sample_seconds', 'min_free_bytes', 'resource_policy', 'power_source')}
     config.update(cpus={k: sorted(v) for k, v in roles.items()}, sensor=dict(chip=reader.chip, label=reader.label), targets=selected, dragonfly_threads=dragonfly_threads,
                   client_budget_cores=client_budget_cores(topology, roles['client']), max_client_utilization_pct=args.max_client_utilization_pct, max_latency_seconds=args.max_latency_seconds)
     identity = dict(schema=SCHEMA, plan_sha256=sha(args.plan), profile_sha256=sha(args.profile),
@@ -399,6 +403,20 @@ def resolved_plan(model, row, client_cpus):
     return plan
 
 
+def power_problems(sample, source):
+    if source == 'mains':
+        ac = sample.get('ac_online') or {}
+        if not ac or any(value is None for value in ac.values()) or sample.get('availability', {}).get('ac') is not True:
+            return ['ac_sensor_unavailable']
+        return ['ac_not_online'] if any(value != 1 for value in ac.values()) else []
+    if source == 'no-power-supply-devices':
+        devices = sample.get('power_supply')
+        if not isinstance(devices, dict) or sample.get('availability', {}).get('power_supply') is not True:
+            return ['power_supply_telemetry_unavailable']
+        return sorted({PRESENT_POWER_SUPPLY.get((device or {}).get('type'), 'power_supply_device_present') for device in devices.values()})
+    return ['power_source_undeclared']
+
+
 def sample_problems(sample, args, cooling=False):
     problems = []
     package = sample['package']
@@ -406,11 +424,7 @@ def sample_problems(sample, args, cooling=False):
         problems.append('package_sensor_unavailable')
     elif package['celsius'] > (args.cool_temp_c if cooling else args.max_temp_c):
         problems.append('package_temperature')
-    ac = sample.get('ac_online') or {}
-    if not ac or any(value is None for value in ac.values()) or sample.get('availability', {}).get('ac') is not True:
-        problems.append('ac_sensor_unavailable')
-    elif any(value != 1 for value in ac.values()):
-        problems.append('ac_not_online')
+    problems += power_problems(sample, getattr(args, 'power_source', 'mains'))
     if sample.get('counter_resets'):
         problems.append('counter_reset')
     if sample.get('availability', {}).get('cpu') is not True or sample.get('availability', {}).get('process_scan') is not True:
@@ -685,13 +699,18 @@ class Scheduler:
                               cases=schedule(self.model['plan'], self.model['targets'], self.args.repetitions), last_case_end=None)
             self.save('created')
 
+    def observe(self, *arguments):
+        sample = self.reader.sample(*arguments)
+        sample['power_source'] = self.args.power_source
+        return sample
+
     def gate(self, row):
         self.state['state'] = 'cooling'
         self.save('cooling-started')
         start = self.clock.monotonic()
         stable = None
         while not self.interrupted:
-            sample = self.reader.sample()
+            sample = self.observe()
             problems = sample_problems(sample, self.args, True)
             problems += policy_problems(sample, self.model['identity']['host']['frequency_policy'])
             free = shutil.disk_usage(self.output).free
@@ -773,7 +792,7 @@ class Scheduler:
                 gate_write = None
                 while True:
                     owners = owner_rows(directory / 'owners.jsonl')
-                    sample = self.reader.sample(child.pid, owners)
+                    sample = self.observe(child.pid, owners)
                     samples.append(sample)
                     metrics.append_json(directory / 'metrics.jsonl', sample)
                     if shutil.disk_usage(self.output).free < self.args.min_free_bytes:
@@ -890,6 +909,7 @@ def parser():
     p.add_argument('--sample-seconds', type=float, default=2)
     p.add_argument('--min-free-bytes', type=int, default=5 * 1024 ** 3)
     p.add_argument('--resource-policy', choices=('strict', 'allow-oversubscription'), default='strict')
+    p.add_argument('--power-source', choices=POWER_SOURCES, default='mains', help='mains requires an online Mains power supply device in every sample; no-power-supply-devices requires that the machine exposes no power supply device at all')
     p.add_argument('--max-client-utilization-pct', type=float, default=None, help='annotate a measurement as client_limited when its owned timed client uses more than this share of the logical client CPU budget; unobserved ownership invalidates')
     p.add_argument('--max-latency-seconds', type=float, default=None, help='invalidate a measurement whose raw client JSON reports a maximum latency beyond this run lifetime bound')
     p.add_argument('--host-lock', type=Path, default=Path(tempfile.gettempdir()) / ('eski-exam-%d.lock' % os.getuid()))
@@ -911,7 +931,7 @@ def main():
         reader = metrics.Reader(args.package_sensor, args.sensor_chip, args.sensor_label)
         model = validate(args, reader)
         if args.command == 'inspect':
-            print(json.dumps(dict(identity=model['identity'], sample=reader.sample(), planned_cases=len(model['plan']['items']) * len(model['targets']) * args.repetitions), indent=2))
+            print(json.dumps(dict(identity=model['identity'], sample=dict(reader.sample(), power_source=args.power_source), planned_cases=len(model['plan']['items']) * len(model['targets']) * args.repetitions), indent=2))
             return 0
         missing = [name for name, data in model['identity']['tools'].items() if data['path'] is None]
         if missing:

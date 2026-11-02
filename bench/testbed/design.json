@@ -80,7 +80,8 @@
     "sample_seconds": 1,
     "min_free_bytes": 10737418240,
     "max_client_utilization_pct": 85,
-    "max_latency_seconds": 120
+    "max_latency_seconds": 120,
+    "power_source": "mains"
   },
   "fill": {
     "scenario": "fill10m",

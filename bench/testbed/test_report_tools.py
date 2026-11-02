@@ -234,6 +234,23 @@ class ReportTests(unittest.TestCase):
         self.assertIn('%.2fx Redis 7.4.12' % ratio, text)
         self.assertIn('Fixture fill text.', text)
         self.assertIn('<title>Eski Engine Comparison</title>', text)
+        self.assertIn('<p><b>Power gate.</b> The power gate was mains: a power supply device of type Mains had to be present', text)
+
+    def test_power_gate_is_recorded_and_named_in_the_methodology(self):
+        self.assertEqual(self.dataset['machine']['power_source'], 'mains')
+        protocol = json.loads((self.root / 'protocol.json').read_text())
+        protocol['resources']['power_source'] = 'no-power-supply-devices'
+        dump(self.root / 'protocol.json', protocol)
+        dataset = combine.combine(self.root, self.fill)
+        self.assertEqual(dataset['machine']['power_source'], 'no-power-supply-devices')
+        text = page.build(dataset)
+        self.assertIn('<p><b>Power gate.</b> The power gate was no-power-supply-devices: the machine had to expose no power supply device at all', text)
+        self.assertNotIn('The power gate was mains', text)
+        recorded = json.loads((Path(__file__).with_name('runs') / 'comparison-v1' / 'dataset.json').read_text())
+        self.assertNotIn('power_source', recorded['machine'])
+        text = page.build(recorded)
+        self.assertLess(text.index('<p><b>Gates.</b>'), text.index('<p><b>Power gate.</b> The power gate was mains:'))
+        self.assertLess(text.index('<p><b>Power gate.</b>'), text.index('<p><b>Quality.</b>'))
 
     def archive(self, extra=None, traversal=False):
         exports = self.root / 'exports'
