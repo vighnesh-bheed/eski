@@ -574,8 +574,8 @@ ltrim :: proc(l: List, start: int, end: int) -> (ltrim: int, rtrim: int) {
 }
 
 moved_add_bytes :: proc "contextless" (src_encoding: Encoding, v: Value, n: int) -> int {
-	if src_encoding == .Listpack && v.is_int {
-		return lp.lp_entry_size_integer(v.ival)
+	if src_encoding == .Quicklist && v.is_int {
+		return 0
 	}
 	return n
 }

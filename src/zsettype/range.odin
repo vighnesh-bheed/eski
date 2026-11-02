@@ -46,10 +46,10 @@ parse_range :: proc "contextless" (min, max: []u8) -> (r: Range_Spec, ok: bool) 
 }
 
 parse_lex_item :: proc "contextless" (s: []u8) -> (v: []u8, kind: Lex_Bound, ex: bool, ok: bool) {
-	if len(s) == 1 && s[0] == '-' {
+	if len(s) > 0 && s[0] == '-' && (len(s) == 1 || s[1] == 0) {
 		return nil, .Min_String, true, true
 	}
-	if len(s) == 1 && s[0] == '+' {
+	if len(s) > 0 && s[0] == '+' && (len(s) == 1 || s[1] == 0) {
 		return nil, .Max_String, true, true
 	}
 	if len(s) > 0 && (s[0] == '[' || s[0] == '(') {

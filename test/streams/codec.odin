@@ -224,7 +224,7 @@ deep_loads_accept_what_the_reader_accepts :: proc(t: ^testing.T) {
 	deep, _ := load_payload(empty, true)
 	testing.expect(t, deep == nil)
 	shallow, _ := load_payload(empty, false)
-	testing.expect(t, shallow != nil && st.length(shallow) == 2)
+	testing.expect(t, shallow == nil)
 	if shallow != nil {
 		st.destroy(shallow)
 	}

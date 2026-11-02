@@ -117,7 +117,7 @@ xinfo_consumers :: proc(c: ^Conn, argv: [][]u8, s: st.Stream) {
 		reply_bulk_str(c, "pending")
 		reply_int(c, i64(consumer.owned.stored))
 		reply_bulk_str(c, "idle")
-		reply_int(c, now - consumer.seen_ms)
+		reply_int(c, max(now - consumer.seen_ms, 0))
 		reply_bulk_str(c, "inactive")
 		if consumer.active_ms == -1 {
 			reply_int(c, -1)
@@ -302,7 +302,6 @@ cmd_xreadgroup :: proc(c: ^Conn, argv: [][]u8) {
 		if created {
 			changes += 1
 			stream_sync(e.db, s)
-			signal_key(key)
 		}
 		consumer.seen_ms = srv.now_ms
 		group_consumers[i] = consumer
@@ -336,7 +335,6 @@ cmd_xreadgroup :: proc(c: ^Conn, argv: [][]u8) {
 		delivery := Stream_Delivery{cg, consumer, a.noack}
 		stream_reply_entries(c, s, &start, nil, int(a.count), false, &delivery)
 		stream_sync(e.db, s)
-		signal_key(key)
 		changes += 1
 		served += 1
 	}
@@ -455,6 +453,18 @@ cmd_xgroup :: proc(c: ^Conn, argv: [][]u8) {
 		reply_wrongtype(c)
 		return
 	}
+	if s == nil && (op != .Create || !mkstream) {
+		reply_stream_error(c, .Xgroup_No_Key)
+		return
+	}
+	target: ^st.Group
+	if op == .Setid {
+		target = st.find_group(s, group)
+		if target == nil {
+			reply_nogroup(c, .For_Key_Name, key, group)
+			return
+		}
+	}
 	id: st.ID
 	dollar := false
 	if op == .Create || op == .Setid {
@@ -475,12 +485,10 @@ cmd_xgroup :: proc(c: ^Conn, argv: [][]u8) {
 			id = parsed
 		}
 	}
+	created := false
 	if s == nil {
-		if op != .Create || !mkstream {
-			reply_stream_error(c, .Xgroup_No_Key)
-			return
-		}
 		e, s = stream_create(key)
+		created = true
 	}
 	if dollar {
 		id = s.top
@@ -494,26 +502,20 @@ cmd_xgroup :: proc(c: ^Conn, argv: [][]u8) {
 		}
 		stream_sync(e.db, s)
 		reply_ok(c)
-		signal_key(key)
+		if created {
+			signal_key(key)
+		}
 		notify(.Stream, "xgroup-create", key)
 		group_changes(1)
 	case .Setid:
-		cg := st.find_group(s, group)
-		if cg == nil {
-			reply_nogroup(c, .For_Key_Name, key, group)
-			return
-		}
-		st.group_set_id(cg, id, entries_read)
+		st.group_set_id(target, id, entries_read)
 		reply_ok(c)
-		signal_key(key)
 		notify(.Stream, "xgroup-setid", key)
-		block_signal_key(e.db, key, .Stream)
 		group_changes(1)
 	case .Destroy:
 		if st.drop_group(s, group) {
 			stream_sync(e.db, s)
 			reply_int(c, 1)
-			signal_key(key)
 			notify(.Stream, "xgroup-destroy", key)
 			block_signal_key(e.db, key, .Stream)
 			group_changes(1)
@@ -526,11 +528,10 @@ cmd_xgroup :: proc(c: ^Conn, argv: [][]u8) {
 			reply_nogroup(c, .For_Key_Name, key, group)
 			return
 		}
-		_, created := consumer_create_noted(s, cg, argv[4], key)
-		if created {
+		_, fresh := consumer_create_noted(s, cg, argv[4], key)
+		if fresh {
 			stream_sync(e.db, s)
 			reply_int(c, 1)
-			signal_key(key)
 			group_changes(1)
 		} else {
 			reply_int(c, 0)
@@ -549,7 +550,6 @@ cmd_xgroup :: proc(c: ^Conn, argv: [][]u8) {
 		dropped := st.drop_member(s, cg, consumer)
 		stream_sync(e.db, s)
 		reply_int(c, i64(dropped))
-		signal_key(key)
 		notify(.Stream, "xgroup-delconsumer", key)
 		group_changes(1)
 	case .Help:
@@ -586,7 +586,6 @@ cmd_xack :: proc(c: ^Conn, argv: [][]u8) {
 	}
 	if acked > 0 {
 		stream_sync(e.db, s)
-		signal_key(key)
 		group_changes(acked)
 	}
 	reply_int(c, i64(acked))
@@ -642,7 +641,7 @@ cmd_xpending :: proc(c: ^Conn, argv: [][]u8) {
 				break
 			}
 			nack := (^st.Delivery)(it.data)
-			idle := now - nack.sent_ms
+			idle := max(now - nack.sent_ms, 0)
 			if a.minidle > 0 && idle < a.minidle {
 				continue
 			}
@@ -706,18 +705,6 @@ reply_claimed_entry :: proc(c: ^Conn, s: st.Stream, id: st.ID, justid: bool) {
 cmd_xclaim :: proc(c: ^Conn, argv: [][]u8) {
 	pst.dirty_explicit = true
 	now := srv.now_ms
-	clear(&stream_ids)
-	a, bad, err := st.parse_xclaim_args(argv, now, &stream_ids)
-	if err == .Claim_Option {
-		clear(&group_errbuf)
-		st.append_claim_option_error(&group_errbuf, argv[bad])
-		reply_error_fmt(c, group_errbuf[:])
-		return
-	}
-	if err != .None {
-		reply_stream_error(c, err)
-		return
-	}
 	key := argv[1]
 	group := argv[2]
 	e, s, wrong := stream_lookup(key, true)
@@ -728,6 +715,18 @@ cmd_xclaim :: proc(c: ^Conn, argv: [][]u8) {
 	cg := st.find_group(s, group)
 	if cg == nil {
 		reply_nogroup(c, .Key_Or_Group, key, group)
+		return
+	}
+	clear(&stream_ids)
+	a, bad, err := st.parse_xclaim_args(argv, now, &stream_ids)
+	if err == .Claim_Option {
+		clear(&group_errbuf)
+		st.append_claim_option_error(&group_errbuf, argv[bad])
+		reply_error_fmt(c, group_errbuf[:])
+		return
+	}
+	if err != .None {
+		reply_stream_error(c, err)
 		return
 	}
 	changes := 0
@@ -752,12 +751,11 @@ cmd_xclaim :: proc(c: ^Conn, argv: [][]u8) {
 	}
 	defer_len(c, mark, '*', claimed)
 	changes += claimed + deleted
-	if raised && claimed == 0 {
+	if raised && claimed == 0 && deleted == 0 {
 		changes += 1
 	}
 	if changes > 0 {
 		stream_sync(e.db, s)
-		signal_key(key)
 		group_changes(changes)
 	}
 }
@@ -811,7 +809,6 @@ cmd_xautoclaim :: proc(c: ^Conn, argv: [][]u8) {
 	changes += len(group_steps)
 	if changes > 0 {
 		stream_sync(e.db, s)
-		signal_key(key)
 		group_changes(changes)
 	}
 }

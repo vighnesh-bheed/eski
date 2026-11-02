@@ -504,3 +504,90 @@ mpop_count_errors :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+@(private = "file")
+lex_members :: proc(z: Zset, min, max: string, offset, limit: i64, reverse: bool) -> string {
+	r, ok := parse_lex_range(transmute([]u8)min, transmute([]u8)max)
+	if !ok {
+		return "invalid"
+	}
+	items: [dynamic]Item
+	defer delete(items)
+	lex_range(z, &r, offset, limit, reverse, false, &items)
+	out: [dynamic]u8
+	defer delete(out)
+	buf: [lp.DECIMAL_BUFFER_BYTES]u8
+	for &item, i in items {
+		if i > 0 {
+			append(&out, ' ')
+		}
+		append(&out, ..item_bytes(&item, &buf))
+	}
+	return string(out[:]) if len(out) > 0 else ""
+}
+
+@(private = "file")
+lex_total :: proc(z: Zset, min, max: string) -> int {
+	r, _ := parse_lex_range(transmute([]u8)min, transmute([]u8)max)
+	return lex_count(z, &r)
+}
+
+@(test)
+lex_queries_on_mixed_scores :: proc(t: ^testing.T) {
+	Case :: struct {
+		min, max:      string,
+		offset, limit: i64,
+		reverse:       bool,
+		packed, table: string,
+	}
+	cases := [?]Case {
+		{"[a", "[d", 0, -1, false, "b", "b"},
+		{"[a", "[d", 1, 5, false, "", ""},
+		{"[a", "[d", 2, 5, false, "c a d", "c a d"},
+		{"[a", "[d", 0, -1, true, "d a c z b", "b"},
+		{"[a", "[d", 1, 5, true, "a c z b", ""},
+		{"[a", "[d", 2, 5, true, "c z b", ""},
+		{"[c", "[d", 0, 5, false, "", ""},
+		{"[c", "[d", 1, 5, false, "", "c a d"},
+		{"-", "+", 0, -1, false, "b z c a d", "b z c a d"},
+		{"(b", "+", 0, -1, false, "z c a d", "z c a d"},
+		{"[e", "+", 0, -1, false, "", ""},
+	}
+	counts := [?]struct {
+		min, max: string,
+		want:     int,
+	}{{"[a", "[d", 1}, {"[c", "[d", 0}, {"-", "+", 5}, {"[b", "[c", 1}, {"(a", "[z", 5}}
+	for table in ([2]bool{false, true}) {
+		z := create_listpack()
+		defer destroy(z)
+		for member, i in ([5]string{"b", "z", "c", "a", "d"}) {
+			_, _, _ = add(z, f64(i), transmute([]u8)member, {})
+		}
+		if table {
+			convert_to_skiplist(z, 0)
+		}
+		for c in cases {
+			want := c.table if table else c.packed
+			got := lex_members(z, c.min, c.max, c.offset, c.limit, c.reverse)
+			testing.expectf(t, got == want, "skiplist=%v %s %s offset %d reverse %v gave %q want %q", table, c.min, c.max, c.offset, c.reverse, got, want)
+		}
+		for c in counts {
+			testing.expectf(t, lex_total(z, c.min, c.max) == c.want, "skiplist=%v count %s %s", table, c.min, c.max)
+		}
+	}
+	plain := create_listpack()
+	defer destroy(plain)
+	for member, i in ([3]string{"b", "a", "c"}) {
+		_, _, _ = add(plain, f64(i), transmute([]u8)member, {})
+	}
+	testing.expect_value(t, lex_members(plain, "[b", "[c", 0, -1, false), "b a c")
+	testing.expect_value(t, lex_members(plain, "[b", "[c", 0, -1, true), "c")
+	testing.expect_value(t, lex_members(plain, "[a", "(c", 0, -1, true), "a b")
+	testing.expect_value(t, lex_total(plain, "[b", "[c"), 3)
+	for text in ([4]string{"-\x00x", "+\x00", "-", "+"}) {
+		_, kind, _, ok := parse_lex_item(transmute([]u8)text)
+		testing.expect(t, ok && kind == (.Min_String if text[0] == '-' else .Max_String))
+	}
+	_, _, _, rejected := parse_lex_item(transmute([]u8)string("+x"))
+	testing.expect(t, !rejected)
+}

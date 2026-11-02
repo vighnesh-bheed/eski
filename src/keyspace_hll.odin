@@ -58,7 +58,7 @@ keyspace_hll_execute :: proc(job: ^ks.Job) {
 		if invalid { task.failed = true; return }
 		keyspace_save(task, r, mutable, r.expire_at)
 		r.encoding = u8(Obj_Encoding.Raw)
-		task.dirty = 1; return
+		task.dirty = 1; keyspace_invalidate(task, r); return
 	}
 	keyspace_touch(task, r)
 	if task.op == .Pfadd {
@@ -66,12 +66,13 @@ keyspace_hll_execute :: proc(job: ^ks.Job) {
 		source := hll.HLL_EMPTY_SPARSE[:] if created else bytes
 		mutable := ks.value_new(&keyspace_pool, source)
 		if mutable == nil { task.failed = true; return }; defer ks.value_release(mutable)
-		changed, in_scratch, err := hll.pfadd_apply(ks.value_data(mutable), argv[2:], &scratch, hll_sparse_max_bytes)
+		updates, in_scratch, err := hll.pfadd_apply(ks.value_data(mutable), argv[2:], &scratch, hll_sparse_max_bytes)
 		if err != .None { task.failed = true; return }
+		changed := updates > 0
 		if !created && !changed { return }
 		result := scratch[:] if in_scratch && changed else ks.value_data(mutable)
 		if !keyspace_hll_store(task, r, result) { return }
-		task.dirty = i64(created) + i64(changed); task.integer = 1; keyspace_changed(task, r, .String, "pfadd"); return
+		task.dirty = i64(created) + i64(updates); task.integer = 1; keyspace_changed(task, r, .String, "pfadd"); return
 	}
 	if !r.exists { task.failed = true; return }
 	sub := argv[1]

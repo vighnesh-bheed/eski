@@ -713,6 +713,16 @@ INCRBYFLOAT f 1 => "100000000000000000002818806839475865145864534336290520386259
     events: __keyspace@0__:f incrbyfloat | __keyevent@0__:incrbyfloat f
 INCRBYFLOAT dl 1 => -ERR value is not a valid float
 INCRBYFLOAT dl abc => -ERR value is not a valid float
+RPUSH fl a => :1
+    events: __keyspace@0__:fl rpush | __keyevent@0__:rpush fl
+INCRBYFLOAT fl abc => -WRONGTYPE Operation against a key holding the wrong kind of value
+INCRBYFLOAT fl 1 => -WRONGTYPE Operation against a key holding the wrong kind of value
+INCRBYFLOAT fl "" => -WRONGTYPE Operation against a key holding the wrong kind of value
+INCRBYFLOAT nofl abc => -ERR value is not a valid float
+INCRBY fl abc => -ERR value is not an integer or out of range
+DECRBY fl abc => -ERR value is not an integer or out of range
+DEL fl => :1
+    events: __keyspace@0__:fl del | __keyevent@0__:del fl
 INCRBYFLOAT f => -ERR wrong number of arguments for 'incrbyfloat' command
 INCRBYFLOAT f 1 2 => -ERR wrong number of arguments for 'incrbyfloat' command
 SET f 1 EX 100 => +OK

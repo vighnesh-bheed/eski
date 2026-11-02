@@ -130,7 +130,7 @@ keyspace_stream_execute :: proc(job: ^ks.Job) {
 	case: task.failed = true; return
 	}
 	if !keyspace_object_commit(task, r, &work, true) { task.dirty = 0; return }
-	keyspace_changed(task, r, .Stream, name)
+	if name == "xsetid" { keyspace_notify(task, r, .Stream, name) } else { keyspace_changed(task, r, .Stream, name) }
 	if trimmed > 0 { keyspace_notify(task, r, .Stream, "xtrim") }
 	if name == "xadd" { keyspace_wake(task, r, .Stream) }
 }
@@ -163,6 +163,7 @@ keyspace_stream_group :: proc(task: ^Keyspace_Task) {
 		}
 	}
 	if !r.exists && !(create && mkstream) { task.failed = true; return }
+	fresh := !r.exists
 	work, ok := keyspace_object_work(task, r, .Stream)
 	if !ok { return }; defer keyspace_object_discard(&work)
 	s := cast(sm.Stream)work.object
@@ -187,8 +188,9 @@ keyspace_stream_group :: proc(task: ^Keyspace_Task) {
 	}
 	if !keyspace_object_commit(task, r, &work, true) { task.dirty = 0; return }
 	event := "xgroup-create" if create else ("xgroup-setid" if setid else ("xgroup-destroy" if destroy else ("xgroup-createconsumer" if makeconsumer else "xgroup-delconsumer")))
-	if makeconsumer { keyspace_notify(task, r, .Stream, event); keyspace_invalidate(task, r) } else { keyspace_changed(task, r, .Stream, event) }
-	if setid || destroy { keyspace_wake(task, r, .Stream) }
+	keyspace_notify(task, r, .Stream, event)
+	if create && fresh { keyspace_invalidate(task, r) }
+	if destroy { keyspace_wake(task, r, .Stream) }
 }
 
 keyspace_stream_read :: proc(task: ^Keyspace_Task, grouped: bool) {
@@ -250,7 +252,7 @@ keyspace_stream_read :: proc(task: ^Keyspace_Task, grouped: bool) {
 			cg := sm.find_group(s, argv[args.group_arg])
 			consumer, created := sm.member_for(s, cg, argv[args.group_arg + 1], task.now)
 			changes += int(created); consumer.seen_ms = task.now
-			if created { keyspace_notify(task, records[i], .Stream, "xgroup-createconsumer"); keyspace_invalidate(task, records[i]) }
+			if created { keyspace_notify(task, records[i], .Stream, "xgroup-createconsumer") }
 		}
 	}
 	served := 0
@@ -270,7 +272,6 @@ keyspace_stream_read :: proc(task: ^Keyspace_Task, grouped: bool) {
 				start := cg.delivered; sm.incr_id(&start)
 				keyspace_stream_range(task, &b, s, &start, nil, int(args.count), false, false, cg, consumer, args.noack)
 				changes += 1
-				keyspace_invalidate(task, records[i])
 			}
 		} else { start := ids[i]; sm.incr_id(&start); keyspace_stream_range(task, &b, s, &start, nil, int(args.count), false, false) }
 		served += 1
@@ -408,7 +409,7 @@ keyspace_pel_claim :: proc(task: ^Keyspace_Task, b: ^Keyspace_Builder, s: sm.Str
 		}
 	}
 	keyspace_builder_prefix(b, 0, '*', i64(claimed))
-	bumped := 1 if raised && claimed == 0 else 0
+	bumped := 1 if raised && claimed == 0 && dropped == 0 else 0
 	return claimed + dropped + bumped
 }
 
@@ -525,9 +526,6 @@ keyspace_stream_pending :: proc(task: ^Keyspace_Task) {
 		return
 	}
 	task.dirty = i64(changes)
-	if changes > 0 {
-		keyspace_invalidate(task, r)
-	}
 }
 
 keyspace_stream_pending_reply :: proc(task: ^Keyspace_Task, b: ^Keyspace_Builder, cg: ^sm.Group, args: ^sm.Xpending_Args) {
@@ -561,7 +559,7 @@ keyspace_stream_pending_reply :: proc(task: ^Keyspace_Task, b: ^Keyspace_Builder
 		it: rx.Iterator; rx.start(&it, source); rx.seek(&it, ">=", start[:])
 		for emitted < args.count && rx.next(&it) {
 			id := sm.decode_id(rx.key(&it)); if sm.compare_id(id, args.end) > 0 { break }
-			nack := cast(^sm.Delivery)it.data; idle := task.now - nack.sent_ms
+			nack := cast(^sm.Delivery)it.data; idle := max(task.now - nack.sent_ms, 0)
 			if args.minidle > 0 && idle < args.minidle { continue }
 			keyspace_builder_integer(b, 4, '*'); keyspace_stream_id(b, id); keyspace_builder_bulk(b, nack.owner.name)
 			keyspace_builder_integer(b, idle); keyspace_builder_integer(b, i64(nack.times)); emitted += 1
@@ -597,7 +595,7 @@ keyspace_stream_info :: proc(task: ^Keyspace_Task, s: sm.Stream, b: ^Keyspace_Bu
 			keyspace_stream_map(task, b, 4)
 			keyspace_stream_label(b, "name"); keyspace_builder_bulk(b, consumer.name)
 			keyspace_stream_label(b, "pending"); keyspace_builder_integer(b, i64(consumer.owned.stored))
-			keyspace_stream_label(b, "idle"); keyspace_builder_integer(b, task.now - consumer.seen_ms)
+			keyspace_stream_label(b, "idle"); keyspace_builder_integer(b, max(task.now - consumer.seen_ms, 0))
 			keyspace_stream_label(b, "inactive"); keyspace_builder_integer(b, -1 if consumer.active_ms == -1 else task.now - consumer.active_ms)
 		}
 		rx.stop(&it); keyspace_builder_finish(task, b); return

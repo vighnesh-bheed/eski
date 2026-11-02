@@ -158,15 +158,7 @@ rdb_load_plain :: proc(r: ^rdb.Reader, deep: bool) -> Hash {
 }
 
 rdb_repack_loaded :: proc(h: Hash) -> bool {
-	convert_needed := length(h) > hash_max_listpack_entries
-	it := iterator(h)
-	for next(&it) {
-		if value_len(current_field(&it)) > hash_max_listpack_value || value_len(current_value(&it)) > hash_max_listpack_value {
-			convert_needed = true
-			break
-		}
-	}
-	if convert_needed {
+	if length(h) > hash_max_listpack_entries {
 		if !rdb.lp_validate_dups(lp.lp_view(h.lp), true, pack_stride(h)) {
 			return false
 		}

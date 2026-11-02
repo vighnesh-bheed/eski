@@ -74,10 +74,13 @@ scan :: proc(z: Zset, cursor: u64, count: int, out: ^[dynamic]Item) -> u64 {
 	if length(z) == 0 {
 		return 0
 	}
+	wanted := max(count, 1)
+	visits := max(int) if wanted > max(int) / 10 else wanted * 10
+	first := len(out)
 	v := cursor
-	for _ in 0 ..< max(count, 1) {
+	for ; visits > 0; visits -= 1 {
 		v = dict_scan_bucket(z.sl, v, scan_node, out)
-		if v == 0 {
+		if v == 0 || (len(out) - first) / 2 >= wanted {
 			break
 		}
 	}

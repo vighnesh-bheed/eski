@@ -140,6 +140,8 @@ run_script "test/compatibility/hfe_aof.py" "field-expiry-aof" --server "$server_
 run_script "test/compatibility/hfe_aof.py" "field-expiry-workers" --server "$server_binary" --keyspace-threads 2
 run_script "test/compatibility/server_parity.py" "server-parity" --server "$server_binary" --keyspace-threads 0
 run_script "test/compatibility/server_parity.py" "server-parity-workers" --server "$server_binary" --keyspace-threads 2
+run_script "test/compatibility/datatype_parity.py" "datatype-parity" --server "$server_binary" --keyspace-threads 0
+run_script "test/compatibility/datatype_parity.py" "datatype-parity-workers" --server "$server_binary" --keyspace-threads 2
 run_script "test/scripting/debugger.py" "lua-debugger" --server "$server_binary"
 
 if [ "$ran" -eq 0 ]; then

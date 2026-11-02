@@ -370,7 +370,6 @@ cmd_xsetid :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	stream_sync(e.db, s)
-	signal_key(key)
 	notify(.Stream, "xsetid", key)
 	reply_ok(c)
 }

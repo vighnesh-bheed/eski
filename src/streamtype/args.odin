@@ -246,9 +246,6 @@ parse_range_bound :: proc "contextless" (arg: []u8, missing_seq: u64) -> (id: ID
 		return
 	}
 	exclusive = true
-	if len(arg) > ID_ARG_BYTES_MAX {
-		return
-	}
 	t := read_id_text(arg[1:])
 	#partial switch t.shape {
 	case .Ms:
@@ -325,7 +322,9 @@ Trim_Reader :: struct {
 @(private)
 read_threshold :: proc "contextless" (r: ^Trim_Reader, argv: [][]u8, at: int, word: Trim_Word) -> (next: int, err: Error) {
 	value := at + 1
-	r.spec.nearly = false
+	if r.spec.rule != .Off {
+		return value, .Maxlen_Minid
+	}
 	if value + 1 < len(argv) {
 		if is_byte(argv[value], '~') {
 			r.spec.nearly = true
@@ -334,7 +333,6 @@ read_threshold :: proc "contextless" (r: ^Trim_Reader, argv: [][]u8, at: int, wo
 			value += 1
 		}
 	}
-	other := Trim_Rule.Min_Id if word == .Max_Len else Trim_Rule.Max_Len
 	if word == .Max_Len {
 		keep, good := parse_ll(argv[value])
 		switch {
@@ -342,18 +340,13 @@ read_threshold :: proc "contextless" (r: ^Trim_Reader, argv: [][]u8, at: int, wo
 			return value, .Not_Integer
 		case keep < 0:
 			return value, .Maxlen_Negative
-		case r.spec.rule == other:
-			return value, .Maxlen_Minid
 		}
 		r.spec.rule = .Max_Len
 		r.spec.max_len = keep
 	} else {
 		floor, good := parse_exact_id(argv[value])
-		switch {
-		case !good:
+		if !good {
 			return value, .Invalid_ID
-		case r.spec.rule == other:
-			return value, .Maxlen_Minid
 		}
 		r.spec.rule = .Min_Id
 		r.spec.min_id = floor
@@ -401,7 +394,7 @@ read_trim_words :: proc "contextless" (argv: [][]u8, xadd: bool) -> (r: Trim_Rea
 			return r, .Xtrim_No_Strategy
 		}
 	}
-	if r.spec.limit > 0 && !r.spec.nearly && !trim_limit_relaxed {
+	if r.limit_seen && !r.spec.nearly && !trim_limit_relaxed {
 		return r, .Limit_No_Approx
 	}
 	switch {
@@ -758,18 +751,24 @@ parse_xpending_args :: proc "contextless" (argv: [][]u8) -> (a: Xpending_Args, e
 	}
 	at := 3
 	if opt_is(argv[3], "idle") {
-		if n < 8 {
-			err = .Syntax
-			return
-		}
 		v, ok := parse_ll(argv[4])
 		if !ok {
 			err = .Not_Integer
 			return
 		}
+		if n < 8 {
+			err = .Syntax
+			return
+		}
 		a.minidle = v < 0 ? 0 : v
 		at = 5
 	}
+	v, good := parse_ll(argv[at + 2])
+	if !good {
+		err = .Not_Integer
+		return
+	}
+	a.count = v < 0 ? 0 : v
 	sx, ex, ok: bool
 	a.start, sx, ok = parse_range_bound(argv[at], 0)
 	if !ok {
@@ -789,12 +788,6 @@ parse_xpending_args :: proc "contextless" (argv: [][]u8) -> (a: Xpending_Args, e
 		err = .Invalid_End
 		return
 	}
-	v, good := parse_ll(argv[at + 2])
-	if !good {
-		err = .Not_Integer
-		return
-	}
-	a.count = v < 0 ? 0 : v
 	if n > at + 3 {
 		a.consumer_idx = at + 3
 	}

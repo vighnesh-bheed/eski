@@ -210,7 +210,30 @@ format_f6 :: proc "contextless" (dst: []u8, v: f64) -> int {
 }
 
 format_distance :: proc "contextless" (dst: []u8, d: f64) -> int {
-	return fixed_into(dst, d, 4, false)
+	scaled := d * 10000
+	if !(abs(scaled) < 1e18) {
+		return fixed_into(dst, d, 4, false)
+	}
+	magnitude := abs(scaled)
+	whole := u64(magnitude)
+	rest := magnitude - f64(whole)
+	if rest > 0.5 || (rest == 0.5 && whole & 1 == 1) {
+		whole += 1
+	}
+	text: [32]u8
+	pos := 0
+	if scaled < 0 && whole != 0 {
+		text[0] = '-'
+		pos = 1
+	}
+	pos = put_u128(text[:], pos, u128(whole / 10000))
+	text[pos] = '.'
+	pos = put_padded(text[:], pos + 1, whole % 10000, 4)
+	n := min(pos, len(dst))
+	for i in 0 ..< n {
+		dst[i] = text[i]
+	}
+	return n
 }
 
 format_human :: proc "contextless" (dst: []u8, v: f64) -> int {

@@ -1092,6 +1092,55 @@ section_fuzz :: proc(g: ^Gen, rounds: int) {
 	g_cmd(g, "CONFIG", "SET", "zset-max-listpack-value", "64")
 }
 
+section_parity :: proc(g: ^Gen) {
+	g_cmd(g, "FLUSHALL")
+	g_cmd(g, "CONFIG", "SET", "zset-max-listpack-entries", "128")
+	g_cmd(g, "CONFIG", "SET", "zset-max-listpack-value", "64")
+	g_cmd(g, "ZADD", "r", "1", "a", "2", "b", "3", "c", "4", "d")
+	for limit in ([?][2]string{{"1", "-1"}, {"5", "-1"}, {"-1", "-1"}, {"3", "-1"}, {"9223372036854775807", "-1"}, {"0", "-1"}, {"0", "-5"}, {"0", "0"}, {"1", "0"}, {"-1", "0"}, {"0", "-2"}, {"0", "2"}, {"1", "-5"}, {"x", "-1"}, {"1", "x"}}) {
+		g_cmd(g, "ZRANGE", "r", "0", "-1", "LIMIT", limit[0], limit[1])
+		g_cmd(g, "ZRANGE", "r", "1", "2", "REV", "LIMIT", limit[0], limit[1])
+	}
+	g_cmd(g, "ZRANGE", "r", "1", "2", "LIMIT", "3", "-1", "WITHSCORES")
+	g_cmd(g, "ZRANGE", "r", "0", "-1", "LIMIT", "1", "-1", "LIMIT", "0", "2")
+	g_cmd(g, "ZRANGE", "r", "0", "-1", "LIMIT", "0", "2", "LIMIT", "1", "-1")
+	g_cmd(g, "ZRANGESTORE", "rd", "r", "0", "-1", "LIMIT", "1", "-1")
+	g_state(g, "rd")
+	g_cmd(g, "ZRANGESTORE", "rd", "r", "1", "2", "REV", "LIMIT", "7", "-1")
+	g_state(g, "rd")
+	g_cmd(g, "ZADD", "x", "0", "a", "0", "b", "0", "a\x00b")
+	for bounds in ([?][2]string{{"-", "+\x00abc"}, {"-\x00x", "+"}, {"-\x00", "+\x00"}, {"+\x00", "-\x00"}, {"-", "+abc"}, {"-x", "+"}, {"\x00", "+"}, {"(a\x00", "+"}, {"[a\x00b", "[a\x00b"}}) {
+		g_cmd(g, "ZRANGEBYLEX", "x", bounds[0], bounds[1])
+		g_cmd(g, "ZREVRANGEBYLEX", "x", bounds[1], bounds[0])
+		g_cmd(g, "ZLEXCOUNT", "x", bounds[0], bounds[1])
+		g_cmd(g, "ZRANGE", "x", bounds[0], bounds[1], "BYLEX")
+	}
+	g_cmd(g, "ZRANGESTORE", "xd", "x", "-\x00", "+\x00", "BYLEX")
+	g_state(g, "xd")
+	g_cmd(g, "ZREMRANGEBYLEX", "x", "-\x00a", "+\x00")
+	g_state(g, "x")
+	mixed := [?][]string{{"1", "b", "2", "a", "0", "d", "3", "c", "1", "e", "5", "aa"}, {"0", "b", "1", "z", "2", "c", "3", "a", "4", "d"}, {"0", "b", "1", "a", "2", "c"}, {"0", "c", "1", "a", "2", "b"}, {"0", "b", "1", "z", "2", "c"}}
+	queries := [?][]string{{"ZLEXCOUNT", "[b", "+"}, {"ZLEXCOUNT", "-", "[c"}, {"ZLEXCOUNT", "[aa", "[d"}, {"ZLEXCOUNT", "[a", "[d"}, {"ZLEXCOUNT", "[b", "[c"}, {"ZLEXCOUNT", "(a", "+"}, {"ZLEXCOUNT", "[c", "[d"}, {"ZRANGEBYLEX", "[b", "[e"}, {"ZRANGEBYLEX", "-", "[c", "LIMIT", "0", "5"}, {"ZRANGEBYLEX", "[a", "[d"}, {"ZRANGEBYLEX", "[a", "[d", "LIMIT", "1", "5"}, {"ZRANGEBYLEX", "[a", "[d", "LIMIT", "2", "5"}, {"ZRANGEBYLEX", "[c", "[d", "LIMIT", "0", "5"}, {"ZRANGEBYLEX", "[c", "[d", "LIMIT", "1", "5"}, {"ZRANGEBYLEX", "[b", "[c"}, {"ZRANGEBYLEX", "(a", "+"}, {"ZREVRANGEBYLEX", "+", "[b", "LIMIT", "0", "5"}, {"ZREVRANGEBYLEX", "[e", "-", "LIMIT", "0", "5"}, {"ZREVRANGEBYLEX", "[d", "[a"}, {"ZREVRANGEBYLEX", "[d", "[a", "LIMIT", "1", "5"}, {"ZREVRANGEBYLEX", "[d", "[a", "LIMIT", "2", "5"}, {"ZREVRANGEBYLEX", "[c", "[b"}, {"ZREVRANGEBYLEX", "(c", "[a"}, {"ZREVRANGEBYLEX", "[b", "[a"}, {"ZREVRANGEBYLEX", "[bb", "[b", "LIMIT", "0", "5"}, {"ZRANGE", "[b", "[e", "BYLEX"}, {"ZRANGE", "[e", "[b", "BYLEX", "REV", "LIMIT", "0", "5"}, {"ZRANGE", "[a", "[d", "BYLEX", "LIMIT", "2", "5"}}
+	for members, i in mixed {
+		key := tp("m", i)
+		a := make([dynamic]string, context.temp_allocator)
+		append(&a, "ZADD", key)
+		append(&a, ..members)
+		g_cmds(g, a[:])
+		for q in queries {
+			b := make([dynamic]string, context.temp_allocator)
+			append(&b, q[0], key)
+			append(&b, ..q[1:])
+			g_cmds(g, b[:])
+		}
+		g_cmd(g, "ZRANGESTORE", "md", key, "[a", "[d", "BYLEX", "LIMIT", "2", "5")
+		g_state(g, "md")
+		g_cmd(g, "ZREMRANGEBYLEX", key, "[a", "[c")
+		g_state(g, key)
+	}
+	g_cmd(g, "FLUSHALL")
+}
+
 run_gen :: proc(dir: string) -> bool {
 	g := Gen {
 		buf = make([dynamic]u8),
@@ -1111,6 +1160,7 @@ run_gen :: proc(dir: string) -> bool {
 		section_scan(&g)
 		section_errors(&g)
 		section_duplicates(&g)
+		section_parity(&g)
 		section_fuzz(&g, 9000 if proto == "2" else 3000)
 		free_all(context.temp_allocator)
 	}

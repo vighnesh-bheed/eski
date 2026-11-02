@@ -221,6 +221,20 @@ run_gen :: proc(dir: string) -> bool {
 		gen_end(&g) or_return
 	}
 
+	{
+		gen_begin(&g, "signals")
+		s := &g.script
+		cmd(s, "PFADD", "w:hll", "a", "b", "c")
+		for step in ([?][]string{{"PFCOUNT", "w:hll"}, {"PFCOUNT", "w:hll"}, {"PFADD", "w:hll", "a"}, {"PFADD", "w:hll", "zz"}, {"PFCOUNT", "w:hll"}, {"PFCOUNT", "w:hll", "w:hll"}, {"PFADD", "w:hll", "zz"}, {"PFCOUNT", "w:none"}}) {
+			cmd(s, "WATCH", "w:hll")
+			cmd(s, ..step)
+			cmd(s, "MULTI")
+			cmd(s, "PING")
+			cmd(s, "EXEC")
+		}
+		gen_end(&g) or_return
+	}
+
 	for max_bytes in ([]int{3000, 500, 100}) {
 		key := fmt.aprintf("growth:%d", max_bytes)
 		gen_begin(&g, key)

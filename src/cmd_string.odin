@@ -628,14 +628,14 @@ cmd_decrby :: proc(c: ^Conn, argv: [][]u8) {
 float_text: [ld.MAX_LONG_DOUBLE_CHARS]u8
 
 cmd_incrbyfloat :: proc(c: ^Conn, argv: [][]u8) {
-	step, step_ok := ld.parse(argv[2])
-	if !step_ok {
-		reply_error(c, ERR_NOT_FLOAT)
-		return
-	}
 	key := argv[1]
 	e := db_find(key)
 	if !string_entry_of(c, e) {
+		return
+	}
+	step, step_ok := ld.parse(argv[2])
+	if !step_ok {
+		reply_error(c, ERR_NOT_FLOAT)
 		return
 	}
 	current := ld.zero(false)

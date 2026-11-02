@@ -1620,6 +1620,137 @@ section_group_fuzz :: proc(g: ^Gen, ops: int) {
 	config_nodes(g, "100", "4096")
 }
 
+unhex :: proc(text: string) -> string {
+	out := make([]u8, len(text) / 2, context.temp_allocator)
+	for i in 0 ..< len(out) {
+		hi, lo := text[2 * i], text[2 * i + 1]
+		hv := hi - '0' if hi <= '9' else hi - 'a' + 10
+		lv := lo - '0' if lo <= '9' else lo - 'a' + 10
+		out[i] = hv << 4 | lv
+	}
+	return string(out)
+}
+
+ENTRIES_ADDED_AT_MAX :: "150110000000000000000100000000000000011d1d0000000a0001010001010181660200010201000100018176020401ff0105000101000081ffffffffffffffff010167000081ffffffffffffffff00000c008cb73a1e17e1f3b6"
+
+LENGTH_WITHOUT_NODES :: "15000101010000010101000c00730d14ed424d6af5"
+
+section_parity :: proc(g: ^Gen) {
+	g_cmd(g, "FLUSHALL")
+	config_nodes(g, "100", "4096")
+	g_cmd(g, "XGROUP", "CREATE", "nokey", "g", "badid")
+	g_cmd(g, "XGROUP", "SETID", "nokey", "g", "badid")
+	g_cmd(g, "XGROUP", "CREATE", "nokey", "g", "badid", "MKSTREAM")
+	g_cmd(g, "XGROUP", "CREATE", "nokey", "g", "0", "ENTRIESREAD", "x")
+	g_cmd(g, "XCLAIM", "nokey", "g", "c", "notanumber", "0-1")
+	g_cmd(g, "XCLAIM", "nokey", "g", "c", "0", "1-1", "BOGUS")
+	g_cmd(g, "XADD", "p", "1-1", "f", "v")
+	g_cmd(g, "XGROUP", "SETID", "p", "nogroup", "badid")
+	g_cmd(g, "XGROUP", "SETID", "p", "nogroup", "0", "ENTRIESREAD", "x")
+	g_cmd(g, "XGROUP", "CREATECONSUMER", "p", "nogroup", "c")
+	g_cmd(g, "XCLAIM", "p", "nogroup", "c", "notanumber", "0-1")
+	g_cmd(g, "XCLAIM", "p", "nogroup", "c", "0", "badid")
+	g_cmd(g, "XCLAIM", "p", "nogroup", "c", "0", "1-1", "IDLE", "x")
+	g_cmd(g, "XAUTOCLAIM", "p", "nogroup", "c", "notanumber", "0")
+	g_cmd(g, "XGROUP", "CREATE", "p", "g", "badid")
+	g_cmd(g, "XGROUP", "CREATE", "p", "g", "0")
+	g_cmd(g, "XGROUP", "CREATE", "p", "g", "badid")
+	g_cmd(g, "XCLAIM", "p", "g", "c", "notanumber", "0-1")
+	g_cmd(g, "XCLAIM", "p", "g", "c", "0", "badid")
+	g_cmd(g, "XCLAIM", "p", "g", "c", "0", "1-1", "IDLE", "x")
+	g_cmd(g, "XCLAIM", "p", "g", "c", "0", "1-1", "LASTID", "x")
+	g_cmd(g, "XREADGROUP", "GROUP", "g", "c", "STREAMS", "p", ">")
+	for form in ([?][]string{{"IDLE", "abc", "-", "+"}, {"bad", "+", "abc"}, {"bad", "+", "10"}, {"-", "bad", "abc"}, {"IDLE", "10", "bad", "+", "abc"}, {"IDLE", "10", "-", "+"}, {"IDLE", "abc"}, {"bad", "+", "abc", "c", "extra"}, {"(18446744073709551615-18446744073709551615", "+", "abc"}, {"-", "(0-0", "abc"}, {"x", "-", "+"}, {"x", "-", "+", "10"}, {"-", "+", "10", "c", "extra"}}) {
+		a := make([dynamic]string, context.temp_allocator)
+		append(&a, "XPENDING", "p", "g")
+		append(&a, ..form)
+		g_cmds(g, a[:])
+	}
+	g_cmd(g, "XPENDING", "nokey", "g", "IDLE", "abc", "-", "+")
+	for i in 2 ..= 6 {
+		g_cmd(g, "XADD", "p", tp(i, "-1"), "f", "v")
+	}
+	g_cmd(g, "XREADGROUP", "GROUP", "g", "c", "STREAMS", "p", ">")
+	g_cmd(g, "XCLAIM", "p", "g", "c2", "0", "2-1", "TIME", "-5", "JUSTID")
+	g_cmd(g, "XCLAIM", "p", "g", "c2", "0", "3-1", "IDLE", "9999999999999", "JUSTID")
+	g_cmd(g, "XCLAIM", "p", "g", "c2", "0", "4-1", "TIME", "9999999999999", "JUSTID")
+	g_cmd(g, "XPENDING", "p", "g", "-", "+", "10")
+	g_cmd(g, "XPENDING", "p", "g", "IDLE", "1000000", "-", "+", "10")
+	watched := [?][]string{{"XSETID", "p", "100-1"}, {"XACK", "p", "g", "1-1"}, {"XCLAIM", "p", "g", "c3", "0", "5-1"}, {"XAUTOCLAIM", "p", "g", "c4", "0", "0"}, {"XGROUP", "CREATECONSUMER", "p", "g", "c9"}, {"XGROUP", "SETID", "p", "g", "0"}, {"XREADGROUP", "GROUP", "g", "c5", "STREAMS", "p", ">"}, {"XGROUP", "CREATE", "p", "g2", "0"}, {"XGROUP", "DELCONSUMER", "p", "g", "c9"}, {"XGROUP", "DESTROY", "p", "g2"}, {"XTRIM", "p", "MAXLEN", "1000"}, {"XGROUP", "CREATE", "fresh", "g", "0", "MKSTREAM"}, {"XDEL", "p", "6-1"}}
+	for command in watched {
+		g_cmd(g, "WATCH", "p", "fresh")
+		g_cmds(g, command)
+		g_cmd(g, "MULTI")
+		g_cmd(g, "PING")
+		g_cmd(g, "EXEC")
+	}
+	g_cmd(g, "DEL", "s")
+	for i in 1 ..= 10 {
+		g_cmd(g, "XADD", "s", tp(i, "-1"), "f", "v")
+	}
+	for form in ([?][]string{{"MAXLEN", "5", "LIMIT", "0"}, {"MAXLEN", "=", "5", "LIMIT", "0"}, {"LIMIT", "0", "MAXLEN", "5"}, {"MAXLEN", "~", "5", "LIMIT", "0", "MAXLEN", "5"}, {"MAXLEN", "9", "MAXLEN", "8"}, {"MAXLEN", "9", "MAXLEN", "9"}, {"MINID", "0", "MAXLEN", "abc"}, {"MINID", "0", "MINID", "3"}, {"MAXLEN", "3", "MAXLEN", "~"}, {"MAXLEN", "3", "MAXLEN"}, {"MAXLEN", "9", "LIMIT", "0", "MAXLEN", "8"}, {"MAXLEN", "9", "MAXLEN", "8", "bogus"}, {"MAXLEN", "abc", "MINID", "0"}, {"MINID", "bad", "MINID", "3"}, {"LIMIT", "0"}, {"LIMIT", "5"}, {"MAXLEN", "5", "LIMIT", "-1"}, {"LIMIT", "0", "MAXLEN", "~", "5"}}) {
+		a := make([dynamic]string, context.temp_allocator)
+		append(&a, "XTRIM", "s")
+		append(&a, ..form)
+		g_cmds(g, a[:])
+	}
+	g_cmd(g, "XADD", "s", "MAXLEN", "5", "LIMIT", "0", "*", "f", "v")
+	g_cmd(g, "XADD", "s", "MINID", "3", "LIMIT", "0", "100-1", "f", "v")
+	g_cmd(g, "XADD", "s", "MAXLEN", "6", "MAXLEN", "5", "*", "f", "v")
+	g_cmd(g, "XADD", "s", "LIMIT", "0", "*", "f", "v")
+	g_cmd(g, "XADD", "s", "NOMKSTREAM", "MAXLEN", "6", "NOMKSTREAM", "MAXLEN", "5", "*", "f", "v")
+	g_cmd(g, "XADD", "s", "MAXLEN", "6", "LIMIT", "0")
+	g_cmd(g, "XADD", "s", "MAXLEN", "~", "6", "LIMIT", "0", "101-1", "f", "v")
+	g_cmd(g, "XTRIM", "nokey", "MAXLEN", "5", "LIMIT", "0")
+	g_state(g, "s")
+	for n in 126 ..= 129 {
+		long := tp("(", rep('0', n - 3), "1-1")
+		g_cmd(g, "XRANGE", "s", long, "+")
+		g_cmd(g, "XRANGE", "s", "-", long)
+		g_cmd(g, "XREVRANGE", "s", long, "-")
+		g_cmd(g, "XPENDING", "p", "g", long, "+", "10")
+		g_cmd(g, "XAUTOCLAIM", "p", "g", "c", "0", long, "COUNT", "1")
+	}
+	g_cmd(g, "DEL", "t")
+	config_nodes(g, "4", "4096")
+	for id in ([?]string{"1-1", "2-1", "3-1", "4-1", "11-1", "12-1", "13-1"}) {
+		g_cmd(g, "XADD", "t", id, "f", "v")
+	}
+	g_cmd(g, "XDEL", "t", "4-1")
+	g_cmd(g, "XTRIM", "t", "MINID", "=", "4-1")
+	g_full(g, "t")
+	g_cmd(g, "XADD", "t", "14-1", "f", "v")
+	g_cmd(g, "XTRIM", "t", "MINID", "=", "4-1")
+	g_full(g, "t")
+	g_cmd(g, "XTRIM", "t", "MINID", "=", "12-1")
+	g_full(g, "t")
+	g_cmd(g, "DEL", "u")
+	for id in ([?]string{"1-1", "2-1", "3-1", "4-1"}) {
+		g_cmd(g, "XADD", "u", id, "f", "v")
+	}
+	g_cmd(g, "XDEL", "u", "4-1")
+	g_cmd(g, "XTRIM", "u", "MINID", "=", "9-1")
+	g_full(g, "u")
+	g_cmd(g, "XADD", "u", "10-1", "f", "v")
+	g_full(g, "u")
+	config_nodes(g, "100", "4096")
+	g_cmd(g, "RESTORE", "wrap", "0", unhex(ENTRIES_ADDED_AT_MAX))
+	g_cmd(g, "XINFO", "STREAM", "wrap")
+	g_cmd(g, "XINFO", "GROUPS", "wrap")
+	g_cmd(g, "XREADGROUP", "GROUP", "g", "c", "COUNT", "1", "STREAMS", "wrap", ">")
+	g_cmd(g, "XINFO", "GROUPS", "wrap")
+	g_cmd(g, "XADD", "wrap", "6-1", "f", "v")
+	g_cmd(g, "XINFO", "GROUPS", "wrap")
+	g_cmd(g, "XREADGROUP", "GROUP", "g", "c", "STREAMS", "wrap", ">")
+	g_cmd(g, "XINFO", "GROUPS", "wrap")
+	g_cmd(g, "XGROUP", "CREATE", "wrap", "g2", "0")
+	g_cmd(g, "XREADGROUP", "GROUP", "g2", "c", "STREAMS", "wrap", ">")
+	g_cmd(g, "XINFO", "GROUPS", "wrap")
+	g_cmd(g, "RESTORE", "hollow", "0", unhex(LENGTH_WITHOUT_NODES))
+	g_cmd(g, "XLEN", "hollow")
+	g_cmd(g, "FLUSHALL")
+}
+
 run_gen :: proc(dir: string) -> bool {
 	g := Gen {
 		buf = make([dynamic]u8),
@@ -1647,7 +1778,9 @@ run_gen :: proc(dir: string) -> bool {
 	section_lag(&g)
 	section_group_copy(&g)
 	section_group_fuzz(&g, 8000)
+	section_parity(&g)
 	g_cmd(&g, "HELLO", "3")
+	section_parity(&g)
 	section_groups_basic(&g)
 	section_readgroup(&g)
 	section_pending_claim(&g)

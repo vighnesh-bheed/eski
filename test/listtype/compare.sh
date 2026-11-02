@@ -18,7 +18,7 @@ REF_PORT="${ESKI_LIST_REF_PORT:-6562}"
 PORT="${ESKI_LIST_PORT:-6561}"
 SERVER="${ESKI_LIST_SERVER:-bin/eski}"
 SERVER_PID=""
-IMAGE="docker.io/library/redis:7"
+IMAGE="${ESKI_LIST_REF_IMAGE:-docker.io/library/redis:7}"
 NAME="eski-list-compare-$REF_PORT"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/eski-list-compare.XXXXXX")"
 

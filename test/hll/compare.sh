@@ -17,7 +17,7 @@ fi
 PORT="${ESKI_HLL_PORT:-6431}"
 REF_PORT="${ESKI_HLL_REF_PORT:-6432}"
 SERVER="${ESKI_HLL_SERVER:-bin/eski}"
-IMAGE="docker.io/library/redis:7"
+IMAGE="${ESKI_HLL_REF_IMAGE:-docker.io/library/redis:7}"
 NAME="eski-hll-compare-$REF_PORT"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/eski-hll-compare.XXXXXX")"
 SERVER_PID=""
