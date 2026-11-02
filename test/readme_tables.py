@@ -571,7 +571,92 @@ def published_run(root):
     return max(runs)[1]
 
 
-def render_outputs(commands, baseline, observed, dataset, readme):
+AB_FLOOR = 'bench/ab_floor.json'
+AB_FLOOR_SCHEMA = 'eski-local-ab-floor-v1'
+
+
+def validate_ab_floor(value):
+    if value is None:
+        return None
+    if not isinstance(value, dict) or value.get('schema') != AB_FLOOR_SCHEMA or not isinstance(value.get('workloads'), dict) or not value['workloads']:
+        raise ValueError(AB_FLOOR + ' is not a local measurement floor record')
+    for key, workload in value['workloads'].items():
+        if not isinstance(workload, dict):
+            raise ValueError(AB_FLOOR + ' has an invalid workload ' + str(key))
+        count(workload.get('clean_pairs'), AB_FLOOR + ' clean_pairs')
+        for field in ('median', 'min', 'max', 'floor'):
+            if workload.get(field) is not None:
+                finite_number(workload[field], AB_FLOOR + ' ' + field)
+    for field in ('session', 'date', 'binary_sha256', 'rounds', 'seconds', 'warmup', 'cpus'):
+        if field not in value:
+            raise ValueError(AB_FLOOR + ' lacks ' + field)
+    if not isinstance(value['cpus'], dict) or (value.get('load') is not None and (not isinstance(value['load'], list) or len(value['load']) != 2)):
+        raise ValueError(AB_FLOOR + ' has invalid cpus or load fields')
+    for field in ('rounds', 'seconds', 'warmup'):
+        count(value[field], AB_FLOOR + ' ' + field)
+    return value
+
+
+def local_section(floor):
+    lines = ['## Local relative measurement', '',
+             'The recorded comparison above needs a dedicated machine and compares engines. A change to Eski itself is measured on the shared development machine with '
+             '`bench/ab.py`, which reports the cost of a candidate build relative to its parent instead of absolute numbers. It reuses the pinned memtier image, the dataset '
+             'of 100,000 keys of 64 B under one prefix and the server options of the test bed, and it complements the recorded comparison rather than replacing it.', '',
+             '### Method', '',
+             'Two lanes run at the same time on symmetric cores. Lane 1 places the server on CPU 1 and memtier on CPUs 10 and 11, lane 2 places the server on CPU 2 and memtier '
+             'on CPUs 12 and 13, and the controller runs on CPU 14; each memtier instance uses two threads of 16 connections. Every round starts both servers fresh, preloads '
+             'them, and for each workload runs a 5 second warmup and a 20 second measured run on both lanes together. Odd rounds put build A in lane 1 and even rounds swap the lanes.', '',
+             'The primary metric is server CPU time per command: the task time of every server thread plus the irq and softirq time of the server CPU, divided by the commands '
+             'processed in the measured window. Softirq time is included because loopback receive work triggered by the server lands there. A swap pair is an odd round and '
+             'the following even round; its ratio is the geometric mean of the two B/A ratios, which cancels a constant difference between the lanes. A session reports the '
+             'median and range of the clean swap-pair ratios per workload, with task time only, throughput, system calls and event-loop cycles per command as secondary '
+             'figures. A workload with fewer than three clean pairs is insufficient and the session is repeated later instead of being topped up with extra rounds.', '',
+             'The workloads are GET and SET of 64 B at pipeline 1 and 96,000 operations per second per lane, GET and SET at pipeline 16 and 640,000 operations per second, '
+             'PING at pipeline 16 and 640,000 operations per second, GET at pipeline 1 and 32,000 operations per second, and unthrottled GET at pipeline 16. The fixed rates '
+             'make both builds process the same offered load. The lanes share the last level cache and memory bandwidth, so ratios are slightly compressed toward 1, and '
+             'throughput on this machine is limited by the load generator, so it is not claimed.', '',
+             '### Noise rules', '',
+             'A measured run is excluded when its lane delivers less than 98 percent of a fixed offered rate, when the server CPU carries more than 30 percent of foreign '
+             'task time, when the machine runs on battery, or when the server core\'s own thermal throttle counter rises by more than 100 events per second of the window. '
+             'Package throttle events are recorded but never exclude a run: under the performance governor the package counter of every CPU rises continuously, and '
+             'swap-pair ratios stayed consistent through sustained core throttling of both lanes. A round is excluded when the two lanes differ by more than 5 points of '
+             'server CPU foreign time or by more than 10 points of client CPU foreign time.', '',
+             'Frequency is judged per swap pair, not per run. The B/A ratio of mean server core frequency is formed like the CPU ratio, which cancels the lane frequency '
+             'difference, and the pair is excluded when that ratio differs from the median over the session\'s pairs for the workload by more than 20 percent. At a fixed '
+             'rate the two cores settle on different clocks from round to round without changing the CPU ratio, and a cheaper candidate lets its own core clock down in '
+             'both lanes; because the lanes swap every round, a frequency shift shared by every pair comes from the build and is not treated as noise. Every exclusion '
+             'keeps its reasons in `summary.json` and the report.', '']
+    lines += ['### Reference floor', '']
+    if floor is None:
+        lines += ['No reference floor is recorded. Record one with an A/A session as described below before citing a ratio.', '']
+    else:
+        load = floor.get('load')
+        lines += ['The floor comes from A/A session `%s` of one release build against itself (sha256 `%s`) on %s: %s, kernel %s, governor %s with energy preference %s, '
+                  'servers on CPUs %s and %s, %d rounds of %d seconds after %d seconds of warmup%s. The floor of a workload is the half-width around 1 of its clean '
+                  'swap-pair range, rounded up to half a percent. A candidate median inside the floor is no measurable change. The floor applies to sessions on the '
+                  'same cores under the same governor; a change of machine, kernel, governor or compiler needs a new A/A session.' % (
+                      md(floor['session']), floor['binary_sha256'][:12], md(floor['date']), md(floor.get('cpu_model') or 'CPU not recorded'), md(floor.get('kernel') or 'not recorded'),
+                      md(floor.get('governor') or 'not recorded'), md(floor.get('epp') or 'not recorded'), md(floor['cpus'].get('server')), md(floor['cpus'].get('server_b')),
+                      floor['rounds'], floor['seconds'], floor['warmup'], ', with a 1-minute load of %.2f to %.2f' % tuple(load) if load else ''), '',
+                  '| Workload | Clean swap pairs | A/A swap-pair median [min, max] | Floor |', '| --- | ---: | ---: | ---: |']
+        for key, workload in floor['workloads'].items():
+            if workload.get('floor') is None:
+                lines.append('| %s | %d | insufficient | — |' % (md(key), workload['clean_pairs']))
+            else:
+                lines.append('| %s | %d | %.3f [%.3f, %.3f] | %.1f%% |' % (md(key), workload['clean_pairs'], workload['median'], workload['min'], workload['max'], 100 * workload['floor']))
+        lines.append('')
+    lines += ['### Commands', '',
+              'Build the parent and the candidate with `./build.sh release` from paths of identical length, because the compiler embeds source paths, and copy each binary '
+              'out with its sha256. Check that the 1-minute load is low and that no build or test run is active, then run '
+              '`python3 -I bench/ab.py --a <parent> --b <candidate> --label <label> --out <results> --workloads <list> --max-load 3`; the defaults are concurrent mode, '
+              'eight rounds, the lanes above and ports 39400 and 39401. Report with `python3 -I bench/ab_report.py <results>/<label>`, which reads `' + AB_FLOOR + '` and '
+              'states for every workload whether the median lies within, below or above the floor; `--recompute` applies the current rules to an older session. Record a '
+              'new floor with an A/A session of one build against itself and `python3 -I bench/ab_report.py <results>/<label> --write-floor ' + AB_FLOOR + '`. The unit '
+              'tests run with `python3 -I -B bench/test_ab.py`.', '']
+    return '\n'.join(lines)
+
+
+def render_outputs(commands, baseline, observed, dataset, readme, ab_floor=None):
     expected, preserved, regressions = preserved_tests(baseline, observed)
     run = run_directory(dataset)
     cells = benchmark_cells(dataset)
@@ -674,6 +759,7 @@ def render_outputs(commands, baseline, observed, dataset, readme):
                           ','.join(map(str, dataset.get('machine', {}).get('cpus', {}).get('server', []))), ','.join(map(str, dataset.get('machine', {}).get('cpus', {}).get('client', []))), ','.join(map(str, dataset.get('machine', {}).get('cpus', {}).get('control', []))),
                           method_text, '\n'.join(identities), benchmark_table(dataset, cells), ratio, ' (client limited)' if limited else '', '\n'.join(exclusions),
                           '{:,}'.format((dataset.get('fill') or {}).get('design', {}).get('keys', 0)), (dataset.get('fill') or {}).get('design', {}).get('data_size', 'not recorded'), (dataset.get('fill') or {}).get('design', {}).get('pipeline', 'not recorded'), '\n'.join(fill_rows))
+    benchmark_page += '\n' + local_section(validate_ab_floor(ab_floor))
     blocks = {'CONFORMANCE': conformance_block, 'BENCHMARKS': benchmark_block, 'COMMANDS': commands_block}
     updated_readme = replace_blocks(readme, blocks)
     if re.search(r'\b(?:Redis|Valkey|Dragonfly)\s+(?:v?\d|version)', updated_readme, re.I):
@@ -710,6 +796,7 @@ def parser():
     result.add_argument('--observed-conformance', type=Path, default=Path('docs/data/conformance-redis.json'))
     result.add_argument('--record-conformance', type=Path, help='sanitize an actual run into the observed snapshot before generation')
     result.add_argument('--benchmark-results', type=Path, help='recorded run directory or its dataset.json; defaults to the run under ' + RUNS + ' with the latest finish time')
+    result.add_argument('--ab-floor', type=Path, default=Path(AB_FLOOR), help='floor record of the local relative measurement; the section omits the floor table when it is missing')
     result.add_argument('--check', action='store_true', help='exit 1 on drift without rewriting any output')
     return result
 
@@ -740,7 +827,9 @@ def main(argv=None):
         readme = (root/'README.md').read_text()
         with server_connection(resolve(args.server_binary), args.server) as connection:
             commands = command_inventory(connection)
-        outputs = render_outputs(commands, baseline, observed, dataset, readme)
+        floor_path = resolve(args.ab_floor)
+        ab_floor = read_json(floor_path) if floor_path.is_file() else None
+        outputs = render_outputs(commands, baseline, observed, dataset, readme, ab_floor)
         if args.record_conformance:
             try:
                 relative = observed_path.relative_to(root)

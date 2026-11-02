@@ -1,0 +1,102 @@
+{
+ "schema": "eski-local-ab-floor-v1",
+ "session": "aa-pcores-20261102-2",
+ "date": "2026-11-02",
+ "binary_sha256": "9d5541264d25985d44b397d7b7790a0e821f69ffb4bb38581d7de48b5d9429a0",
+ "cpu_model": "Intel(R) Core(TM) Ultra 7 265H",
+ "kernel": "7.2.10-200.fc44.x86_64",
+ "governor": "performance",
+ "epp": "performance",
+ "no_turbo": "0",
+ "cpus": {
+  "server": "1",
+  "cluster": "1-2",
+  "client": "10,11",
+  "control": "14",
+  "server_b": "2",
+  "client_b": "12,13"
+ },
+ "mode": "concurrent",
+ "rounds": 8,
+ "seconds": 20,
+ "warmup": 5,
+ "limits": {
+  "asym_foreign_pct": 5.0,
+  "server_foreign_pct": 30.0,
+  "client_foreign_pct": null,
+  "rate_fraction": 0.98,
+  "freq_deviation": 0.1,
+  "freq_pair_tolerance": 0.2,
+  "core_throttle_per_s": 100.0,
+  "min_pairs": 3
+ },
+ "load": [
+  1.74,
+  7.78
+ ],
+ "workloads": {
+  "get64-p1-r3k": {
+   "clean_pairs": 4,
+   "pairs": 4,
+   "median": 0.9976,
+   "min": 0.985,
+   "max": 1.0051,
+   "floor": 0.015,
+   "verdict": "ok"
+  },
+  "set64-p1-r3k": {
+   "clean_pairs": 4,
+   "pairs": 4,
+   "median": 0.997,
+   "min": 0.9746,
+   "max": 1.0368,
+   "floor": 0.04,
+   "verdict": "ok"
+  },
+  "get64-p16-r20k": {
+   "clean_pairs": 4,
+   "pairs": 4,
+   "median": 0.9861,
+   "min": 0.9744,
+   "max": 1.0081,
+   "floor": 0.03,
+   "verdict": "ok"
+  },
+  "set64-p16-r20k": {
+   "clean_pairs": 4,
+   "pairs": 4,
+   "median": 1.0104,
+   "min": 0.9898,
+   "max": 1.0256,
+   "floor": 0.03,
+   "verdict": "ok"
+  },
+  "ping-p16-r20k": {
+   "clean_pairs": 4,
+   "pairs": 4,
+   "median": 1.0001,
+   "min": 0.9793,
+   "max": 1.0291,
+   "floor": 0.03,
+   "verdict": "ok"
+  },
+  "get64-p1-r1k": {
+   "clean_pairs": 4,
+   "pairs": 4,
+   "median": 0.973,
+   "min": 0.934,
+   "max": 1.0013,
+   "floor": 0.07,
+   "verdict": "ok"
+  },
+  "get64-p16-max": {
+   "clean_pairs": 4,
+   "pairs": 4,
+   "median": 1.0036,
+   "min": 0.9954,
+   "max": 1.0068,
+   "floor": 0.01,
+   "verdict": "ok"
+  }
+ }
+}
