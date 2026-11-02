@@ -127,7 +127,7 @@ proof_key_fixtures :: proc() {
 		srv.now_ms = 1
 		db_set(proof_bytes("key"), proof_bytes("final"), deadline)
 		srv.now_ms = 1000
-		aof = Aof{feed = true, state = .On, in_tx = true, selected_db = 0}
+		aof = Aof{feed = true, state = .Enabled, in_tx = true, selected_db = 0}
 		argv := [5][]u8{proof_bytes("SET"), proof_bytes("key"), proof_bytes("final"), proof_bytes("PX"), proof_bytes("250")}
 		if mode == 0 || mode == 1 {
 			if mode == 1 { argv[4] = proof_bytes("1") }
@@ -218,7 +218,7 @@ main :: proc() {
 			srv.now_ms = proof_number(args[2])
 			continue
 		}
-		aof = Aof{feed = true, state = .On, in_tx = true, selected_db = 3}
+		aof = Aof{feed = true, state = .Enabled, in_tx = true, selected_db = 3}
 		field := proof_bytes(args[1])
 		argv: [32][]u8
 		argv[1] = proof_bytes("key"); argv[2] = field
