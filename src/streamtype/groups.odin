@@ -3,7 +3,7 @@ package streamtype
 import rx "../rax"
 import "base:runtime"
 
-SCG_INVALID_ENTRIES_READ :: -1
+ENTRIES_READ_UNKNOWN :: -1
 AUTOCLAIM_MAX_COUNT :: max(i64) / 16
 AUTOCLAIM_ATTEMPTS_FACTOR :: 10
 
@@ -316,11 +316,11 @@ cg_lag :: proc "contextless" (s: Stream, cg: ^CG) -> (lag: i64, valid: bool) {
 	if compare_id(cg.last_id, s.first_id) < 0 && !tombstones_from(s, s.first_id) {
 		return i64(s.length), true
 	}
-	if cg.entries_read != SCG_INVALID_ENTRIES_READ && !tombstones_from(s, cg.last_id) {
+	if cg.entries_read != ENTRIES_READ_UNKNOWN && !tombstones_from(s, cg.last_id) {
 		return i64(s.entries_added) - cg.entries_read, true
 	}
 	estimate := estimate_distance(s, cg.last_id)
-	if estimate == SCG_INVALID_ENTRIES_READ {
+	if estimate == ENTRIES_READ_UNKNOWN {
 		return 0, false
 	}
 	return i64(s.entries_added) - estimate, true
@@ -333,14 +333,14 @@ estimate_distance :: proc "contextless" (s: Stream, id: ID) -> i64 {
 	switch compare_id(id, s.last_id) {
 	case 0:
 		if s.length > 0 && !id_is_zero(s.max_deleted_entry_id) && compare_id(s.max_deleted_entry_id, s.last_id) > 0 {
-			return SCG_INVALID_ENTRIES_READ
+			return ENTRIES_READ_UNKNOWN
 		}
 		return i64(s.entries_added)
 	case 1:
-		return SCG_INVALID_ENTRIES_READ
+		return ENTRIES_READ_UNKNOWN
 	}
 	if tombstones_from(s, s.first_id) {
-		return SCG_INVALID_ENTRIES_READ
+		return ENTRIES_READ_UNKNOWN
 	}
 	switch compare_id(id, s.first_id) {
 	case -1:
@@ -348,12 +348,12 @@ estimate_distance :: proc "contextless" (s: Stream, id: ID) -> i64 {
 	case 0:
 		return i64(s.entries_added - s.length) + 1
 	}
-	return SCG_INVALID_ENTRIES_READ
+	return ENTRIES_READ_UNKNOWN
 }
 
 @(private)
 advance_entries_read :: proc "contextless" (s: Stream, cg: ^CG, id: ID) {
-	if compare_id(cg.last_id, s.first_id) >= 0 && cg.entries_read != SCG_INVALID_ENTRIES_READ && !tombstones_from(s, cg.last_id) {
+	if compare_id(cg.last_id, s.first_id) >= 0 && cg.entries_read != ENTRIES_READ_UNKNOWN && !tombstones_from(s, cg.last_id) {
 		cg.entries_read += 1
 		return
 	}

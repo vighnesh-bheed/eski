@@ -266,92 +266,213 @@ unit_scan_guarantee :: proc() {
 	fmt.printfln("    scan guarantee: %d rounds, %d scan calls, %d growths and %d shrinks mid-scan", rounds, scans, growths, shrinks)
 }
 
-unit_random :: proc() {
-	set_config(128, 64)
-	lp.lp_srand(777)
-	for enc in 0 ..< 2 {
-		h := ht.create()
-		defer ht.destroy(h)
-		for i in 0 ..< 10 {
-			ht.set(h, b(tp("f", i)), b(tp(i)))
+HRANDFIELD_FIXTURE := [?][2]string{{"a", "1"}, {"b", "2"}, {"c", "3"}, {"d", "4"}, {"e", "5"}, {"6", "f"}, {"7", "g"}, {"8", "h"}, {"9", "i"}, {"10", "j"}}
+
+Fixture_Tally :: [len(HRANDFIELD_FIXTURE)]int
+
+fixture_slot :: proc(field: string) -> int {
+	for pair, i in HRANDFIELD_FIXTURE {
+		if pair[0] == field {
+			return i
 		}
-		if enc == 1 {
-			ht.convert(h)
+	}
+	return -1
+}
+
+tally_chi_square :: proc(tally: Fixture_Tally) -> f64 {
+	draws := 0
+	for n in tally {
+		draws += n
+	}
+	expected := f64(draws) / f64(len(tally))
+	sum := 0.0
+	for n in tally {
+		gap := f64(n) - expected
+		sum += gap * gap / expected
+	}
+	return sum
+}
+
+Draw_Report :: struct {
+	tally:     Fixture_Tally,
+	strangers:   int,
+	unpaired:  int,
+	repeated:  bool,
+	all_found: bool,
+}
+
+inspect_draw :: proc(fields, values: []ht.Value, with_values: bool) -> (r: Draw_Report) {
+	for f, i in fields {
+		slot := fixture_slot(vstr(f))
+		if slot < 0 {
+			r.strangers += 1
+			continue
 		}
-		fields := make([dynamic]ht.Value, context.temp_allocator)
-		values := make([dynamic]ht.Value, context.temp_allocator)
-		counts: [10]int
-		for _ in 0 ..< 2000 {
-			clear(&fields)
-			clear(&values)
-			ht.random_unique(h, 3, true, &fields, &values)
-			if len(fields) != 3 {
-				check(false, "unique count")
-				break
-			}
+		if r.tally[slot] > 0 {
+			r.repeated = true
+		}
+		r.tally[slot] += 1
+		if with_values && (i >= len(values) || vstr(values[i]) != HRANDFIELD_FIXTURE[slot][1]) {
+			r.unpaired += 1
+		}
+	}
+	r.all_found = true
+	for n in r.tally {
+		r.all_found = r.all_found && n > 0
+	}
+	return
+}
+
+fixture_hash :: proc(encoding: string) -> ht.Hash {
+	h := ht.create()
+	for pair in HRANDFIELD_FIXTURE {
+		ht.set(h, b(pair[0]), b(pair[1]))
+	}
+	if encoding == "hashtable" {
+		ht.convert(h)
+	}
+	return h
+}
+
+hrandfield_single_field :: proc(h: ht.Hash, label: string) {
+	seen: Fixture_Tally
+	paired := true
+	for _ in 0 ..< 100 {
+		f, v := ht.random_element(h)
+		slot := fixture_slot(vstr(f))
+		if slot < 0 {
+			paired = false
+			continue
+		}
+		paired = paired && vstr(v) == HRANDFIELD_FIXTURE[slot][1]
+		seen[slot] += 1
+	}
+	missing := 0
+	for n in seen {
+		missing += 1 if n == 0 else 0
+	}
+	check(paired && missing == 0, fmt.tprintf("%s: a hundred single draws return paired fixture fields and reach all of them", label))
+}
+
+hrandfield_negative_counts :: proc(h: ht.Hash, label: string, fields, values: ^[dynamic]ht.Value) {
+	for amount in ([]int{20, 1001}) {
+		for with_values in ([]bool{false, true}) {
+			clear(fields)
+			clear(values)
+			ht.random_with_repeats(h, amount, with_values, fields, values)
+			r := inspect_draw(fields[:], values[:], with_values)
+			want_values := amount if with_values else 0
+			check(len(fields) == amount && len(values) == want_values && r.strangers == 0 && r.unpaired == 0, fmt.tprintf("%s: count -%d withvalues=%v returns exactly %d fixture entries", label, amount, with_values, amount))
+		}
+	}
+	clear(fields)
+	clear(values)
+	ht.random_with_repeats(h, 1000, false, fields, values)
+	r := inspect_draw(fields[:], values[:], false)
+	chi := tally_chi_square(r.tally)
+	check(r.repeated && chi < 40, fmt.tprintf("%s: count -1000 repeats fields and stays uniform, chi square %.2f", label, chi))
+	union_tally: Fixture_Tally
+	rounds := 0
+	for ; rounds < 1000; rounds += 1 {
+		clear(fields)
+		clear(values)
+		ht.random_with_repeats(h, 3, rounds % 2 == 0, fields, values)
+		step := inspect_draw(fields[:], values[:], rounds % 2 == 0)
+		covered := true
+		for n, i in step.tally {
+			union_tally[i] += n
+			covered = covered && union_tally[i] > 0
+		}
+		if covered {
+			break
+		}
+	}
+	check(rounds < 1000, fmt.tprintf("%s: repeated count -3 draws eventually return every field", label))
+}
+
+hrandfield_positive_counts :: proc(h: ht.Hash, label: string, encoding: string, fields, values: ^[dynamic]ht.Value) {
+	clear(fields)
+	clear(values)
+	ht.random_unique(h, 0, true, fields, values)
+	check(len(fields) == 0 && len(values) == 0, fmt.tprintf("%s: count 0 returns nothing", label))
+	for amount in ([]int{10, 20}) {
+		clear(fields)
+		clear(values)
+		ht.random_unique(h, amount, true, fields, values)
+		r := inspect_draw(fields[:], values[:], true)
+		check(len(fields) == len(HRANDFIELD_FIXTURE) && !r.repeated && r.all_found && r.unpaired == 0, fmt.tprintf("%s: count %d returns the whole hash once with values", label, amount))
+		if encoding == "listpack" {
+			in_order := true
 			for f, i in fields {
-				name := vstr(f)
-				n, _ := strconv.parse_int(name[1:])
-				counts[n] += 1
-				check(vstr(values[i]) == name[1:], "unique value pairs")
+				in_order = in_order && vstr(f) == HRANDFIELD_FIXTURE[i][0]
 			}
-			check(vstr(fields[0]) != vstr(fields[1]) && vstr(fields[1]) != vstr(fields[2]) && vstr(fields[0]) != vstr(fields[2]), "unique distinct")
+			check(in_order, fmt.tprintf("%s: count %d returns a listpack hash in insertion order", label, amount))
 		}
-		chi := 0.0
-		for c in counts {
-			d := f64(c) - 600.0
-			chi += d * d / 600.0
+	}
+	for amount in ([]int{8, 2}) {
+		union_tally: Fixture_Tally
+		unique, sized, clean := true, true, true
+		for round in 0 ..< 1000 / amount {
+			with_values := round % 2 == 0
+			clear(fields)
+			clear(values)
+			ht.random_unique(h, amount, with_values, fields, values)
+			r := inspect_draw(fields[:], values[:], with_values)
+			unique = unique && !r.repeated
+			sized = sized && len(fields) == amount && len(values) == (amount if with_values else 0)
+			clean = clean && r.strangers == 0 && r.unpaired == 0
+			for n, i in r.tally {
+				union_tally[i] += n
+			}
 		}
-		check(chi < 40, fmt.tprintf("unique distribution chi square %.2f encoding %d", chi, enc))
-		clear(&fields)
-		clear(&values)
-		ht.random_with_repeats(h, 2500, true, &fields, &values)
-		check(len(fields) == 2500 && len(values) == 2500, "repeats count over sample limit")
-		rc: [10]int
+		covered := true
+		for n in union_tally {
+			covered = covered && n > 0
+		}
+		chi := tally_chi_square(union_tally)
+		check(unique && sized && clean, fmt.tprintf("%s: count %d returns that many distinct fixture fields", label, amount))
+		check(covered && chi < 40, fmt.tprintf("%s: count %d draws cover the hash uniformly, chi square %.2f", label, amount, chi))
+	}
+}
+
+hrandfield_large_table :: proc(fields, values: ^[dynamic]ht.Value) {
+	h := ht.create()
+	defer ht.destroy(h)
+	for i in 0 ..< 300 {
+		ht.set(h, b(tp("member:", i)), b(tp(i * 3)))
+	}
+	ht.convert(h)
+	for amount in ([]int{299, 250, 120, 30, 1}) {
+		clear(fields)
+		clear(values)
+		ht.random_unique(h, amount, true, fields, values)
+		names := make(map[string]bool, 16, context.temp_allocator)
+		paired := true
 		for f, i in fields {
 			name := vstr(f)
-			n, _ := strconv.parse_int(name[1:])
-			rc[n] += 1
-			check(vstr(values[i]) == name[1:], "repeat value pairs")
+			names[name] = true
+			n, parsed := strconv.parse_int(name[len("member:"):])
+			paired = paired && parsed && i < len(values) && vstr(values[i]) == tp(n * 3)
 		}
-		chi = 0
-		for c in rc {
-			d := f64(c) - 250.0
-			chi += d * d / 250.0
-		}
-		check(chi < 40, fmt.tprintf("repeat distribution chi square %.2f encoding %d", chi, enc))
-		clear(&fields)
-		clear(&values)
-		ht.random_unique(h, 50, false, &fields, &values)
-		check(len(fields) == 10 && len(values) == 0, "count above size returns all")
-		if enc == 0 {
-			for f, i in fields {
-				check(vstr(f) == tp("f", i), "listpack whole hash keeps listpack order")
-			}
-		}
-		f, v := ht.random_element(h)
-		check(vstr(v) == vstr(f)[1:], "random element pair")
+		check(len(fields) == amount && len(names) == amount && paired, fmt.tprintf("hashtable of 300: count %d returns distinct paired members", amount))
 	}
-	big := ht.create()
-	defer ht.destroy(big)
-	for i in 0 ..< 1000 {
-		ht.set(big, b(tp("k", i)), b("v"))
-	}
+}
+
+unit_random :: proc() {
+	set_config(128, 64)
+	lp.lp_srand(20261101)
 	fields := make([dynamic]ht.Value, context.temp_allocator)
 	values := make([dynamic]ht.Value, context.temp_allocator)
-	ht.random_unique(big, 900, false, &fields, &values)
-	seen := make(map[string]bool, 16, context.temp_allocator)
-	for f in fields {
-		seen[vstr(f)] = true
+	for encoding in ([]string{"listpack", "hashtable"}) {
+		h := fixture_hash(encoding)
+		defer ht.destroy(h)
+		label := fmt.tprintf("hrandfield %s", encoding)
+		check(ht.encoding_name(h) == encoding, fmt.tprintf("%s fixture encoding", label))
+		hrandfield_single_field(h, label)
+		hrandfield_negative_counts(h, label, &fields, &values)
+		hrandfield_positive_counts(h, label, encoding, &fields, &values)
 	}
-	check(len(fields) == 900 && len(seen) == 900, "case 3 subtract strategy distinct")
-	clear(&fields)
-	clear(&seen)
-	ht.random_unique(big, 20, false, &fields, &values)
-	for f in fields {
-		seen[vstr(f)] = true
-	}
-	check(len(fields) == 20 && len(seen) == 20, "case 4 sampling strategy distinct")
+	hrandfield_large_table(&fields, &values)
 	free_all(context.temp_allocator)
 }
 
@@ -424,81 +545,219 @@ token_bytes :: proc(t: string) -> []u8 {
 	return b(t)
 }
 
-unit_match_and_cursor :: proc() {
-	cases := [?]struct {
-		pat, str: string,
-		want:     bool,
-	} {
-		{"*", "", false},
-		{"*", "abc", true},
-		{"**", "", false},
-		{"", "", true},
-		{"", "a", false},
-		{"a*", "a", true},
-		{"a*b", "axxb", true},
-		{"a*b", "axxbc", false},
+Glob_Vector :: struct {
+	pattern, subject: string,
+	matches:          bool,
+}
+
+KEYS_GLOB_VECTORS := [?]Glob_Vector {
 		{"h?llo", "hello", true},
+		{"h?llo", "hallo", true},
+		{"h?llo", "hxllo", true},
 		{"h?llo", "hllo", false},
+		{"h*llo", "hllo", true},
+		{"h*llo", "heeeello", true},
+		{"h*llo", "hellox", false},
+		{"h[ae]llo", "hello", true},
 		{"h[ae]llo", "hallo", true},
+		{"h[ae]llo", "hillo", false},
+		{"h[^e]llo", "hallo", true},
+		{"h[^e]llo", "hbllo", true},
 		{"h[^e]llo", "hello", false},
+		{"h[a-b]llo", "hallo", true},
 		{"h[a-b]llo", "hbllo", true},
+		{"h[a-b]llo", "hcllo", false},
 		{"h[b-a]llo", "hallo", true},
+		{"h[b-a]llo", "hcllo", false},
+		{"*", "abc", true},
+		{"*", "x", true},
+		{"**", "ab", true},
+		{"a*", "a", true},
+		{"*a", "a", true},
+		{"a*b*c", "aXbYc", true},
+		{"a*b*c", "aXbY", false},
 		{"\\*", "*", true},
 		{"\\*", "a", false},
+		{"\\?", "?", true},
+		{"\\?", "a", false},
+		{"a\\", "a\\", true},
+		{"a\\", "a", false},
+		{"[]", "]", false},
+		{"[]", "[", false},
+		{"[]]", "]", false},
+		{"[]a]", "a", false},
+		{"[]a]", "]", false},
 		{"f[", "f[", false},
 		{"f[", "fa", false},
-		{"[]", "]", false},
-		{"*[0-9]", "f12", true},
-		{"*f*f*", "xfyfz", true},
-		{"a\\", "a\\", true},
+		{"f[a", "fa", true},
+		{"f[a-", "fa", true},
+		{"f[a-", "f-", true},
 		{"[\\]]", "]", true},
+		{"[\\]]", "\\", false},
+		{"[a\\-z]", "-", true},
+		{"[a\\-z]", "b", false},
+		{"[a-]", "-", false},
+		{"[a-]", "a", true},
+		{"[-a]", "-", true},
+		{"[!a]", "!", true},
+		{"[!a]", "b", false},
+		{"[^]", "^", true},
+		{"[^]]", "x", false},
+		{"[^]]", "]", false},
+		{"*[0-9]", "f12", true},
+		{"*[0-9]", "f1x", false},
+		{"*f*f*", "xfyfz", true},
+		{"*f*f*", "xfyz", false},
+		{"[A-Z]", "q", false},
+		{"[a-z]", "Q", false},
+		{"?", "\xff", true},
+		{"[\x80-\xff]", "\xaa", true},
+		{"a[bc", "ab", true},
+		{"a[bc", "a[bc", false},
+		{"*\\", "x\\", true},
+		{"\\", "\\", true},
+		{"\\a", "a", true},
+		{"[[]", "[", true},
+		{"[*]", "*", true},
+		{"[*]", "x", false},
+		{"[?]", "?", true},
+		{"[?]", "x", false},
+		{"a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*b", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false},
+}
+
+Cursor_Vector :: struct {
+	text:   string,
+	cursor: u64,
+	valid:  bool,
+}
+
+SCAN_CURSOR_VECTORS := [?]Cursor_Vector {
+	{"0", 0, true},
+	{"7", 7, true},
+	{" 7", 7, true},
+	{"\t5", 5, true},
+	{"\x0b9", 9, true},
+	{"\r\n5", 5, true},
+	{"+7", 7, true},
+	{"007", 7, true},
+	{"-0", 0, true},
+	{"-01", max(u64), true},
+	{" -1", max(u64), true},
+	{"-1", 0, false},
+	{"-9223372036854775808", 0, false},
+	{"-9223372036854775809", 9223372036854775807, true},
+	{"-18446744073709551615", 1, true},
+	{"-18446744073709551616", 0, false},
+	{"18446744073709551615", max(u64), true},
+	{"18446744073709551616", 0, false},
+	{"00000000000000000000000000018446744073709551615", max(u64), true},
+	{"-0000000000000000000001", max(u64), true},
+	{"5\x00junk", 5, true},
+	{"\x005", 0, false},
+	{"5 ", 0, false},
+	{"7 ", 0, false},
+	{"", 0, false},
+	{" ", 0, false},
+	{"-", 0, false},
+	{"+", 0, false},
+	{"+-5", 0, false},
+	{"- 5", 0, false},
+	{"abc", 0, false},
+	{"0x10", 0, false},
+	{"1e3", 0, false},
+}
+
+Scan_Option_Vector :: struct {
+	args:    []string,
+	is_hash: bool,
+	err:     ht.Error,
+}
+
+as_args :: proc(words: []string) -> [][]u8 {
+	out := make([][]u8, len(words), context.temp_allocator)
+	for w, i in words {
+		out[i] = b(w)
 	}
-	for c in cases {
-		check(ht.matches_pattern(b(c.pat), b(c.str), false) == c.want, fmt.tprintf("match %q %q", c.pat, c.str))
+	return out
+}
+
+Hrandfield_Vector :: struct {
+	args:        []string,
+	err:         ht.Error,
+	count:       i64,
+	with_values: bool,
+}
+
+unit_match_and_cursor :: proc() {
+	glob_agree := 0
+	for v in KEYS_GLOB_VECTORS {
+		if check(ht.matches_pattern(b(v.pattern), b(v.subject), false) == v.matches, fmt.tprintf("KEYS %q against %q", v.pattern, v.subject)) {
+			glob_agree += 1
+		}
 	}
-	check(ht.matches_pattern(b("HeLLo"), b("hello"), true), "match nocase")
-	cursors := [?]struct {
-		s:  string,
-		v:  u64,
-		ok: bool,
-	} {
-		{"0", 0, true},
-		{"123", 123, true},
-		{"-1", 0, false},
-		{"abc", 0, false},
-		{"", 0, false},
-		{" 7", 7, true},
-		{"+7", 7, true},
-		{"-0", 0, true},
-		{"007", 7, true},
-		{"18446744073709551615", max(u64), true},
-		{"18446744073709551616", 0, false},
-		{"-18446744073709551615", 1, true},
-		{"5\x00junk", 5, true},
-		{"7 ", 0, false},
+	fmt.printfln("    glob vectors agreeing with the reference KEYS: %d/%d", glob_agree, len(KEYS_GLOB_VECTORS))
+	nocase := [?]Glob_Vector{{"HeLLo", "hello", true}, {"H[A-E]LLO", "hallo", true}, {"h?LLO", "HxLlo", true}, {"*LO", "hello", true}, {"[^E]llo", "ello", false}, {"h[^E]llo", "hEllo", false}, {"h[^E]llo", "hallo", true}, {"HELLO", "help", false}}
+	for v in nocase {
+		check(ht.matches_pattern(b(v.pattern), b(v.subject), true) == v.matches, fmt.tprintf("nocase %q against %q", v.pattern, v.subject))
 	}
-	for c in cursors {
-		v, ok := ht.parse_scan_cursor(b(c.s))
-		check(ok == c.ok && (!ok || v == c.v), fmt.tprintf("cursor %q", c.s))
+	check(ht.matches_pattern(b("[^E]llo"), b("ello"), false), "case sensitive negated class keeps other case")
+	for v in SCAN_CURSOR_VECTORS {
+		cursor, valid := ht.parse_scan_cursor(b(v.text))
+		check(valid == v.valid && (!valid || cursor == v.cursor), fmt.tprintf("cursor %q gives %v %d", v.text, valid, cursor))
 	}
-	opts, err := ht.parse_scan_options({b("count"), b("5"), b("MATCH"), b("*"), b("NoValues")}, true)
-	check(err == .None && opts.count == 5 && !opts.use_pattern && opts.no_values, "scan options")
-	_, err = ht.parse_scan_options({b("COUNT"), b("0")}, true)
-	check(err == .Syntax, "count 0 syntax")
-	_, err = ht.parse_scan_options({b("COUNT"), b("x")}, true)
-	check(err == .Value_Not_Integer, "count not integer")
-	_, err = ht.parse_scan_options({b("MATCH")}, true)
-	check(err == .Syntax, "match without argument")
-	_, err = ht.parse_scan_options({b("NOVALUES")}, false)
-	check(err == .Novalues_Only_Hscan && ht.error_message(err) == "NOVALUES option can only be used in HSCAN", "novalues outside hscan")
-	ra, rerr := ht.parse_hrandfield_args({b("-9223372036854775808")})
-	check(rerr == .Hrandfield_Count_Range && ht.error_message(rerr) == "value is out of range, value must between -9223372036854775807 and 9223372036854775807", "hrandfield range")
-	ra, rerr = ht.parse_hrandfield_args({b("-9223372036854770000"), b("withvalues")})
-	check(rerr == .Value_Out_Of_Range, "hrandfield withvalues range")
-	ra, rerr = ht.parse_hrandfield_args({b("4611686018427387903"), b("WITHVALUES")})
-	check(rerr == .None && ra.with_values && ra.count == 4611686018427387903, "hrandfield withvalues max")
-	ra, rerr = ht.parse_hrandfield_args({b("5"), b("WITHVALUES"), b("x")})
-	check(rerr == .Syntax, "hrandfield extra arg")
+	scan_options := [?]Scan_Option_Vector {
+		{{"COUNT", "0"}, true, .Syntax},
+		{{"COUNT", "-3"}, true, .Syntax},
+		{{"COUNT", "x"}, true, .Value_Not_Integer},
+		{{"MATCH"}, true, .Syntax},
+		{{"COUNT"}, true, .Syntax},
+		{{"bogus"}, true, .Syntax},
+		{{"COUNT", "x", "bogus"}, true, .Value_Not_Integer},
+		{{"bogus", "COUNT", "x"}, true, .Syntax},
+		{{"NOVALUES"}, false, .Novalues_Only_Hscan},
+		{{"NOVALUES"}, true, .None},
+		{{"novalues", "COUNT", "5", "MATCH", "*"}, true, .None},
+	}
+	for v in scan_options {
+		_, err := ht.parse_scan_options(as_args(v.args), v.is_hash)
+		check(err == v.err, fmt.tprintf("scan options %v hash=%v gives %v", v.args, v.is_hash, err))
+	}
+	defaults, derr := ht.parse_scan_options(nil, true)
+	check(derr == .None && defaults.count == 10 && !defaults.use_pattern && !defaults.no_values, "scan options default to count 10 without a pattern")
+	opts, oerr := ht.parse_scan_options(as_args({"match", "f*", "Count", "250", "NOVALUES"}), true)
+	check(oerr == .None && opts.count == 250 && opts.use_pattern && string(opts.pattern) == "f*" && opts.no_values, "scan options keep count, pattern and novalues")
+	opts, oerr = ht.parse_scan_options(as_args({"MATCH", "*"}), false)
+	check(oerr == .None && !opts.use_pattern, "a lone star pattern needs no matching")
+	check(ht.error_message(.Novalues_Only_Hscan) == "NOVALUES option can only be used in HSCAN", "novalues message")
+	hrandfield_cases := [?]Hrandfield_Vector {
+		{{}, .None, 0, false},
+		{{"0"}, .None, 0, false},
+		{{"0", "WITHVALUES"}, .None, 0, true},
+		{{"-9223372036854775807"}, .None, -9223372036854775807, false},
+		{{"9223372036854775807"}, .None, 9223372036854775807, false},
+		{{"-9223372036854775808"}, .Hrandfield_Count_Range, 0, false},
+		{{"-9223372036854775808", "WITHVALUES"}, .Hrandfield_Count_Range, 0, false},
+		{{"-9223372036854770000", "withvalues"}, .Value_Out_Of_Range, 0, false},
+		{{"4611686018427387903", "WITHVALUES"}, .None, 4611686018427387903, true},
+		{{"-4611686018427387903", "WithValues"}, .None, -4611686018427387903, true},
+		{{"4611686018427387904", "WITHVALUES"}, .Value_Out_Of_Range, 0, false},
+		{{"-4611686018427387904", "WITHVALUES"}, .Value_Out_Of_Range, 0, false},
+		{{"5", "WITHVALUES", "x"}, .Syntax, 0, false},
+		{{"5", "bogus"}, .Syntax, 0, false},
+		{{"x"}, .Value_Not_Integer, 0, false},
+		{{"x", "WITHVALUES"}, .Value_Not_Integer, 0, false},
+	}
+	for v in hrandfield_cases {
+		got, err := ht.parse_hrandfield_args(as_args(v.args))
+		ok := err == v.err
+		if ok && err == .None {
+			ok = got.count == v.count && got.with_values == v.with_values && got.has_count == (len(v.args) > 0)
+		}
+		check(ok, fmt.tprintf("hrandfield arguments %v gives %v", v.args, err))
+	}
+	check(ht.error_message(.Hrandfield_Count_Range) == "value is out of range, value must between -9223372036854775807 and 9223372036854775807", "hrandfield count range message")
+	check(ht.error_message(.Value_Out_Of_Range) == "value is out of range", "hrandfield withvalues range message")
+	free_all(context.temp_allocator)
 }
 
 unit_memory :: proc() {

@@ -706,7 +706,7 @@ xadd_apply :: proc(s: Stream, spec: ^Xadd_Spec, fv: [][]u8, now_ms: u64) -> (id:
 }
 
 parse_xgroup_opts :: proc "contextless" (argv: [][]u8) -> (mkstream: bool, entries_read: i64, err: Error) {
-	entries_read = SCG_INVALID_ENTRIES_READ
+	entries_read = ENTRIES_READ_UNKNOWN
 	if len(argv) < 2 {
 		return
 	}
@@ -727,7 +727,7 @@ parse_xgroup_opts :: proc "contextless" (argv: [][]u8) -> (mkstream: bool, entri
 				err = .Not_Integer
 				return
 			}
-			if v < 0 && v != SCG_INVALID_ENTRIES_READ {
+			if v < 0 && v != ENTRIES_READ_UNKNOWN {
 				err = .Entries_Read_Value
 				return
 			}
