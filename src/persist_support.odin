@@ -291,20 +291,25 @@ persist_slot_value :: #force_inline proc "contextless" (db: ^Db, kp: ^Key_Handle
 	return
 }
 
-persist_debug_delay :: proc "contextless" (usec: i64) {
-	u := usec
-	if u < 0 {
-		u = 1 if rng_next() % u64(-u) == 0 else 0
+sleep_microseconds :: proc "contextless" (us: i64) {
+	if us <= 0 {
+		return
 	}
-	if u > 0 {
-		ts := linux.Time_Spec {
-			time_sec  = uint(u / 1_000_000),
-			time_nsec = uint((u % 1_000_000) * 1000),
-		}
-		rem: linux.Time_Spec
-		for linux.nanosleep(&ts, &rem) == .EINTR {
-			ts = rem
-		}
+	pending := linux.Time_Spec {
+		time_sec  = uint(us) / 1_000_000,
+		time_nsec = uint(us) % 1_000_000 * 1_000,
+	}
+	for linux.nanosleep(&pending, &pending) == .EINTR {
+	}
+}
+
+persist_debug_delay :: proc "contextless" (usec: i64) {
+	if usec >= 0 {
+		sleep_microseconds(usec)
+		return
+	}
+	if rng_next() % u64(-usec) == 0 {
+		sleep_microseconds(1)
 	}
 }
 

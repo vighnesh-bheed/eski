@@ -2,6 +2,7 @@ package main
 
 import lp "../../src/listpack"
 import "../../src/rdb"
+import "core:encoding/hex"
 import "core:fmt"
 import "core:os"
 import "core:strconv"
@@ -91,22 +92,85 @@ gen :: proc(pattern: string, seed: u64, length: int) -> []u8 {
 	return out[:length]
 }
 
+JONES_REFLECTED :: u64(0x95ac9329ac4bc9b5)
+
+crc64_model :: proc(seed: u64, data: []u8) -> u64 {
+	register := seed
+	for byte_value in data {
+		register ~= u64(byte_value)
+		for _ in 0 ..< 8 {
+			low := register & 1
+			register >>= 1
+			if low != 0 {
+				register ~= JONES_REFLECTED
+			}
+		}
+	}
+	return register
+}
+
+little_endian_u64 :: proc(b: []u8) -> u64 {
+	v: u64
+	for i in 0 ..< 8 {
+		v |= u64(b[i]) << (8 * uint(i))
+	}
+	return v
+}
+
+DUMP_VECTORS := [?]string {
+	"000568656c6c6f0c00a804ebb69f1ebe43",
+	"00c139300c0056e2dee769d696f0",
+	"12010210100000000300816102816202816302ff0c00036e8dcc6f19ccd7",
+	"1015150000000200856669656c64068576616c756506ff0c003a37d00c9c9350f8",
+	"00c30c412c017878e0ff00e017000178780c003b452d9a714c93cd",
+}
+
 test_crc64 :: proc() {
-	v1 := "123456789"
-	check(rdb.crc64(0, transmute([]u8)v1) == 0xe9c6d914c4b8d9ca, "crc64 of 123456789")
-	check(rdb.crc64_bitwise(0, transmute([]u8)v1) == 0xe9c6d914c4b8d9ca, "bitwise crc64 of 123456789")
-	li := "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.\x00"
-	check(rdb.crc64(0, transmute([]u8)li) == 0xc7794709e69683b3, "crc64 of lorem ipsum")
-	data := gen("rand", 99, 10000)
-	defer delete(data)
-	whole := rdb.crc64(0, data)
-	for split in ([]int{1, 7, 8, 9, 63, 4096, 9999}) {
-		part := rdb.crc64(rdb.crc64(0, data[:split]), data[split:])
-		check(part == whole, "chained crc64 equals one shot")
+	check_value := "123456789"
+	message := transmute([]u8)check_value
+	check(crc64_model(0, message) == 0xe9c6d914c4b8d9ca, "reference model gives the published check value")
+	check(rdb.crc64(0, message) == 0xe9c6d914c4b8d9ca, "table crc64 gives the published check value for 123456789")
+	check(rdb.crc64_bitwise(0, message) == 0xe9c6d914c4b8d9ca, "bitwise crc64 gives the published check value for 123456789")
+	check(rdb.crc64(0, nil) == 0 && rdb.crc64(0x1234, nil) == 0x1234, "an empty update leaves the register unchanged")
+	framed: [17]u8
+	copy(framed[:], message)
+	crc := rdb.crc64(0, message)
+	for i in 0 ..< 8 {
+		framed[9 + i] = u8(crc >> (8 * uint(i)))
 	}
-	for off in 0 ..< 8 {
-		check(rdb.crc64(0, data[off:off + 100]) == rdb.crc64_bitwise(0, data[off:off + 100]), "table crc64 equals bitwise at every alignment")
+	check(rdb.crc64(0, framed[:]) == 0, "a message followed by its little endian crc leaves the published zero residue")
+	for hex_text in DUMP_VECTORS {
+		payload, ok := hex.decode(transmute([]u8)hex_text)
+		if !check(ok && len(payload) > 8, "decode a captured DUMP payload") {
+			continue
+		}
+		body := payload[:len(payload) - 8]
+		trailer := little_endian_u64(payload[len(payload) - 8:])
+		check(rdb.crc64(0, body) == trailer, fmt.tprintf("DUMP payload %s carries the crc64 of its body", hex_text[:16]))
+		check(rdb.crc64(0, payload) == 0, "a whole DUMP payload has a zero residue")
+		delete(payload)
 	}
+	r := rng_make(20261101)
+	buffer := make([]u8, 4099)
+	defer delete(buffer)
+	for i in 0 ..< len(buffer) {
+		buffer[i] = u8(rng_next(&r))
+	}
+	agree := true
+	for start in 0 ..< 16 {
+		for length in ([]int{0, 1, 2, 7, 8, 9, 15, 16, 17, 31, 64, 255, 1000, 4083 - start}) {
+			piece := buffer[start:start + length]
+			want := crc64_model(0, piece)
+			agree = agree && rdb.crc64(0, piece) == want && rdb.crc64_bitwise(0, piece) == want
+		}
+	}
+	check(agree, "table and bitwise crc64 match the reference model at every offset and length")
+	whole := crc64_model(0, buffer)
+	chained := true
+	for cut in ([]int{0, 1, 3, 8, 13, 64, 2048, 4098, 4099}) {
+		chained = chained && rdb.crc64(rdb.crc64(0, buffer[:cut]), buffer[cut:]) == whole
+	}
+	check(chained, "updating in two pieces equals one update over the whole buffer")
 }
 
 test_lzf_vectors :: proc(path: string) -> int {

@@ -143,7 +143,7 @@ keyspace_stream_group :: proc(task: ^Keyspace_Task) {
 	makeconsumer, delconsumer := eq_nocase(sub, "createconsumer"), eq_nocase(sub, "delconsumer")
 	if !(create || setid || destroy || makeconsumer || delconsumer) || (create && (len(argv) < 5 || len(argv) > sm.XGROUP_CREATE_MAX_ARGS)) || (setid && len(argv) < 5) || (destroy && len(argv) != 4) || ((makeconsumer || delconsumer) && len(argv) != 5) { task.failed = true; return }
 	mkstream := false
-	entries: i64 = sm.SCG_INVALID_ENTRIES_READ
+	entries: i64 = sm.ENTRIES_READ_UNKNOWN
 	if create || setid {
 		m, e, err := sm.parse_xgroup_opts(argv); if err != .None { task.failed = true; return }; mkstream = m; entries = e
 	}
@@ -424,7 +424,7 @@ keyspace_stream_pending_reply :: proc(task: ^Keyspace_Task, b: ^Keyspace_Builder
 }
 
 keyspace_stream_entries_read :: proc "contextless" (task: ^Keyspace_Task, b: ^Keyspace_Builder, cg: ^sm.CG) {
-	if cg.entries_read == sm.SCG_INVALID_ENTRIES_READ { keyspace_hash_null(task, b) } else { keyspace_builder_integer(b, cg.entries_read) }
+	if cg.entries_read == sm.ENTRIES_READ_UNKNOWN { keyspace_hash_null(task, b) } else { keyspace_builder_integer(b, cg.entries_read) }
 }
 
 keyspace_stream_lag :: proc "contextless" (task: ^Keyspace_Task, b: ^Keyspace_Builder, s: sm.Stream, cg: ^sm.CG) {

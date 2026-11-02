@@ -161,77 +161,108 @@ reply_subcommand_syntax :: proc(c: ^Conn, argv: [][]u8) {
 	reply_error_quoted(c, "ERR unknown subcommand or wrong number of arguments for '", sub[:min(len(sub), 128)], "'. Try CLIENT HELP.")
 }
 
-cmd_hello :: proc(c: ^Conn, argv: [][]u8) {
-	ver: i64 = 0
-	next := 1
-	if len(argv) >= 2 {
-		v, ok := parse_i64(argv[1])
-		if !ok {
-			reply_error(c, "ERR Protocol version is not an integer or out of range")
-			return
-		}
-		if v < RESP2 || v > RESP3 {
-			reply_error(c, "NOPROTO unsupported protocol version")
-			return
-		}
-		ver = v
-		next = 2
+@(private = "file")
+Hello_Options :: struct {
+	protover:    i64,
+	auth_user:   []u8,
+	auth_pass:   []u8,
+	client_name: []u8,
+	wants_auth:  bool,
+	wants_name:  bool,
+}
+
+@(private = "file")
+hello_read_options :: proc(c: ^Conn, argv: [][]u8, opts: ^Hello_Options) -> bool {
+	if len(argv) < 2 {
+		return true
 	}
-	user: []u8
-	pass: []u8
-	name: []u8
-	has_auth := false
-	has_name := false
-	for i := next; i < len(argv); i += 1 {
-		more := len(argv) - i - 1
-		a := argv[i]
-		if eq_nocase(a, "auth") && more >= 2 {
-			user = argv[i + 1]
-			pass = argv[i + 2]
-			has_auth = true
-			i += 2
-		} else if eq_nocase(a, "setname") && more >= 1 {
-			name = argv[i + 1]
-			if !valid_client_name(name) {
+	version, numeric := parse_i64(argv[1])
+	if !numeric {
+		reply_error(c, "ERR Protocol version is not an integer or out of range")
+		return false
+	}
+	if version != RESP2 && version != RESP3 {
+		reply_error(c, "NOPROTO unsupported protocol version")
+		return false
+	}
+	opts.protover = version
+	rest := argv[2:]
+	for len(rest) > 0 {
+		word := rest[0]
+		switch {
+		case len(rest) >= 3 && eq_nocase(word, "auth"):
+			opts.auth_user = rest[1]
+			opts.auth_pass = rest[2]
+			opts.wants_auth = true
+			rest = rest[3:]
+		case len(rest) >= 2 && eq_nocase(word, "setname"):
+			if !valid_client_name(rest[1]) {
 				reply_error(c, ERR_CLIENT_NAME)
-				return
+				return false
 			}
-			has_name = true
-			i += 1
-		} else {
-			reply_error_quoted(c, "ERR Syntax error in HELLO option '", a, "'")
-			return
+			opts.client_name = rest[1]
+			opts.wants_name = true
+			rest = rest[2:]
+		case:
+			reply_error_quoted(c, "ERR Syntax error in HELLO option '", word, "'")
+			return false
 		}
 	}
-	if has_auth && !acl_authenticate(c, argv, user, pass) {
-		reply_error(c, ERR_WRONGPASS)
-		return
-	}
-	if acl_auth_required(c) {
-		reply_error(c, ERR_NOAUTH_HELLO)
-		return
-	}
-	if has_name {
-		set_conn_string(c, &c.name, name)
-	}
-	if ver != 0 {
-		c.resp = u8(ver)
-	}
+	return true
+}
+
+@(private = "file")
+hello_text_field :: proc(c: ^Conn, field: string, text: string) {
+	reply_bulk_str(c, field)
+	reply_bulk_str(c, text)
+}
+
+@(private = "file")
+hello_number_field :: proc(c: ^Conn, field: string, n: i64) {
+	reply_bulk_str(c, field)
+	reply_int(c, n)
+}
+
+@(private = "file")
+hello_describe_server :: proc(c: ^Conn) {
 	reply_map(c, 7)
-	reply_bulk_str(c, "server")
-	reply_bulk_str(c, "eski")
-	reply_bulk_str(c, "version")
-	reply_bulk_str(c, REDIS_COMPAT_VERSION)
-	reply_bulk_str(c, "proto")
-	reply_int(c, i64(c.resp))
-	reply_bulk_str(c, "id")
-	reply_int(c, c.id)
-	reply_bulk_str(c, "mode")
-	reply_bulk_str(c, "standalone")
-	reply_bulk_str(c, "role")
-	reply_bulk_str(c, "master")
+	hello_text_field(c, "server", "eski")
+	hello_text_field(c, "version", REDIS_COMPAT_VERSION)
+	hello_number_field(c, "proto", i64(c.resp))
+	hello_number_field(c, "id", c.id)
+	hello_text_field(c, "mode", "standalone")
+	hello_text_field(c, "role", "master")
 	reply_bulk_str(c, "modules")
 	reply_array(c, 0)
+}
+
+@(private = "file")
+hello_auth_refusal :: proc(c: ^Conn, argv: [][]u8, opts: ^Hello_Options) -> string {
+	if opts.wants_auth && !acl_authenticate(c, argv, opts.auth_user, opts.auth_pass) {
+		return ERR_WRONGPASS
+	}
+	if acl_auth_required(c) {
+		return ERR_NOAUTH_HELLO
+	}
+	return ""
+}
+
+cmd_hello :: proc(c: ^Conn, argv: [][]u8) {
+	opts: Hello_Options
+	if !hello_read_options(c, argv, &opts) {
+		return
+	}
+	if refusal := hello_auth_refusal(c, argv, &opts); refusal != "" {
+		reply_error(c, refusal)
+		return
+	}
+	if opts.wants_name {
+		set_conn_string(c, &c.name, opts.client_name)
+	}
+	if opts.protover != 0 {
+		c.resp = u8(opts.protover)
+	}
+	hello_describe_server(c)
 }
 
 conn_type :: proc(c: ^Conn) -> Client_Type {
@@ -472,105 +503,103 @@ parse_client_filter :: proc(c: ^Conn, argv: [][]u8, f: ^Client_Filter) -> bool {
 }
 
 client_filter_match :: proc(f: ^Client_Filter, other: ^Conn, self: ^Conn) -> bool {
-	if f.has_addr && !bytes_eq(other.addr[:other.addr_len], f.addr) {
+	if f.skipme && other == self {
 		return false
 	}
-	if f.has_laddr && !bytes_eq(conn_laddr(other), f.laddr) {
+	if f.id != 0 && f.id != other.id {
 		return false
 	}
-	if f.ctype != .Any && conn_type(other) != f.ctype {
+	kind_ok := f.ctype == .Any || f.ctype == conn_type(other)
+	user_ok := f.user == nil || f.user == other.user
+	old_enough := f.max_age == 0 || conn_age(other) >= f.max_age
+	if !(kind_ok && user_ok && old_enough) {
 		return false
 	}
-	if f.id != 0 && other.id != f.id {
+	peer_ok := !f.has_addr || bytes_eq(f.addr, other.addr[:other.addr_len])
+	return peer_ok && (!f.has_laddr || bytes_eq(f.laddr, conn_laddr(other)))
+}
+
+@(private = "file")
+client_list_by_ids :: proc(c: ^Conn, argv: [][]u8) -> bool {
+	wanted := argv[3:]
+	for raw in wanted {
+		if _, numeric := parse_i64(raw); !numeric {
+			reply_error(c, "ERR Invalid client ID")
+			return false
+		}
+	}
+	for raw in wanted {
+		id, _ := parse_i64(raw)
+		if target := conn_by_id(id); target != nil {
+			client_info_line(&scratch, target, c, argv)
+		}
+	}
+	return true
+}
+
+@(private = "file")
+client_list_filtered :: proc(c: ^Conn, argv: [][]u8) -> bool {
+	criteria: Client_Filter
+	if !parse_client_filter(c, argv, &criteria) {
 		return false
 	}
-	if f.user != nil && other.user != f.user {
-		return false
-	}
-	if other == self && f.skipme {
-		return false
-	}
-	if f.max_age != 0 && conn_age(other) < f.max_age {
-		return false
+	for candidate in sorted_conns() {
+		if client_filter_match(&criteria, candidate, c) {
+			client_info_line(&scratch, candidate, c, argv)
+		}
 	}
 	return true
 }
 
 client_list :: proc(c: ^Conn, argv: [][]u8) {
-	n := len(argv)
 	clear(&scratch)
-	if n == 4 && eq_nocase(argv[2], "type") {
-		t, ok := parse_client_type(argv[3])
-		if !ok {
-			reply_error_quoted(c, "ERR Unknown client type '", argv[3], "'")
-			return
-		}
-		for other in sorted_conns() {
-			if conn_type(other) == t {
-				client_info_line(&scratch, other, c, argv)
-			}
-		}
-	} else if n > 3 && eq_nocase(argv[2], "id") {
-		for i in 3 ..< n {
-			id, ok := parse_i64(argv[i])
-			if !ok {
-				reply_error(c, "ERR Invalid client ID")
-				return
-			}
-			if other := conn_by_id(id); other != nil {
-				client_info_line(&scratch, other, c, argv)
-			}
-		}
-	} else {
-		f := Client_Filter{}
-		if !parse_client_filter(c, argv, &f) {
-			return
-		}
-		for other in sorted_conns() {
-			if client_filter_match(&f, other, c) {
-				client_info_line(&scratch, other, c, argv)
-			}
+	by_id := len(argv) > 3 && eq_nocase(argv[2], "id")
+	listed := client_list_by_ids(c, argv) if by_id else client_list_filtered(c, argv)
+	if listed {
+		reply_verbatim(c, scratch[:])
+	}
+}
+
+@(private = "file")
+kill_scratch: [dynamic]^Conn
+
+@(private = "file")
+client_kill_matching :: proc(self: ^Conn, criteria: ^Client_Filter) -> i64 {
+	clear(&kill_scratch)
+	for candidate in srv.conns {
+		if candidate != nil && client_filter_match(criteria, candidate, self) {
+			append(&kill_scratch, candidate)
 		}
 	}
-	reply_verbatim(c, scratch[:])
+	for victim in kill_scratch {
+		if victim == self {
+			self.close_after = true
+		} else {
+			conn_kill(victim)
+		}
+	}
+	return i64(len(kill_scratch))
 }
 
 client_kill :: proc(c: ^Conn, argv: [][]u8) {
-	f := Client_Filter {
-		skipme = true,
+	legacy := len(argv) == 3
+	criteria := Client_Filter {
+		skipme = !legacy,
 	}
-	if len(argv) == 3 {
-		f.addr = argv[2]
-		f.has_addr = true
-		f.skipme = false
-	} else if !parse_client_filter(c, argv, &f) {
+	if legacy {
+		criteria.addr = argv[2]
+		criteria.has_addr = true
+	} else if !parse_client_filter(c, argv, &criteria) {
 		return
 	}
-	killed: i64 = 0
-	close_self := false
-	for i in 0 ..< len(srv.conns) {
-		other := srv.conns[i]
-		if other == nil || !client_filter_match(&f, other, c) {
-			continue
-		}
-		if other == c {
-			close_self = true
-		} else {
-			conn_kill(other)
-		}
-		killed += 1
-	}
-	if close_self {
-		c.close_after = true
-	}
-	if len(argv) == 3 {
-		if killed == 0 {
-			reply_error(c, "ERR No such client")
-		} else {
-			reply_ok(c)
-		}
-	} else {
-		reply_int(c, killed)
+	count := client_kill_matching(c, &criteria)
+	switch {
+	case !legacy:
+		reply_int(c, count)
+	case count > 0:
+		reply_ok(c)
+	case:
+		reply_error(c, "ERR No such client")
 	}
 }
 
@@ -612,38 +641,43 @@ client_no_touch :: proc(c: ^Conn, argv: [][]u8) {
 	reply_ok(c)
 }
 
-client_pause :: proc(c: ^Conn, argv: [][]u8) {
-	if len(argv) > 4 {
-		reply_subcommand_syntax(c, argv)
-		return
+parse_timeout_deadline :: proc(c: ^Conn, arg: []u8) -> (deadline: i64, ok: bool) {
+	span, numeric := parse_i64(arg)
+	switch {
+	case !numeric:
+		reply_error(c, "ERR timeout is not an integer or out of range")
+	case span < 0:
+		reply_error(c, "ERR timeout is negative")
+	case span == 0:
+		return 0, true
+	case span > I64_MAX - srv.now_ms:
+		reply_error(c, "ERR timeout is out of range")
+	case:
+		return srv.now_ms + span, true
 	}
-	all := true
-	if len(argv) == 4 {
-		if eq_nocase(argv[3], "write") {
-			all = false
-		} else if !eq_nocase(argv[3], "all") {
+	return 0, false
+}
+
+client_pause :: proc(c: ^Conn, argv: [][]u8) {
+	writes_only := false
+	switch len(argv) {
+	case 3:
+	case 4:
+		mode := argv[3]
+		writes_only = eq_nocase(mode, "write")
+		if !writes_only && !eq_nocase(mode, "all") {
 			reply_error(c, "ERR CLIENT PAUSE mode must be WRITE or ALL")
 			return
 		}
-	}
-	t, ok := parse_i64(argv[2])
-	if !ok {
-		reply_error(c, "ERR timeout is not an integer or out of range")
+	case:
+		reply_subcommand_syntax(c, argv)
 		return
 	}
-	if t < 0 {
-		reply_error(c, "ERR timeout is negative")
+	deadline, valid := parse_timeout_deadline(c, argv[2])
+	if !valid {
 		return
 	}
-	end: i64 = 0
-	if t > 0 {
-		if t > I64_MAX - srv.now_ms {
-			reply_error(c, "ERR timeout is out of range")
-			return
-		}
-		end = srv.now_ms + t
-	}
-	pause_clients(end, all)
+	pause_clients(deadline, !writes_only)
 	reply_ok(c)
 }
 
@@ -669,23 +703,29 @@ client_reply :: proc(c: ^Conn, argv: [][]u8) {
 	}
 }
 
+@(private = "file")
+client_metadata_slot :: proc(c: ^Conn, option: []u8) -> ^[]u8 {
+	switch {
+	case eq_nocase(option, "lib-name"):
+		return &c.lib_name
+	case eq_nocase(option, "lib-ver"):
+		return &c.lib_ver
+	}
+	return nil
+}
+
 client_setinfo :: proc(c: ^Conn, argv: [][]u8) {
-	attr := argv[2]
-	dst: ^[]u8
-	if eq_nocase(attr, "lib-name") {
-		dst = &c.lib_name
-	} else if eq_nocase(attr, "lib-ver") {
-		dst = &c.lib_ver
-	} else {
-		reply_error_quoted(c, "ERR Unrecognized option '", attr, "'")
-		return
+	option, value := argv[2], argv[3]
+	slot := client_metadata_slot(c, option)
+	switch {
+	case slot == nil:
+		reply_error_quoted(c, "ERR Unrecognized option '", option, "'")
+	case !valid_client_name(value):
+		reply_error_quoted(c, "ERR ", option, " cannot contain spaces, newlines or special characters.")
+	case:
+		set_conn_string(c, slot, value)
+		reply_ok(c)
 	}
-	if !valid_client_name(argv[3]) {
-		reply_error_quoted(c, "ERR ", attr, " cannot contain spaces, newlines or special characters.")
-		return
-	}
-	set_conn_string(c, dst, argv[3])
-	reply_ok(c)
 }
 
 client_setname :: proc(c: ^Conn, argv: [][]u8) {
