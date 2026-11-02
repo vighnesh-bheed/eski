@@ -83,10 +83,15 @@ runtime_tuning_enter :: proc(role: Runtime_CPU_Role) -> bool {
 	if len(text) == 0 { return true }
 	mask, valid := runtime_tuning_cpu_list(text)
 	if !valid {
-		plog(LOG_WARNING, "Ignoring invalid ", name, " CPU list; retaining inherited affinity")
+		if role != .Server {
+			plog(LOG_WARNING, "Ignoring invalid ", name, " CPU list; retaining inherited affinity")
+		}
 		return false
 	}
 	err := runtime_tuning_apply(&mask)
+	if err != .NONE && role == .Server {
+		return false
+	}
 	if err != .NONE {
 		buffer: [24]u8
 		n := format_i64(raw_data(buffer[:]), i64(err))

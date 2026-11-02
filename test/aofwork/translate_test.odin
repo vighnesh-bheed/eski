@@ -228,12 +228,60 @@ feed_streams_follow_reference :: proc(t: ^testing.T) {
 	recs := take_records(t)
 	testing.expect_value(t, len(recs), 1)
 	if len(recs) == 1 {
-		testing.expect(t, record_matches("XADD big MAXLEN = <n> <id> n x", recs[0]), joined(recs[0]))
+		testing.expect(t, record_matches("XADD big MAXLEN = <n> LIMIT 1000 <id> n x", recs[0]), joined(recs[0]))
 		want := strings.trim_space(run(c, "XLEN", "big"))
 		testing.expect_value(t, recs[0][4], strings.trim_prefix(want, ":"))
 	}
 	run(c, "XTRIM", "big", "MINID", "~", "0-0")
 	expect_records(t, {})
+}
+
+@(test)
+feed_spop_batches_and_emptied_trims :: proc(t: ^testing.T) {
+	context.allocator = runtime.heap_allocator()
+	env_init(t)
+	flush_all()
+	feed_on("feed-spop-trim")
+	defer feed_off()
+	c := new_client(0)
+	members := make([dynamic]string, context.temp_allocator)
+	append(&members, "SADD", "s")
+	for i in 0 ..< 3000 {
+		append(&members, strings.concatenate({"m", int_text(i64(10000 + i))}, context.temp_allocator))
+	}
+	run(c, ..members[:])
+	take_records(t)
+	run(c, "SPOP", "s", "2500")
+	recs := take_records(t)
+	testing.expect_value(t, len(recs), 5)
+	if len(recs) == 5 {
+		testing.expect_value(t, joined(recs[0]), "MULTI")
+		testing.expect_value(t, len(recs[1]), 2 + 1024)
+		testing.expect_value(t, len(recs[2]), 2 + 1024)
+		testing.expect_value(t, len(recs[3]), 2 + 452)
+		for rec in recs[1:4] {
+			testing.expect_value(t, rec[0], "SREM")
+			testing.expect_value(t, rec[1], "s")
+		}
+		testing.expect_value(t, joined(recs[4]), "EXEC")
+	}
+	run(c, "SPOP", "s", "300")
+	recs = take_records(t)
+	testing.expect_value(t, len(recs), 1)
+	if len(recs) == 1 {
+		testing.expect_value(t, len(recs[0]), 2 + 300)
+	}
+	run(c, "XADD", "st3", "MINID", "~", "50", "7-1", "f", "v")
+	expect_records(t, {"XADD st3 MINID = 18446744073709551615-18446744073709551615 7-1 f v"})
+	run(c, "XADD", "st", "1-1", "f", "v")
+	run(c, "XADD", "st", "2-1", "f", "v")
+	take_records(t)
+	run(c, "XTRIM", "st", "MINID", "~", "50", "LIMIT", "100")
+	expect_records(t, {"XTRIM st MINID = 18446744073709551615-18446744073709551615 LIMIT 100"})
+	run(c, "XADD", "st", "3-1", "f", "v")
+	take_records(t)
+	run(c, "XTRIM", "st", "MAXLEN", "~", "0", "LIMIT", "100")
+	expect_records(t, {"XTRIM st MAXLEN = 0 LIMIT 100"})
 }
 
 @(test)

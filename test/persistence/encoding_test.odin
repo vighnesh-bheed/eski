@@ -318,7 +318,6 @@ string_encoding_rejections :: proc(t: ^testing.T) {
 		{{0xFF}, .Corrupt, "Unknown RDB string encoding type 63"},
 		{{0xC3, 0x05, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00}, .Corrupt, "Invalid LZF compressed string"},
 		{{0xC3, 0x00, 0x05}, .Corrupt, "Invalid LZF compressed string"},
-		{{0xC3, 0x02, 0x00, 0x00, 0x61}, .Corrupt, "Invalid LZF compressed string"},
 		{{0xC3, 0x02, 0x81, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02}, .Corrupt, "Invalid LZF compressed string"},
 		{{0xC3, 0x40, 0x10, 0x44, 0x00, 0x01, 0x02}, .Short_Read, "Unexpected EOF reading RDB file"},
 		{{0x81, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 'a'}, .Short_Read, "Unexpected EOF reading RDB file"},
@@ -337,6 +336,14 @@ string_encoding_rejections :: proc(t: ^testing.T) {
 		testing.expect_value(t, r.status, c.status)
 		testing.expect_value(t, rdb.reader_reason(&r), c.reason)
 		rdb.reader_destroy(&r)
+	}
+	for data in ([][]u8{{0xC3, 0x00, 0x00}, {0xC3, 0x01, 0x00, 0x00}, {0xC3, 0x02, 0x00, 0x00, 0x61}}) {
+		empty: rdb.Reader
+		rdb.reader_init_mem(&empty, data, false)
+		value, good := rdb.get_string(&empty, 0)
+		testing.expect(t, good && len(value) == 0)
+		testing.expect_value(t, empty.status, rdb.Status.Ok)
+		rdb.reader_destroy(&empty)
 	}
 	r: rdb.Reader
 	rdb.reader_init_mem(&r, {0xC4}, false)

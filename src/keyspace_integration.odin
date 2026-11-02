@@ -19,6 +19,7 @@ Keyspace_Task :: struct {
 	start:      u64,
 	stats:      ^Cmd_Hot,
 	suppressed: bool,
+	forked: bool,
 	op: Keyspace_Op,
 	command_name: string,
 	restore_deep: bool,
@@ -663,7 +664,8 @@ keyspace_try :: proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8) -> bool {
 	task.start = start
 	task.stats = stats
 	task.suppressed = c.reply & {.Off, .Skip} != {}
-	task.job = ks.Job{op = .Custom, record = task.records[0], records = task.records, context_executor = keyspace_execute_context, clock = access_seconds_now, touch = .No_Touch not_in c.flags, data = task}
+	task.forked = pst.child_pid > 0
+	task.job = ks.Job{op = .Custom, record = task.records[0], records = task.records, context_executor = keyspace_execute_context, clock = access_seconds_now, touch = .No_Touch not_in c.flags && !task.forked, data = task}
 	if !ks.submit(&keyspace_pool, &task.job) {
 		keyspace_task_free(task)
 		keyspace_fallbacks += 1
@@ -759,7 +761,7 @@ keyspace_remove :: proc "contextless" (r: ^ks.Record) {
 }
 
 keyspace_touch :: proc "contextless" (task: ^Keyspace_Task, r: ^ks.Record, force: bool = false, created: bool = false) {
-	if r.exists && (task.job.touch || force || created) {
+	if r.exists && (task.job.touch || (force && !task.forked) || created) {
 		r.clock = memory_worker_access_touch(&task.access, r.clock, created)
 		r.touched = true
 	}

@@ -2,6 +2,7 @@ package main
 
 import "base:intrinsics"
 import "base:runtime"
+import "core:slice"
 import "core:sys/linux"
 import ht "hashtype"
 import st "settype"
@@ -34,6 +35,7 @@ Conn :: struct {
 	wcap:        int,
 	wpeak:       int,
 	wpeak_reset_ms: i64,
+	held_order:  u64,
 	eviction_delivery_epoch: u64,
 	wlen:        int,
 	wpos:        int,
@@ -109,6 +111,7 @@ Server :: struct {
 	pause_all:           bool,
 	resume_due:          bool,
 	held_count:          int,
+	held_next:           u64,
 	last_timeout_ms:     i64,
 }
 
@@ -475,6 +478,8 @@ accept_clients :: proc(lfd: linux.Fd, kind: Conn_Kind) {
 		c.rcap = RBUF_INIT
 		c.wbuf = mem_alloc(WBUF_INIT)
 		c.wcap = WBUF_INIT
+		c.wpeak = WBUF_INIT
+		c.wpeak_reset_ms = srv.now_ms
 		conn_mem += size_of(Conn) + RBUF_INIT + WBUF_INIT
 		c.ctime_ms = lua_connection_clock()
 		c.atime_ms = c.ctime_ms
@@ -508,10 +513,9 @@ accept_clients :: proc(lfd: linux.Fd, kind: Conn_Kind) {
 @(cold)
 qbuf_limit_reached :: #force_no_inline proc(c: ^Conn) {
 	b := make([dynamic]u8, context.temp_allocator)
-	sb_str(&b, "Closing client that reached max query buffer length: id=")
-	sb_int(&b, c.id)
-	sb_str(&b, " addr=")
-	sb_bytes(&b, c.addr[:c.addr_len])
+	sb_str(&b, "Closing client that reached max query buffer length: ")
+	client_info_line(&b, c, nil, nil)
+	pop(&b)
 	sb_str(&b, " (qbuf initial bytes: ")
 	sds_repr(&b, c.rbuf[c.rpos:min(c.rlen, c.rpos + 64)])
 	sb_str(&b, ")")
@@ -671,6 +675,8 @@ execute_guarded :: proc(c: ^Conn, argv: [][]u8) -> bool {
 		if !c.held {
 			c.held = true
 			srv.held_count += 1
+			srv.held_next += 1
+			c.held_order = srv.held_next
 		}
 		return false
 	}
@@ -721,11 +727,28 @@ pause_clear :: proc() {
 	}
 }
 
+Held_Ref :: struct {
+	order: u64,
+	id:    i64,
+	fd:    linux.Fd,
+}
+
+held_scratch: [dynamic]Held_Ref
+
 resume_held_clients :: proc() {
 	srv.resume_due = false
-	for i := 0; i < len(srv.conns); i += 1 {
-		c := srv.conns[i]
-		if c == nil || !c.held {
+	clear(&held_scratch)
+	for c in srv.conns {
+		if c != nil && c.held {
+			append(&held_scratch, Held_Ref{order = c.held_order, id = c.id, fd = c.fd})
+		}
+	}
+	slice.sort_by(held_scratch[:], proc(a, b: Held_Ref) -> bool {
+		return a.order < b.order
+	})
+	for ref in held_scratch {
+		c := srv.conns[ref.fd] if int(ref.fd) < len(srv.conns) else nil
+		if c == nil || c.id != ref.id || !c.held {
 			continue
 		}
 		c.held = false

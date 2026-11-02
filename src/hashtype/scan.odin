@@ -44,22 +44,24 @@ matches_pattern :: proc "contextless" (pattern, text: []u8, nocase: bool) -> boo
 	return glob.glob_match(pattern, text, nocase)
 }
 
-parse_scan_cursor :: proc "contextless" (arg: []u8) -> (cursor: u64, ok: bool) {
-	text := arg
+until_nul :: proc "contextless" (arg: []u8) -> []u8 {
 	for c, at in arg {
 		if c == 0 {
-			text = arg[:at]
-			break
+			return arg[:at]
 		}
 	}
-	return decimal.parse_u64_loose(text)
+	return arg
+}
+
+parse_scan_cursor :: proc "contextless" (arg: []u8) -> (cursor: u64, ok: bool) {
+	return decimal.parse_u64_loose(until_nul(arg))
 }
 
 parse_scan_options :: proc "contextless" (args: [][]u8, is_hash: bool) -> (opts: Scan_Options, err: Error) {
 	opts.count = DEFAULT_SCAN_COUNT
 	i := 0
 	for i < len(args) {
-		arg := args[i]
+		arg := until_nul(args[i])
 		if eq_nocase(arg, "novalues") {
 			if !is_hash {
 				return opts, .Novalues_Only_Hscan

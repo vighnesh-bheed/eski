@@ -658,7 +658,7 @@ config_cmd_set :: proc(c: ^Conn, argv: [][]u8) {
 		case invalid_name != nil:
 			clear(&scratch)
 			sb_str(&scratch, "ERR Unknown option or number of arguments for CONFIG SET - '")
-			sb_bytes(&scratch, invalid_name)
+			sb_bytes(&scratch, generic_cstr(invalid_name))
 			sb_byte(&scratch, '\'')
 			sanitize_scratch()
 			reply_error_bytes(c, scratch[:])
@@ -1620,21 +1620,6 @@ config_parse_command_line :: proc(args: []string) -> (filename: string, from_std
 	return filename, from_stdin, string(b[:])
 }
 
-absolute_path :: proc(path: string) -> string {
-	if len(path) > 0 && path[0] == '/' {
-		return path
-	}
-	buf: [4096]u8
-	cwd := persist_cwd(buf[:])
-	out := make([dynamic]u8)
-	sb_str(&out, cwd)
-	if len(cwd) == 0 || cwd[len(cwd) - 1] != '/' {
-		sb_byte(&out, '/')
-	}
-	sb_str(&out, path)
-	return string(out[:])
-}
-
 @(private = "file")
 config_rewrite_string_line :: proc(rs: ^Rewrite_State, name: string, value: string, force: bool) {
 	b := rewrite_line_buf(rs)
@@ -2294,13 +2279,6 @@ ipv6_valid :: proc(s: []u8) -> bool {
 	return groups == 8
 }
 
-config_check_cluster_config_file :: proc(v: i64, s: []u8) -> string {
-	if len(s) == 0 {
-		return "cluster-config-file can't be empty"
-	}
-	return ""
-}
-
 config_check_hostname :: proc(v: i64, s: []u8) -> string {
 	if len(s) >= 256 {
 		return "Hostnames must be less than 256 characters"
@@ -2315,7 +2293,7 @@ config_check_hostname :: proc(v: i64, s: []u8) -> string {
 
 config_check_nodename :: proc(v: i64, s: []u8) -> string {
 	for ch in s {
-		if !((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '.' || ch == '_' || ch == ':') {
+		if !((ch >= '-' && ch <= '9') || (ch >= 'A' && ch <= 'Z') || (ch >= '_' && ch <= 'z') || ch >= 0x80) {
 			return "Announced human node name contained invalid character"
 		}
 	}

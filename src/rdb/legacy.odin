@@ -133,7 +133,7 @@ ziplist_next :: proc "contextless" (it: ^Ziplist_Iter, out: ^Zl_Entry) -> bool #
 		str_len = int(enc & 63) << 8 | int(zl[p + 1])
 		p += 2
 	case 2:
-		if enc != 0x80 || p + 5 > limit {
+		if p + 5 > limit {
 			it.failed = true
 			return false
 		}

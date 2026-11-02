@@ -282,7 +282,7 @@ config_table_init :: proc() {
 		{name = "replica-announce-ip", alias = "slave-announce-ip", type = .Str, flags = {.Null_Empty}, store = &cfg.replica_announce_ip},
 		{name = "masteruser", type = .Str, flags = {.Sensitive, .Null_Empty}, store = &cfg.masteruser},
 		{name = "cluster-announce-ip", type = .Str, flags = {.Null_Empty}, store = &cfg.cluster_announce_ip, check = config_check_announce_ip},
-		{name = "cluster-config-file", type = .Str, flags = {.Immutable}, sdef = "nodes.conf", store = &cfg.cluster_config_file, check = config_check_cluster_config_file},
+		{name = "cluster-config-file", type = .Str, flags = {.Immutable}, sdef = "nodes.conf", store = &cfg.cluster_config_file},
 		{name = "cluster-announce-hostname", type = .Str, flags = {.Null_Empty}, store = &cfg.cluster_announce_hostname, check = config_check_hostname},
 		{name = "cluster-announce-human-nodename", type = .Str, flags = {.Null_Empty}, store = &cfg.cluster_announce_human_nodename, check = config_check_nodename},
 		{name = "syslog-ident", type = .Str, flags = {.Immutable}, sdef = "redis", store = &cfg.syslog_ident},

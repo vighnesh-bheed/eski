@@ -24,7 +24,6 @@ reply_invalid_expire :: #force_no_inline proc(c: ^Conn, name: string) {
 	reply_error_parts(c, "ERR invalid expire time in '", name, "' command")
 }
 
-@(private = "file")
 generic_cstr :: proc "contextless" (s: []u8) -> []u8 {
 	for b, i in s {
 		if b == 0 {
@@ -543,7 +542,7 @@ scan_read_options :: proc(c: ^Conn, options: [][]u8, req: ^Scan_Request) -> bool
 	req.count = 10
 	rest := options
 	for len(rest) > 0 {
-		word := rest[0]
+		word := generic_cstr(rest[0])
 		paired := len(rest) >= 2
 		switch {
 		case paired && eq_nocase(word, "count"):

@@ -43,10 +43,6 @@ transport_format :: proc(output: []u8, address: ^linux.Sock_Addr_Any) -> int {
 			if byte == 0 { break }
 			output[n] = byte; n += 1
 		}
-		if address.ipv6.sin6_scope_id != 0 {
-			output[n] = '%'; n += 1
-			n += format_i64(&output[n], i64(address.ipv6.sin6_scope_id))
-		}
 		output[n] = ']'; output[n + 1] = ':'; n += 2
 		n += format_i64(&output[n], i64(address.ipv6.sin6_port))
 		return n

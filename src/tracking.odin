@@ -406,7 +406,7 @@ trk_deliver :: proc(c: ^Conn, st: ^Ps_State, payload: []u8, null: bool) {
 	clear(b)
 	if t.resp >= RESP3 {
 		append(b, TRK_PUSH_HEAD)
-	} else if .Subscribed in t.ps {
+	} else if .Subscribed in t.ps && st.trk_redirect != 0 {
 		append(b, TRK_MESSAGE_HEAD)
 	} else {
 		return
@@ -519,9 +519,7 @@ trk_remember_broadcast :: proc(key: []u8, by: ^Conn) {
 			continue
 		}
 		if at, seen := bs.seen[string(key)]; seen {
-			if bs.batch[at].by != by_id {
-				bs.batch[at].by = 0
-			}
+			bs.batch[at].by = by_id
 			continue
 		}
 		trk_metadata_adjust(bs, -1)
@@ -689,13 +687,6 @@ trk_check_overlaps :: proc(c: ^Conn, prefixes: [][]u8) -> bool {
 }
 
 client_tracking :: proc(c: ^Conn, argv: [][]u8) {
-	on: bool
-	if eq_nocase(argv[2], "on") {
-		on = true
-	} else if !eq_nocase(argv[2], "off") {
-		reply_error(c, ERR_SYNTAX)
-		return
-	}
 	options: Track_Flags
 	redirect: i64
 	has_redirect := false
@@ -737,6 +728,11 @@ client_tracking :: proc(c: ^Conn, argv: [][]u8) {
 			return
 		}
 	}
+	on := eq_nocase(argv[2], "on")
+	if !on && !eq_nocase(argv[2], "off") {
+		reply_error(c, ERR_SYNTAX)
+		return
+	}
 	if !on {
 		tracking_disable(c)
 		reply_ok(c)
@@ -752,20 +748,17 @@ client_tracking :: proc(c: ^Conn, argv: [][]u8) {
 		reply_error(c, ERR_TRK_SWITCH_BCAST)
 		return
 	}
-	if options & TRK_OPT_MODES == TRK_OPT_MODES {
-		reply_error(c, ERR_TRK_OPT_BOTH)
-		return
-	}
 	if .Bcast in options && options & TRK_OPT_MODES != {} {
 		reply_error(c, ERR_TRK_OPT_BCAST)
+		return
+	}
+	if options & TRK_OPT_MODES == TRK_OPT_MODES {
+		reply_error(c, ERR_TRK_OPT_BOTH)
 		return
 	}
 	if was_on && ((.Optin in options && .Optout in cur) || (.Optout in options && .Optin in cur)) {
 		reply_error(c, ERR_TRK_SWITCH_OPT)
 		return
-	}
-	if options & TRK_OPT_MODES == {} {
-		options += cur & TRK_OPT_MODES
 	}
 	if .Bcast in options && !trk_check_overlaps(c, prefixes[:]) {
 		return
@@ -777,7 +770,7 @@ client_tracking :: proc(c: ^Conn, argv: [][]u8) {
 
 client_caching :: proc(c: ^Conn, argv: [][]u8) {
 	flags := trk_flags(c)
-	if .On not_in flags || flags & TRK_OPT_MODES == {} {
+	if .On not_in flags {
 		reply_error(c, ERR_CACHING)
 		return
 	}

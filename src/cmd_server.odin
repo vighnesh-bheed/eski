@@ -344,7 +344,7 @@ function_help := [?]string {
 reply_error_arg :: proc(c: ^Conn, prefix: string, arg: []u8) {
 	clear(&scratch)
 	sb_str(&scratch, prefix)
-	sb_bytes(&scratch, arg)
+	sb_bytes(&scratch, generic_cstr(arg))
 	sanitize_scratch()
 	reply_error_bytes(c, scratch[:])
 }

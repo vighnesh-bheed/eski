@@ -123,14 +123,15 @@ tls_build_context :: proc() -> (ctx: rawptr, good: bool) {
 		parts: [dynamic][]u8
 		defer delete(parts)
 		config_split_spaces(transmute([]u8)cfg.tls_protocols, &parts)
-		if len(parts) == 0 { tls_error("TLS protocol list is empty"); return }
 		for protocol in parts {
-			switch string(protocol) {
-			case "TLSv1": disabled &= ~(u64(1)<<26)
-			case "TLSv1.1": disabled &= ~(u64(1)<<28)
-			case "TLSv1.2": disabled &= ~(u64(1)<<27)
-			case "TLSv1.3": disabled &= ~(u64(1)<<29)
-			case: tls_error("Invalid TLS protocol"); return
+			switch {
+			case eq_nocase(protocol, "tlsv1"): disabled &= ~(u64(1)<<26)
+			case eq_nocase(protocol, "tlsv1.1"): disabled &= ~(u64(1)<<28)
+			case eq_nocase(protocol, "tlsv1.2"): disabled &= ~(u64(1)<<27)
+			case eq_nocase(protocol, "tlsv1.3"): disabled &= ~(u64(1)<<29)
+			case:
+				plog(LOG_WARNING, "Invalid tls-protocols specified. Use a combination of 'TLSv1', 'TLSv1.1', 'TLSv1.2' and 'TLSv1.3'.")
+				return
 			}
 		}
 	}

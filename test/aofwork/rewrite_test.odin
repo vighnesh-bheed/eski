@@ -259,3 +259,45 @@ info_fields_in_reference_order :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+@(test)
+rewrite_keeps_logically_expired_keys :: proc(t: ^testing.T) {
+	context.allocator = runtime.heap_allocator()
+	env_init(t)
+	defer reset_dir()
+	flush_all()
+	j.update_clock()
+	c0 := new_client(0)
+	run(c0, "SET", "a", "1")
+	run(c0, "SET", "gone", "v", "PX", "1")
+	run(c0, "SET", "b", "2", "EX", "1000")
+	sleep_ms(20)
+	dir := fresh_dir("rewrite-expired")
+	path := path_join({dir, "appendonly.aof.1.base.aof"})
+	testing.expect(t, j.aof_write_base_to(cstr(path), false))
+	data, ok := read_file(path)
+	testing.expect(t, ok)
+	recs, good := decode_records(data)
+	testing.expect(t, good)
+	seen := make(map[string]bool, context.temp_allocator)
+	for rec, i in recs {
+		seen[joined(rec)] = true
+		if joined(rec) == "SET gone v" {
+			testing.expect(t, i + 1 < len(recs) && record_matches("PEXPIREAT gone <n>", recs[i + 1]))
+			if i + 1 < len(recs) {
+				at, _ := j.parse_i64(transmute([]u8)recs[i + 1][2])
+				j.update_clock()
+				testing.expect(t, at < j.srv.now_ms)
+			}
+		}
+	}
+	testing.expect(t, seen["SELECT 0"])
+	testing.expect(t, seen["SET a 1"])
+	testing.expect(t, seen["SET b 2"])
+	testing.expect(t, seen["SET gone v"])
+	write_file(path_join({dir, "appendonly.aof.manifest"}), transmute([]u8)string("file appendonly.aof.1.base.aof seq 1 type b\n"))
+	testing.expect_value(t, load_manifest_dir(dir), j.Aof_Load_Outcome.Loaded)
+	testing.expect_value(t, run(c0, "EXISTS", "gone"), ":0\r\n")
+	testing.expect_value(t, run(c0, "GET", "a"), "$1\r\n1\r\n")
+	testing.expect_value(t, run(c0, "GET", "b"), "$1\r\n2\r\n")
+}

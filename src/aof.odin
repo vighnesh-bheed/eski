@@ -2519,6 +2519,8 @@ aof_tr_hincrbyfloat :: proc(c: ^Conn, argv: [][]u8, reply: []u8, field_deadline:
 	}
 }
 
+AOF_SPOP_BATCH :: 1024
+
 aof_tr_spop :: proc(c: ^Conn, argv: [][]u8, reply: []u8) {
 	db := aof_db_of(c)
 	if len(reply) == 0 {
@@ -2558,10 +2560,13 @@ aof_tr_spop :: proc(c: ^Conn, argv: [][]u8, reply: []u8) {
 		}
 		append(&aof.args, m)
 	}
-	b := aof_sink(db.id, 2 + len(aof.args))
-	aof_put_str(b, "SREM")
-	aof_put_arg(b, argv[1])
-	aof_put_argv(b, aof.args[:])
+	for start := 0; start < len(aof.args); start += AOF_SPOP_BATCH {
+		batch := aof.args[start:min(start + AOF_SPOP_BATCH, len(aof.args))]
+		b := aof_sink(db.id, 2 + len(batch))
+		aof_put_str(b, "SREM")
+		aof_put_arg(b, argv[1])
+		aof_put_argv(b, batch)
+	}
 	clear(&aof.args)
 }
 
@@ -2673,9 +2678,7 @@ aof_trim_threshold :: proc(s: sm.Stream, minid: bool, dst: ^[sm.ID_TEXT_MAX]u8) 
 			return sm.format_id(dst, id)
 		}
 	}
-	next := s.top
-	sm.incr_id(&next)
-	return sm.format_id(dst, next)
+	return sm.format_id(dst, sm.ID_MAX)
 }
 
 @(private = "file")
@@ -2683,7 +2686,6 @@ Aof_Trim :: struct {
 	strat:  int,
 	approx: bool,
 	thr:    int,
-	limit:  int,
 	next:   int,
 	nomk:   int,
 }
@@ -2692,7 +2694,6 @@ Aof_Trim :: struct {
 aof_parse_trim :: proc(argv: [][]u8, from: int, adding: bool) -> (t: Aof_Trim) {
 	t.strat = -1
 	t.thr = -1
-	t.limit = -1
 	t.nomk = -1
 	i := from
 	for i < len(argv) {
@@ -2716,7 +2717,6 @@ aof_parse_trim :: proc(argv: [][]u8, from: int, adding: bool) -> (t: Aof_Trim) {
 			continue
 		}
 		if eq_nocase(a, "limit") {
-			t.limit = i
 			i += 2
 			continue
 		}
@@ -2733,15 +2733,8 @@ aof_emit_trimmed :: proc(db: ^Db, argv: [][]u8, t: Aof_Trim, s: sm.Stream, idpos
 	if t.approx {
 		thr = aof_trim_threshold(s, eq_nocase(argv[t.strat], "minid"), &tbuf)
 	}
-	n := len(argv)
-	if t.approx && t.limit >= 0 {
-		n -= 2
-	}
-	b := aof_sink(db.id, n)
+	b := aof_sink(db.id, len(argv))
 	for k in 0 ..< len(argv) {
-		if t.approx && t.limit >= 0 && (k == t.limit || k == t.limit + 1) {
-			continue
-		}
 		switch {
 		case k == idpos:
 			aof_put_id(b, id)
@@ -3874,9 +3867,6 @@ aof_rewrite_commands :: proc(w: ^rdb.Writer) -> bool {
 					i := int(g) * GROUP_SLOTS + int(intrinsics.count_trailing_zeros(bits))
 					bits &= bits - 1
 					expire := i64(t.slots[i].meta.expire_at)
-					if expire != 0 && expire < now {
-						continue
-					}
 					if !selected {
 						aof_w_header(w, 2)
 						aof_w_str(w, "SELECT")
@@ -5223,6 +5213,7 @@ aof_load_manifest :: proc(m: ^Aof_Manifest, at_startup: bool) -> Aof_Load_Outcom
 	pst.loading_used_mem = 0
 	pst.serve_while_loading = at_startup
 	aof.loading = true
+	sm.trim_limit_relaxed = true
 	deny_blocking = true
 	aof_feed_refresh()
 	persist_update_gate()
@@ -5266,6 +5257,7 @@ aof_load_manifest :: proc(m: ^Aof_Manifest, at_startup: bool) -> Aof_Load_Outcom
 	pst.serve_while_loading = false
 	pst.loading_loaded = done
 	aof.loading = false
+	sm.trim_limit_relaxed = false
 	deny_blocking = saved_deny
 	db_cur = saved_db
 	pst.dirty = saved_dirty

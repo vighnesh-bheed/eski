@@ -383,7 +383,11 @@ DOCTOR_FRAG :: " * High total RSS: This instance has a memory fragmentation and 
 @(private = "file")
 DOCTOR_CLIENTS :: " * Big client buffers: The clients output buffers in this instance are greater than 200K per client (on average). This may result from different causes, like Pub/Sub clients subscribed to channels bot not receiving data fast enough, so that data piles on the Redis instance output buffer, or clients sending commands with large replies or very large sequences of commands in the same pipeline. Please use the CLIENT LIST command in order to investigate the issue if it causes problems in your instance, or to understand better why certain clients are using a big amount of memory.\n\n"
 @(private = "file")
+DOCTOR_SCRIPTS :: " * Many scripts: There seem to be many cached scripts in this instance (more than 1000). This may be because scripts are generated and `EVAL`ed, instead of being parameterized (with KEYS and ARGV), `SCRIPT LOAD`ed and `EVALSHA`ed. Unless `SCRIPT FLUSH` is called periodically, the scripts' caches may end up consuming most of your memory.\n\n"
+@(private = "file")
 DOCTOR_TAIL :: "I'm here to keep you safe, Sam. I want to help you.\n"
+@(private = "file")
+DOCTOR_MANY_SCRIPTS :: 1000
 
 @(private = "file")
 memory_doctor :: proc(c: ^Conn) {
@@ -399,7 +403,8 @@ memory_doctor :: proc(c: ^Conn) {
 	high_frag := mh.frag > 1.4 && mh.frag_bytes > MEM_DOCTOR_BIG_BYTES
 	nclients := max(srv.nconns - mc_conn_count(), 1)
 	big_clients := mh.clients / nclients > MEM_DOCTOR_CLIENT_AVG
-	if !big_peak && !high_frag && !big_clients {
+	many_scripts := lua_cache_count > DOCTOR_MANY_SCRIPTS
+	if !big_peak && !high_frag && !big_clients && !many_scripts {
 		sb_str(b, DOCTOR_FINE)
 		reply_verbatim(c, b[:])
 		return
@@ -413,6 +418,9 @@ memory_doctor :: proc(c: ^Conn) {
 	}
 	if big_clients {
 		sb_str(b, DOCTOR_CLIENTS)
+	}
+	if many_scripts {
+		sb_str(b, DOCTOR_SCRIPTS)
 	}
 	sb_str(b, DOCTOR_TAIL)
 	reply_verbatim(c, b[:])

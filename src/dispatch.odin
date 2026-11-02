@@ -381,7 +381,7 @@ sanitize_scratch :: proc() {
 reply_unknown_command :: #force_no_inline proc(c: ^Conn, argv: [][]u8) {
 	clear(&scratch)
 	sb_str(&scratch, "ERR unknown command '")
-	name := argv[0]
+	name := generic_cstr(argv[0])
 	sb_bytes(&scratch, name[:min(len(name), 128)])
 	sb_str(&scratch, "', with args beginning with: ")
 	args_len := 0
@@ -389,7 +389,7 @@ reply_unknown_command :: #force_no_inline proc(c: ^Conn, argv: [][]u8) {
 		if args_len >= 128 {
 			break
 		}
-		a := argv[i]
+		a := generic_cstr(argv[i])
 		part := a[:min(len(a), 128 - args_len)]
 		sb_byte(&scratch, '\'')
 		sb_bytes(&scratch, part)
@@ -404,7 +404,7 @@ reply_unknown_command :: #force_no_inline proc(c: ^Conn, argv: [][]u8) {
 reply_unknown_subcommand :: #force_no_inline proc(c: ^Conn, sub: []u8, cmdname: string) {
 	clear(&scratch)
 	sb_str(&scratch, "ERR unknown subcommand '")
-	sb_bytes(&scratch, sub[:min(len(sub), 128)])
+	sb_bytes(&scratch, generic_cstr(sub[:min(len(sub), 128)]))
 	sb_str(&scratch, "'. Try ")
 	sb_str(&scratch, cmdname)
 	sb_str(&scratch, " HELP.")
@@ -416,7 +416,7 @@ reply_unknown_subcommand :: #force_no_inline proc(c: ^Conn, sub: []u8, cmdname: 
 reply_subcommand_syntax_error :: #force_no_inline proc(c: ^Conn, sub: []u8, cmdname: string) {
 	clear(&scratch)
 	sb_str(&scratch, "ERR unknown subcommand or wrong number of arguments for '")
-	sb_bytes(&scratch, sub[:min(len(sub), 128)])
+	sb_bytes(&scratch, generic_cstr(sub[:min(len(sub), 128)]))
 	sb_str(&scratch, "'. Try ")
 	sb_str(&scratch, cmdname)
 	sb_str(&scratch, " HELP.")

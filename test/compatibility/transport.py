@@ -248,6 +248,24 @@ class Transport(unittest.TestCase):
             self.tls_client(server, version=ssl.TLSVersion.TLSv1_3)
         self.assertEqual(self.tls_client(server, version=ssl.TLSVersion.TLSv1_2).call('PING'), 'PONG')
 
+    def test_tls_protocol_names_ignore_case(self):
+        server = self.tls_server()
+        plain = server.connection()
+        for value in ('tlsv1.2', 'TLSV1.3', 'tlsv1.2 tlsv1.3', 'tLsV1.1', 'tlsv1'):
+            self.assertEqual(plain.call('CONFIG', 'SET', 'tls-protocols', value), 'OK')
+        self.assertEqual(plain.call('CONFIG', 'GET', 'tls-protocols'), [b'tls-protocols', b'tlsv1'])
+        for value in ('bogus', 'TLSv1.2 bogus', 'TLSv1.2  TLSv1.3', '   '):
+            plain.send('CONFIG', 'SET', 'tls-protocols', value)
+            self.assertEqual(str(plain.reply()), "ERR CONFIG SET failed (possibly related to argument 'tls-protocols') - "
+                                                 "Unable to update TLS configuration. Check server logs.")
+        self.assertEqual(plain.call('CONFIG', 'SET', 'tls-protocols', 'tlsv1.2'), 'OK')
+        with self.assertRaises(ssl.SSLError):
+            self.tls_client(server, version=ssl.TLSVersion.TLSv1_3)
+        self.assertEqual(self.tls_client(server, version=ssl.TLSVersion.TLSv1_2).call('PING'), 'PONG')
+        text = (server.directory / 'server.log').read_text(errors='replace')
+        self.assertEqual(text.count("Invalid tls-protocols specified. Use a combination of 'TLSv1', 'TLSv1.1', 'TLSv1.2' and 'TLSv1.3'."), 4)
+        self.assertNotIn('Invalid TLS protocol', text)
+
     def test_tls_incomplete_handshake_does_not_block_clients(self):
         server = self.tls_server()
         incomplete = socket.create_connection(('127.0.0.1', server.tls_port), timeout=5)
