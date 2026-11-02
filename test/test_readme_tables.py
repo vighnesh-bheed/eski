@@ -131,6 +131,39 @@ class Inputs(FixtureInputs, unittest.TestCase):
                 with self.assertRaises(ValueError):
                     tables.benchmark_cells(dataset)
 
+    def test_run_directory_comes_from_the_rendered_dataset(self):
+        self.assertEqual(tables.run_directory(self.dataset), 'bench/testbed/runs/comparison-v1')
+        commands = {'ping': {'group': 'connection', 'summary': 'Pings.'}}
+        renamed = copy.deepcopy(self.dataset)
+        renamed['run']['root'] = 'cloud-v1'
+        outputs = tables.render_outputs(commands, self.baseline, self.observed, renamed, skeleton())
+        for name in ('README.md', 'docs/benchmarks.md'):
+            self.assertNotIn('comparison-v1', outputs[name])
+        self.assertIn('Recorded medians from `bench/testbed/runs/cloud-v1`', outputs['README.md'])
+        self.assertIn('Generated from `bench/testbed/runs/cloud-v1/dataset.json`', outputs['docs/benchmarks.md'])
+        self.assertIn('--benchmark-results bench/testbed/runs/cloud-v1`', outputs['docs/benchmarks.md'])
+        self.assertIn('[recorded report](../bench/testbed/runs/cloud-v1/report.html)', outputs['docs/benchmarks.md'])
+        for value in (None, '', '../escape', 'two words', '.hidden', 'runs/cloud-v1'):
+            broken = copy.deepcopy(self.dataset)
+            broken['run']['root'] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'run.root'):
+                tables.render_outputs(commands, self.baseline, self.observed, broken, skeleton())
+
+    def test_default_run_is_the_latest_finished_recorded_run(self):
+        self.assertEqual(tables.published_run(ROOT), (ROOT/'bench/testbed/runs/comparison-v1/dataset.json').resolve())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runs = root/tables.RUNS
+            for name, finished in (('comparison-v1', 1.0), ('cloud-v1', 2.0), ('unfinished', None)):
+                (runs/name).mkdir(parents=True)
+                (runs/name/'dataset.json').write_text(json.dumps(dict(run=dict(root=name, finished_at=finished))))
+            self.assertEqual(tables.published_run(root), (runs/'cloud-v1'/'dataset.json').resolve())
+            (runs/'cloud-v1'/'dataset.json').write_text(json.dumps(dict(run=dict(root='cloud-v1', finished_at=1.0))))
+            with self.assertRaisesRegex(ValueError, 'no single latest finished run'):
+                tables.published_run(root)
+            with self.assertRaisesRegex(ValueError, 'no single latest finished run'):
+                tables.published_run(root/'empty')
+
     def test_ratio_requires_a_valid_nonzero_reference(self):
         cells = tables.benchmark_cells(self.dataset)
         cells[('get64-p1', 'redis')]['ops']['median'] = 0
@@ -303,6 +336,29 @@ class LiveInputs(FixtureInputs, unittest.TestCase):
             self.assertEqual(self.tree_state(root), before)
             result = self.cli(root)
             self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.tree_state(root), before)
+
+    def test_cli_follows_the_latest_run_and_rejects_a_misplaced_dataset(self):
+        with tempfile.TemporaryDirectory(prefix='eski-doc-test-') as directory:
+            root = self.fixture(directory)
+            dataset = copy.deepcopy(self.dataset)
+            dataset['run'].update(root='cloud-v1', finished_at=dataset['run']['finished_at'] + 1)
+            target = root/'bench/testbed/runs/cloud-v1/dataset.json'
+            target.parent.mkdir(parents=True)
+            target.write_text(json.dumps(dataset))
+            result = self.cli(root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('Generated from `bench/testbed/runs/cloud-v1/dataset.json`', (root/'docs/benchmarks.md').read_text())
+            self.assertIn('Recorded medians from `bench/testbed/runs/cloud-v1`', (root/'README.md').read_text())
+            self.assertEqual(self.cli(root, '--check').returncode, 0)
+            self.assertEqual(self.cli(root, '--check', '--benchmark-results', 'bench/testbed/runs/comparison-v1').returncode, 1)
+            misplaced = root/'bench/testbed/runs/other/dataset.json'
+            misplaced.parent.mkdir(parents=True)
+            misplaced.write_text(json.dumps(dataset))
+            before = self.tree_state(root)
+            result = self.cli(root, '--benchmark-results', 'bench/testbed/runs/other')
+            self.assertEqual(result.returncode, 2)
+            self.assertIn('bench/testbed/runs/cloud-v1/dataset.json', result.stderr)
             self.assertEqual(self.tree_state(root), before)
 
     def test_check_reports_missing_output_without_creating_it(self):

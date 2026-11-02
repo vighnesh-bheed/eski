@@ -120,6 +120,9 @@ class InstallTests(unittest.TestCase):
         protocol = json.loads((root / 'protocol.json').read_text())
         self.assertEqual(protocol['phases']['benchmark']['identity'], 'b' * 64)
         self.assertEqual(protocol['phases']['calibration']['identity'], 'c' * 64)
+        self.assertEqual(protocol['design']['gates']['power_source'], 'mains')
+        for phase in ('calibration', 'benchmark'):
+            self.assertEqual(json.loads((root / 'workspace' / 'plans' / phase / 'experiment.json').read_text())['power_source'], 'mains')
         receipt = json.loads((root / 'install.json').read_text())
         self.assertFalse(receipt['started'])
         self.assertEqual(receipt['protocol_sha256'], install.sha(root / 'protocol.json'))

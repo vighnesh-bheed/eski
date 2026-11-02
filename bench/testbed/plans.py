@@ -20,6 +20,7 @@ TYPES = {
 }
 GATES = ('sensor_chip', 'sensor_label', 'cool_temp_c', 'max_temp_c', 'min_idle', 'min_rest', 'stable_seconds', 'max_wait',
          'sample_seconds', 'min_free_bytes', 'max_client_utilization_pct', 'max_latency_seconds')
+POWER_SOURCES = ('mains', 'no-power-supply-devices')
 RESOURCES = ('server_cpus', 'client_cpus', 'control_cpus', 'server_memory', 'client_memory', 'maxmemory', 'resource_policy')
 KEY = re.compile(r'[a-z0-9][a-z0-9.-]*$')
 
@@ -59,6 +60,8 @@ def validate(design):
     missing += [name for name in GATES if name not in gates]
     if missing:
         raise ValueError('design lacks ' + ', '.join(missing))
+    if gates.get('power_source', 'mains') not in POWER_SOURCES:
+        raise ValueError('gates.power_source must be one of ' + ', '.join(POWER_SOURCES))
     dataset = design.get('dataset') or {}
     client = design.get('client') or {}
     for name, value in (('dataset.keys', dataset.get('keys')), ('dataset.members', dataset.get('members')), ('client.threads', client.get('threads')),
@@ -199,6 +202,7 @@ def experiment(design, phase):
                  repetitions=design['repetitions'] if phase == 'benchmark' else design['calibration']['repetitions'])
     value.update({name: resources[name] for name in RESOURCES})
     value.update({name: gates[name] for name in GATES})
+    value['power_source'] = gates.get('power_source', 'mains')
     return value
 
 

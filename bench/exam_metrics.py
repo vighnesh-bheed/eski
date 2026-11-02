@@ -15,6 +15,15 @@ def frequency_policy(cpus, sys=Path('/sys')):
     return {str(cpu): {name: read(sys / f'devices/system/cpu/cpu{cpu}/cpufreq' / name) for name in POLICY_FIELDS} for cpu in sorted(cpus)}
 
 
+def power_supplies(sys=Path('/sys')):
+    directory = Path(sys) / 'class/power_supply'
+    try:
+        names = sorted(path.name for path in directory.iterdir())
+    except OSError:
+        return None
+    return {name: dict(type=read(directory / name / 'type'), online=number(directory / name / 'online')) for name in names}
+
+
 def read(path):
     try:
         return Path(path).read_text().strip()
@@ -181,10 +190,8 @@ class Reader:
                         resets.append('cpu:' + key)
                     idle[key] = 100 * quiet / delta if delta > 0 and quiet >= 0 else None
         self.previous_cpu = cpu
-        ac = {}
-        for directory in (self.sys / 'class/power_supply').glob('*'):
-            if read(directory / 'type') == 'Mains':
-                ac[directory.name] = number(directory / 'online')
+        supplies = power_supplies(self.sys)
+        ac = {name: device['online'] for name, device in (supplies or {}).items() if device['type'] == 'Mains'}
         throttle = {}
         frequencies = {}
         policies = {}
@@ -241,14 +248,15 @@ class Reader:
             item['status'] = 'running' if same else 'disappeared-or-reused'
             item['cgroup'] = cgroup_snapshot(current['pid'], self.proc, self.sys) if same else None
             snapshots.append(item)
-        return dict(wall_time=time.time(), monotonic=at, idle_pct=idle, ac_online=ac,
+        return dict(wall_time=time.time(), monotonic=at, idle_pct=idle, ac_online=ac, power_supply=supplies,
                     package=self.sensor(), throttle=throttle, throttle_delta=throttle_delta,
                     frequency_khz=frequencies, frequency_policy=policies, cpu_ticks=cpu, loadavg=read(self.proc / 'loadavg'),
                     memory=read(self.proc / 'meminfo'), pressure={k: read(self.proc / 'pressure' / k) for k in ('cpu', 'memory', 'io')},
                     owned_processes=observed, owned_cgroups=snapshots, disappeared=gone,
                     external_cpu=external, counter_resets=resets,
                     availability=dict(cpu=bool(cpu), process_scan=bool(processes), throttle=bool(throttle), frequency=any(v is not None for v in frequencies.values()),
-                                      ac=bool(ac) and all(value is not None for value in ac.values()), cgroup_version=2 if (self.sys / 'fs/cgroup/cgroup.controllers').exists() else None))
+                                      ac=bool(ac) and all(value is not None for value in ac.values()), power_supply=supplies is not None,
+                                      cgroup_version=2 if (self.sys / 'fs/cgroup/cgroup.controllers').exists() else None))
 
 
 def main():

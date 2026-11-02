@@ -49,7 +49,9 @@ class PlanTests(unittest.TestCase):
         root, _ = self.write()
         for phase, repetitions in (('calibration', 1), ('benchmark', 4)):
             value = json.loads((root / phase / 'experiment.json').read_text())
-            self.assertEqual(set(value), set(workflow.EXPERIMENT_FIELDS) | {'schema'})
+            self.assertEqual(set(value), set(workflow.EXPERIMENT_FIELDS) | {'schema', 'power_source'})
+            self.assertIn('power_source', workflow.OPTIONAL_FIELDS)
+            self.assertEqual(value['power_source'], 'mains')
             self.assertEqual(value['repetitions'], repetitions)
             self.assertEqual(value['targets'], ['eski-docker', 'redis', 'valkey', 'dragonfly'])
             self.assertEqual(value['server_cpus'], DESIGN['resources']['server_cpus'])
@@ -89,6 +91,26 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(mixed['info']['tested_commands'], ['get', 'set'])
         hget = next(item for item in benchmark if item['key'] == 'hget16-p1')
         self.assertIn(dict(argv=['HSTRLEN', 'testbed:1', 'field:8'], equals=64), hget['check']['replies'])
+
+    def test_power_source_defaults_to_mains_and_accepts_the_server_value(self):
+        self.assertEqual(plans.POWER_SOURCES, scheduler.POWER_SOURCES)
+        self.assertEqual(DESIGN['gates']['power_source'], 'mains')
+        undeclared = copy.deepcopy(DESIGN)
+        del undeclared['gates']['power_source']
+        server = copy.deepcopy(DESIGN)
+        server['gates']['power_source'] = 'no-power-supply-devices'
+        for design, expected in ((DESIGN, 'mains'), (undeclared, 'mains'), (server, 'no-power-supply-devices')):
+            for phase in plans.PHASES:
+                with self.subTest(expected=expected, phase=phase):
+                    self.assertEqual(plans.experiment(design, phase)['power_source'], expected)
+                    arguments = scheduler.parser().parse_args(['run', '--output', 'unused', '--power-source', plans.experiment(design, phase)['power_source']])
+                    self.assertEqual(arguments.power_source, expected)
+        self.assertEqual(plans.plan(undeclared, 'benchmark'), plans.plan(DESIGN, 'benchmark'))
+        for value in ('battery', None, ''):
+            broken = copy.deepcopy(DESIGN)
+            broken['gates']['power_source'] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'gates.power_source must be one of mains, no-power-supply-devices'):
+                plans.validate(broken)
 
     def test_invalid_designs_are_rejected(self):
         cases = []

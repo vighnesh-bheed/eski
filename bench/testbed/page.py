@@ -57,6 +57,12 @@ code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-si
 '''
 
 
+POWER_GATES = {
+    'mains': 'The power gate was mains: a power supply device of type Mains had to be present and report online in every sample before and during each case.',
+    'no-power-supply-devices': 'The power gate was no-power-supply-devices: the machine had to expose no power supply device at all, and a battery, mains or other power supply device seen in any sample before or during a case held the run or invalidated that case.',
+}
+
+
 def esc(value):
     return html.escape(str(value), quote=True)
 
@@ -173,6 +179,11 @@ def exclusion_section(dataset):
             '<div class="tablewrap"><table><thead><tr><th class="text">Phase</th><th class="text">Workload</th><th class="text">Engine</th><th>Rep</th><th class="text">State</th><th class="text">Reason</th></tr></thead><tbody>%s</tbody></table></div>' % body)
 
 
+def power_gate(dataset):
+    source = (dataset.get('machine') or {}).get('power_source') or 'mains'
+    return POWER_GATES.get(source, 'The power gate was %s.' % source)
+
+
 def build(dataset):
     counts = dataset.get('counts') or {}
     run = dataset.get('run') or {}
@@ -186,7 +197,10 @@ def build(dataset):
     if fill:
         fill_section = '<section><h2>Memory per key at scale</h2><p class="note">%s</p><div class="figure">%s</div></section>' % (
             esc((design.get('methodology') or {}).get('fill', '')), fill)
-    methodology = ''.join('<p><b>%s.</b> %s</p>' % (esc(name.replace('_', ' ').capitalize()), esc(text)) for name, text in (design.get('methodology') or {}).items())
+    entries = list((design.get('methodology') or {}).items())
+    position = next((index + 1 for index, (name, _) in enumerate(entries) if name == 'gates'), len(entries))
+    entries.insert(position, ('power_gate', power_gate(dataset)))
+    methodology = ''.join('<p><b>%s.</b> %s</p>' % (esc(name.replace('_', ' ').capitalize()), esc(text)) for name, text in entries)
     calibration = (dataset.get('phases') or {}).get('calibration') or {}
     generated = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
     return '''<!doctype html>

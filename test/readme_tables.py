@@ -17,6 +17,8 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 BLOCKS = ('CONFORMANCE', 'BENCHMARKS', 'COMMANDS')
+RUNS = 'bench/testbed/runs'
+RUN_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*')
 ENGINE_LABELS = {'eski-docker': 'Eski', 'eski': 'Eski', 'redis': 'Redis', 'valkey': 'Valkey', 'dragonfly': 'Dragonfly'}
 
 
@@ -551,8 +553,27 @@ def replace_blocks(readme, blocks):
     return result
 
 
+def run_directory(dataset):
+    name = (dataset.get('run') or {}).get('root')
+    if not isinstance(name, str) or not RUN_NAME.fullmatch(name):
+        raise ValueError('benchmark dataset must name its run in run.root')
+    return RUNS + '/' + name
+
+
+def published_run(root):
+    runs = []
+    for path in sorted((Path(root)/RUNS).glob('*/dataset.json')):
+        finished = (read_json(path).get('run') or {}).get('finished_at')
+        if isinstance(finished, (int, float)) and not isinstance(finished, bool) and math.isfinite(finished):
+            runs.append((finished, path.resolve()))
+    if not runs or sum(finished == max(runs)[0] for finished, _ in runs) != 1:
+        raise ValueError('no single latest finished run under ' + RUNS + '; pass --benchmark-results')
+    return max(runs)[1]
+
+
 def render_outputs(commands, baseline, observed, dataset, readme):
     expected, preserved, regressions = preserved_tests(baseline, observed)
+    run = run_directory(dataset)
     cells = benchmark_cells(dataset)
     ratio, limited = benchmark_ratio(cells)
     command_count = len(commands)
@@ -574,7 +595,7 @@ def render_outputs(commands, baseline, observed, dataset, readme):
                          'The expanded recorded run has **%d passes, %d failures and %d skips** across %d units, with **%d unit errors**. '
                          '%s %s\n\n%s') % (
                              preserved, expected, len(baseline['units']), len(regressions), observed['totals']['passed'], observed['totals']['failed'], observed['totals']['skipped'], len(observed['units']), observed['totals']['errored'], compared_note, result_note, conformance_table(observed))
-    benchmark_block = ('Recorded medians from `bench/testbed/runs/comparison-v1`, using valid repetitions only. '
+    benchmark_block = ('Recorded medians from `' + run + '`, using valid repetitions only. '
                        'These are measurements from one machine, not a claim about every workload or deployment.\n\n%s\n\n'
                        '† At least one included repetition was client limited. The observed GET 64 B pipeline 1 median throughput ratio '
                        'is **%.2fx Eski / Redis**%s. Client limits affect both measurements, so that ratio is not a guaranteed engine-speed ratio. '
@@ -625,16 +646,16 @@ def render_outputs(commands, baseline, observed, dataset, readme):
             fill_rows.append('| %s | excluded | — | — | — | — | — | — |' % md(ENGINE_LABELS.get(engine.get('target'), engine.get('label', 'unknown'))))
         else:
             fill_rows.append('| %s | %s | %.2f | %.2f | %.2f | %s | %.3f | %.3f |' % (md(ENGINE_LABELS.get(engine['target'], engine['label'])), '{:,}'.format(engine['dbsize']), engine['bytes_per_key_rss'], engine['bytes_per_key_used'], engine['bytes_per_key_cgroup_peak'], numeric(engine['ops_per_sec'], 'ops'), engine['p99_ms'], engine['max_ms']))
-    benchmark_page = ('# Recorded benchmark comparison\n\nGenerated from `bench/testbed/runs/comparison-v1/dataset.json`, schema `%s`. '
+    benchmark_page = ('# Recorded benchmark comparison\n\nGenerated from `' + run + '/dataset.json`, schema `%s`. '
                       'The benchmark phase contains %d planned repetitions, %d valid, %d excluded and %d included client-limited measurements. '
                       'The medians and ranges below are recomputed from included benchmark rows; calibration and excluded rows do not enter them.\n\n'
-                      '## Reproduce the tables\n\nRun `python3 -I test/readme_tables.py --benchmark-results bench/testbed/runs/comparison-v1` '
+                      '## Reproduce the tables\n\nRun `python3 -I test/readme_tables.py --benchmark-results ' + run + '` '
                       'and verify with `python3 -I test/readme_tables.py --check`. To render the recorded charts and report, run '
-                      '`python3 -I bench/testbed/charts.py --dataset bench/testbed/runs/comparison-v1/dataset.json --out bench/testbed/runs/comparison-v1/charts` '
-                      'and `python3 -I bench/testbed/page.py --dataset bench/testbed/runs/comparison-v1/dataset.json --out bench/testbed/runs/comparison-v1/report.html`. '
+                      '`python3 -I bench/testbed/charts.py --dataset ' + run + '/dataset.json --out ' + run + '/charts` '
+                      'and `python3 -I bench/testbed/page.py --dataset ' + run + '/dataset.json --out ' + run + '/report.html`. '
                       'A new physical experiment uses `bench/testbed/design.json` with the plan, install and collection tools described in [build-run-test.md](build-run-test.md). '
                       'It requires a dedicated machine satisfying those gates; generating tables does not launch that experiment. '
-                      'The [recorded report](../bench/testbed/runs/comparison-v1/report.html), [dataset](../bench/testbed/runs/comparison-v1/dataset.json) '
+                      'The [recorded report](../' + run + '/report.html), [dataset](../' + run + '/dataset.json) '
                       'and collection receipts are committed together.\n\n'
                       '## Method and machine\n\nMachine: %s; %s RAM; server CPUs `%s`, client CPUs `%s`, controller CPUs `%s`.\n\n%s\n\n'
                       '## Engine identities\n\n%s\n\n## Valid benchmark measurements\n\n%s\n\n'
@@ -688,7 +709,7 @@ def parser():
     result.add_argument('--baseline', type=Path, default=Path('test/conformance/baseline-redis.json'))
     result.add_argument('--observed-conformance', type=Path, default=Path('docs/data/conformance-redis.json'))
     result.add_argument('--record-conformance', type=Path, help='sanitize an actual run into the observed snapshot before generation')
-    result.add_argument('--benchmark-results', type=Path, default=Path('bench/testbed/runs/comparison-v1'))
+    result.add_argument('--benchmark-results', type=Path, help='recorded run directory or its dataset.json; defaults to the run under ' + RUNS + ' with the latest finish time')
     result.add_argument('--check', action='store_true', help='exit 1 on drift without rewriting any output')
     return result
 
@@ -707,11 +728,14 @@ def main(argv=None):
         observed = validate_conformance(read_json(resolve(args.record_conformance) if args.record_conformance else observed_path), 'observed conformance')
         if args.record_conformance:
             observed = validate_conformance(compact_summary(observed, baseline), 'observed conformance')
-        benchmark_path = resolve(args.benchmark_results)
+        benchmark_path = resolve(args.benchmark_results) if args.benchmark_results else published_run(root)
         if benchmark_path.is_dir():
             benchmark_path /= 'dataset.json'
         dataset = read_json(benchmark_path)
         benchmark_cells(dataset)
+        run = run_directory(dataset)
+        if benchmark_path.resolve() != (root/run/'dataset.json').resolve():
+            raise ValueError('the pages link to %s, so its dataset must be read from %s/dataset.json' % (run, run))
         preserved_tests(baseline, observed)
         readme = (root/'README.md').read_text()
         with server_connection(resolve(args.server_binary), args.server) as connection:
