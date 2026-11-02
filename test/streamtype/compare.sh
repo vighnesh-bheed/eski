@@ -18,7 +18,7 @@ REF_PORT="${ESKI_STREAM_REF_PORT:-6592}"
 PORT="${ESKI_STREAM_PORT:-6591}"
 SERVER="${ESKI_STREAM_SERVER:-bin/eski}"
 SERVER_PID=""
-IMAGE="docker.io/library/redis:7"
+IMAGE="${ESKI_STREAM_REF_IMAGE:-docker.io/library/redis:7}"
 NAME="eski-stream-compare-$REF_PORT"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/eski-stream-compare.XXXXXX")"
 

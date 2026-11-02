@@ -111,6 +111,12 @@ observed_dirty_and_events :: proc(t: ^testing.T) {
 		{{"pfcount", "fresh"}, ":0\r\n", 0, 0, 0},
 		{{"pfcount", "nokey"}, ":0\r\n", 0, 0, 0},
 		{{"pfcount", "fresh", "e"}, ":2\r\n", 0, 0, 0},
+		{{"pfadd", "many", "a", "b", "c", "d", "e"}, ":1\r\n", 6, 1, 0},
+		{{"pfadd", "many", "f", "g", "h"}, ":1\r\n", 3, 1, 0},
+		{{"pfadd", "many", "a", "b"}, ":0\r\n", 0, 0, 0},
+		{{"pfadd", "many", "x", "x", "x"}, ":1\r\n", 1, 1, 0},
+		{{"pfadd", "twice", "a", "a"}, ":1\r\n", 2, 1, 0},
+		{{"pfcount", "many"}, ":9\r\n", 1, 0, 1},
 	}
 	for step in steps {
 		before := m.dirty

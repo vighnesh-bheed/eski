@@ -421,6 +421,31 @@ merge_nodes :: proc(ql: ^Quicklist, center: ^Node) -> ^Node {
 	return n
 }
 
+merge_around :: proc(ql: ^Quicklist, center: ^Node) {
+	prev, prev_prev, next, next_next: ^Node
+	if center.prev != nil {
+		prev = center.prev
+		prev_prev = prev.prev
+	}
+	if center.next != nil {
+		next = center.next
+		next_next = next.next
+	}
+	if node_allow_merge(prev_prev, prev, ql.fill) {
+		listpack_merge(ql, prev_prev, prev)
+	}
+	if node_allow_merge(next, next_next, ql.fill) {
+		listpack_merge(ql, next, next_next)
+	}
+	target := center
+	if node_allow_merge(center.prev, center, ql.fill) {
+		target = listpack_merge(ql, center.prev, center)
+	}
+	if node_allow_merge(target, target.next, ql.fill) {
+		listpack_merge(ql, target, target.next)
+	}
+}
+
 split_node :: proc(ql: ^Quicklist, node: ^Node, offset: int, after: bool) -> ^Node {
 	cut := offset
 	if after {
@@ -484,10 +509,7 @@ insert :: proc(it: ^Iter, entry: ^Entry, value: []u8, after: bool) {
 				node_lp_append(ql, n, value)
 			}
 			if !is_large_element(len(value), ql.fill) {
-				if node_allow_merge(right, right.next, ql.fill) {
-					listpack_merge(ql, right, right.next)
-				}
-				merge_nodes(ql, n)
+				merge_around(ql, n if after else right)
 			}
 		}
 	}

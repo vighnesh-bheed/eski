@@ -95,7 +95,8 @@ cmd_pfadd :: proc(c: ^Conn, argv: [][]u8) {
 	empty := hll.HLL_EMPTY_SPARSE
 	cur := empty[:] if created else e.val
 	scratch := hll_scratch_ready()
-	changed, in_scratch, err := hll.pfadd_apply(cur, argv[2:], scratch, hll_sparse_max_bytes)
+	updates, in_scratch, err := hll.pfadd_apply(cur, argv[2:], scratch, hll_sparse_max_bytes)
+	changed := updates > 0
 	if created {
 		e, _ = db_upsert(key)
 		hll_entry_store(e, scratch[:] if in_scratch && changed else cur)
@@ -115,9 +116,7 @@ cmd_pfadd :: proc(c: ^Conn, argv: [][]u8) {
 	if created {
 		pst.dirty += 1
 	}
-	if changed {
-		pst.dirty += 1
-	}
+	pst.dirty += i64(updates)
 	signal_key(key)
 	notify(.String, "pfadd", key)
 	reply_int(c, 1)
@@ -146,6 +145,7 @@ cmd_pfcount :: proc(c: ^Conn, argv: [][]u8) {
 			return
 		}
 		pst.dirty += 1
+		signal_key(argv[1])
 		aof_emit(c, ..argv)
 		reply_int(c, i64(card))
 		return

@@ -376,23 +376,70 @@ score_range :: proc(z: Zset, r: ^Range_Spec, offset_in, limit: i64, reverse: boo
 	}
 }
 
+lex_in_range :: proc(z: Zset, r: ^Lex_Spec) -> bool {
+	if z.encoding == .Listpack {
+		return zzl_is_in_lex_range(z.lp, r)
+	}
+	return sl_is_in_lex_range(z.sl, r)
+}
+
+@(private = "file")
+lex_reverse_start :: proc(z: Zset, r: ^Lex_Spec, it: ^Iter, item: ^Item) -> bool {
+	if z.encoding == .Listpack {
+		buf: [lp.DECIMAL_BUFFER_BYTES]u8
+		for iter_next(it, item) {
+			if lex_lte_max(item_bytes(item, &buf), r) {
+				return lex_gte_min(item_bytes(item, &buf), r)
+			}
+		}
+		return false
+	}
+	start: ^Node
+	for n := sl_first(z.sl); n != nil && lex_lte_max(node_member(n), r); n = sl_next(n) {
+		start = n
+	}
+	if start == nil {
+		return false
+	}
+	it.started = true
+	it.node = start
+	item^ = item_from_node(start)
+	return true
+}
+
+@(private = "file")
+lex_forward_start :: proc(z: Zset, r: ^Lex_Spec, it: ^Iter, item: ^Item) -> bool {
+	buf: [lp.DECIMAL_BUFFER_BYTES]u8
+	for iter_next(it, item) {
+		if lex_gte_min(item_bytes(item, &buf), r) {
+			return z.encoding != .Listpack || lex_lte_max(item_bytes(item, &buf), r)
+		}
+	}
+	return false
+}
+
 lex_range :: proc(z: Zset, r: ^Lex_Spec, offset_in, limit: i64, reverse: bool, with_scores: bool, out: ^[dynamic]Item) {
-	if offset_in < 0 || limit == 0 || lex_range_empty(r) {
+	if offset_in < 0 || limit == 0 || !lex_in_range(z, r) {
 		return
 	}
-	offset := offset_in
-	left := limit
 	it := iter_make(z, reverse)
 	item: Item
-	buf: [lp.DECIMAL_BUFFER_BYTES]u8
-	for iter_next(&it, &item) {
-		member := item_bytes(&item, &buf)
-		if !lex_gte_min(member, r) || !lex_lte_max(member, r) {
-			continue
+	found := lex_reverse_start(z, r, &it, &item) if reverse else lex_forward_start(z, r, &it, &item)
+	if !found {
+		return
+	}
+	for skip := offset_in; skip > 0; skip -= 1 {
+		if !iter_next(&it, &item) {
+			return
 		}
-		if offset > 0 {
-			offset -= 1
-			continue
+	}
+	left := limit
+	buf: [lp.DECIMAL_BUFFER_BYTES]u8
+	for {
+		member := item_bytes(&item, &buf)
+		inside := lex_gte_min(member, r) if reverse else lex_lte_max(member, r)
+		if !inside {
+			break
 		}
 		append(out, item)
 		if left > 0 {
@@ -400,6 +447,9 @@ lex_range :: proc(z: Zset, r: ^Lex_Spec, offset_in, limit: i64, reverse: bool, w
 			if left == 0 {
 				break
 			}
+		}
+		if !iter_next(&it, &item) {
+			break
 		}
 	}
 }
@@ -417,15 +467,23 @@ count_in_range :: proc(z: Zset, r: ^Range_Spec) -> int {
 }
 
 lex_count :: proc(z: Zset, r: ^Lex_Spec) -> int {
+	if !lex_in_range(z, r) {
+		return 0
+	}
 	it := iter_make(z, false)
 	item: Item
 	buf: [lp.DECIMAL_BUFFER_BYTES]u8
-	count := 0
+	found := false
 	for iter_next(&it, &item) {
-		member := item_bytes(&item, &buf)
-		if lex_gte_min(member, r) && lex_lte_max(member, r) {
-			count += 1
+		if lex_gte_min(item_bytes(&item, &buf), r) {
+			found = true
+			break
 		}
+	}
+	count := 0
+	for found && lex_lte_max(item_bytes(&item, &buf), r) {
+		count += 1
+		found = iter_next(&it, &item)
 	}
 	return count
 }

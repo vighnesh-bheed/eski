@@ -888,7 +888,11 @@ find_tail :: proc "contextless" (s: Stream) -> (t: Tail, found: bool) {
 
 @(private)
 node_accepts :: proc "contextless" (node: [^]u8, incoming: int) -> bool {
-	if stream_node_max_bytes != 0 && lp_total(node) + incoming >= stream_node_max_bytes {
+	byte_cap := stream_node_max_bytes
+	if byte_cap == 0 || byte_cap > NODE_SIZE_CEILING {
+		byte_cap = NODE_SIZE_CEILING
+	}
+	if lp_total(node) + incoming >= byte_cap {
 		return false
 	}
 	if stream_node_max_entries == 0 {
@@ -974,6 +978,10 @@ append_entry :: proc(s: Stream, fv: [][]u8, mode: Xadd_Id_Mode, want: ID, now_ms
 		has_tail = false
 	}
 	stored := extend_node(s, &tail, id, fv) if has_tail else open_node(s, id, fv)
+	if !stored && has_tail {
+		seal_tail(s, &tail)
+		stored = open_node(s, id, fv)
+	}
 	if !stored {
 		return {}, .Entry_Too_Large
 	}
@@ -1077,10 +1085,6 @@ trim_inside :: proc "contextless" (s: Stream, spec: ^Trim_Spec, key: []u8, node:
 		at = entry_end(e)
 	}
 	cut := h.count - remaining
-	if remaining == 0 {
-		node_remove(s, key, node)
-		return cut
-	}
 	moved := node
 	node_counts_store(s, &moved, remaining, h.deleted + cut)
 	if moved != node {

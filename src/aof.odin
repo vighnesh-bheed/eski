@@ -5013,6 +5013,8 @@ aof_load_truncated :: proc(name: string, valid: i64, is_last: bool) -> Aof_Load_
 
 @(private = "file")
 aof_load_commands :: proc(r: ^Aof_Reader, name: string, is_last: bool, done_before: i64) -> Aof_Load_Outcome {
+	sm.trim_limit_relaxed = true
+	defer sm.trim_limit_relaxed = false
 	c := aof_fake_conn()
 	if len(dbs) > 0 {
 		c.db = &dbs[0]

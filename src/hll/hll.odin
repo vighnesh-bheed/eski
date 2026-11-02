@@ -138,16 +138,16 @@ scratch_load :: proc(scratch: ^[dynamic]u8, src: []u8) -> Error {
 	return .None
 }
 
-pfadd_apply :: proc(cur: []u8, elems: [][]u8, scratch: ^[dynamic]u8, sparse_max_bytes: int) -> (changed: bool, in_scratch: bool, err: Error) {
+pfadd_apply :: proc(cur: []u8, elems: [][]u8, scratch: ^[dynamic]u8, sparse_max_bytes: int) -> (updates: int, in_scratch: bool, err: Error) {
 	if cur[4] == HLL_DENSE {
 		regs := cur[HLL_HDR_SIZE:]
 		for elem in elems {
 			index, count := hll_pat_len(elem)
 			if dense_set(regs, index, count) {
-				changed = true
+				updates += 1
 			}
 		}
-		if changed {
+		if updates > 0 {
 			hll_invalidate_cache(cur)
 		}
 		return
@@ -177,10 +177,10 @@ pfadd_apply :: proc(cur: []u8, elems: [][]u8, scratch: ^[dynamic]u8, sparse_max_
 			return
 		}
 		if set_changed {
-			changed = true
+			updates += 1
 		}
 	}
-	if changed && in_scratch {
+	if updates > 0 && in_scratch {
 		hll_invalidate_cache(scratch[:])
 	}
 	return

@@ -786,6 +786,124 @@ section_config :: proc(g: ^Gen) {
 	g_cmd(g, "CONFIG", "SET", "list-max-listpack-size", "-2")
 }
 
+section_parity :: proc(g: ^Gen) {
+	g_cmd(g, "FLUSHALL")
+	g_cmd(g, "CONFIG", "SET", "list-max-listpack-size", "-1")
+	padding := make([dynamic]string, context.temp_allocator)
+	append(&padding, "RPUSH", "src")
+	for i in 0 ..< 200 {
+		append(&padding, fmt.tprintf("%040d", i))
+	}
+	moved := [?]string{"12345", "1", "-1", "0", "127", "128", "-129", "65536", "1234567890123", "9223372036854775807", "-9223372036854775808", "18446744073709551615", "007", "abcde"}
+	for value in moved {
+		for chained in ([2]bool{true, false}) {
+			for size in 4060 ..< 4100 {
+				g_cmd(g, "DEL", "src", "dst")
+				if chained {
+					g_cmds(g, padding[:])
+				} else {
+					g_cmd(g, "RPUSH", "src", "y")
+				}
+				g_cmd(g, "LPUSH", "src", value)
+				g_cmd(g, "RPUSH", "dst", rep('x', size))
+				g_cmd(g, "LMOVE", "src", "dst", "LEFT", "RIGHT")
+				g_cmd(g, "OBJECT", "ENCODING", "dst")
+			}
+		}
+	}
+	for chained in ([2]bool{true, false}) {
+		for size in 4076 ..< 4090 {
+			g_cmd(g, "DEL", "src", "dst")
+			if chained {
+				g_cmds(g, padding[:])
+			} else {
+				g_cmd(g, "RPUSH", "src", "y")
+			}
+			g_cmd(g, "RPUSH", "src", "12345")
+			g_cmd(g, "RPUSH", "dst", rep('x', size))
+			g_cmd(g, "RPOPLPUSH", "src", "dst")
+			g_cmd(g, "OBJECT", "ENCODING", "dst")
+			g_cmd(g, "LPUSH", "src", "12345")
+			g_cmd(g, "DEL", "dst")
+			g_cmd(g, "RPUSH", "dst", rep('x', size))
+			g_cmd(g, "BLMOVE", "src", "dst", "LEFT", "LEFT", "0")
+			g_cmd(g, "OBJECT", "ENCODING", "dst")
+		}
+	}
+	g_cmd(g, "DEL", "src", "dst")
+	g_cmd(g, "CONFIG", "SET", "list-max-listpack-size", "4")
+	start := make([dynamic]string, context.temp_allocator)
+	append(&start, "RPUSH", "l")
+	for i in 0 ..< 16 {
+		append(&start, tp(i))
+	}
+	g_write(g, "l", ..start[:])
+	g_write(g, "l", "LINSERT", "l", "AFTER", "10", "v31")
+	g_write(g, "l", "LREM", "l", "1", "9")
+	g_write(g, "l", "LINSERT", "l", "BEFORE", "5", "v42")
+	g_write(g, "l", "LINSERT", "l", "BEFORE", "15", "v31")
+	g_full(g, "l")
+	r := &g.rng
+	for fill in ([?]string{"4", "3", "2", "5", "1"}) {
+		g_cmd(g, "CONFIG", "SET", "list-max-listpack-size", fill)
+		for _ in 0 ..< 60 {
+			items := make([dynamic]string, context.temp_allocator)
+			first := make([dynamic]string, context.temp_allocator)
+			append(&first, "RPUSH", "l")
+			for i in 0 ..< 4 + rng_below(r, 27) {
+				append(&items, tp(i))
+				append(&first, tp(i))
+			}
+			g_cmd(g, "DEL", "l")
+			g_cmds(g, first[:])
+			for _ in 0 ..< 1 + rng_below(r, 10) {
+				if len(items) == 0 {
+					break
+				}
+				value := tp("v", rng_below(r, 100))
+				at := rng_below(r, len(items))
+				switch rng_below(r, 6) {
+				case 0, 1, 2:
+					pivot := items[at]
+					for item, i in items {
+						if item == pivot {
+							at = i
+							break
+						}
+					}
+					after := rng_chance(r, 50)
+					g_write(g, "l", "LINSERT", "l", "AFTER" if after else "BEFORE", pivot, value)
+					inject_at(&items, at + 1 if after else at, value)
+				case 3:
+					g_write(g, "l", "LSET", "l", tp(at), value)
+					items[at] = value
+				case 4:
+					target := items[at]
+					g_write(g, "l", "LREM", "l", "1", target)
+					for item, i in items {
+						if item == target {
+							ordered_remove(&items, i)
+							break
+						}
+					}
+				case 5:
+					g_write(g, "l", "LREM", "l", "-1", items[at])
+					target := items[at]
+					#reverse for item, i in items {
+						if item == target {
+							ordered_remove(&items, i)
+							break
+						}
+					}
+				}
+			}
+			g_full(g, "l")
+		}
+	}
+	g_cmd(g, "CONFIG", "SET", "list-max-listpack-size", "-2")
+	g_cmd(g, "FLUSHALL")
+}
+
 run_gen :: proc(dir: string) -> bool {
 	g := Gen {
 		buf = make([dynamic]u8),
@@ -801,8 +919,10 @@ run_gen :: proc(dir: string) -> bool {
 	section_lmove(&g)
 	section_lmpop(&g)
 	section_middle(&g)
+	section_parity(&g)
 	section_fuzz(&g, 6000)
 	g_cmd(&g, "HELLO", "3")
+	section_parity(&g)
 	section_basic(&g)
 	section_errors(&g)
 	section_lmpop(&g)

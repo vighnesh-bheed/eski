@@ -285,10 +285,55 @@ unit_groups :: proc() {
 	check(s.group_bytes == before, fmt.tprintf("group memory returns to %d, got %d", before, s.group_bytes))
 }
 
+unit_node_ceiling :: proc() {
+	saved_bytes := st.stream_node_max_bytes
+	saved_entries := st.stream_node_max_entries
+	defer {
+		st.stream_node_max_bytes = saved_bytes
+		st.stream_node_max_entries = saved_entries
+	}
+	value := make([]u8, 400 << 20)
+	defer delete(value)
+	for limit in ([2]int{0, 2 << 30}) {
+		st.stream_node_max_bytes = limit
+		st.stream_node_max_entries = 0
+		s := st.create()
+		for i in 1 ..= 3 {
+			use := st.ID{u64(i), 1}
+			got, res := st.append_entry(s, [][]u8{b("f"), value}, .Explicit, use, 0)
+			check(res == .Ok && got == use, fmt.tprintf("a 400 MiB entry %d is stored with stream-node-max-bytes %d", i, limit))
+		}
+		check(st.length(s) == 3 && st.node_count(s) == 2, fmt.tprintf("a third 400 MiB entry opens a second node at the 1 GiB cap with stream-node-max-bytes %d, got %d nodes", limit, st.node_count(s)))
+		st.destroy(s)
+	}
+}
+
+unit_trim_keeps_tombstone_node :: proc() {
+	saved_entries := st.stream_node_max_entries
+	defer st.stream_node_max_entries = saved_entries
+	st.stream_node_max_entries = 4
+	s := st.create()
+	defer st.destroy(s)
+	fv := [][]u8{b("f"), b("v")}
+	for i in ([?]u64{1, 2, 3, 4, 11, 12, 13}) {
+		st.append_entry(s, fv, .Explicit, st.ID{i, 1}, 0)
+	}
+	check(st.delete_item(s, st.ID{4, 1}), "delete the last entry of the first node")
+	spec := st.Trim_Spec {
+		rule   = .Min_Id,
+		min_id = st.ID{4, 1},
+	}
+	check(st.trim(s, &spec) == 3, "exact MINID trim removes the three live entries")
+	check(st.length(s) == 3 && st.node_count(s) == 2, fmt.tprintf("the node left with only deleted entries stays, got %d nodes", st.node_count(s)))
+	check(s.head == st.ID{11, 1}, "first entry moves to the second node")
+}
+
 run_unit :: proc() -> bool {
 	unit_ids()
 	unit_stream()
 	unit_groups()
+	unit_trim_keeps_tombstone_node()
+	unit_node_ceiling()
 	fmt.printfln("streamtype unit: %d checks, %d failures", checks, failures)
 	free_all(context.temp_allocator)
 	return failures == 0

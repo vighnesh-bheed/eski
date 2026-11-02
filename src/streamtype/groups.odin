@@ -344,7 +344,7 @@ place_of :: proc "contextless" (s: Stream, id: ID) -> Id_Place {
 
 added_through :: proc "contextless" (s: Stream, id: ID) -> (reached: i64, known: bool) {
 	if s.added == 0 {
-		return 0, true
+		return 0, s.live == 0
 	}
 	place := place_of(s, id)
 	switch place {
@@ -485,8 +485,8 @@ claim_entry :: proc(s: Stream, g: ^Group, member: ^Member, id: ID, a: ^Claim_Opt
 		}
 	}
 	when_ms := now
-	if a.stamp != CLAIM_UNSET {
-		when_ms = min(a.stamp, now)
+	if a.stamp >= 0 && a.stamp < now {
+		when_ms = a.stamp
 	}
 	d.sent_ms = when_ms
 	if a.tries >= 0 {

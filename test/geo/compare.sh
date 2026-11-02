@@ -18,7 +18,7 @@ REF_PORT="${ESKI_GEO_REF_PORT:-6498}"
 PORT="${ESKI_GEO_PORT:-6497}"
 SERVER="${ESKI_GEO_SERVER:-bin/eski}"
 SERVER_PID=""
-IMAGE="docker.io/library/redis:7"
+IMAGE="${ESKI_GEO_REF_IMAGE:-docker.io/library/redis:7}"
 NAME="eski-geo-compare-$REF_PORT"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/eski-geo-compare.XXXXXX")"
 

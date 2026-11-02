@@ -140,7 +140,7 @@ parse_zrange :: proc "contextless" (argv: [][]u8, key_at: int, store: bool, kind
 	if a.kind == .Auto {
 		a.kind = .Rank
 	}
-	if has_limit && a.kind == .Rank && (a.offset != 0 || a.limit != -1) {
+	if has_limit && a.kind == .Rank && a.limit != -1 {
 		return a, .Limit_Rank
 	}
 	if a.withscores && a.kind == .Lex {

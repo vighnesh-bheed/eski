@@ -2,8 +2,6 @@ package hashtype
 
 import rdb "../rdb"
 
-TABLE_EX_HEADER_CEILING :: FIELD_DEADLINE_MAX + 1
-
 read_row_deadline :: proc(r: ^rdb.Reader, layout: Row_Layout) -> (deadline: u64, ok: bool) {
 	encoded := rdb.get_len(r)
 	if !rdb.ok(r) {
@@ -28,10 +26,6 @@ read_table_ex_header :: proc(r: ^rdb.Reader) -> (base: u64, ok: bool) {
 	if !got {
 		r.status = .Ok
 		rdb.corrupt(r, "has an invalid field expiry: the minimum deadline is truncated")
-		return
-	}
-	if u64(header) > TABLE_EX_HEADER_CEILING {
-		rdb.corrupt(r, "has an invalid field expiry: the minimum deadline is out of range")
 		return
 	}
 	return u64(header), true

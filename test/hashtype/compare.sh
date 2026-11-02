@@ -18,7 +18,7 @@ REF_PORT="${ESKI_HASH_REF_PORT:-6491}"
 PORT="${ESKI_HASH_PORT:-6492}"
 SERVER="${ESKI_HASH_SERVER:-bin/eski}"
 SERVER_PID=""
-IMAGE="docker.io/library/redis:7"
+IMAGE="${ESKI_HASH_REF_IMAGE:-docker.io/library/redis:7}"
 NAME="eski-hash-compare-$REF_PORT"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/eski-hash-compare.XXXXXX")"
 

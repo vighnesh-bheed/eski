@@ -287,7 +287,7 @@ parse_request :: proc(argv: [][]u8, src_index: int, flags: Request_Flags, z: zt.
 			i += 1
 		} else if .Search_Store in flags && word_is(arg, "storedist") {
 			req.store_dist = true
-		} else if searching && word_is(arg, "frommember") && left > 1 && !from_member && !from_lonlat {
+		} else if searching && word_is(arg, "frommember") && left > 1 && !from_lonlat {
 			if z != nil {
 				ok: bool
 				req.shape.xy, ok = member_xy(z, argv[i + 1])
@@ -297,7 +297,7 @@ parse_request :: proc(argv: [][]u8, src_index: int, flags: Request_Flags, z: zt.
 			}
 			from_member = true
 			i += 1
-		} else if searching && word_is(arg, "fromlonlat") && left > 2 && !from_member && !from_lonlat {
+		} else if searching && word_is(arg, "fromlonlat") && left > 2 && !from_member {
 			req.shape.xy, err = parse_long_lat(argv[i + 1], argv[i + 2])
 			if err != .None {
 				req.pair = req.shape.xy
@@ -305,13 +305,13 @@ parse_request :: proc(argv: [][]u8, src_index: int, flags: Request_Flags, z: zt.
 			}
 			from_lonlat = true
 			i += 2
-		} else if searching && word_is(arg, "byradius") && left > 2 && !by_radius && !by_box {
+		} else if searching && word_is(arg, "byradius") && left > 2 && !by_box {
 			if err = parse_distance(argv[i + 1], argv[i + 2], &req.shape); err != .None {
 				return
 			}
 			by_radius = true
 			i += 2
-		} else if searching && word_is(arg, "bybox") && left > 3 && !by_radius && !by_box {
+		} else if searching && word_is(arg, "bybox") && left > 3 && !by_radius {
 			if err = parse_box(argv[i + 1], argv[i + 2], argv[i + 3], &req.shape); err != .None {
 				return
 			}

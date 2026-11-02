@@ -456,17 +456,40 @@ expiry_metadata_codecs_truncation_and_duplicates :: proc(t: ^testing.T) {
 
 @(test)
 expiry_invalid_metadata_boundaries :: proc(t: ^testing.T) {
+	defer ordinary_cleanup()
 	w: rdb.Writer
-	rdb.writer_init_mem(&w, false, false)
-	rdb.put_ms(&w, i64(FIELD_DEADLINE_MAX + 2))
 	r: rdb.Reader
-	rdb.reader_init_mem(&r, rdb.writer_bytes(&w), false)
-	h := rdb_load_meta(&r, rdb.TYPE_HASH_TABLE_EX, true)
-	testing.expect(t, h == nil && r.status == .Corrupt)
-	testing.expect_value(t, rdb.reader_reason(&r), "has an invalid field expiry: the minimum deadline is out of range")
-	destroy(h)
-	rdb.reader_destroy(&r)
-	rdb.writer_destroy(&w)
+	h: Hash
+	for header in ([4]u64{FIELD_DEADLINE_MAX + 1, FIELD_DEADLINE_MAX + 2, 1 << 63, max(u64)}) {
+		rdb.writer_init_mem(&w, false, false)
+		rdb.put_ms(&w, i64(header))
+		rdb.put_len(&w, 1)
+		rdb.put_len(&w, 0)
+		rdb.put_string(&w, ordinary_bytes("f"))
+		rdb.put_string(&w, ordinary_bytes("v"))
+		rdb.reader_init_mem(&r, rdb.writer_bytes(&w), false)
+		h = rdb_load_meta(&r, rdb.TYPE_HASH_TABLE_EX, true)
+		testing.expect(t, h != nil && r.status == .Ok)
+		if h != nil {
+			v, deadline, found := get_raw(h, ordinary_bytes("f"))
+			testing.expect(t, found && deadline == DEADLINE_UNSET && value_eq(v, ordinary_bytes("v")))
+		}
+		destroy(h)
+		rdb.reader_destroy(&r)
+		rdb.writer_destroy(&w)
+		rdb.writer_init_mem(&w, false, false)
+		rdb.put_ms(&w, i64(header))
+		rdb.put_len(&w, 1)
+		rdb.put_len(&w, 1)
+		rdb.put_string(&w, ordinary_bytes("f"))
+		rdb.put_string(&w, ordinary_bytes("v"))
+		rdb.reader_init_mem(&r, rdb.writer_bytes(&w), false)
+		h = rdb_load_meta(&r, rdb.TYPE_HASH_TABLE_EX, true)
+		testing.expect(t, h == nil && r.status == .Corrupt)
+		destroy(h)
+		rdb.reader_destroy(&r)
+		rdb.writer_destroy(&w)
+	}
 	rdb.writer_init_mem(&w, false, false)
 	rdb.put_len(&w, 1)
 	rdb.put_len(&w, FIELD_DEADLINE_MAX + 1)

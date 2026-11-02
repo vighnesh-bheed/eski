@@ -184,7 +184,8 @@ model_pfadd :: proc(m: ^Model, argv: [][]u8) {
 	empty := hll.HLL_EMPTY_SPARSE
 	cur := empty[:] if created else v.val
 	clear(&m.scratch)
-	changed, in_scratch, err := hll.pfadd_apply(cur, argv[2:], &m.scratch, m.sparse_max_bytes)
+	updates, in_scratch, err := hll.pfadd_apply(cur, argv[2:], &m.scratch, m.sparse_max_bytes)
+	changed := updates > 0
 	if created {
 		model_set(m, key, m.scratch[:] if in_scratch && changed else cur)
 	} else if in_scratch && changed {
@@ -201,9 +202,7 @@ model_pfadd :: proc(m: ^Model, argv: [][]u8) {
 	if created {
 		m.dirty += 1
 	}
-	if changed {
-		m.dirty += 1
-	}
+	m.dirty += i64(updates)
 	notify_event(m, "pfadd", key)
 	put_int(m, 1)
 }

@@ -147,9 +147,6 @@ block_timeout_ms :: proc "contextless" (v: ld.F80) -> (ms: i64, err: string) {
 		return 0, ERR_TIMEOUT_RANGE
 	case .Finite:
 	}
-	if v.neg {
-		return 0, ERR_TIMEOUT_NEGATIVE
-	}
 	if v.mant == 0 {
 		return 0, ""
 	}
@@ -165,6 +162,12 @@ block_timeout_ms :: proc "contextless" (v: ld.F80) -> (ms: i64, err: string) {
 			product += 1
 		}
 		exp += extra
+	}
+	if v.neg {
+		if exp >= 0 || (-exp < 128 && product >> uint(-exp) != 0) {
+			return 0, ERR_TIMEOUT_NEGATIVE
+		}
+		return 0, ""
 	}
 	if exp >= 0 {
 		if exp > 62 || product > limit >> uint(exp) {

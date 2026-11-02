@@ -397,7 +397,7 @@ rdb_load :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> Stream {
 		s.tomb = ID_MIN
 		s.head = boundary_id(s, .Head, false)
 	}
-	if deep && s.nodes.stored == 0 && s.live != 0 {
+	if s.nodes.stored == 0 && s.live != 0 {
 		return rdb_fail(r, s, "Stream length inconsistent with empty listpack set")
 	}
 	groups: u64
