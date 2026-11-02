@@ -454,9 +454,9 @@ unit_match_and_cursor :: proc() {
 		{"[\\]]", "]", true},
 	}
 	for c in cases {
-		check(ht.string_match_len(b(c.pat), b(c.str), false) == c.want, fmt.tprintf("match %q %q", c.pat, c.str))
+		check(ht.matches_pattern(b(c.pat), b(c.str), false) == c.want, fmt.tprintf("match %q %q", c.pat, c.str))
 	}
-	check(ht.string_match_len(b("HeLLo"), b("hello"), true), "match nocase")
+	check(ht.matches_pattern(b("HeLLo"), b("hello"), true), "match nocase")
 	cursors := [?]struct {
 		s:  string,
 		v:  u64,

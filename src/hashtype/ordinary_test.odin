@@ -603,7 +603,7 @@ ordinary_loaded_metadata_precedes_attachment :: proc(t: ^testing.T) {
 }
 
 @(test)
-ordinary_small_table_samples_and_retry_rollback :: proc(t: ^testing.T) {
+ordinary_small_table_samples_keep_earlier_rows :: proc(t: ^testing.T) {
 	h := create()
 	defer ordinary_cleanup()
 	defer destroy(h)
@@ -623,9 +623,9 @@ ordinary_small_table_samples_and_retry_rollback :: proc(t: ^testing.T) {
 	defer delete(values)
 	append(&fields, Value{str = ordinary_bytes("prefix")})
 	append(&values, Value{str = ordinary_bytes("prefix-value")})
-	testing.expect(t, !random_unique_try_table(h.table, 2, 1, true, &fields, &values))
-	testing.expect_value(t, len(fields), 1)
-	testing.expect_value(t, len(values), 1)
+	random_unique(h, 2, true, &fields, &values)
+	testing.expect_value(t, len(fields), 3)
+	testing.expect_value(t, len(values), 3)
 	testing.expect(t, value_eq(fields[0], ordinary_bytes("prefix")))
 	testing.expect(t, value_eq(values[0], ordinary_bytes("prefix-value")))
 	for count in ([3]int{1, 7, 39}) {

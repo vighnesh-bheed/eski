@@ -9,48 +9,70 @@ b :: proc(s: string) -> []u8 {
 }
 
 id_str :: proc(id: st.ID) -> string {
-	buf: [st.ID_STR_LEN]u8
+	buf: [st.ID_TEXT_MAX]u8
 	return fmt.tprint(string(st.format_id(&buf, id)))
+}
+
+Id_Form :: enum u8 {
+	Sentinel,
+	Exact,
+	Xadd,
+}
+
+parse_in_form :: proc(s: []u8, form: Id_Form) -> (id: st.ID, given: bool, ok: bool) {
+	switch form {
+	case .Sentinel:
+		id, ok = st.parse_id_or_sentinel(s, 0)
+		given = true
+	case .Exact:
+		id, ok = st.parse_exact_id(s)
+		given = true
+	case .Xadd:
+		mode: st.Xadd_Id_Mode
+		id, mode, ok = st.parse_xadd_id(s)
+		given = mode != .Generated_Seq
+	}
+	return
 }
 
 unit_ids :: proc() {
 	Case :: struct {
-		s:       string,
-		strict:  bool,
-		partial: bool,
-		ok:      bool,
-		want:    st.ID,
-		given:   bool,
+		s:     string,
+		form:  Id_Form,
+		ok:    bool,
+		want:  st.ID,
+		given: bool,
 	}
 	MAX :: max(u64)
 	cases := [?]Case {
-		{"1-2", true, false, true, {1, 2}, true},
-		{"5", true, false, true, {5, 0}, true},
-		{"-", false, false, true, {0, 0}, true},
-		{"+", false, false, true, {MAX, MAX}, true},
-		{"-", true, false, false, {}, true},
-		{"+", true, false, false, {}, true},
-		{"007", true, false, true, {7, 0}, true},
-		{" 7", true, false, true, {7, 0}, true},
-		{"+7", true, false, true, {7, 0}, true},
-		{"7 ", true, false, false, {}, true},
-		{"-0", true, false, false, {}, true},
-		{"0--05", true, false, true, {0, MAX - 4}, true},
-		{"1--5", true, false, false, {}, true},
-		{"18446744073709551615-18446744073709551615", true, false, true, {MAX, MAX}, true},
-		{"18446744073709551616", true, false, false, {}, true},
-		{"1-*", true, true, true, {1, 0}, false},
-		{"1-*", true, false, false, {}, true},
-		{"*", true, true, false, {}, true},
-		{"", true, false, false, {}, true},
-		{"1-", true, false, false, {}, true},
-		{"0x10", true, false, false, {}, true},
-		{"1.5", true, false, false, {}, true},
-		{"5\x00junk", true, false, true, {5, 0}, true},
-		{"5-1\x00-9", true, false, true, {5, 1}, true},
+		{"1-2", .Exact, true, {1, 2}, true},
+		{"5", .Exact, true, {5, 0}, true},
+		{"-", .Sentinel, true, {0, 0}, true},
+		{"+", .Sentinel, true, {MAX, MAX}, true},
+		{"-", .Exact, false, {}, true},
+		{"+", .Exact, false, {}, true},
+		{"007", .Exact, true, {7, 0}, true},
+		{" 7", .Exact, true, {7, 0}, true},
+		{"+7", .Exact, true, {7, 0}, true},
+		{"7 ", .Exact, false, {}, true},
+		{"-0", .Exact, false, {}, true},
+		{"0--05", .Exact, true, {0, MAX - 4}, true},
+		{"1--5", .Exact, false, {}, true},
+		{"18446744073709551615-18446744073709551615", .Exact, true, {MAX, MAX}, true},
+		{"18446744073709551616", .Exact, false, {}, true},
+		{"1-*", .Xadd, true, {1, 0}, false},
+		{"1-*", .Exact, false, {}, true},
+		{"*", .Xadd, true, {0, 0}, true},
+		{"*", .Exact, false, {}, true},
+		{"", .Exact, false, {}, true},
+		{"1-", .Exact, false, {}, true},
+		{"0x10", .Exact, false, {}, true},
+		{"1.5", .Exact, false, {}, true},
+		{"5\x00junk", .Exact, true, {5, 0}, true},
+		{"5-1\x00-9", .Exact, true, {5, 1}, true},
 	}
 	for c in cases {
-		id, given, ok := st.parse_id(b(c.s), 0, c.strict, c.partial)
+		id, given, ok := parse_in_form(b(c.s), c.form)
 		check(ok == c.ok, fmt.tprintf("parse %q ok=%v", c.s, ok))
 		if ok && c.ok {
 			check(id == c.want, fmt.tprintf("parse %q gave %s", c.s, id_str(id)))
@@ -61,7 +83,7 @@ unit_ids :: proc() {
 	for i in 0 ..< len(long) {
 		long[i] = '1'
 	}
-	_, _, ok := st.parse_id(long, 0, true, false)
+	_, ok := st.parse_exact_id(long)
 	check(!ok, "128 byte id is rejected")
 	id := st.ID{5, max(u64)}
 	check(st.incr_id(&id) && id == st.ID{6, 0}, "incr carries into ms")
@@ -100,11 +122,11 @@ unit_stream :: proc() {
 	check(!st.delete_item(s, st.ID{4, 0}), "delete it again")
 	check(st.length(s) == 9, "length after delete")
 	check(st.range_count(s, &lo, &hi, 0, false) == 4, "range skips the tombstone")
-	args := st.Add_Trim_Args {
-		trim_strategy = .Maxlen,
-		maxlen        = 5,
-		approx_trim   = true,
-		limit         = 100,
+	args := st.Trim_Spec {
+		rule    = .Max_Len,
+		max_len = 5,
+		nearly  = true,
+		limit   = 100,
 	}
 	removed := st.trim(s, &args)
 	check(removed == 3, fmt.tprintf("approximate trim removes whole nodes only, got %d", removed))
@@ -127,7 +149,7 @@ unit_stream :: proc() {
 	check(res == .Ok && s.last_id == st.ID{400, 2}, "partial id continues the sequence")
 	use = st.ID{399, 0}
 	_, res = st.append_item(s, fv, &use, false, 0)
-	check(res == .Edom, "partial id in the past fails")
+	check(res == .Id_Not_Greater, "partial id in the past fails")
 }
 
 unit_groups :: proc() {

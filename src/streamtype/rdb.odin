@@ -1,5 +1,6 @@
 package streamtype
 
+import integer "../integer"
 import lp "../listpack"
 import rx "../rax"
 import rdb "../rdb"
@@ -153,7 +154,7 @@ node_int :: proc(p: [^]u8) -> (i64, bool) {
 		return elem_int(p), true
 	}
 	buf: [lp.LP_INTBUF_SIZE]u8
-	return parse_int_text(elem_bytes(p, &buf))
+	return integer.parse_i64(elem_bytes(p, &buf))
 }
 
 @(private)

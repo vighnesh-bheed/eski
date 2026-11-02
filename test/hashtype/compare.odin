@@ -514,7 +514,7 @@ scan_union_ok :: proc(wrapper: Reply, h: ht.Hash, opts: ht.Scan_Options, now: u6
 	fields, values := model_pairs(h, now)
 	expected := make(map[string]bool, 16, context.temp_allocator)
 	for f in fields {
-		if !opts.use_pattern || ht.string_match_len(opts.pattern, transmute([]u8)f, false) {
+		if !opts.use_pattern || ht.matches_pattern(opts.pattern, transmute([]u8)f, false) {
 			expected[f] = true
 		}
 	}

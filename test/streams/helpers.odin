@@ -61,12 +61,12 @@ new_stream_from :: proc(entries: [][]string) -> st.Stream {
 		for p, i in e {
 			argv[i] = transmute([]u8)p
 		}
-		args, idpos, err := st.parse_add_trim_args(argv, true)
+		spec, err := st.parse_xadd(argv)
 		assert(err == .None)
-		_, aerr := st.xadd_apply(s, &args, argv[idpos + 1:], 1)
+		_, aerr := st.xadd_apply(s, &spec, argv[spec.fields_at:], 1)
 		assert(aerr == .None)
-		if args.trim_strategy != .None {
-			st.trim(s, &args)
+		if spec.trim.rule != .Off {
+			st.trim(s, &spec.trim)
 		}
 	}
 	return s

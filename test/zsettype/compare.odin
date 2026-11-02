@@ -358,7 +358,7 @@ scan_pages_model :: proc(m: ^Model, args: [][]u8) -> []u8 {
 scan_union_ok :: proc(wrapper: Reply, z: zt.Zset, opts: ht.Scan_Options, complete: bool) -> (ok: bool, why: string) {
 	expected := make(map[string]string, 16, context.temp_allocator)
 	for p in model_pairs(z) {
-		if !opts.use_pattern || ht.string_match_len(opts.pattern, transmute([]u8)p.member, false) {
+		if !opts.use_pattern || ht.matches_pattern(opts.pattern, transmute([]u8)p.member, false) {
 			buf: [zt.G17_MAX]u8
 			n := zt.format_g17(buf[:], transmute(f64)p.bits)
 			expected[p.member] = strings.clone(string(buf[:n]), context.temp_allocator)

@@ -3,8 +3,7 @@ package hashtype
 import lp "../listpack"
 import "base:intrinsics"
 
-HRANDFIELD_SUB_STRATEGY_MUL :: 3
-HRANDFIELD_RANDOM_SAMPLE_LIMIT :: 1000
+RANDOM_PICK_BATCH :: 1000
 
 random_state: u64 = 0x8b8b8b8b5a5a5a5a
 
@@ -87,179 +86,129 @@ random_element :: proc(h: Hash) -> (field: Value, value: Value) {
 	return value_from_entry(f), value_from_entry(v)
 }
 
-Random_Choice :: struct {
-	index: int,
-	order: int,
+put_pick :: #force_inline proc(fields: ^[dynamic]Value, values: ^[dynamic]Value, keep_value: bool, field: Value, value: Value) {
+	append(fields, field)
+	if keep_value {
+		append(values, value)
+	}
+}
+
+put_blob :: #force_inline proc(fields: ^[dynamic]Value, values: ^[dynamic]Value, keep_value: bool, b: ^Blob) {
+	put_pick(fields, values, keep_value, Value{str = blob_field(b)}, Value{str = blob_value(b)})
+}
+
+Packed_Row :: struct {
+	field: Value,
+	value: Value,
+}
+
+packed_rows :: proc(h: Hash) -> []Packed_Row {
+	rows := make([dynamic]Packed_Row, 0, length(h))
+	walk := iterator(h)
+	for next(&walk) {
+		append(&rows, Packed_Row{current_field(&walk), current_value(&walk)})
+	}
+	return rows[:]
+}
+
+packed_repeats :: proc(h: Hash, count: int, with_values: bool, fields: ^[dynamic]Value, values: ^[dynamic]Value) {
+	rows := packed_rows(h)
+	defer delete(rows)
+	if len(rows) == 0 {
+		return
+	}
+	for _ in 0 ..< count {
+		row := rows[rand_below(u64(len(rows)))]
+		put_pick(fields, values, with_values, row.field, row.value)
+	}
 }
 
 random_with_repeats :: proc(h: Hash, count: int, with_values: bool, fields: ^[dynamic]Value, values: ^[dynamic]Value) {
-	n := length(h)
-	if n == 0 || count <= 0 {
+	if count <= 0 || length(h) == 0 {
 		return
 	}
-	if h.encoding == .Hashtable {
-		for _ in 0 ..< count {
-			b := table_random_blob(h.table)
-			append(fields, Value{str = blob_field(b)})
-			if with_values {
-				append(values, Value{str = blob_value(b)})
-			}
-		}
+	if h.encoding != .Hashtable {
+		packed_repeats(h, count, with_values, fields, values)
 		return
 	}
-	remaining := count
-	for remaining > 0 {
-		batch := min(remaining, HRANDFIELD_RANDOM_SAMPLE_LIMIT)
-		choices := make([]Random_Choice, batch)
-		start := len(fields^)
-		vstart := len(values^)
-		for i in 0 ..< batch {
-			choices[i] = Random_Choice{index = int(rand_below(u64(n))), order = i}
-			append(fields, Value{})
-			if with_values {
-				append(values, Value{})
-			}
-		}
-		for i in 1 ..< batch {
-			x := choices[i]
-			j := i
-			for j > 0 && choices[j - 1].index > x.index {
-				choices[j] = choices[j - 1]
-				j -= 1
-			}
-			choices[j] = x
-		}
-		it := iterator(h)
-		row := 0
-		pick := 0
-		for next(&it) {
-			for pick < batch && choices[pick].index == row {
-				order := choices[pick].order
-				fields^[start + order] = current_field(&it)
-				if with_values {
-					values^[vstart + order] = current_value(&it)
-				}
-				pick += 1
-			}
-			if pick == batch {
-				break
-			}
-			row += 1
-		}
-		delete(choices)
-		remaining -= batch
+	for _ in 0 ..< count {
+		put_blob(fields, values, with_values, table_random_blob(h.table))
 	}
 }
 
-Unique_Set :: struct {
-	slots: []u64,
-	mask: u64,
+every_row :: proc(h: Hash, with_values: bool, fields: ^[dynamic]Value, values: ^[dynamic]Value) {
+	walk := iterator(h)
+	for next(&walk) {
+		put_pick(fields, values, with_values, current_field(&walk), current_value(&walk))
+	}
 }
 
-unique_insert :: proc "contextless" (s: ^Unique_Set, idx: int) -> bool {
-	x := u64(idx) + 1
-	i := ((x >> 4) ~ (x >> 20) ~ x) & s.mask
-	for s.slots[i] != 0 {
-		if s.slots[i] == x {
-			return false
+packed_ordered_subset :: proc(h: Hash, want: int, total: int, with_values: bool, fields: ^[dynamic]Value, values: ^[dynamic]Value) {
+	chosen := make([]bool, total)
+	defer delete(chosen)
+	for top in total - want ..< total {
+		pick := int(rand_below(u64(top + 1)))
+		if chosen[pick] {
+			chosen[top] = true
+		} else {
+			chosen[pick] = true
 		}
-		i = (i + 1) & s.mask
 	}
-	s.slots[i] = x
-	return true
+	walk := iterator(h)
+	for position := 0; next(&walk); position += 1 {
+		if position < total && chosen[position] {
+			put_pick(fields, values, with_values, current_field(&walk), current_value(&walk))
+		}
+	}
 }
 
-random_unique_try_table :: proc(t: ^Table, count, attempt_budget: int, with_values: bool, fields: ^[dynamic]Value, values: ^[dynamic]Value) -> bool {
-	resize_require(count > 0 && count <= t.count && count <= HRANDFIELD_RANDOM_SAMPLE_LIMIT && attempt_budget >= 0)
-	if attempt_budget == 0 {
-		return false
-	}
-	if count == 1 {
+table_distinct_draws :: proc(t: ^Table, want: int, with_values: bool, fields: ^[dynamic]Value, values: ^[dynamic]Value) {
+	taken := make(map[^Blob]struct{}, want)
+	defer delete(taken)
+	for len(taken) < want {
 		b := table_random_blob(t)
-		append(fields, Value{str = blob_field(b)})
-		if with_values {
-			append(values, Value{str = blob_value(b)})
+		if b == nil {
+			return
 		}
-		return true
-	}
-	capacity := next_pow2(count * 2)
-	storage := mem_alloc(capacity * size_of(u64))
-	defer mem_free(storage)
-	seen := Unique_Set{slots = (cast([^]u64)storage)[:capacity]}
-	seen.mask = u64(len(seen.slots) - 1)
-	start := len(fields^)
-	vstart := len(values^)
-	for _ in 0 ..< attempt_budget {
-		b := table_random_blob(t)
-		if !unique_insert(&seen, int(uintptr(b))) {
+		if b in taken {
 			continue
 		}
-		append(fields, Value{str = blob_field(b)})
-		if with_values {
-			append(values, Value{str = blob_value(b)})
-		}
-		if len(fields^) - start == count {
-			return true
+		taken[b] = {}
+		put_blob(fields, values, with_values, b)
+	}
+}
+
+table_shuffled_prefix :: proc(t: ^Table, want: int, with_values: bool, fields: ^[dynamic]Value, values: ^[dynamic]Value) {
+	pool := make([dynamic]^Blob, 0, t.count)
+	defer delete(pool)
+	for bank in 0 ..< 2 {
+		slots, capacity := table_bank(t, bank)
+		for i in 0 ..< capacity {
+			if blob_live(slots[i].blob) {
+				append(&pool, slots[i].blob)
+			}
 		}
 	}
-	resize(fields, start)
-	resize(values, vstart)
-	return false
+	for front in 0 ..< min(want, len(pool)) {
+		swap := front + int(rand_below(u64(len(pool) - front)))
+		pool[front], pool[swap] = pool[swap], pool[front]
+		put_blob(fields, values, with_values, pool[front])
+	}
 }
 
 random_unique :: proc(h: Hash, count: int, with_values: bool, fields: ^[dynamic]Value, values: ^[dynamic]Value) {
-	n := length(h)
-	k := min(max(count, 0), n)
-	if k == 0 {
+	total := length(h)
+	want := clamp(count, 0, total)
+	switch {
+	case want == 0:
 		return
-	}
-	if h.encoding == .Hashtable && k <= HRANDFIELD_RANDOM_SAMPLE_LIMIT && k <= n / HRANDFIELD_SUB_STRATEGY_MUL {
-		if random_unique_try_table(h.table, k, k * 8 + 32, with_values, fields, values) {
-			return
-		}
-	}
-	if h.encoding != .Hashtable && k < n {
-		it := iterator(h)
-		row := 0
-		picked := 0
-		for picked < k && next(&it) {
-			if int(rand_below(u64(n - row))) < k - picked {
-				append(fields, current_field(&it))
-				if with_values {
-					append(values, current_value(&it))
-				}
-				picked += 1
-			}
-			row += 1
-		}
-		return
-	}
-	start := len(fields^)
-	vstart := len(values^)
-	it := iterator(h)
-	row := 0
-	for next(&it) {
-		if row < k {
-			append(fields, current_field(&it))
-			if with_values {
-				append(values, current_value(&it))
-			}
-		} else if slot := int(rand_below(u64(row + 1))); slot < k {
-			fields^[start + slot] = current_field(&it)
-			if with_values {
-				values^[vstart + slot] = current_value(&it)
-			}
-		}
-		row += 1
-	}
-	if k == n {
-		return
-	}
-	for i := k - 1; i > 0; i -= 1 {
-		j := int(rand_below(u64(i + 1)))
-		fields^[start + i], fields^[start + j] = fields^[start + j], fields^[start + i]
-		if with_values {
-			values^[vstart + i], values^[vstart + j] = values^[vstart + j], values^[vstart + i]
-		}
+	case want == total:
+		every_row(h, with_values, fields, values)
+	case h.encoding != .Hashtable:
+		packed_ordered_subset(h, want, total, with_values, fields, values)
+	case want * 2 <= total:
+		table_distinct_draws(h.table, want, with_values, fields, values)
+	case:
+		table_shuffled_prefix(h.table, want, with_values, fields, values)
 	}
 }

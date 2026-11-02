@@ -359,7 +359,7 @@ hrandfield_with_count :: proc(c: ^Conn, key: []u8, l: i64, with_values: bool) {
 		for remaining > 0 {
 			clear(&hash_fields)
 			clear(&hash_values)
-			batch := min(remaining, ht.HRANDFIELD_RANDOM_SAMPLE_LIMIT)
+			batch := min(remaining, ht.RANDOM_PICK_BATCH)
 			ht.random_with_repeats(h, int(batch), with_values, &hash_fields, &hash_values)
 			reply_random_pairs(c, with_values)
 			remaining -= batch

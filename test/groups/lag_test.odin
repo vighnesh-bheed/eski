@@ -8,12 +8,12 @@ xdel :: proc(s: st.Stream, x: ..st.ID) -> int {
 }
 
 trim_maxlen :: proc(s: st.Stream, n: i64) -> i64 {
-	a := st.Add_Trim_Args{trim_strategy = .Maxlen, maxlen = n}
+	a := st.Trim_Spec{rule = .Max_Len, max_len = n}
 	return st.trim(s, &a)
 }
 
 trim_minid :: proc(s: st.Stream, x: st.ID) -> i64 {
-	a := st.Add_Trim_Args{trim_strategy = .Minid, minid = x}
+	a := st.Trim_Spec{rule = .Min_Id, min_id = x}
 	return st.trim(s, &a)
 }
 
@@ -154,7 +154,7 @@ lag_after_trimming_and_setid :: proc(t: ^testing.T) {
 	expect_lag(t, s, g, 0)
 	st.group_set_id(g, id(0), 0)
 	expect_lag(t, s, g, 0)
-	a := st.Setid_Args{id = id(9), entries_added = 20, max_xdel_id = id(8)}
+	a := st.Setid_Args{id = id(9), entries_added = 20, max_deleted_id = id(8)}
 	testing.expect_value(t, st.xsetid_apply(s, &a), st.Error.None)
 	expect_lag(t, s, g, 0)
 	add(t, s, 10)

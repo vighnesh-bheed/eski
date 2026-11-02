@@ -1118,7 +1118,7 @@ aof_put_int :: proc(b: ^[dynamic]u8, v: i64) {
 }
 
 aof_put_id :: proc(b: ^[dynamic]u8, id: sm.ID) {
-	tmp: [sm.ID_STR_LEN]u8
+	tmp: [sm.ID_TEXT_MAX]u8
 	aof_put_arg(b, sm.format_id(&tmp, id))
 }
 
@@ -1763,7 +1763,7 @@ aof_stream_of :: proc(db: ^Db, key: []u8) -> sm.Stream {
 }
 
 aof_parse_id :: proc(s: []u8) -> (id: sm.ID, ok: bool) {
-	return sm.parse_strict_id(s)
+	return sm.parse_exact_id(s)
 }
 
 aof_has_token :: proc(argv: [][]u8, from: int, tok: string) -> bool {
@@ -2124,7 +2124,7 @@ aof_claim_snapshot :: proc(c: ^Conn, argv: [][]u8, with_ids: bool) {
 		return
 	}
 	for i := 5; i < len(argv); i += 1 {
-		id, idok := sm.parse_strict_id(argv[i])
+		id, idok := sm.parse_exact_id(argv[i])
 		if !idok {
 			break
 		}
@@ -2610,7 +2610,7 @@ aof_tr_blmove :: proc(c: ^Conn, argv: [][]u8, reply: []u8, plain: bool) {
 	aof_put_argv(b, argv[1:5])
 }
 
-aof_trim_threshold :: proc(s: sm.Stream, minid: bool, dst: ^[sm.ID_STR_LEN]u8) -> []u8 {
+aof_trim_threshold :: proc(s: sm.Stream, minid: bool, dst: ^[sm.ID_TEXT_MAX]u8) -> []u8 {
 	if !minid {
 		n := format_i64(&dst[0], i64(s.length))
 		return dst[:n]
@@ -2681,7 +2681,7 @@ aof_parse_trim :: proc(argv: [][]u8, from: int, adding: bool) -> (t: Aof_Trim) {
 
 @(private = "file")
 aof_emit_trimmed :: proc(db: ^Db, argv: [][]u8, t: Aof_Trim, s: sm.Stream, idpos: int, id: sm.ID) {
-	tbuf: [sm.ID_STR_LEN]u8
+	tbuf: [sm.ID_TEXT_MAX]u8
 	thr: []u8
 	if t.approx {
 		thr = aof_trim_threshold(s, eq_nocase(argv[t.strat], "minid"), &tbuf)
@@ -2820,7 +2820,7 @@ aof_reply_stream_ids :: proc(p: ^Aof_Rp, out: ^[dynamic]sm.ID) -> bool {
 			if !iok || inull {
 				return false
 			}
-			id, idok := sm.parse_strict_id(idb)
+			id, idok := sm.parse_exact_id(idb)
 			if !idok {
 				return false
 			}
@@ -2839,7 +2839,7 @@ aof_reply_stream_ids :: proc(p: ^Aof_Rp, out: ^[dynamic]sm.ID) -> bool {
 		if inull {
 			continue
 		}
-		id, idok := sm.parse_strict_id(idb)
+		id, idok := sm.parse_exact_id(idb)
 		if !idok {
 			return false
 		}
@@ -2982,7 +2982,7 @@ aof_tr_xclaim :: proc(c: ^Conn, argv: [][]u8, reply: []u8) {
 		_, cg := aof_group_of(db, argv[1], argv[2])
 		k := 0
 		for i := 5; i < len(argv) && k < len(aof_snap_pel); i += 1 {
-			id, idok := sm.parse_strict_id(argv[i])
+			id, idok := sm.parse_exact_id(argv[i])
 			if !idok {
 				break
 			}
@@ -3421,7 +3421,7 @@ aof_w_int :: proc(w: ^rdb.Writer, v: i64) {
 }
 
 aof_w_id :: proc(w: ^rdb.Writer, id: sm.ID) {
-	tmp: [sm.ID_STR_LEN]u8
+	tmp: [sm.ID_TEXT_MAX]u8
 	aof_w_arg(w, sm.format_id(&tmp, id))
 }
 
