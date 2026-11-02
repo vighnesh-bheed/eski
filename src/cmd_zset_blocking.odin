@@ -2,46 +2,47 @@ package main
 
 import zt "zsettype"
 
-@(private)
-bzpop_generic :: proc(c: ^Conn, keys: [][]u8, timeout: []u8, max_end: bool, count: i64, nested: bool) {
+@(private = "file")
+zset_block_pop :: proc(c: ^Conn, keys: [][]u8, timeout: []u8, order: Zpop_Order) {
 	pst.dirty_explicit = true
-	deadline, ok := block_parse_timeout(c, timeout)
-	if !ok {
+	deadline, valid := block_parse_timeout(c, timeout)
+	if !valid {
 		return
 	}
-	for key in keys {
-		e, z, wrong := zset_lookup(key, false)
-		if wrong {
-			reply_wrongtype(c)
-			return
-		}
-		if z != nil && zt.length(z) > 0 {
-			_ = zpop_serve(c, key, e, z, max_end, true, count, nested)
-			return
+	key, e, z, probe := zpop_find_ready(keys)
+	switch probe {
+	case .Wrong:
+		reply_wrongtype(c)
+	case .Ready:
+		zpop_emit(c, key, e, z, order)
+	case .Empty:
+		if deny_blocking {
+			reply_null_array(c)
+		} else {
+			block_for_keys(c, .Zset, keys, deadline)
 		}
 	}
-	if deny_blocking {
-		reply_null_array(c)
-		return
-	}
-	block_for_keys(c, .Zset, keys, deadline)
+}
+
+@(private = "file")
+zset_block_pop_edge :: proc(c: ^Conn, argv: [][]u8, top: bool) {
+	timeout_at := len(argv) - 1
+	zset_block_pop(c, argv[1:timeout_at], argv[timeout_at], Zpop_Order{shape = .Keyed_Pair, top = top})
 }
 
 cmd_bzpopmin :: proc(c: ^Conn, argv: [][]u8) {
-	last := len(argv) - 1
-	bzpop_generic(c, argv[1:last], argv[last], false, -1, false)
+	zset_block_pop_edge(c, argv, false)
 }
 
 cmd_bzpopmax :: proc(c: ^Conn, argv: [][]u8) {
-	last := len(argv) - 1
-	bzpop_generic(c, argv[1:last], argv[last], true, -1, false)
+	zset_block_pop_edge(c, argv, true)
 }
 
 cmd_bzmpop :: proc(c: ^Conn, argv: [][]u8) {
-	a, err := zt.parse_zmpop(argv, 2)
-	if err != .None {
-		reply_zset_error(c, err)
+	spec, refused := zt.parse_zmpop(argv, 2)
+	if refused != .None {
+		reply_zset_error(c, refused)
 		return
 	}
-	bzpop_generic(c, argv[3:3 + a.numkeys], argv[1], a.max_end, a.count, true)
+	zset_block_pop(c, argv[3:][:spec.numkeys], argv[1], Zpop_Order{shape = .Keyed_Run, top = spec.max_end, count = spec.count})
 }

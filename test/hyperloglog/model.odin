@@ -258,7 +258,7 @@ model_pfcount :: proc(m: ^Model, argv: [][]u8) {
 @(private = "file")
 model_pfmerge :: proc(m: ^Model, argv: [][]u8) {
 	m.regs = {}
-	use_dense := false
+	dense_wanted := false
 	for key in argv[1:] {
 		v, status := model_lookup(m, key)
 		switch status {
@@ -270,7 +270,7 @@ model_pfmerge :: proc(m: ^Model, argv: [][]u8) {
 		case .Ok:
 		}
 		if v.val[4] == hll.HLL_DENSE {
-			use_dense = true
+			dense_wanted = true
 		}
 		if hll.hll_merge_into(&m.regs, v.val) != .None {
 			put_error(m, hll.HLL_ERR_INVALIDOBJ)
@@ -281,7 +281,7 @@ model_pfmerge :: proc(m: ^Model, argv: [][]u8) {
 	v, status := model_lookup(m, dest)
 	exists := status == .Ok
 	clear(&m.scratch)
-	in_scratch, err := hll.pfmerge_apply(v.val if exists else nil, exists, &m.regs, use_dense, &m.scratch, m.sparse_max_bytes)
+	in_scratch, err := hll.pfmerge_apply(v.val if exists else nil, exists, &m.regs, dense_wanted, &m.scratch, m.sparse_max_bytes)
 	if err != .None {
 		put_error(m, hll.hll_error_message(err))
 		return

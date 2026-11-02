@@ -201,31 +201,40 @@ xinfo_full_groups :: proc(c: ^Conn, s: st.Stream, count: i64) {
 }
 
 @(private = "file")
-reply_group_history :: proc(c: ^Conn, s: st.Stream, consumer: ^st.Consumer, after: st.ID, count: int) {
-	mark := defer_mark(c)
-	emitted := 0
-	from := after
-	if st.incr_id(&from) {
-		now := srv.now_ms
-		start: [16]u8
-		st.encode_id(&start, from)
-		it: rx.Iterator
-		rx.start(&it, consumer.pel)
-		rx.seek(&it, ">=", start[:])
-		for (count <= 0 || emitted < count) && rx.next(&it) {
-			id := st.decode_id(rx.key(&it))
-			if stream_reply_range(c, s, &id, &id, 1, false, true) == 0 {
-				reply_array(c, 2)
-				reply_stream_id(c, id)
-				reply_null_array(c)
-			} else {
-				st.pel_touch(consumer, id, now)
-			}
-			emitted += 1
-		}
-		rx.stop(&it)
+group_replay_ids: [dynamic]st.ID
+
+@(private = "file")
+group_pending_after :: proc(consumer: ^st.Consumer, after: st.ID, limit: int) {
+	clear(&group_replay_ids)
+	first := after
+	if !st.incr_id(&first) {
+		return
 	}
-	defer_len(c, mark, '*', emitted)
+	lower: [16]u8
+	st.encode_id(&lower, first)
+	walk: rx.Iterator
+	rx.start(&walk, consumer.pel)
+	defer rx.stop(&walk)
+	rx.seek(&walk, ">=", lower[:])
+	for (limit <= 0 || len(group_replay_ids) < limit) && rx.next(&walk) {
+		append(&group_replay_ids, st.decode_id(rx.key(&walk)))
+	}
+}
+
+@(private = "file")
+reply_group_replay :: proc(c: ^Conn, s: st.Stream, consumer: ^st.Consumer, after: st.ID, limit: int) {
+	group_pending_after(consumer, after, limit)
+	reply_array(c, len(group_replay_ids))
+	stamp := srv.now_ms
+	for id in group_replay_ids {
+		if stream_emit_entry_at(c, s, id) {
+			st.pel_touch(consumer, id, stamp)
+			continue
+		}
+		reply_array(c, 2)
+		reply_stream_id(c, id)
+		reply_null_array(c)
+	}
 }
 
 cmd_xreadgroup :: proc(c: ^Conn, argv: [][]u8) {
@@ -311,7 +320,7 @@ cmd_xreadgroup :: proc(c: ^Conn, argv: [][]u8) {
 				reply_array(c, 2)
 			}
 			reply_bulk(c, key)
-			reply_group_history(c, s, consumer, stream_ids[i], int(a.count))
+			reply_group_replay(c, s, consumer, stream_ids[i], int(a.count))
 			served += 1
 			continue
 		}
@@ -324,7 +333,8 @@ cmd_xreadgroup :: proc(c: ^Conn, argv: [][]u8) {
 		reply_bulk(c, key)
 		start := cg.last_id
 		st.incr_id(&start)
-		stream_reply_range(c, s, &start, nil, int(a.count), false, false, cg, consumer, a.noack)
+		delivery := Stream_Delivery{cg, consumer, a.noack}
+		stream_reply_entries(c, s, &start, nil, int(a.count), false, &delivery)
 		stream_sync(e.db, s)
 		signal_key(key)
 		changes += 1
@@ -686,8 +696,7 @@ reply_claimed_entry :: proc(c: ^Conn, s: st.Stream, id: st.ID, justid: bool) {
 		reply_stream_id(c, id)
 		return
 	}
-	at := id
-	if stream_reply_range(c, s, &at, &at, 1, false, true) == 0 {
+	if !stream_emit_entry_at(c, s, id) {
 		reply_array(c, 2)
 		reply_stream_id(c, id)
 		reply_null_array(c)

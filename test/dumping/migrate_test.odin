@@ -351,11 +351,11 @@ migrate_cron_closes_idle_sockets :: proc(t: ^testing.T) {
 	testing.expect_value(t, eski.migrate_cached_count(), 1)
 	cs := eski.migrate_cache[0]
 	testing.expect_value(t, string(cs.name[:]), concat("127.0.0.1:", ft.port_str))
-	testing.expect_value(t, cs.last_dbid, i64(0))
-	cs.last_use = clock_ms() / 1000 - eski.MIGRATE_CACHE_TTL
+	testing.expect_value(t, cs.selected, i64(0))
+	cs.idle_since = clock_ms() / 1000 - eski.MIGRATE_POOL_IDLE_SECONDS
 	eski.migrate_cron()
 	testing.expect_value(t, eski.migrate_cached_count(), 1)
-	cs.last_use -= 1
+	cs.idle_since -= 1
 	eski.migrate_cron()
 	testing.expect_value(t, eski.migrate_cached_count(), 0)
 	testing.expect(t, contains(run(c, "info", "stats"), "migrate_cached_sockets:0\r\n"))

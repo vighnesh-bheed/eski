@@ -1556,7 +1556,7 @@ zset_sort_debug :: proc() {
 		append(&expected, ..transmute([]u8)fmt.tprintf("$%d\r\n%s\r\n", len(member), member))
 	}
 	response = storage_capture(cmd_sort, 2, "SORT", "debug-zset", "BY", "nosort", "DESC", "LIMIT", "3", "7")
-	check(string(response) == string(expected[:]), "SORT dontsort retains ordered/rank fast path during dictionary migration")
+	check(string(response) == string(expected[:]), "SORT with a constant BY keeps the ordered and rank fast path during dictionary migration")
 	mem_free(raw_data(response))
 	check(z.sl.resize.cursor == cursor, "SORT and DEBUG never force a Zset dictionary drain")
 	delete(expected)

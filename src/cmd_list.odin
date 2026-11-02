@@ -602,7 +602,7 @@ list_sort_len :: proc(e: ^Entry) -> i64 {
 	return i64(lt.length(cast(lt.List)entry_object(e, .List)))
 }
 
-list_sort_load :: proc(e: ^Entry, dontsort: bool, desc: bool, start: i64, end: i64, count: i64) -> (direct: bool) {
+list_sort_load :: proc(e: ^Entry, natural: bool, desc: bool, start: i64, end: i64, count: i64) -> (direct: bool) {
 	if e == nil || entry_type(e) != .List {
 		return false
 	}
@@ -611,7 +611,7 @@ list_sort_load :: proc(e: ^Entry, dontsort: bool, desc: bool, start: i64, end: i
 	begin := 0
 	take := n
 	dir := lt.Where.Tail
-	if dontsort {
+	if natural {
 		if count == 0 || start >= i64(n) || end < start {
 			return false
 		}
@@ -634,7 +634,7 @@ list_sort_load :: proc(e: ^Entry, dontsort: bool, desc: bool, start: i64, end: i
 		}
 		sort_add_element(lt.value_bytes(lt.entry_value(&it, &entry), &buf))
 	}
-	return dontsort
+	return natural
 }
 
 list_sort_store :: proc(key: []u8, values: [][]u8) {

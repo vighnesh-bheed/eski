@@ -52,13 +52,55 @@ Sort_Order :: struct {
 Sort_Request :: struct {
 	desc:      bool,
 	alpha:     bool,
-	dontsort:  bool,
+	natural:   bool,
 	has_by:    bool,
 	by:        []u8,
 	has_store: bool,
 	store:     []u8,
 	offset:    i64,
 	count:     i64,
+}
+
+@(private = "file")
+Sort_Word :: enum u8 {
+	Unknown,
+	Asc,
+	Desc,
+	Alpha,
+	Limit,
+	Store,
+	By,
+	Get,
+}
+
+@(private = "file")
+sort_word_operands := [Sort_Word]int {
+	.Unknown = 0,
+	.Asc     = 0,
+	.Desc    = 0,
+	.Alpha   = 0,
+	.Limit   = 2,
+	.Store   = 1,
+	.By      = 1,
+	.Get     = 1,
+}
+
+@(private = "file")
+sort_word_names := [Sort_Word]string {
+	.Unknown = "",
+	.Asc     = "asc",
+	.Desc    = "desc",
+	.Alpha   = "alpha",
+	.Limit   = "limit",
+	.Store   = "store",
+	.By      = "by",
+	.Get     = "get",
+}
+
+@(private = "file")
+Sort_Window :: struct {
+	first: i64,
+	span:  i64,
 }
 
 @(private = "file")
@@ -98,139 +140,163 @@ sort_add_element :: proc(elem: []u8) {
 }
 
 cmd_sort :: proc(c: ^Conn, argv: [][]u8) {
-	sort_generic(c, argv, false)
+	sort_command(c, argv, true)
 }
 
 cmd_sort_ro :: proc(c: ^Conn, argv: [][]u8) {
-	sort_generic(c, argv, true)
+	sort_command(c, argv, false)
 }
 
 @(private = "file")
-sort_generic :: proc(c: ^Conn, argv: [][]u8, readonly: bool) {
-	pst.dirty_explicit = true
-	req: Sort_Request
-	if !sort_parse(c, argv, readonly, &req) {
-		return
-	}
-	src := db_find_read(argv[1])
-	kind := Obj_Type.List
-	if src != nil {
-		kind = entry_type(src)
-		if kind != .List && kind != .Set && kind != .Zset {
-			reply_wrongtype(c)
-			return
+sort_word_of :: proc(arg: []u8, writable: bool) -> Sort_Word {
+	for name, word in sort_word_names {
+		if word != .Unknown && eq_nocase(arg, name) {
+			if word == .Store && !writable {
+				return .Unknown
+			}
+			return word
 		}
 	}
-	if req.dontsort && kind == .Set && (req.has_store || lua_active != nil) {
-		req.dontsort = false
-		req.alpha = true
-		req.has_by = false
-	}
-	total: i64 = 0
-	if src != nil {
-		total = sort_source_length(src, kind)
-	}
-	first, span := sort_window(req.offset, req.count, total)
-	sort_reset()
-	reserve(&sort_rows, int(span if req.dontsort && kind != .Set else total))
-	direct := false
-	if src != nil {
-		#partial switch kind {
-		case .List:
-			direct = list_sort_load(src, req.dontsort, req.desc, first, first + span - 1, span)
-		case .Zset:
-			direct = zset_sort_load(src, req.dontsort, req.desc, first, span)
-		case .Set:
-			set_sort_load(src)
-		}
-	}
-	loaded := i64(len(sort_rows))
-	if direct {
-		first = 0
-		span = loaded
-	} else if first >= loaded {
-		first = 0
-		span = 0
-	} else {
-		span = min(span, loaded - first)
-	}
-	if !req.dontsort {
-		if !sort_weigh(&req) {
-			reply_error(c, SORT_ERR_SCORE)
-			sort_release()
-			return
-		}
-		sort_arrange(&req, int(first), int(span))
-	}
-	sort_project(argv, int(first), int(span))
-	if req.has_store {
-		sort_store(c, req.store)
-	} else {
-		sort_reply(c)
-	}
-	sort_release()
+	return .Unknown
 }
 
 @(private = "file")
-sort_parse :: proc(c: ^Conn, argv: [][]u8, readonly: bool, req: ^Sort_Request) -> bool {
+sort_read_options :: proc(c: ^Conn, argv: [][]u8, writable: bool) -> (req: Sort_Request, ok: bool) {
 	req.count = -1
 	clear(&sort_get_args)
-	access_known := false
-	access_full := false
-	i := 2
-	for i < len(argv) {
-		opt := argv[i]
-		left := len(argv) - i - 1
-		switch {
-		case eq_nocase(opt, "asc"):
+	checked, permitted := false, false
+	at := 2
+	for at < len(argv) {
+		word := sort_word_of(argv[at], writable)
+		operands := sort_word_operands[word]
+		if word == .Unknown || at + operands >= len(argv) {
+			reply_error(c, ERR_SYNTAX)
+			return
+		}
+		next := at + 1
+		#partial switch word {
+		case .Asc:
 			req.desc = false
-		case eq_nocase(opt, "desc"):
+		case .Desc:
 			req.desc = true
-		case eq_nocase(opt, "alpha"):
+		case .Alpha:
 			req.alpha = true
-		case eq_nocase(opt, "limit") && left >= 2:
-			offset, offset_ok := parse_i64(argv[i + 1])
+		case .Limit:
+			offset, offset_ok := parse_i64(argv[next])
 			if !offset_ok {
 				reply_error(c, ERR_NOT_INT)
-				return false
+				return
 			}
-			count, count_ok := parse_i64(argv[i + 2])
+			count, count_ok := parse_i64(argv[next + 1])
 			if !count_ok {
 				reply_error(c, ERR_NOT_INT)
-				return false
+				return
 			}
-			req.offset = offset
-			req.count = count
-			i += 2
-		case eq_nocase(opt, "store") && left >= 1 && !readonly:
+			req.offset, req.count = offset, count
+		case .Store:
 			req.has_store = true
-			req.store = argv[i + 1]
-			i += 1
-		case eq_nocase(opt, "by") && left >= 1:
-			pattern := argv[i + 1]
+			req.store = argv[next]
+		case .By:
 			req.has_by = true
-			req.by = pattern
-			if bytes.index_byte(pattern, '*') < 0 {
-				req.dontsort = true
-			} else if !sort_full_access(c, argv, &access_known, &access_full) {
+			req.by = argv[next]
+			if bytes.index_byte(req.by, '*') < 0 {
+				req.natural = true
+			} else if !sort_full_access(c, argv, &checked, &permitted) {
 				reply_error(c, SORT_ERR_BY_DENIED)
-				return false
+				return
 			}
-			i += 1
-		case eq_nocase(opt, "get") && left >= 1:
-			if !sort_full_access(c, argv, &access_known, &access_full) {
+		case .Get:
+			if !sort_full_access(c, argv, &checked, &permitted) {
 				reply_error(c, SORT_ERR_GET_DENIED)
-				return false
+				return
 			}
-			append(&sort_get_args, i + 1)
-			i += 1
-		case:
-			reply_error(c, ERR_SYNTAX)
-			return false
+			append(&sort_get_args, next)
 		}
-		i += 1
+		at = next + operands
 	}
-	return true
+	ok = true
+	return
+}
+
+@(private = "file")
+sort_open_source :: proc(key: []u8) -> (src: ^Entry, kind: Obj_Type, sortable: bool) {
+	src = db_find_read(key)
+	if src == nil {
+		return nil, .List, true
+	}
+	kind = entry_type(src)
+	sortable = kind == .List || kind == .Set || kind == .Zset
+	return
+}
+
+@(private = "file")
+sort_load :: proc(src: ^Entry, kind: Obj_Type, req: ^Sort_Request, want: Sort_Window) -> (trimmed: bool) {
+	if src == nil {
+		return false
+	}
+	#partial switch kind {
+	case .Set:
+		set_sort_load(src)
+	case .Zset:
+		trimmed = zset_sort_load(src, req.natural, req.desc, want.first, want.span)
+	case .List:
+		trimmed = list_sort_load(src, req.natural, req.desc, want.first, want.first + want.span - 1, want.span)
+	}
+	return
+}
+
+@(private = "file")
+sort_gather :: proc(src: ^Entry, kind: Obj_Type, req: ^Sort_Request) -> Sort_Window {
+	total := sort_source_length(src, kind) if src != nil else 0
+	want: Sort_Window
+	want.first, want.span = sort_window(req.offset, req.count, total)
+	sort_reset()
+	if req.natural && kind != .Set {
+		reserve(&sort_rows, int(want.span))
+	} else {
+		reserve(&sort_rows, int(total))
+	}
+	trimmed := sort_load(src, kind, req, want)
+	held := i64(len(sort_rows))
+	switch {
+	case trimmed:
+		return Sort_Window{0, held}
+	case want.first >= held:
+		return Sort_Window{}
+	}
+	return Sort_Window{want.first, min(want.span, held - want.first)}
+}
+
+@(private = "file")
+sort_command :: proc(c: ^Conn, argv: [][]u8, writable: bool) {
+	pst.dirty_explicit = true
+	req, parsed := sort_read_options(c, argv, writable)
+	if !parsed {
+		return
+	}
+	src, kind, sortable := sort_open_source(argv[1])
+	if !sortable {
+		reply_wrongtype(c)
+		return
+	}
+	if req.natural && kind == .Set && (req.has_store || lua_active != nil) {
+		req.natural, req.alpha, req.has_by = false, true, false
+	}
+	view := sort_gather(src, kind, &req)
+	defer sort_release()
+	if !req.natural {
+		if !sort_weigh(&req) {
+			reply_error(c, SORT_ERR_SCORE)
+			return
+		}
+		sort_arrange(&req, int(view.first), int(view.span))
+	}
+	sort_project(argv, int(view.first), int(view.span))
+	if !req.has_store {
+		sort_reply(c)
+		return
+	}
+	sort_store(c, req.store)
 }
 
 @(private = "file")

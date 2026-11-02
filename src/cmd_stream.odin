@@ -152,37 +152,52 @@ reply_stream_id :: proc(c: ^Conn, id: st.ID) {
 	reply_bulk(c, st.format_id(&buf, id))
 }
 
+Stream_Delivery :: struct {
+	group:    ^st.CG,
+	consumer: ^st.Consumer,
+	noack:    bool,
+}
+
 @(private)
-stream_reply_range :: proc(c: ^Conn, s: st.Stream, start: ^st.ID, end: ^st.ID, count: int, rev: bool, raw: bool, cg: ^st.CG = nil, consumer: ^st.Consumer = nil, noack := false) -> int {
-	mark := 0
-	if !raw {
-		mark = defer_mark(c)
-	}
-	si: st.Iterator
-	st.iterator_start(&si, s, start, end, rev)
-	emitted := 0
-	id: st.ID
-	numfields: i64
-	now := srv.now_ms
-	for (count <= 0 || emitted < count) && st.iterator_get_id(&si, &id, &numfields) {
+stream_emit_entries :: proc(c: ^Conn, s: st.Stream, from: ^st.ID, to: ^st.ID, limit: int, backwards: bool, delivery: ^Stream_Delivery = nil) -> (sent: int) {
+	walk: st.Iterator
+	st.iterator_start(&walk, s, from, to, backwards)
+	defer st.iterator_stop(&walk)
+	stamp := srv.now_ms
+	for limit <= 0 || sent < limit {
+		id: st.ID
+		pairs: i64
+		if !st.iterator_get_id(&walk, &id, &pairs) {
+			break
+		}
 		reply_array(c, 2)
 		reply_stream_id(c, id)
-		reply_array(c, int(numfields) * 2)
-		for _ in 0 ..< numfields {
-			field, value := st.iterator_get_field(&si)
+		reply_array(c, int(pairs) * 2)
+		for _ in 0 ..< pairs {
+			field, value := st.iterator_get_field(&walk)
 			reply_bulk(c, field)
 			reply_bulk(c, value)
 		}
-		if cg != nil {
-			st.group_deliver(s, cg, consumer, id, noack, now)
+		if delivery != nil {
+			st.group_deliver(s, delivery.group, delivery.consumer, id, delivery.noack, stamp)
 		}
-		emitted += 1
+		sent += 1
 	}
-	st.iterator_stop(&si)
-	if !raw {
-		defer_len(c, mark, '*', emitted)
-	}
-	return emitted
+	return
+}
+
+@(private)
+stream_reply_entries :: proc(c: ^Conn, s: st.Stream, from: ^st.ID, to: ^st.ID, limit: int, backwards: bool, delivery: ^Stream_Delivery = nil) -> int {
+	mark := defer_mark(c)
+	sent := stream_emit_entries(c, s, from, to, limit, backwards, delivery)
+	defer_len(c, mark, '*', sent)
+	return sent
+}
+
+@(private)
+stream_emit_entry_at :: proc(c: ^Conn, s: st.Stream, id: st.ID) -> bool {
+	at := id
+	return stream_emit_entries(c, s, &at, &at, 1, false) == 1
 }
 
 cmd_xadd :: proc(c: ^Conn, argv: [][]u8) {
@@ -251,7 +266,7 @@ xrange_generic :: proc(c: ^Conn, argv: [][]u8, rev: bool) {
 	if count > 0 {
 		limit = int(min(count, i64(max(int))))
 	}
-	stream_reply_range(c, s, &start, &end, limit, rev, false)
+	stream_reply_entries(c, s, &start, &end, limit, rev)
 }
 
 cmd_xrange :: proc(c: ^Conn, argv: [][]u8) {
@@ -376,7 +391,7 @@ xinfo_help := [?]string {
 
 @(private = "file")
 reply_edge_entry :: proc(c: ^Conn, s: st.Stream, last: bool) {
-	if s.length == 0 || stream_reply_range(c, s, nil, nil, 1, last, true) == 0 {
+	if s.length == 0 || stream_emit_entries(c, s, nil, nil, 1, last) == 0 {
 		reply_null(c)
 	}
 }
@@ -421,7 +436,7 @@ xinfo_stream :: proc(c: ^Conn, argv: [][]u8, s: st.Stream) {
 	if count > 0 {
 		limit = int(min(count, i64(max(int))))
 	}
-	stream_reply_range(c, s, nil, nil, limit, false, false)
+	stream_reply_entries(c, s, nil, nil, limit, false)
 	reply_bulk_str(c, "groups")
 	xinfo_full_groups(c, s, count)
 }
@@ -478,99 +493,117 @@ cmd_xinfo :: proc(c: ^Conn, argv: [][]u8) {
 	}
 }
 
-cmd_xread :: proc(c: ^Conn, argv: [][]u8) {
-	a, err := st.parse_xread_args(argv, srv.now_ms, false)
-	if err != .None {
-		reply_stream_error(c, err)
-		return
-	}
-	nkeys := a.key_count
-	reexec := block_in_reexecution() && c.bstate != nil && len(c.bstate.stream_ids) == nkeys
+@(private = "file")
+xread_starting_points :: proc(c: ^Conn, keys: [][]u8, marks: [][]u8, replay: bool) -> bool {
 	clear(&stream_ids)
-	resize(&stream_ids, nkeys)
-	clear(&stream_reads)
-	resize(&stream_reads, nkeys)
-	for i in 0 ..< nkeys {
-		key := argv[a.keys_at + i]
-		arg := argv[a.keys_at + nkeys + i]
+	for key, n in keys {
 		_, s, wrong := stream_lookup(key, true)
 		if wrong {
 			reply_wrongtype(c)
-			return
+			return false
 		}
-		stream_reads[i] = s
-		id: st.ID
+		mark := marks[n]
+		at: st.ID
 		switch {
-		case st.is_byte(arg, '$'):
-			if reexec {
-				pair := c.bstate.stream_ids[i]
-				id = st.ID{pair[0], pair[1]}
-			} else if s != nil {
-				id = s.last_id
+		case st.is_byte(mark, '$') && replay:
+			saved := c.bstate.stream_ids[n]
+			at = st.ID{saved[0], saved[1]}
+		case st.is_byte(mark, '$'):
+			if s != nil {
+				at = s.last_id
 			}
-		case st.is_byte(arg, '+'):
+		case st.is_byte(mark, '+'):
 			if s != nil && s.length > 0 {
-				id = st.last_valid_id(s)
-				st.decr_id(&id)
+				at = st.last_valid_id(s)
+				st.decr_id(&at)
 			}
-		case st.is_byte(arg, '>'):
+		case st.is_byte(mark, '>'):
 			reply_stream_error(c, .Gt_Id)
-			return
+			return false
 		case:
-			ok: bool
-			id, ok = st.parse_exact_id(arg)
-			if !ok {
+			explicit, valid := st.parse_exact_id(mark)
+			if !valid {
 				reply_stream_error(c, .Invalid_ID)
-				return
+				return false
 			}
+			at = explicit
 		}
-		stream_ids[i] = id
+		append(&stream_ids, at)
 	}
-	served := 0
-	for i in 0 ..< nkeys {
-		_, s, _ := stream_lookup(argv[a.keys_at + i], true)
-		stream_reads[i] = s
-		if s != nil && s.length > 0 && st.compare_id(st.last_valid_id(s), stream_ids[i]) > 0 {
-			served += 1
-		} else {
-			stream_reads[i] = nil
+	return true
+}
+
+@(private = "file")
+xread_collect_ready :: proc(keys: [][]u8) -> (ready: int) {
+	clear(&stream_reads)
+	for key, n in keys {
+		_, s, _ := stream_lookup(key, true)
+		if s != nil && (s.length == 0 || st.compare_id(st.last_valid_id(s), stream_ids[n]) <= 0) {
+			s = nil
+		}
+		if s != nil {
+			ready += 1
+		}
+		append(&stream_reads, s)
+	}
+	return
+}
+
+@(private = "file")
+xread_reply_ready :: proc(c: ^Conn, keys: [][]u8, ready: int, limit: int) {
+	flat := c.resp == RESP2
+	if flat {
+		reply_array(c, ready)
+	} else {
+		reply_map(c, ready)
+	}
+	for s, n in stream_reads {
+		if s == nil {
+			continue
+		}
+		if flat {
+			reply_array(c, 2)
+		}
+		reply_bulk(c, keys[n])
+		after := stream_ids[n]
+		st.incr_id(&after)
+		stream_reply_entries(c, s, &after, nil, limit, false)
+	}
+}
+
+@(private = "file")
+xread_park :: proc(c: ^Conn, keys: [][]u8, timeout: i64, replay: bool) {
+	if c.bstate == nil {
+		c.bstate = new(Block_State)
+	}
+	if !replay {
+		clear(&c.bstate.stream_ids)
+		for at in stream_ids {
+			append(&c.bstate.stream_ids, [2]u64{at.ms, at.seq})
 		}
 	}
-	if served > 0 {
-		if c.resp == RESP2 {
-			reply_array(c, served)
-		} else {
-			reply_map(c, served)
-		}
-		for i in 0 ..< nkeys {
-			s := stream_reads[i]
-			if s == nil {
-				continue
-			}
-			if c.resp == RESP2 {
-				reply_array(c, 2)
-			}
-			reply_bulk(c, argv[a.keys_at + i])
-			start := stream_ids[i]
-			st.incr_id(&start)
-			stream_reply_range(c, s, &start, nil, int(a.count), false, false)
-		}
+	block_for_keys(c, .Stream, keys, timeout, false)
+}
+
+cmd_xread :: proc(c: ^Conn, argv: [][]u8) {
+	spec, refused := st.parse_xread_args(argv, srv.now_ms, false)
+	if refused != .None {
+		reply_stream_error(c, refused)
 		return
 	}
-	if a.timeout != -1 && !deny_blocking {
-		if c.bstate == nil {
-			c.bstate = new(Block_State)
-		}
-		if !reexec {
-			clear(&c.bstate.stream_ids)
-			for id in stream_ids {
-				append(&c.bstate.stream_ids, [2]u64{id.ms, id.seq})
-			}
-		}
-		block_for_keys(c, .Stream, argv[a.keys_at:a.keys_at + nkeys], a.timeout, false)
+	keys := argv[spec.keys_at:][:spec.key_count]
+	marks := argv[spec.keys_at + spec.key_count:][:spec.key_count]
+	replay := block_in_reexecution() && c.bstate != nil && len(c.bstate.stream_ids) == spec.key_count
+	if !xread_starting_points(c, keys, marks, replay) {
 		return
 	}
-	reply_null_array(c)
+	if ready := xread_collect_ready(keys); ready > 0 {
+		xread_reply_ready(c, keys, ready, int(spec.count))
+	} else if spec.timeout != -1 && !deny_blocking {
+		xread_park(c, keys, spec.timeout, replay)
+	} else {
+		reply_null_array(c)
+	}
 }
 
 @(private = "file")
