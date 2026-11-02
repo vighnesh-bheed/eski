@@ -55,6 +55,10 @@ TLS_Connection :: struct {
 	read_wants_out: bool,
 	write_length: int,
 	write_wants_in: bool,
+	pending_listed: bool,
+	pending_pass: u64,
+	pending_prev: ^Conn,
+	pending_next: ^Conn,
 	read_buffer: [16384]u8,
 	write_buffer: [16384]u8,
 }
@@ -177,6 +181,7 @@ transport_connection_init :: proc(c: ^Conn) -> bool {
 
 transport_connection_close :: proc(c: ^Conn) {
 	if c.tls == nil { return }
+	if c.tls.pending_listed { tls_pending_unlink(c) }
 	if c.tls.ready && !c.lua_debug_detached { SSL_shutdown(c.tls.ssl) }
 	SSL_free(c.tls.ssl)
 	free(c.tls)
@@ -189,7 +194,7 @@ transport_handshake :: proc(c: ^Conn) -> bool {
 	if tls == nil || tls.ready { return true }
 	ERR_clear_error()
 	result := SSL_accept(tls.ssl)
-	if result == 1 { tls.ready = true; tls.handshake_out = false; epoll_set(c.fd, .MOD, c.want_write, c.id); return true }
+	if result == 1 { tls.ready = true; tls.handshake_out = false; epoll_set(c.fd, .MOD, c.want_write, c.id); tls_pending_note(c); return true }
 	problem := SSL_get_error(tls.ssl, result)
 	if problem == 2 || problem == 3 {
 		tls.handshake_out = problem == 3
@@ -213,8 +218,36 @@ conn_net_pending :: proc(c: ^Conn) -> bool {
 	return c.tls != nil && c.tls.ready && (c.tls.read_position < c.tls.read_length || SSL_pending(c.tls.ssl) > 0)
 }
 
+tls_pending_link :: proc(c: ^Conn) {
+	tls := c.tls
+	tls.pending_prev, tls.pending_next = tls_pending_tail, nil
+	if tls_pending_tail != nil { tls_pending_tail.tls.pending_next = c } else { tls_pending_head = c }
+	tls_pending_tail = c
+	tls.pending_listed = true
+}
+
+tls_pending_unlink :: proc(c: ^Conn) {
+	tls := c.tls
+	if tls.pending_prev != nil { tls.pending_prev.tls.pending_next = tls.pending_next } else { tls_pending_head = tls.pending_next }
+	if tls.pending_next != nil { tls.pending_next.tls.pending_prev = tls.pending_prev } else { tls_pending_tail = tls.pending_prev }
+	tls.pending_prev, tls.pending_next = nil, nil
+	tls.pending_listed = false
+}
+
+tls_pending_note :: proc(c: ^Conn) {
+	pending := conn_net_pending(c)
+	if pending == c.tls.pending_listed { return }
+	if pending { tls_pending_link(c) } else { tls_pending_unlink(c) }
+}
+
 conn_net_read :: proc(c: ^Conn, bytes: []u8) -> (int, linux.Errno) {
 	if c.tls == nil { return linux.read(c.fd, bytes) }
+	n, err := tls_net_read(c, bytes)
+	tls_pending_note(c)
+	return n, err
+}
+
+tls_net_read :: proc(c: ^Conn, bytes: []u8) -> (int, linux.Errno) {
 	tls := c.tls
 	if !tls.ready && !transport_handshake(c) { return 0, .ECONNRESET if c.close_after else .EAGAIN }
 	if tls.write_length != 0 || len(bytes) == 0 { return 0, .EAGAIN }
@@ -247,6 +280,12 @@ conn_net_read :: proc(c: ^Conn, bytes: []u8) -> (int, linux.Errno) {
 conn_net_write :: proc(c: ^Conn, bytes: []u8) -> (int, linux.Errno) {
 	if len(bytes) == 0 { return 0, .NONE }
 	if c.tls == nil { return linux.write(c.fd, bytes) }
+	n, err := tls_net_write(c, bytes)
+	tls_pending_note(c)
+	return n, err
+}
+
+tls_net_write :: proc(c: ^Conn, bytes: []u8) -> (int, linux.Errno) {
 	tls := c.tls
 	if !tls.ready && !transport_handshake(c) { return 0, .ECONNRESET if c.close_after else .EAGAIN }
 	if tls.read_wants_out { return 0, .EAGAIN }
@@ -289,16 +328,24 @@ conn_net_wait :: proc(c: ^Conn, for_write: bool, timeout_ms: i32) -> (ready: boo
 	return count > 0, .NONE
 }
 
-tls_pending_cursor: int
+tls_pending_head: ^Conn
+tls_pending_tail: ^Conn
+tls_pending_pass: u64
 
 transport_pending_input :: proc() -> bool {
+	if tls_pending_head == nil { return false }
+	tls_pending_pass += 1
 	budget := 64
 	processed := false
-	for _ in 0 ..< len(srv.conns) {
-		if budget == 0 { break }
-		tls_pending_cursor = (tls_pending_cursor + 1) % len(srv.conns)
-		c := srv.conns[tls_pending_cursor]
-		if c != nil && conn_net_pending(c) && c.tls.write_length == 0 && !c.tls.read_wants_out {
+	for budget > 0 {
+		c := tls_pending_head
+		if c == nil || c.tls.pending_pass == tls_pending_pass { break }
+		c.tls.pending_pass = tls_pending_pass
+		if c != tls_pending_tail {
+			tls_pending_unlink(c)
+			tls_pending_link(c)
+		}
+		if c.tls.write_length == 0 && !c.tls.read_wants_out {
 			conn_read(c)
 			budget -= 1
 			processed = true

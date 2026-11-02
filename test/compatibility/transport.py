@@ -270,6 +270,19 @@ class Transport(unittest.TestCase):
         self.assertEqual(slow.reply(), 'PONG')
         self.assertEqual(control.call('GET', 'pipeline-after-output'), b'kept')
 
+    def test_tls_buffered_input_after_large_requests_is_served(self):
+        server = self.tls_server()
+        clients = [self.tls_client(server) for unused in range(72)]
+        sizes = [1100000 + 977 * index for index in range(len(clients))]
+        for index, client in enumerate(clients):
+            client.send_many([('SET', 'buffered-%d' % index, b'b' * sizes[index])] +
+                             [('INCR', 'buffered-count-%d' % index)] * 50 + [('STRLEN', 'buffered-%d' % index), ('PING',)])
+        for index, client in enumerate(clients):
+            self.assertEqual(client.reply(), 'OK')
+            self.assertEqual([client.reply() for unused in range(50)], list(range(1, 51)))
+            self.assertEqual(client.reply(), sizes[index])
+            self.assertEqual(client.reply(), 'PONG')
+
     def test_tls_encrypted_key_and_atomic_password_change(self):
         encrypted = self.pki / 'encrypted-server.key'
         subprocess.run(['openssl', 'pkey', '-in', str(self.pki / 'server.key'), '-aes-256-cbc',
