@@ -12,11 +12,11 @@ Conn_Kind :: enum u8 {
 MC_KEY_MAX :: 250
 MC_LINE_MAX :: 2048
 MC_GET_LINE_MAX :: 16 << 20
-MC_MAX_TOKENS :: 23
+MC_LAST_TOKEN_SCAN_TOKENS :: 23
 MC_TOKEN_SLOTS :: 8
-MC_REALTIME_MAXDELTA :: 60 * 60 * 24 * 30
-MC_ITEM_OVERHEAD :: 59
-MC_FLAGS_OVERHEAD :: 4
+MC_RELATIVE_EXPIRY_LIMIT_SECONDS :: 60 * 60 * 24 * 30
+MC_ITEM_FIXED_BYTES :: 59
+MC_ITEM_FLAGS_BYTES :: 4
 MC_ITEM_SIZE_DEFAULT :: 1024 * 1024
 MC_ITEM_SIZE_MIN :: 1024
 MC_ITEM_SIZE_MAX :: 512 * 1024 * 1024
@@ -180,7 +180,7 @@ mc_cas_next :: #force_inline proc "contextless" () -> u64 {
 }
 
 mc_item_size :: #force_inline proc "contextless" (klen: int, vlen: int, flags: u32) -> int {
-	return klen + vlen + MC_ITEM_OVERHEAD + (MC_FLAGS_OVERHEAD if flags != 0 else 0)
+	return klen + vlen + MC_ITEM_FIXED_BYTES + (MC_ITEM_FLAGS_BYTES if flags != 0 else 0)
 }
 
 @(private = "file")
@@ -390,85 +390,64 @@ mc_parse_exptime32 :: proc "contextless" (s: []u8) -> (i64, bool) {
 	return i64(v), true
 }
 
-mc_strtoull :: proc "contextless" (s: []u8) -> (u64, bool) #no_bounds_check {
-	n := len(s)
-	i := 0
-	for i < n && mc_isspace(s[i]) {
-		i += 1
+@(private = "file")
+mc_scan_text_number :: proc "contextless" (text: []u8) -> (magnitude: u128, negative: bool, ok: bool) #no_bounds_check {
+	at := 0
+	for at < len(text) && mc_isspace(text[at]) {
+		at += 1
 	}
-	neg := false
-	if i < n && (s[i] == '+' || s[i] == '-') {
-		neg = s[i] == '-'
-		i += 1
+	if at < len(text) && (text[at] == '+' || text[at] == '-') {
+		negative = text[at] == '-'
+		at += 1
 	}
-	start := i
-	v: u64 = 0
-	overflow := false
-	for i < n && s[i] >= '0' && s[i] <= '9' {
-		d := u64(s[i] - '0')
-		if v > (max(u64) - d) / 10 {
-			overflow = true
-		} else {
-			v = v * 10 + d
+	digits_from := at
+	for at < len(text) && text[at] >= '0' && text[at] <= '9' {
+		magnitude = magnitude * 10 + u128(text[at] - '0')
+		if magnitude > u128(max(u64)) {
+			return 0, false, false
 		}
-		i += 1
+		at += 1
 	}
-	if i == start || overflow {
-		return 0, false
+	if at == digits_from {
+		return 0, false, false
 	}
-	if i < n && s[i] != 0 && !mc_isspace(s[i]) {
-		return 0, false
-	}
-	if neg {
-		v = 0 - v
-	}
-	if i64(v) < 0 {
-		for b in s {
-			if b == 0 {
-				break
-			}
-			if b == '-' {
-				return 0, false
-			}
-		}
-	}
-	return v, true
+	ok = at == len(text) || text[at] == 0 || mc_isspace(text[at])
+	return
 }
 
-mc_strtol :: proc "contextless" (s: []u8) -> (i64, bool) #no_bounds_check {
-	n := len(s)
-	i := 0
-	for i < n && mc_isspace(s[i]) {
-		i += 1
-	}
-	neg := false
-	if i < n && (s[i] == '+' || s[i] == '-') {
-		neg = s[i] == '-'
-		i += 1
-	}
-	start := i
-	limit: u64 = u64(I64_MAX) + 1 if neg else u64(I64_MAX)
-	v: u64 = 0
-	overflow := false
-	for i < n && s[i] >= '0' && s[i] <= '9' {
-		d := u64(s[i] - '0')
-		if v > (limit - d) / 10 {
-			overflow = true
-		} else {
-			v = v * 10 + d
+@(private = "file")
+mc_minus_before_nul :: proc "contextless" (text: []u8) -> bool {
+	for b in text {
+		switch b {
+		case 0:
+			return false
+		case '-':
+			return true
 		}
-		i += 1
 	}
-	if i == start || overflow {
+	return false
+}
+
+mc_text_unsigned :: proc "contextless" (text: []u8) -> (u64, bool) {
+	magnitude, negative, ok := mc_scan_text_number(text)
+	if !ok {
 		return 0, false
 	}
-	if i < n && s[i] != 0 && !mc_isspace(s[i]) {
+	signed := -i128(magnitude) if negative else i128(magnitude)
+	wrapped := u64(signed & i128(max(u64)))
+	if wrapped >= 1 << 63 && (negative || mc_minus_before_nul(text)) {
 		return 0, false
 	}
-	if neg {
-		return i64(0 - v), true
+	return wrapped, true
+}
+
+mc_text_signed :: proc "contextless" (text: []u8) -> (i64, bool) {
+	magnitude, negative, ok := mc_scan_text_number(text)
+	signed := -i128(magnitude) if negative else i128(magnitude)
+	if !ok || signed < i128(min(i64)) || signed > i128(max(i64)) {
+		return 0, false
 	}
-	return i64(v), true
+	return i64(signed), true
 }
 
 mc_fmt_u64 :: proc "contextless" (dst: [^]u8, v: u64) -> int #no_bounds_check {
@@ -602,7 +581,7 @@ mc_tokenize :: proc "contextless" (t: ^Mc_Line, line: []u8) #no_bounds_check {
 
 @(private = "file")
 mc_take_noreply :: proc(t: ^Mc_Line, min_tokens: int) -> int {
-	if t.ntok >= max(min_tokens, 2) && t.ntok <= MC_MAX_TOKENS && string(t.last) == "noreply" {
+	if t.ntok >= max(min_tokens, 2) && t.ntok <= MC_LAST_TOKEN_SCAN_TOKENS && string(t.last) == "noreply" {
 		mc_noreply = true
 		return t.ntok - 1
 	}
@@ -614,7 +593,7 @@ mc_expire_at :: proc(exptime: i64) -> (at: i64, dead: bool) {
 	if exptime < 0 {
 		return 0, true
 	}
-	if exptime > MC_REALTIME_MAXDELTA {
+	if exptime > MC_RELATIVE_EXPIRY_LIMIT_SECONDS {
 		at = exptime * 1000
 		if at <= srv.now_ms {
 			return 0, true
@@ -721,7 +700,7 @@ mc_flush :: proc(delay: i64) {
 	db := &dbs[0]
 	if delay > 0 {
 		at: i64
-		if delay > MC_REALTIME_MAXDELTA {
+		if delay > MC_RELATIVE_EXPIRY_LIMIT_SECONDS {
 			at = delay * 1000
 			if at <= srv.start_ms {
 				return
@@ -1014,8 +993,8 @@ mc_cmd_store :: proc(c: ^Conn, t: ^Mc_Line, op: Mc_Store, buf: []u8, used: int) 
 	cas_in: u64
 	flags_ok, exp_ok, cas_ok := false, false, true
 	if ntok >= (6 if op == .Cas else 5) && len(key) <= MC_KEY_MAX {
-		flags, flags_ok = mc_strtoull(t.tok[2])
-		exptime, exp_ok = mc_strtol(t.tok[3])
+		flags, flags_ok = mc_text_unsigned(t.tok[2])
+		exptime, exp_ok = mc_text_signed(t.tok[3])
 		if op == .Cas {
 			cas_in, cas_ok = mc_parse_digits(t.tok[5], MC_LONG_NUM)
 		}
@@ -1096,7 +1075,7 @@ mc_cmd_arith :: proc(c: ^Conn, t: ^Mc_Line, incr: bool) #no_bounds_check {
 		mc_out(c, MC_ERR_NON_NUMERIC)
 		return
 	}
-	cur, numeric := mc_strtoull(e.val)
+	cur, numeric := mc_text_unsigned(e.val)
 	if !numeric {
 		mc_out(c, MC_ERR_NON_NUMERIC)
 		return
@@ -1348,11 +1327,11 @@ mc_cmd_stats :: proc(c: ^Conn, t: ^Mc_Line) {
 
 @(private = "file")
 mc_cmd_unknown :: proc(c: ^Conn, t: ^Mc_Line) {
-	if t.ntok >= 2 && t.ntok <= MC_MAX_TOKENS && len(t.last) >= 5 && string(t.last[:5]) == "HTTP/" {
+	if t.ntok >= 2 && t.ntok <= MC_LAST_TOKEN_SCAN_TOKENS && len(t.last) >= 5 && string(t.last[:5]) == "HTTP/" {
 		mc_drop(c)
 		return
 	}
-	if t.ntok <= MC_MAX_TOKENS && string(t.last) == "noreply" {
+	if t.ntok <= MC_LAST_TOKEN_SCAN_TOKENS && string(t.last) == "noreply" {
 		return
 	}
 	mc_out(c, "ERROR\r\n")
