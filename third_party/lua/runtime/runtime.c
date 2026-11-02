@@ -463,15 +463,26 @@ static int es_register(lua_State *L) {
     return 0;
 }
 
-static void es_readonly(lua_State *L, int index) {
-    index = lua_absindex(L, index);
+static void es_readonly_visit(lua_State *L, int index, int visited) {
+    lua_pushvalue(L, index); lua_rawget(L, visited);
+    int seen = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+    if (seen) return;
+    lua_pushvalue(L, index); lua_pushboolean(L, 1); lua_rawset(L, visited);
     if (lua_isreadonlytable(L, index)) return;
     lua_enablereadonlytable(L, index, 1);
+    luaL_checkstack(L, 4, "nested tables too deep");
     lua_pushnil(L);
     while (lua_next(L, index)) {
-        if (lua_type(L, -1) == LUA_TTABLE) es_readonly(L, -1);
+        if (lua_type(L, -1) == LUA_TTABLE) es_readonly_visit(L, lua_gettop(L), visited);
         lua_pop(L, 1);
     }
+}
+static void es_readonly(lua_State *L, int index) {
+    index = lua_absindex(L, index);
+    lua_newtable(L);
+    es_readonly_visit(L, index, lua_gettop(L));
+    lua_pop(L, 1);
 }
 static int es_log(lua_State *L) {
     es_context *ctx = es_context_of(L);
