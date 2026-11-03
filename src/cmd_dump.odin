@@ -332,7 +332,7 @@ cmd_restore :: proc(c: ^Conn, argv: [][]u8) {
 		reply_ok(c)
 		return
 	}
-	e, _ := db_upsert(key)
+	e, _ := db_upsert_timed(key, min(at, MAX_EXPIRE_MS))
 	persist_attach(e, key, v)
 	if at != 0 {
 		entry_set_expire(e, min(at, MAX_EXPIRE_MS))

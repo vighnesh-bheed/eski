@@ -34,9 +34,8 @@ FORM_HEAP :: 10
 FORM_OBJECT :: 11
 INLINE_BYTES :: 7
 
-Slot_Meta :: bit_field u64 {
-	expire_at: u64 | 48,
-	stamp:     u16 | 16,
+Slot_Meta :: struct {
+	stamp: u16,
 }
 
 Slot_Tag :: bit_field u8 {
@@ -57,7 +56,7 @@ Key_Small :: struct #packed {
 Key_Slab :: struct #packed {
 	offset: u32,
 	len:    u16,
-	spare:  u8,
+	timed:  u8,
 	tag:    Slot_Tag,
 }
 
@@ -66,7 +65,8 @@ Key_Handle :: struct #raw_union {
 	small: Key_Small,
 	slab:  Key_Slab,
 	heap:  bit_field u64 {
-		addr: uintptr | 48,
+		addr:  uintptr | 48,
+		timed: u8      | 8,
 	},
 }
 
@@ -104,10 +104,12 @@ Big_Str :: struct {
 }
 
 KEY_CMP_MASK :: u64(0x0FFF_FFFF_FFFF_FFFF)
+KEY_TIMED :: u8(1)
+DEADLINE_BYTES :: 8
 TALLY_SHIFT :: 56
 MAX_EXPIRE_MS :: i64(1 << 48) - 1
 
-#assert(size_of(Slot_Meta) == 8)
+#assert(size_of(Slot_Meta) == 2)
 #assert(size_of(Slot_Tag) == 1)
 #assert(size_of(Val_Info) == 1)
 #assert(size_of(Key_Handle) == 8)
@@ -115,10 +117,10 @@ MAX_EXPIRE_MS :: i64(1 << 48) - 1
 #assert(size_of(Key_Small) == 8 && size_of(Key_Slab) == 8)
 #assert(size_of(Val_Small) == 8 && size_of(Val_Slab) == 8)
 #assert(offset_of(Key_Small, tag) == 7 && offset_of(Key_Slab, tag) == 7)
+#assert(offset_of(Key_Slab, timed) == 6)
 #assert(offset_of(Val_Small, tally) == 7 && offset_of(Val_Slab, tally) == 7)
 #assert(offset_of(Val_Slab, info) == 6)
-#assert(size_of(Slot) == 24)
-#assert(size_of(Slot_Meta) + size_of(Key_Handle) + size_of(Val_Handle) <= 24)
+#assert(size_of(Slot_Meta) + size_of(Key_Handle) + size_of(Val_Handle) == 18)
 #assert(size_of(Big_Str) == 16)
 
 pack_small :: #force_inline proc "contextless" (b: []u8) -> u64 #no_bounds_check {

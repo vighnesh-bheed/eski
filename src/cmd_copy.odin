@@ -55,7 +55,7 @@ cmd_copy :: proc(c: ^Conn, argv: [][]u8) {
 			return
 		}
 	}
-	e, _ := db_upsert_in(target, destination)
+	e, _ := db_upsert_timed_in(target, destination, expire)
 	if kind == .String {
 		entry_copy_string(e, copy_text[:], encoding)
 	} else {

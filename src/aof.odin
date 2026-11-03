@@ -1796,7 +1796,7 @@ aof_key_state :: proc(db: ^Db, key: []u8) -> (exists: bool, expire: i64, v: Slot
 	if i < 0 {
 		return
 	}
-	at := i64(t.slots[i].meta.expire_at)
+	at := slot_deadline(db, t, i)
 	if at != 0 && at <= expire_now() {
 		return
 	}
@@ -3859,12 +3859,12 @@ aof_rewrite_commands :: proc(w: ^rdb.Writer) -> bool {
 			if t.ctrl == nil || t.cap <= 0 || t.live <= 0 {
 				continue
 			}
-			for g: u64 = 0; g <= t.gmask; g += 1 {
+			for g: u64 = 0; g < t.groups; g += 1 {
 				bits := group_full(group_load(t.ctrl, g))
 				for bits != 0 {
 					i := int(g) * GROUP_SLOTS + int(intrinsics.count_trailing_zeros(bits))
 					bits &= bits - 1
-					expire := i64(t.slots[i].meta.expire_at)
+					expire := slot_deadline(&db, t, i)
 					if !selected {
 						aof_w_header(w, 2)
 						aof_w_str(w, "SELECT")

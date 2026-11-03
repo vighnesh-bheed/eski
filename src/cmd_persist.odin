@@ -342,7 +342,7 @@ persist_slot_entry :: #force_inline proc "contextless" (db: ^Db, t: ^Table, i: i
 		mp = &t.slots[i].meta,
 		kp = &t.slots[i].key,
 		vp = &t.slots[i].val,
-		expire_at = i64(t.slots[i].meta.expire_at),
+		expire_at = slot_deadline(db, t, i),
 	}
 }
 
@@ -377,13 +377,13 @@ persist_write_rdb :: proc(w: ^rdb.Writer, aof_base: bool = false) -> bool {
 			if !persist_table_ok(t) {
 				continue
 			}
-			for g: u64 = 0; g <= t.gmask; g += 1 {
+			for g: u64 = 0; g < t.groups; g += 1 {
 				bits := group_full(group_load(t.ctrl, g))
 				for bits != 0 {
 					i := int(g) * GROUP_SLOTS + int(intrinsics.count_trailing_zeros(bits))
 					bits &= bits - 1
 					kp := &t.slots[i].key
-					expire := i64(t.slots[i].meta.expire_at)
+					expire := slot_deadline(&db, t, i)
 					if expire != 0 {
 						rdb.put_u8(w, rdb.OPCODE_EXPIRETIME_MS)
 						rdb.put_ms(w, expire)
@@ -1208,7 +1208,8 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 				expire, hint = -1, {}
 				continue
 			}
-			e, created := db_upsert_in(db, key)
+			due := expire if expire != -1 else 0
+			e, created := db_upsert_timed_in(db, key, due)
 			if !created {
 				if !merge {
 					l: Log_Line
@@ -1220,7 +1221,7 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 					persist_fail_end(&l)
 				}
 				db_remove_in(db, key)
-				e, _ = db_upsert_in(db, key)
+				e, _ = db_upsert_timed_in(db, key, due)
 			}
 			persist_attach(e, key, v)
 			if expire != -1 {
@@ -1841,7 +1842,7 @@ digest_of_key :: proc(db: ^Db, t: ^Table, slot: int) -> Digest {
 	digest_text(&h, key_bytes(&t.slots[slot].key, &db.slab))
 	contents := digest_of_value(persist_slot_value(db, &t.slots[slot].key, &t.slots[slot].val))
 	blake2b.update(&h, contents[:])
-	expiring := [1]u8{1 if t.slots[slot].meta.expire_at != 0 else 0}
+	expiring := [1]u8{1 if key_timed(t.slots[slot].key) else 0}
 	blake2b.update(&h, expiring[:])
 	return digest_close(&h)
 }
@@ -1859,7 +1860,7 @@ reply_digest :: proc(c: ^Conn, d: ^[20]u8) {
 
 @(private = "file")
 digest_table :: proc(total: ^Digest, db: ^Db, t: ^Table) {
-	for g in 0 ..= t.gmask {
+	for g in 0 ..< t.groups {
 		occupied := group_full(group_load(t.ctrl, g))
 		base := int(g) * GROUP_SLOTS
 		for occupied != 0 {

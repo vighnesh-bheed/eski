@@ -47,12 +47,12 @@ Successful inner writes survive later errors and join one AOF effect group, incl
 
 ## Keyspace and values
 
-The database table separates compact control bytes from a structure-of-arrays slot region. Lookup hashes a key, checks a group of control bytes and compares only candidate keys. Slots carry expiry/access metadata and compact key/value handles. Short strings fit in handles; larger payloads use slab or heap storage, and collection handles reference type-specific objects. The representations and accounting are in `src/table.odin`, `src/value.odin` and `src/memory_storage.odin`.
+The database table separates compact control bytes from a structure-of-arrays slot region. Lookup hashes a key, checks a group of control bytes and compares only candidate keys. Slots carry a two-byte access stamp and compact key/value handles. A key with a deadline keeps it in eight bytes beside its own key bytes, so keys without one pay nothing for expiry. Short strings fit in handles; larger payloads use slab or heap storage, and collection handles reference type-specific objects. The representations and accounting are in `src/table.odin`, `src/value.odin` and `src/memory_storage.odin`.
 
 ```mermaid
 flowchart TD
     Db[Logical database] --> Control[Control-byte groups]
-    Db --> Slots[Slots and expiry/access metadata]
+    Db --> Slots[Slots and access stamps]
     Slots --> Inline[Inline key or string]
     Slots --> Slab[Slab-backed payload]
     Slots --> Heap[Heap-backed payload or type object]
@@ -64,9 +64,9 @@ Storage packages manage lists, hashes, sets, sorted sets, packed values, bitmaps
 
 ## Maintenance
 
-Keyspace resizing and member-table migration use bounded work steps. The event loop also advances maintenance while traffic is quiet. Slab reclamation and lazy freeing have separate work queues. The periodic cron path performs expiry work, persistence scheduling, subscription maintenance, idle-client checks and statistics updates.
+Keyspace resizing and member-table migration use bounded work steps. The keyspace table grows by a quarter of its capacity when it reaches seven eighths full, and its capacity is any multiple of the 16-slot group. The event loop also advances maintenance while traffic is quiet. Slab reclamation and lazy freeing have separate work queues. The periodic cron path performs expiry work, persistence scheduling, subscription maintenance, idle-client checks and statistics updates.
 
-Expiry is lazy on access and active through a budgeted sweep over database metadata. Hash field deadlines use a registry so active field expiry can find relevant hashes without sweeping every hash. A key mutation also participates in watched-key invalidation, pub/sub notifications, tracking invalidation and the persistence feed. These effects are coordinated with transaction and blocked-client execution.
+Expiry is lazy on access and active through a budgeted sweep over the key handles of each database. Hash field deadlines use a registry so active field expiry can find relevant hashes without sweeping every hash. A key mutation also participates in watched-key invalidation, pub/sub notifications, tracking invalidation and the persistence feed. These effects are coordinated with transaction and blocked-client execution.
 
 ## Persistence and blocking work
 
