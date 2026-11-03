@@ -15,54 +15,41 @@ def expect {α : Type} : Except String α → IO α
   | .ok a => pure a
   | .error e => throw (IO.userError e)
 
+def keyLength : Nat := 7
+
 def showCell : Cell → String
   | .empty => "-"
   | .deleted => "x"
-  | .live e => s!"{e.key}:{e.value}:{e.expiry}:{e.clock}"
+  | .live e =>
+    s!"{e.key}:{e.value}:{e.clock}:" ++ (if e.cell.timed then s!"t{e.cell.deadline}" else "u")
 
 def showTable (t : Table) : String :=
   s!"{t.slots.length},{t.live},{t.tombs},{t.growth};" ++ String.intercalate "," (t.slots.map showCell)
 
-def locate (b : Banks) (key hash : Nat) : Option (Bool × Nat) :=
-  match findIndex b.src key hash with
-  | some i => some (false, i)
-  | none => if b.cursor ≥ 0 then (findIndex b.dst key hash).map (true, ·) else none
+def startAt (k : Keyspace) (cap : Nat) : Except String (Keyspace × String) := do
+  if 0 ≤ k.banks.cursor then throw "nested resize"
+  return (ksStart k cap, "0")
 
-def insertEntry (b : Banks) (e : Entry) : Except String (Banks × String) := do
-  if let some (dst, i) := locate b e.key e.hash then
-    if dst then return ({b with dst := {b.dst with slots := put b.dst.slots i (.live e)}}, "0")
-    return ({b with src := {b.src with slots := put b.src.slots i (.live e)}}, "0")
-  let target := if b.cursor ≥ 0 then b.dst else b.src
-  let some i := claimIndex target.slots e.hash | throw "destination full"
-  if b.cursor ≥ 0 then return ({b with dst := place target i e}, "1")
-  return ({b with src := place target i e}, "1")
-
-def tableStep (b : Banks) : List String → Except String (Banks × String)
-  | ["I", key, hash, value, expiry, clock] => do
-    insertEntry b ⟨← nat key, ← nat hash, ← nat value, ← nat expiry, ← nat clock⟩
+def tableStep (k : Keyspace) : List String → Except String (Keyspace × String)
+  | ["I", key, hash, value, deadline, clock] => do
+    let some (next, created) := ksUpsert k (← nat key) (← nat hash) (← nat value) (← nat deadline) (← nat clock)
+      keyLength | throw "destination full"
+    return (next, if created then "1" else "0")
   | ["D", key, hash] => do
-    let key ← nat key
-    let hash ← nat hash
-    match locate b key hash with
-    | none => return (b, "0")
-    | some (dst, i) =>
-      if dst then return ({b with dst := erase b.dst i}, "1")
-      return ({b with src := erase b.src i}, "1")
+    let (next, removed) := ksRemove k (← nat key) (← nat hash)
+    return (next, if removed then "1" else "0")
   | ["Q", key, hash] => do
     let key ← nat key
     let hash ← nat hash
-    match locate b key hash with
-    | none => return (b, "n")
-    | some (dst, i) =>
-      return (b, showCell (((if dst then b.dst else b.src).slots[i]?).getD .empty))
-  | ["G", cap] => do
-    let cap ← nat cap
-    if b.cursor ≥ 0 then throw "nested resize"
-    return (⟨b.src, emptyTable cap, 0⟩, "0")
-  | ["M", groups, want] => do
-    let groups ← nat groups
-    let want ← nat want
-    return (if b.cursor ≥ 0 then rehash b groups want else b, "0")
+    match locate k.banks key hash with
+    | none => return (k, "n")
+    | some (d, i) => return (k, showCell (((bankOf k.banks d).slots[i]?).getD .empty))
+  | ["G", cap] => do startAt k (← nat cap)
+  | ["U"] =>
+    let cap := k.banks.src.slots.length
+    startAt k (if k.banks.src.live > (cap * 7 / 16 : Nat) then growCap cap else cap)
+  | ["V"] => startAt k (roundCap (k.banks.src.live.toNat * 2))
+  | ["M", groups, want] => do return (ksMigrate k (← nat groups) (← nat want), "0")
   | _ => throw "invalid table operation"
 
 def memoryStep (l : Ledger) (limit : Int) (initialized : Bool) : List String → Except String (Ledger × Bool)
@@ -75,7 +62,7 @@ def memoryStep (l : Ledger) (limit : Int) (initialized : Bool) : List String →
 def main (args : List String) : IO Unit := do
   let [path] := args | throw (IO.userError "expected trace path")
   let input ← IO.FS.readFile path
-  let mut b : Banks := ⟨emptyTable 16, emptyTable 0, -1⟩
+  let mut k : Keyspace := ksReset 16
   let mut l : Ledger := ⟨0, []⟩
   let mut limit : Int := 0
   let mut initialized := false
@@ -83,18 +70,20 @@ def main (args : List String) : IO Unit := do
     if line.isEmpty then continue
     match line.splitOn " " with
     | ["R", cap] =>
-      let n ← expect (nat cap)
-      b := ⟨emptyTable n, emptyTable 0, -1⟩
+      k := ksReset (← expect (nat cap))
     | ["A", budget, init] =>
       limit ← expect (int budget)
       initialized := init == "1"
       l := ⟨0, []⟩
+    | ["S", cursor] =>
+      let (keys, next) := scanRound k.banks (← expect (nat cursor))
+      IO.println s!"S|{String.intercalate "," (keys.map toString)}|{next}"
     | fields =>
       if fields.head! ∈ ["E", "P", "L", "F", "N", "W", "Z"] then
         let (next, ok) ← expect (memoryStep l limit initialized fields)
         l := next
         IO.println s!"K|{if ok then 1 else 0}|{l.used}"
       else
-        let (next, reply) ← expect (tableStep b fields)
-        b := next
-        IO.println s!"T|{reply}|{b.cursor}|{showTable b.src}|{showTable b.dst}"
+        let (next, reply) ← expect (tableStep k fields)
+        k := next
+        IO.println s!"T|{reply}|{k.banks.cursor}|{k.expires},{k.cells},{k.tables}|{showTable k.banks.src}|{showTable k.banks.dst}"

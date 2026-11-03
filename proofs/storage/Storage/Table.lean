@@ -2,12 +2,18 @@ import Std
 
 namespace Storage
 
+structure KeyCell where
+  len : Nat
+  timed : Bool
+  deadline : Nat
+  deriving DecidableEq, Repr, Inhabited
+
 structure Entry where
   key : Nat
   hash : Nat
   value : Nat
-  expiry : Nat
   clock : Nat
+  cell : KeyCell
   deriving DecidableEq, Repr, Inhabited
 
 inductive Cell where
@@ -23,6 +29,13 @@ def weight (w : Cell → Nat) : List Cell → Nat
   | [] => 0
   | x :: xs => w x + weight w xs
 
+def liftWeight (f : Entry → Nat) : Cell → Nat
+  | .live e => f e
+  | _ => 0
+
+def total (f : Entry → Nat) (src dst : List Cell) : Nat :=
+  weight (liftWeight f) src + weight (liftWeight f) dst
+
 def entryWeight (p : Entry → Bool) : Cell → Nat
   | .live e => if p e then 1 else 0
   | _ => 0
@@ -35,16 +48,41 @@ def freeAt (xs : List Cell) (i : Nat) : Bool :=
   | some .empty | some .deleted => true
   | _ => false
 
-def probeGroups (groups home : Nat) : List Nat :=
-  ((List.range groups).foldl (fun (st : Nat × Nat × List Nat) _ =>
-    let next := st.2.1 + 1
-    ((st.1 + next) % groups, next, st.2.2 ++ [st.1])) (home, 0, [])).2.2
+def wordSpan : Nat := 18446744073709551616
 
-def candidates (groups home : Nat) : List Nat :=
-  (probeGroups groups home).flatMap fun g => (List.range 16).map (g * 16 + ·)
+def hashHome (h groups : Nat) : Nat := h % wordSpan * groups / wordSpan
+
+def tri : Nat → Nat
+  | 0 => 0
+  | k + 1 => tri k + (k + 1)
+
+def widen : Nat → Nat → Nat → Nat
+  | 0, p, _ => p
+  | fuel + 1, p, groups => if p < groups then widen fuel (p * 2) groups else p
+
+def probeSpan (groups : Nat) : Nat := widen groups 1 groups
+
+def walkFrom (groups mask : Nat) : Nat → Nat → Nat → List Nat
+  | 0, _, _ => []
+  | fuel + 1, pos, step =>
+    let rest := walkFrom groups mask fuel ((pos + (step + 1)) &&& mask) (step + 1)
+    if pos < groups then pos :: rest else rest
+
+def probeGroups (groups home : Nat) : List Nat :=
+  walkFrom groups (probeSpan groups - 1) (probeSpan groups) home 0
+
+def groupIndices (g : Nat) : List Nat := (List.range 16).map (g * 16 + ·)
+
+def groupsOf (xs : List Cell) : Nat := xs.length / 16
+
+def probeOf (xs : List Cell) (hash : Nat) : List Nat :=
+  probeGroups (groupsOf xs) (hashHome hash (groupsOf xs))
+
+def candidates (xs : List Cell) (hash : Nat) : List Nat :=
+  (probeOf xs hash).flatMap groupIndices
 
 def claimIndex (xs : List Cell) (hash : Nat) : Option Nat :=
-  (candidates (xs.length / 16) ((hash / 128) % (xs.length / 16))).find? (freeAt xs)
+  (candidates xs hash).find? (freeAt xs)
 
 structure Table where
   slots : List Cell
@@ -55,6 +93,10 @@ structure Table where
 
 def emptyTable (cap : Nat) : Table :=
   ⟨List.replicate cap .empty, 0, 0, cap - cap / 8⟩
+
+def growCap (cap : Nat) : Nat := max (cap + 16) ((cap * 5 / 4 + 15) / 16 * 16)
+
+def roundCap (n : Nat) : Nat := max 16 ((n + 15) / 16 * 16)
 
 def place (t : Table) (i : Nat) (e : Entry) : Table :=
   let deleted := t.slots[i]? == some .deleted
@@ -93,29 +135,26 @@ def migrateSlots : List Nat → Nat → Banks → Nat → Banks × Nat
     else (b, moved)
 
 def migrateGroup (b : Banks) (g limit : Nat) : Banks × Nat × Bool :=
-  let result := migrateSlots ((List.range 16).map (g * 16 + ·)) limit b 0
+  let result := migrateSlots (groupIndices g) limit b 0
   (result.1, result.2, !groupLive result.1.src g)
 
 def nextCursor (cursor : Int) (done : Bool) : Int := if done then cursor + 1 else cursor
 
 def swapBanks (b : Banks) : Banks := ⟨b.dst, emptyTable 0, -1⟩
 
-def rehash (b : Banks) (maxGroups want : Nat) : Banks := Id.run do
-  let mut b := b
-  let mut moved := 0
-  let mut visited := 0
-  for _ in List.range (b.src.slots.length / 16) do
-    if b.cursor < 0 ∨ b.cursor.toNat ≥ b.src.slots.length / 16 ∨ moved ≥ want ∨ visited ≥ maxGroups then break
-    let (next, n, done) := migrateGroup b b.cursor.toNat (want - moved)
-    b := next
-    moved := moved + n
-    if !done then break
-    b := {b with cursor := nextCursor b.cursor done}
-    visited := visited + 1
-  if b.cursor.toNat ≥ b.src.slots.length / 16 ∨ b.src.live = 0 then return swapBanks b
-  return b
+def rehashLoop : Nat → Banks → Nat → Nat → Nat → Nat → Banks
+  | 0, b, _, _, _, _ => b
+  | fuel + 1, b, maxGroups, want, moved, visited =>
+    if b.cursor < 0 ∨ groupsOf b.src.slots ≤ b.cursor.toNat ∨ want ≤ moved ∨ maxGroups ≤ visited then b
+    else
+      let r := migrateGroup b b.cursor.toNat (want - moved)
+      if r.2.2 then
+        rehashLoop fuel {r.1 with cursor := nextCursor r.1.cursor true} maxGroups want (moved + r.2.1) (visited + 1)
+      else r.1
 
-def groupIndices (g : Nat) : List Nat := (List.range 16).map (g * 16 + ·)
+def rehash (b : Banks) (maxGroups want : Nat) : Banks :=
+  let next := rehashLoop (groupsOf b.src.slots) b maxGroups want 0 0
+  if groupsOf next.src.slots ≤ next.cursor.toNat ∨ next.src.live = 0 then swapBanks next else next
 
 def keyAt (xs : List Cell) (key hash i : Nat) : Bool :=
   match xs[i]? with
@@ -136,13 +175,18 @@ def lookupPath (xs : List Cell) (key hash : Nat) : List Nat → Option Nat
     | none => if groupEmpty xs g then none else lookupPath xs key hash rest
 
 def findIndex (t : Table) (key hash : Nat) : Option Nat :=
-  lookupPath t.slots key hash (probeGroups (t.slots.length / 16) ((hash / 128) % (t.slots.length / 16)))
+  lookupPath t.slots key hash (probeOf t.slots hash)
 
 def erase (t : Table) (i : Nat) : Table :=
   let g := i / 16
   let empty := (List.range 16).any fun k => t.slots[g * 16 + k]? == some .empty
   ⟨put t.slots i (if empty then .empty else .deleted), t.live - 1,
     t.tombs + (if empty then 0 else 1), t.growth + (if empty then 1 else 0)⟩
+
+def locate (b : Banks) (key hash : Nat) : Option (Bool × Nat) :=
+  match findIndex b.src key hash with
+  | some i => some (false, i)
+  | none => if 0 ≤ b.cursor then (findIndex b.dst key hash).map (true, ·) else none
 
 theorem put_weight (xs : List Cell) (i : Nat) (old new : Cell) (w : Cell → Nat)
     (h : xs[i]? = some old) :
@@ -179,35 +223,48 @@ theorem claim_is_free (xs : List Cell) (hash i : Nat)
 
 theorem claim_first_reachable (xs : List Cell) (hash i : Nat)
     (h : claimIndex xs hash = some i) :
-    ∃ before after, candidates (xs.length / 16) ((hash / 128) % (xs.length / 16)) =
-      before ++ i :: after ∧ ∀ j ∈ before, freeAt xs j = false := by
+    ∃ before after, candidates xs hash = before ++ i :: after ∧ ∀ j ∈ before, freeAt xs j = false := by
   obtain ⟨_, before, after, heq, hbefore⟩ := List.find?_eq_some_iff_append.mp h
   refine ⟨before, after, heq, ?_⟩
   intro j hj
   have hh := hbefore j hj
   simpa using hh
 
-theorem move_preserves_logical (b : Banks) (i j : Nat) (e : Entry)
+theorem move_preserves_total (b : Banks) (i j : Nat) (e : Entry)
     (hs : b.src.slots[i]? = some (.live e)) (hd : freeAt b.dst.slots j = true)
-    (p : Entry → Bool) :
-    logical p (moveOne b i j e).src.slots (moveOne b i j e).dst.slots =
-      logical p b.src.slots b.dst.slots := by
-  have hsrc := put_weight b.src.slots i (.live e) .deleted (entryWeight p) hs
+    (f : Entry → Nat) :
+    total f (moveOne b i j e).src.slots (moveOne b i j e).dst.slots =
+      total f b.src.slots b.dst.slots := by
+  have hsrc := put_weight b.src.slots i (.live e) .deleted (liftWeight f) hs
   cases ht : b.dst.slots[j]? with
   | none => simp [freeAt, ht] at hd
   | some c =>
     cases c with
     | live v => simp [freeAt, ht] at hd
     | empty =>
-      have hdst := put_weight b.dst.slots j .empty (.live e) (entryWeight p) ht
-      simp only [entryWeight] at hsrc hdst
-      simp only [logical, moveOne, place]
+      have hdst := put_weight b.dst.slots j .empty (.live e) (liftWeight f) ht
+      simp only [liftWeight] at hsrc hdst
+      simp only [total, moveOne, place]
       omega
     | deleted =>
-      have hdst := put_weight b.dst.slots j .deleted (.live e) (entryWeight p) ht
-      simp only [entryWeight] at hsrc hdst
-      simp only [logical, moveOne, place]
+      have hdst := put_weight b.dst.slots j .deleted (.live e) (liftWeight f) ht
+      simp only [liftWeight] at hsrc hdst
+      simp only [total, moveOne, place]
       omega
+
+theorem entry_weight_lift (p : Entry → Bool) :
+    entryWeight p = liftWeight (fun e => if p e then 1 else 0) := by
+  funext c
+  cases c <;> rfl
+
+theorem move_preserves_logical (b : Banks) (i j : Nat) (e : Entry)
+    (hs : b.src.slots[i]? = some (.live e)) (hd : freeAt b.dst.slots j = true)
+    (p : Entry → Bool) :
+    logical p (moveOne b i j e).src.slots (moveOne b i j e).dst.slots =
+      logical p b.src.slots b.dst.slots := by
+  have h := move_preserves_total b i j e hs hd (fun e => if p e then 1 else 0)
+  simp only [total, ← entry_weight_lift] at h
+  exact h
 
 theorem move_preserves_unique_keys (b : Banks) (i j : Nat) (e : Entry)
     (hs : b.src.slots[i]? = some (.live e)) (hd : freeAt b.dst.slots j = true)
@@ -247,16 +304,23 @@ theorem migration_machine_bounds (b : Banks) (i j : Nat) (e : Entry)
   simp only [moveOne, place]
   split at room <;> simp_all <;> omega
 
-theorem migrateAt_preserves_logical (b : Banks) (i : Nat) (p : Entry → Bool) :
-    logical p (migrateAt b i).1.src.slots (migrateAt b i).1.dst.slots =
-      logical p b.src.slots b.dst.slots := by
+theorem migrateAt_preserves_total (b : Banks) (i : Nat) (f : Entry → Nat) :
+    total f (migrateAt b i).1.src.slots (migrateAt b i).1.dst.slots =
+      total f b.src.slots b.dst.slots := by
   unfold migrateAt
   split
   next e hs =>
     split
-    next j hj => exact move_preserves_logical b i j e hs (claim_is_free _ _ _ hj) p
+    next j hj => exact move_preserves_total b i j e hs (claim_is_free _ _ _ hj) f
     next => rfl
   next => rfl
+
+theorem migrateAt_preserves_logical (b : Banks) (i : Nat) (p : Entry → Bool) :
+    logical p (migrateAt b i).1.src.slots (migrateAt b i).1.dst.slots =
+      logical p b.src.slots b.dst.slots := by
+  have h := migrateAt_preserves_total b i (fun e => if p e then 1 else 0)
+  simp only [total, ← entry_weight_lift] at h
+  exact h
 
 theorem repeated_migration_preserves (steps : List Nat) (b : Banks) (p : Entry → Bool) :
     logical p (steps.foldl (fun s i => (migrateAt s i).1) b).src.slots
@@ -267,16 +331,24 @@ theorem repeated_migration_preserves (steps : List Nat) (b : Banks) (p : Entry �
     simp only [List.foldl_cons]
     rw [ih, migrateAt_preserves_logical]
 
-theorem migrateSlots_preserves (indices : List Nat) (limit moved : Nat) (b : Banks) (p : Entry → Bool) :
-    logical p (migrateSlots indices limit b moved).1.src.slots
-      (migrateSlots indices limit b moved).1.dst.slots = logical p b.src.slots b.dst.slots := by
+theorem migrateSlots_preserves_total (indices : List Nat) (limit moved : Nat) (b : Banks)
+    (f : Entry → Nat) :
+    total f (migrateSlots indices limit b moved).1.src.slots
+      (migrateSlots indices limit b moved).1.dst.slots = total f b.src.slots b.dst.slots := by
   induction indices generalizing b moved with
   | nil => rfl
   | cons i rest ih =>
     simp only [migrateSlots]
     split
-    next => rw [ih, migrateAt_preserves_logical]
+    next => rw [ih, migrateAt_preserves_total]
     next => rfl
+
+theorem migrateSlots_preserves (indices : List Nat) (limit moved : Nat) (b : Banks) (p : Entry → Bool) :
+    logical p (migrateSlots indices limit b moved).1.src.slots
+      (migrateSlots indices limit b moved).1.dst.slots = logical p b.src.slots b.dst.slots := by
+  have h := migrateSlots_preserves_total indices limit moved b (fun e => if p e then 1 else 0)
+  simp only [total, ← entry_weight_lift] at h
+  exact h
 
 theorem migrateGroup_preserves (b : Banks) (g limit : Nat) (p : Entry → Bool) :
     logical p (migrateGroup b g limit).1.src.slots (migrateGroup b g limit).1.dst.slots =
@@ -307,5 +379,24 @@ theorem positive_budget_progress (b : Banks) (i j : Nat) (e : Entry)
     (hs : b.src.slots[i]? = some (.live e)) (hd : claimIndex b.dst.slots e.hash = some j) :
     (migrateAt b i).2 = 1 ∧ (migrateAt b i).1.src.live = b.src.live - 1 := by
   simp [migrateAt, hs, hd, moveOne]
+
+theorem grow_cap_valid (cap : Nat) (h : cap % 16 = 0) :
+    growCap cap % 16 = 0 ∧ cap < growCap cap ∧ cap * 5 / 4 ≤ growCap cap ∧ growCap cap ≤ cap * 5 / 4 + 16 := by
+  unfold growCap
+  omega
+
+theorem grow_holds_live (cap live : Nat) (h : live ≤ cap - cap / 8) :
+    live ≤ growCap cap - growCap cap / 8 := by
+  unfold growCap
+  omega
+
+theorem round_cap_valid (n : Nat) :
+    roundCap n % 16 = 0 ∧ 16 ≤ roundCap n ∧ n ≤ roundCap n ∧ roundCap n < max 16 n + 16 := by
+  unfold roundCap
+  omega
+
+theorem shrink_holds_live (live : Nat) : live ≤ roundCap (live * 2) - roundCap (live * 2) / 8 := by
+  unfold roundCap
+  omega
 
 end Storage

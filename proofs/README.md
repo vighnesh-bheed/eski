@@ -13,16 +13,16 @@ Areas 7 and 8, worker scheduling and fork/shutdown, have separate [bounded concu
 
 ## Recorded coverage
 
-The first phase contains 173 named contract theorems. The complete kernel inventory additionally checks generated declarations. The comparison counts below use different units and should be read by row.
+The first phase contains 276 named contract theorems. The complete kernel inventory additionally checks generated declarations. The comparison counts below use different units and should be read by row.
 
 | Area | Named theorems | Actual Odin comparison evidence |
 | --- | --- | --- |
-| 1. Hash-table resizing | 39 | 9,080 table operations, including partial migration, collisions, deletions and swaps |
+| 1. Hash-table resizing | 132 | 12,275 table operations and 2,266 SCAN rounds, including non-power-of-two capacities, growth and shrink rules, timed keys, partial migration, collisions, deletions and swaps |
 | 2. Worker rollback | 18 | Five internal-failure, success and ordinary command-error fixtures |
 | 3. Expiry and persistence | 25 | 7,958 hash-operation steps, ten ordinary-key translation fixtures and two exact-deadline fixtures |
 | 4. Request parsing | 16 | 1,629 arithmetic guards and 4,042 fragmented-input prefix checks |
 | 5. Packed codecs | 26 | 11,376 codec, decode, validation and traversal rows |
-| 6. Memory accounting | 14 | 1,539 accounting operations and rollback/ownership checks |
+| 6. Memory accounting | 24 | 1,527 pool accounting operations and rollback/ownership checks, plus table-byte, timed-key and key-cell counters on each of the 12,275 table rows |
 | 9. Bit and integer operations | 35 | 49,629 programs containing 100,155 operations |
 
 These checks passed in a fresh aggregate rebuild with Lean 4.35.0 and the repository's Odin toolchain. Each project records its own source, artifact and corpus identities. Validation/traversal rows, whole-parser fast/slow comparisons, ordinary-key translator fixtures and actual Odin correspondence remain tests where the individual documentation says so; their presence does not extend the formal proof claims.
@@ -45,4 +45,4 @@ The shared [audit runner](kernel_audit.py) uses [Lean's loaded environment](Kern
 
 The printed contract manifest names the mathematical results used in each area's evidence. Receipts distinguish those named theorems from the larger kernel theorem inventory, which also includes generated results. `kernel-inventory.json` records module, source, compiled-artifact and audit-tool identities; the aggregate runner checks that inventory and its agreement with the named manifest. Source text layout is not used to decide which declarations require dependency checks.
 
-Formal proofs apply to the Lean definitions. Actual Odin comparisons provide finite evidence of correspondence. The project documents distinguish proved properties from tested behavior and do not establish a verified translation of the Odin executable. Memory accounting concerns charged or reserved bytes, with the specific ledger described by the storage project; it does not measure process RSS or bytes per stored key. Performance benefits require separate implementation changes and measurements.
+Formal proofs apply to the Lean definitions. Actual Odin comparisons provide finite evidence of correspondence. The project documents distinguish proved properties from tested behavior and do not establish a verified translation of the Odin executable. Memory accounting concerns charged, reserved or requested bytes, with the pool ledger, table bytes and key cells described by the storage project; it does not measure process RSS or bytes per stored key. Performance benefits require separate implementation changes and measurements.
