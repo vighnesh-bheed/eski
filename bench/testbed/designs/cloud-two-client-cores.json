@@ -1,0 +1,205 @@
+{
+  "schema": "eski-testbed-design-v1",
+  "title": "Eski, Redis, Valkey and Dragonfly on one server core",
+  "suite": "testbed",
+  "engines": [
+    {
+      "target": "eski-docker",
+      "label": "Eski",
+      "image": "bench/image.json"
+    },
+    {
+      "target": "redis",
+      "label": "Redis 7.4.12",
+      "version": "7.4.12",
+      "image": "docker.io/library/redis:7.4.12@sha256:b6b6e3dc0c0952737748e55d5d885272840c7e42ba41ab1d5489f693419882f5"
+    },
+    {
+      "target": "valkey",
+      "label": "Valkey 8.1.11",
+      "version": "8.1.11",
+      "image": "docker.io/valkey/valkey:8.1.11@sha256:8f836008e0986c36adf50da714c7060cf689dbb335f61fe077939d90fa650809"
+    },
+    {
+      "target": "dragonfly",
+      "label": "Dragonfly 2.0.2",
+      "version": "2.0.2",
+      "image": "ghcr.io/dragonflydb/dragonfly:v2.0.2@sha256:061f00b201b58e12f974e4e96c761a881ee1c05e9d8ee967466a604b7299753b"
+    }
+  ],
+  "load_generator": {
+    "tool": "memtier_benchmark",
+    "label": "memtier_benchmark 2.5.2",
+    "version": "2.5.2",
+    "image": "docker.io/redislabs/memtier_benchmark:2.5.2@sha256:389090e9ef13701f36f5ac97485742618e648adbf76c008418383594a05c1659"
+  },
+  "cli_image": "docker.io/library/redis:7.4.12@sha256:b6b6e3dc0c0952737748e55d5d885272840c7e42ba41ab1d5489f693419882f5",
+  "tools": {
+    "jq": {
+      "source": "the Debian archive configured on the test machine, fetched with apt-get download and unpacked into the root",
+      "binary": "usr/bin/jq",
+      "libraries": "usr/lib/x86_64-linux-gnu",
+      "packages": [
+        {
+          "name": "jq",
+          "version": "1.7.1-6+deb13u4",
+          "sha256": "7350392f700e20e46b7ae174a57f54e4ea106dd559753646d629b4e618bf2bff"
+        },
+        {
+          "name": "libjq1",
+          "version": "1.7.1-6+deb13u4",
+          "sha256": "70bb2cbd66d5ada4349067ae9f61d0560b3b359d4203f2c051ca5773153ae0ba"
+        },
+        {
+          "name": "libonig5",
+          "version": "6.9.9-1+b1",
+          "sha256": "3abee130696244050500bcc7870e3b4cb82ddd87149ece3fd55010c3d4e1d18c"
+        }
+      ]
+    }
+  },
+  "resources": {
+    "server_cpus": "2",
+    "client_cpus": "4,5",
+    "control_cpus": "10",
+    "server_memory": "8g",
+    "client_memory": "2g",
+    "maxmemory": 6442450944,
+    "dragonfly_threads": 1,
+    "resource_policy": "strict"
+  },
+  "dataset": {
+    "keys": 100000,
+    "key_prefix": "testbed:",
+    "members": 16,
+    "sample_keys": [
+      1,
+      50000,
+      99999
+    ]
+  },
+  "client": {
+    "threads": 2,
+    "connections_per_thread": 16,
+    "warmup_seconds": 10,
+    "test_seconds": 60,
+    "timeout_seconds": 180,
+    "preload_pipeline": 32,
+    "percentiles": "50,99,99.9"
+  },
+  "workloads": [
+    {
+      "key": "get64-p1",
+      "name": "GET 64 B, pipeline 1",
+      "type": "string",
+      "data_size": 64,
+      "ratio": "0:1",
+      "pipeline": 1
+    },
+    {
+      "key": "set64-p1",
+      "name": "SET 64 B, pipeline 1",
+      "type": "string",
+      "data_size": 64,
+      "ratio": "1:0",
+      "pipeline": 1
+    },
+    {
+      "key": "mixed64-p1",
+      "name": "SET and GET 1:1, 64 B, pipeline 1",
+      "type": "string",
+      "data_size": 64,
+      "ratio": "1:1",
+      "pipeline": 1
+    },
+    {
+      "key": "mixed64-p16",
+      "name": "SET and GET 1:1, 64 B, pipeline 16",
+      "type": "string",
+      "data_size": 64,
+      "ratio": "1:1",
+      "pipeline": 16
+    },
+    {
+      "key": "get1024-p1",
+      "name": "GET 1024 B, pipeline 1",
+      "type": "string",
+      "data_size": 1024,
+      "ratio": "0:1",
+      "pipeline": 1
+    },
+    {
+      "key": "hget16-p1",
+      "name": "HGET, 16 fields of 64 B, pipeline 1",
+      "type": "hash",
+      "data_size": 64,
+      "command": "HGET __key__ field:8",
+      "pipeline": 1
+    },
+    {
+      "key": "sismember16-p1",
+      "name": "SISMEMBER, 16 members, pipeline 1",
+      "type": "set",
+      "data_size": 64,
+      "command": "SISMEMBER __key__ member:8",
+      "pipeline": 1
+    },
+    {
+      "key": "zscore16-p1",
+      "name": "ZSCORE, 16 members, pipeline 1",
+      "type": "zset",
+      "data_size": 64,
+      "command": "ZSCORE __key__ member:8",
+      "pipeline": 1
+    }
+  ],
+  "repetitions": 4,
+  "calibration": {
+    "workloads": [
+      "mixed64-p16"
+    ],
+    "repetitions": 1,
+    "rule": "Every engine runs the calibration workload once under the full gates before the benchmark phase; the benchmark starts only when all four calibration cases are valid. Calibration values never enter the comparison."
+  },
+  "gates": {
+    "sensor_chip": "coretemp",
+    "sensor_label": "Package id 0",
+    "cool_temp_c": 55,
+    "max_temp_c": 90,
+    "min_idle": 95,
+    "min_rest": 30,
+    "stable_seconds": 10,
+    "max_wait": 600,
+    "sample_seconds": 1,
+    "min_free_bytes": 10737418240,
+    "max_client_utilization_pct": 85,
+    "max_latency_seconds": 120,
+    "power_source": "no-power-supply-devices"
+  },
+  "fill": {
+    "scenario": "fill10m",
+    "keys": 10000000,
+    "data_size": 64,
+    "pipeline": 32,
+    "threads": 4,
+    "connections_per_thread": 5,
+    "rest_seconds": 30,
+    "cool_temp_c": 55,
+    "max_wait_seconds": 900
+  },
+  "methodology": {
+    "scope": "One physical server core with simultaneous multithreading disabled for every engine, two separate physical cores for the load generator and one physical core for the controller, on a rented single-socket bare-metal machine. This is an end to end single core comparison on one machine; it does not measure multicore scaling or maximum capacity.",
+    "engines": "Eski, Redis, Valkey and Dragonfly each run in a fresh container per measurement with the same CPU set, an 8 GiB memory and swap cap, 6 GiB maxmemory, persistence off and host loopback networking. Dragonfly runs one proactor thread on its single core.",
+    "dataset": "100,000 keys with numeric ids 1 to 100,000 under one prefix, loaded by one connection at pipeline 32 before every measurement. String workloads hold one value per key; HGET, SISMEMBER and ZSCORE keys hold 16 fields or members and read field or member 8. DBSIZE and sampled replies on keys 1, 50,000 and 99,999 are checked before the warmup.",
+    "sample": "10 seconds of warmup on the loaded dataset, excluded from the statistics, then one 60 second timed run with two client threads of 16 connections each, uniform random keys and pipeline 1 unless the workload names pipeline 16.",
+    "seeds": "The pinned memtier_benchmark image with its default seed and distinct client seeds, so every engine and repetition sees the same key sequence policy.",
+    "repetitions": "Four repetitions per workload and engine. The engine order rotates so that each engine takes every position once per workload. Failed, invalid and skipped cases are never retried silently.",
+    "gates": "Before every case the CPU package must be at or below 55 C, the server and client CPUs at least 95 percent idle, the readings stable for 10 seconds and at least 30 seconds must have passed since the last case; an unmet gate after 600 seconds holds the run. During a case the machine must expose readable telemetry, no thermal throttle counter increments, an unchanged frequency policy, a package at or below 90 C and no competing CPU load. The machine has no battery or ACPI power-supply device; the power gate records that absence instead of an AC online reading.",
+    "quality": "A measurement whose raw client output reports a maximum latency beyond 120 seconds is invalid as a histogram range artefact. The timed client's CPU share is recorded and a measurement above 85 percent of its two CPU budget is marked client limited, which makes its throughput a lower bound.",
+    "publication": "Medians over the valid repetitions with the observed minimum and maximum. Excluded repetitions stay visible with their reason. There is no overall score and no cross workload average.",
+    "latency": "Closed loop client observed latency; p99 is the per run percentile, never pooled across runs.",
+    "memory": "The kernel memory.peak of the server container read just before it stops: it covers preload, warmup and the timed run and is not live key memory or process RSS.",
+    "fill": "A separate fill of 10,000,000 keys of 64 B at pipeline 32 per engine, with the same server core and memory caps, reports resident and used bytes per key and the worst request during the fill.",
+    "isolation": "Docker CPU sets and memory caps separate the roles but share the kernel, the last level cache, memory bandwidth, power and cooling. Simultaneous multithreading is off, so no role shares a physical core."
+  }
+}

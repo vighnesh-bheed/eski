@@ -4,7 +4,7 @@ Generated from `bench/testbed/runs/comparison-v1/dataset.json`, schema `eski-tes
 
 ## Reproduce the tables
 
-Run `python3 -I test/readme_tables.py --benchmark-results bench/testbed/runs/comparison-v1` and verify with `python3 -I test/readme_tables.py --check`. To render the recorded charts and report, run `python3 -I bench/testbed/charts.py --dataset bench/testbed/runs/comparison-v1/dataset.json --out bench/testbed/runs/comparison-v1/charts` and `python3 -I bench/testbed/page.py --dataset bench/testbed/runs/comparison-v1/dataset.json --out bench/testbed/runs/comparison-v1/report.html`. A new physical experiment uses `bench/testbed/design.json` with the plan, install and collection tools described in [build-run-test.md](build-run-test.md). It requires a dedicated machine satisfying those gates; generating tables does not launch that experiment. The [recorded report](../bench/testbed/runs/comparison-v1/report.html), [dataset](../bench/testbed/runs/comparison-v1/dataset.json) and collection receipts are committed together.
+Run `python3 -I test/readme_tables.py --benchmark-results bench/testbed/runs/comparison-v1` and verify with `python3 -I test/readme_tables.py --check`. To render the recorded charts and report, run `python3 -I bench/testbed/charts.py --dataset bench/testbed/runs/comparison-v1/dataset.json --out bench/testbed/runs/comparison-v1/charts` and `python3 -I bench/testbed/page.py --dataset bench/testbed/runs/comparison-v1/dataset.json --out bench/testbed/runs/comparison-v1/report.html`. A new physical experiment follows [run the comparison on a new machine](#run-the-comparison-on-a-new-machine) below; generating tables does not launch it. The [recorded report](../bench/testbed/runs/comparison-v1/report.html), [dataset](../bench/testbed/runs/comparison-v1/dataset.json) and collection receipts are committed together.
 
 ## Method and machine
 
@@ -105,6 +105,114 @@ The separate fill workload uses 10,000,000 generated keys of 64 bytes at pipelin
 | Redis | 10,000,001 | 166.46 | 163.44 | 166.06 | 919,163 | 1.479 | 3.535 |
 | Valkey | 10,000,001 | 138.65 | 134.93 | 138.11 | 877,642 | 2.495 | 4.927 |
 | Dragonfly | 10,000,001 | 106.79 | 101.70 | 106.46 | 716,687 | 1.215 | 2.335 |
+
+## Run the comparison on a new machine
+
+The comparison can be measured again from a clone of this repository. A workstation with docker, python3 and ssh builds the Eski image and drives a separate test machine; the machine runs the exam unattended, and the workstation collects the archives, builds the dataset and regenerates this page. The engine images, the load generator and the jq packages are pinned by digest or sha256 in the design, so two runs of one design differ only in the machine and the Eski revision.
+
+Three designs are tracked, with the same engines, workloads, dataset, repetitions and gates. `bench/testbed/design.json` is the laptop design: server CPU 1, client CPUs 3 and 4, controller CPUs 5 and 11, two client threads of 16 connections and the `mains` power gate. `bench/testbed/designs/cloud-two-client-cores.json` keeps that client for a server: server CPU 2, client CPUs 4 and 5, controller CPU 10 and the `no-power-supply-devices` power gate. `bench/testbed/designs/cloud-four-client-cores.json` spreads the same 32 connections over four client threads of 8 connections on client CPUs 4 to 7, so that the load generator limits fewer measurements; 84 of the 124 valid measurements above are client limited.
+
+### Machine requirements
+
+- One processor socket, or every role on one socket and memory node, on bare metal. A virtual machine usually exposes no CPU frequency policy and no package temperature, and `exam.sh inspect` rejects a role CPU without a readable frequency policy. Prefer a processor without separate performance and efficiency cores; otherwise put every role on one kind of core.
+- The thermal and throttle telemetry the gates read. The package temperature comes from hwmon with the chip and label in `gates.sensor_chip` and `gates.sensor_label`, `coretemp` and `Package id 0` on Intel; the reader also accepts `k10temp` or `zenpower` with `Tctl` or `Tdie`. Every sample also needs the per-CPU counters under `/sys/devices/system/cpu/cpu*/thermal_throttle`, which Linux exposes on Intel processors; without them every case holds with `throttle_telemetry_unavailable`. Check `grep . /sys/class/hwmon/hwmon*/name` and `ls /sys/devices/system/cpu/cpu1/thermal_throttle` first.
+- Simultaneous multithreading off with the `nosmt` kernel parameter, so that one CPU number is one physical core: add `nosmt` to `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub`, run `update-grub` and reboot. `/sys/devices/system/cpu/smt/control` then reads `off` and `lscpu` reports one thread per core.
+- Debian 13. The installer fetches the jq packages pinned in the design's `tools.jq` (jq and libjq1 1.7.1-6+deb13u4, libonig5 6.9.9-1+b1) with `apt-get download`, checks their sha256 and unpacks them with `dpkg-deb` into the run root without root privileges. If the configured archive no longer offers these versions, add a snapshot.debian.org source dated while it did.
+- docker with the ssh user in the `docker` group and access to the registries, because the installer pulls every pinned engine, load generator and CLI image that is missing and checks its digest; tmux, in which the exam runs detached; python3, `ss`, `taskset` and `timeout`. As root: `apt-get install docker.io tmux python3 iproute2 util-linux linux-cpupower` and `usermod -aG docker <user>`.
+- Key-based ssh from the workstation: `ssh -o BatchMode=yes user@HOST true` must succeed, because the installer and the collector call ssh in batch mode.
+- The power gate named by `gates.power_source`. `mains`, the laptop setting, requires an online Mains device under `/sys/class/power_supply` in every sample, so a laptop stays plugged in for the whole run; on battery the first case holds. `no-power-supply-devices`, the setting of both cloud designs, requires a machine that exposes no power supply device at all, so `ls /sys/class/power_supply` prints nothing; a server that lists an online Mains device uses `mains`.
+- A quiet machine. Before every case the whole machine and each server and client CPU must be at least `gates.min_idle` (95) percent idle, no process outside the run may use a tenth of a core, the package must be at or below `gates.cool_temp_c` (55 C), `gates.min_rest` (30) seconds must have passed and `gates.min_free_bytes` (10 GiB) must be free under the run root, all for `gates.stable_seconds` (10) seconds; a gate unmet for `gates.max_wait` (600) seconds holds the run. Disable unattended upgrades and periodic timers, for example with `systemctl disable --now unattended-upgrades apt-daily.timer apt-daily-upgrade.timer`, and poll the status sparingly. If the idle package sits above about 45 C, raise `cool_temp_c` in a copy of the design and in its `methodology.gates` sentence.
+- One frequency policy for the whole run. Set the governor once before the installation, for example with `cpupower frequency-set -g performance`, and leave it; the preflight records the policy of every role CPU, and a change holds the run or invalidates the case.
+- Free ports 6379 for Redis, 6380 for Valkey, 6381 for Dragonfly and 6400 for Eski. The engines use host networking on these fixed ports, and the harness fails a case whose port is taken.
+- CPU 0 outside every role, since the kernel places housekeeping work and many interrupts there. Choose the roles from `lscpu --extended=CPU,CORE,SOCKET,NODE,ONLINE`: with SMT off every CPU has its own core. Take one CPU for the server, as many CPUs as `client.threads` for the load generator and one for the controller, distinct, online and on one socket and node, and write them into `resources.server_cpus`, `resources.client_cpus` and `resources.control_cpus`. The cloud designs use server CPU 2, client CPUs 4 and 5 or 4 to 7 and controller CPU 10, which fit any machine with at least 11 cores. The scheduler refuses overlapping roles, roles that share a physical core and a client pool smaller than the client threads. When the core count of a role changes, change the matching sentence of the design's `methodology` too, because this page publishes it.
+- Memory for the server and client container caps, `resources.server_memory` (8 GiB) and `resources.client_memory` (2 GiB). The fill of 10,000,000 keys needs about 1.7 GB in the largest engine, so 16 GiB of RAM is enough.
+
+### Time
+
+The recorded run above took 6.89 hours for 132 cases, with a median case of 80 seconds and a median gap of 110 seconds between cases, which the gates spend on rest, stability and cooling. On a server about 125 seconds per case is a fair planning figure: the 132 cases of four engines, eight workloads, four repetitions and the calibration take about 4.6 hours. The installation takes about 20 minutes and the fill a few minutes, so plan about 6 hours of machine time.
+
+### Steps
+
+The commands use `<revision>` for the Eski revision, `<name>` for the run name, `user@HOST` for the test machine and `<base>` for a directory on it, for example `/home/user/eski-exam`. The run name is a new plain directory name such as `cloud-v1`; it becomes the run root `<base>/<name>`, the `run.root` of the dataset and the directory under `bench/testbed/runs/`, whose name the table generator checks.
+
+1. On the workstation, build and export the Eski image from a clean checkout of the revision. `image.sh` builds the Dockerfile at the repository root, which fetches its pinned build inputs from Docker Hub, snapshot.ubuntu.com and GitHub, checks the binary, version, licence and source tree inside the image, saves the image to `bench/results/image/eski-<id>.tar` with a `.sha256` file and records the image ID, binary sha256, source sha256, revision and archive in `bench/image.json`, which the installer reads.
+
+   ```sh
+   git checkout <revision>
+   bash bench/image.sh --revision "$(git rev-parse HEAD)" --export bench/results/image
+   ```
+
+2. Copy a design, set its CPU roles and gates for the machine, and render its plans; the plan writer validates the design and stops on an error.
+
+   ```sh
+   cp bench/testbed/designs/cloud-four-client-cores.json bench/results/<name>-design.json
+   python3 -I bench/testbed/plans.py --design bench/results/<name>-design.json --out bench/results/<name>-plans
+   ```
+
+3. Install the run root. The installer packs the runner, the plans, the design, the fill script, the image archive and itself into an overlay, streams it over ssh into `<base>/.overlays` and checks its sha256 on arrival. On the machine it refuses an existing root, verifies every file, fetches jq, loads the Eski image and checks the binary and source sha256 inside it, pulls the missing pinned images and checks their digests, runs the preflight `exam.sh inspect` and freezes `protocol.json`. It starts nothing. A rejected preflight prints the reason and moves the root aside to `<base>/.failed-<name>-<time>`, so the same name can be installed again. The receipt, also kept as `<base>/<name>/install.json`, records the protocol sha256, the phase identities, every image ID and the planned measurement counts.
+
+   ```sh
+   python3 -I -B bench/testbed/install.py install --host user@HOST --root <name> --base <base> \
+     --design bench/results/<name>-design.json --receipt bench/results/<name>-install.json
+   ```
+
+4. Check the installation, then start the exam. Before the start the status reads `Workflow: NOT STARTED` and shows the package temperature, the power gate and the power supply devices, the CPU roles, the memory limits, every engine image ID and the Eski source revision. The first invocation without arguments starts the calibration phase and then the benchmark phase once, in a detached tmux session; every later invocation without arguments only prints the status.
+
+   ```sh
+   ssh user@HOST <base>/<name>/exam.sh status
+   ssh user@HOST <base>/<name>/exam.sh
+   ```
+
+   Check progress with `exam.sh status` every few minutes at most. The calibration runs its workload once per engine and admits the benchmark only when every engine is valid. `DONE` and `DONE WITH EXCLUSIONS` continue below; an excluded repetition keeps its reason and is never retried. `HELD` and `INTERRUPTED` continue with `<base>/<name>/exam.sh resume` once the cause is gone. A gate hold during the calibration also reads "calibration did not pass for every engine" on the Reason line while the phase progress still shows cases remaining; its unmet gates are listed under `phase_status.pause_reasons` of `exam.sh status --json`, and it can be resumed. A calibration whose cases all finished with an invalid engine cannot be resumed; install a new root after the fix. Whenever the controller stops it writes `exports/results.tar.gz`, `exports/inventory.json` and `exports/receipt.json`; an export after a resume is `results-2.tar.gz`, and the collector takes the archive the receipt names.
+
+5. After `DONE` or `DONE WITH EXCLUSIONS`, run the fill. It refuses while the controller is active, waits for each engine's cooling gate from the design's `fill` block, stores 10,000,000 keys of 64 B per engine with the server core and memory caps of the design, and writes `exports/fill-<stamp>.tar.gz` and `exports/fill-receipt.json`. It exits with status 1 when an engine's fill is not valid; that engine keeps its reason.
+
+   ```sh
+   ssh user@HOST <base>/<name>/fill.sh
+   ```
+
+6. Fetch both archives. Each fetch reads the receipt on the machine, copies the archive it names into `bench/results/<name>/`, checks its sha256 and size against the receipt, extracts it after refusing unsafe paths, verifies every file against the archive's inventory and writes `<stem>.receipt.json` and `<stem>.collected.json` beside it. The results land in `bench/results/<name>/results/` and the fill in `bench/results/<name>/fill-<stamp>/`; an archive that was already collected is never overwritten. After a resume the results stem is `results-2` or later, which then replaces `results` in the paths below.
+
+   ```sh
+   python3 -I -B bench/testbed/collect.py fetch --host user@HOST --root <name> --base <base> --kind results
+   python3 -I -B bench/testbed/collect.py fetch --host user@HOST --root <name> --base <base> --kind fill
+   ```
+
+7. Combine them into the run directory. A measurement enters the dataset only when its case succeeded with an artifact inventory matching the checkpoint and finite throughput, p99 and memory.
+
+   ```sh
+   python3 -I -B bench/testbed/combine.py --results bench/results/<name>/results --fill bench/results/<name>/fill-<stamp> \
+     --collected bench/results/<name>/results.collected.json --out bench/testbed/runs/<name>/dataset.json
+   ```
+
+8. Copy the receipts.
+
+   ```sh
+   cp bench/results/<name>/results.receipt.json bench/results/<name>/results.collected.json bench/testbed/runs/<name>/
+   cp bench/results/<name>/fill-<stamp>.receipt.json bench/testbed/runs/<name>/fill.receipt.json
+   cp bench/results/<name>-install.json bench/testbed/runs/<name>/install.receipt.json
+   ```
+
+9. Render the charts and the report.
+
+   ```sh
+   python3 -I bench/testbed/charts.py --dataset bench/testbed/runs/<name>/dataset.json --out bench/testbed/runs/<name>/charts
+   python3 -I bench/testbed/page.py --dataset bench/testbed/runs/<name>/dataset.json --out bench/testbed/runs/<name>/report.html
+   ```
+
+10. Build the server as [build, run and test](build-run-test.md) describes and regenerate the tables. The generator starts `bin/eski` on a free local port to read the command inventory and rewrites the README tables, this page and the badges from the dataset; the ratio badge needs valid Eski and Redis repetitions of `get64-p1`. Without `--benchmark-results` it reads the recorded run with the latest finish time, so the check confirms that the new run is the published one. Commit the run directory and the regenerated files together.
+
+    ```sh
+    ./build.sh release
+    python3 -I test/readme_tables.py --benchmark-results bench/testbed/runs/<name>
+    python3 -I test/readme_tables.py --check
+    ```
+
+### Checking a run
+
+The run directory lets a reader check the run. `dataset.json` holds every planned repetition of both phases with its state, reasons, client-limited annotation, attempt directory and values, together with the machine, the CPU roles, the frequency policy, the sensor, the power gate, the design with its methodology, the protocol sha256, the phase identity and the receipt of the results archive. `results.receipt.json` and `results.collected.json` give the sha256, size and file count of the results archive as the machine exported it and as the workstation verified it, `fill.receipt.json` does the same for the fill archive, and `install.receipt.json` ties the protocol sha256 and the image IDs to the installation.
+
+The raw evidence stays in the archives, which are published with the run. Each case keeps its resolved plan, harness log, machine samples, ownership events and the raw memtier output under `<phase>/results/cases/<case>/attempt-<n>/`, and every gate sample is in `<phase>/results/gates.jsonl`, where the phase is `calibration` or `benchmark`. A reader verifies a downloaded archive with `python3 -I bench/testbed/collect.py verify results.tar.gz --receipt bench/testbed/runs/<name>/results.receipt.json --extract <directory>` and rebuilds the dataset from it with `combine.py` to compare with the committed `dataset.json`.
 
 ## Local relative measurement
 
