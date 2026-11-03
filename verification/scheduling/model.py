@@ -16,6 +16,9 @@ INVARIANTS = (
     'accepted_write_survives_disconnect',
     'rollback_and_retry_publish_once',
     'no_product_deadlock',
+    'no_lost_worker_wakeup',
+    'no_lost_completion_notification',
+    'no_lost_quiescence_wakeup',
 )
 
 
@@ -65,6 +68,13 @@ class State:
     pause_phase: int = 0
     fencing: bool = False
     replay: bool = False
+    parked: tuple = (True, True)
+    deciding: tuple = (False, False)
+    notify: tuple = (False, False)
+    efd: bool = False
+    coordinator: str = 'sleep'
+    reported: bool = False
+    quiescent_wake: bool = False
 
 
 class Violation(Exception):
@@ -127,8 +137,40 @@ def terminal(scenario, state):
             len(state.published) == len(state.accepted) and
             not state.outstanding and not state.completed and not state.staged and
             not state.halted and not state.replay and not state.fencing and
-            all(w == -1 for w in state.workers) and
+            all(w == -1 for w in state.workers) and all(state.parked) and
+            not any(state.notify) and not any(state.deciding) and not state.efd and
+            state.coordinator == 'sleep' and not state.reported and
             (not scenario.pause or state.pause_phase == 3))
+
+
+def quiescent(state):
+    return all(state.parked) and not any(state.queues)
+
+
+def park(state, w):
+    state = dataclasses.replace(state, parked=change_tuple(state.parked, w, True),
+                                deciding=change_tuple(state.deciding, w, False))
+    if state.pause_phase == 1 and quiescent(state):
+        state = dataclasses.replace(state, quiescent_wake=True)
+    return state
+
+
+def wake(state):
+    if state.coordinator == 'sleep':
+        return dataclasses.replace(state, coordinator='read', reported=state.efd)
+    return state
+
+
+def read_notification(state, phase):
+    label = 'coordinator_read_notification' if state.reported else 'coordinator_skip_read'
+    return label, dataclasses.replace(state, coordinator=phase, reported=False, efd=state.efd and not state.reported)
+
+
+def take_completions(state, phase):
+    return dataclasses.replace(
+        state, coordinator=phase, completed=(), staged=state.staged + state.completed,
+        outstanding=state.outstanding - len(state.completed),
+        replay=state.replay or any(state.failed[j] for j in state.completed))
 
 
 def successors(scenario, s, mutant=''):
@@ -137,26 +179,39 @@ def successors(scenario, s, mutant=''):
     if terminal(scenario, s):
         return
     yield 'environment_yield', s
-    if s.admission < n and not s.fencing:
+    blocked = s.pause_phase in (1, 4)
+    if s.admission < n and not s.fencing and not blocked and s.coordinator != 'take':
         j = s.admission
-        rejecting = p[j].reject or s.halted or s.pause_phase in (1, 2) or s.outstanding >= scenario.capacity
+        rejecting = p[j].reject or s.halted or s.pause_phase == 2 or s.outstanding >= scenario.capacity
         if rejecting:
-            yield 'reject', dataclasses.replace(s, admission=j + 1, rejected=s.rejected + (j,),
+            yield 'reject', dataclasses.replace(wake(s), admission=j + 1, rejected=s.rejected + (j,),
                                                stages=change_tuple(s.stages, j, 'rejected'))
         else:
             queues = s.queues
+            parked = s.parked
             for owner in owners_of(scenario, j, mutant):
                 queues = change_tuple(queues, owner, queues[owner] + (j,))
+                parked = change_tuple(parked, owner, False)
             yield 'admit_assign_sequence', dataclasses.replace(
-                s, admission=j + 1, accepted=s.accepted + (j,), queues=queues,
+                wake(s), admission=j + 1, accepted=s.accepted + (j,), queues=queues, parked=parked,
                 stages=change_tuple(s.stages, j, 'queued'), outstanding=s.outstanding + 1)
     for w in range(2):
-        if s.workers[w] == -1 and s.queues[w]:
+        ready = s.workers[w] == -1 and not s.parked[w] and not s.notify[w] and not s.deciding[w]
+        if ready and s.queues[w]:
             j = s.queues[w][0]
             yield 'worker_arrive', dataclasses.replace(
                 s, queues=change_tuple(s.queues, w, s.queues[w][1:]),
                 workers=change_tuple(s.workers, w, j),
                 arrived=change_tuple(s.arrived, j, s.arrived[j] | (1 << w)))
+        if ready and not s.queues[w]:
+            if mutant == 'park_outside_mutex':
+                yield 'worker_see_empty_queue', dataclasses.replace(s, deciding=change_tuple(s.deciding, w, True))
+            else:
+                yield 'worker_park', park(s, w)
+        if s.deciding[w]:
+            yield 'worker_park', park(s, w)
+        if s.notify[w]:
+            yield 'worker_notify', dataclasses.replace(s, notify=change_tuple(s.notify, w, False), efd=True)
         j = s.workers[w]
         if j != -1 and s.stages[j] == 'executed':
             departed = s.departed[j] | (1 << w)
@@ -165,7 +220,8 @@ def successors(scenario, s, mutant=''):
                 s, workers=change_tuple(s.workers, w, -1),
                 departed=change_tuple(s.departed, j, departed),
                 stages=change_tuple(s.stages, j, 'completed') if complete else s.stages,
-                completed=s.completed + (j,) if complete else s.completed)
+                completed=s.completed + (j,) if complete else s.completed,
+                notify=change_tuple(s.notify, w, True) if complete and not s.completed else s.notify)
     for j in s.accepted:
         required = sum(1 << owner for owner in owners_of(scenario, j, mutant))
         if s.stages[j] == 'queued' and s.arrived[j] == required:
@@ -194,11 +250,19 @@ def successors(scenario, s, mutant=''):
                     stages=change_tuple(s.stages, j, 'executed'))
             else:
                 yield 'worker_commit', dataclasses.replace(s, stages=change_tuple(s.stages, j, 'executed'))
-    if s.completed:
-        j = s.completed[0]
-        yield 'coordinator_poll', dataclasses.replace(
-            s, completed=s.completed[1:], staged=s.staged + (j,), outstanding=s.outstanding - 1,
-            replay=s.replay or s.failed[j])
+    if not blocked:
+        if s.coordinator == 'sleep' and s.efd:
+            yield 'coordinator_wake_notified', dataclasses.replace(s, coordinator='read', reported=True)
+        if s.coordinator == 'read':
+            if mutant == 'take_before_read':
+                yield 'coordinator_poll', take_completions(s, 'take')
+            else:
+                yield read_notification(s, 'take')
+        if s.coordinator == 'take':
+            if mutant == 'take_before_read':
+                yield read_notification(s, 'sleep')
+            else:
+                yield 'coordinator_poll', take_completions(s, 'sleep')
     candidates = s.staged if mutant == 'out_of_order_publish' else s.accepted[len(s.published):len(s.published) + 1]
     for j in candidates:
         if j not in s.staged or s.failed[j] and not s.fencing:
@@ -233,14 +297,19 @@ def successors(scenario, s, mutant=''):
         if j in s.accepted and s.connected[j] and j not in s.published:
             yield 'disconnect_delivery_only', dataclasses.replace(s, connected=change_tuple(s.connected, j, False))
     if scenario.pause:
-        if s.pause_phase == 0:
-            yield 'pause_close_admission', dataclasses.replace(s, pause_phase=1)
-        if s.pause_phase == 1 and not s.completed and not s.outstanding and all(w == -1 for w in s.workers):
-            yield 'pause_quiescent', dataclasses.replace(s, pause_phase=2)
-        if s.pause_phase == 2 and not s.replay:
-            yield 'resume', dataclasses.replace(s, pause_phase=3, halted=False)
-        elif s.pause_phase == 2 and len(s.published) == len(s.accepted):
-            yield 'resume', dataclasses.replace(s, pause_phase=3, halted=False, replay=False, fencing=False)
+        if s.pause_phase == 0 and s.coordinator != 'take':
+            waiting = 4 if mutant == 'pause_registers_after_check' and not quiescent(s) else 1
+            yield 'pause_close_admission', dataclasses.replace(wake(s), pause_phase=waiting,
+                                                               quiescent_wake=quiescent(s))
+        if s.pause_phase == 4:
+            yield 'pause_register_wait', dataclasses.replace(s, pause_phase=1)
+        if s.pause_phase == 1 and s.quiescent_wake and quiescent(s):
+            collected = take_completions(read_notification(s, s.coordinator)[1] if s.reported else s, s.coordinator)
+            yield 'pause_quiescent', dataclasses.replace(collected, pause_phase=2, quiescent_wake=False)
+        if s.pause_phase == 2 and s.coordinator != 'take' and not s.replay:
+            yield 'resume', dataclasses.replace(wake(s), pause_phase=3, halted=False)
+        elif s.pause_phase == 2 and s.coordinator != 'take' and len(s.published) == len(s.accepted):
+            yield 'resume', dataclasses.replace(wake(s), pause_phase=3, halted=False, replay=False, fencing=False)
 
 
 def check(scenario, s, edge=None, previous=None):
@@ -273,8 +342,14 @@ def check(scenario, s, edge=None, previous=None):
             INVARIANTS[4], 'admission partition')
     if edge == 'reject':
         require(previous.accepted == s.accepted and previous.outstanding == s.outstanding and
-                previous.queues == s.queues and previous.values == s.values,
-                INVARIANTS[4], 'rejected job changed sequence, resources or data')
+                previous.queues == s.queues and previous.values == s.values and previous.parked == s.parked,
+                INVARIANTS[4], 'rejected job changed sequence, resources, data or worker wakeups')
+    for w in range(2):
+        require(not s.parked[w] or not s.queues[w], INVARIANTS[8], f'worker {w} parked with queued jobs {s.queues[w]}')
+    require(s.coordinator != 'sleep' or not s.completed or s.efd or any(s.notify), INVARIANTS[9],
+            f'coordinator sleeps with completions {s.completed} and no pending notification')
+    require(s.pause_phase != 1 or not quiescent(s) or s.quiescent_wake, INVARIANTS[10],
+            'pause waits on a quiescent pool without a pending wakeup')
     if edge == 'disconnect_delivery_only':
         require(previous.values == s.values and previous.queues == s.queues and
                 previous.outstanding == s.outstanding and previous.stages == s.stages,
@@ -430,7 +505,10 @@ def run(output):
     for mutant, scenario in (
             ('bypass_ownership', scenarios()[0]),
             ('out_of_order_publish', scenarios()[1]),
-            ('drop_disconnected_write', scenarios()[2])):
+            ('drop_disconnected_write', scenarios()[2]),
+            ('park_outside_mutex', scenarios()[0]),
+            ('take_before_read', scenarios()[1]),
+            ('pause_registers_after_check', scenarios()[5])):
         result = explore(initial(scenario), lambda s: successors(scenario, s, mutant),
                          lambda s, edge=None, previous=None: check(scenario, s, edge, previous),
                          lambda s: terminal(scenario, s), output / (mutant + '-witness.json'))

@@ -1139,7 +1139,9 @@ server_run :: proc() -> bool {
 			ev := events[i]
 			fd := linux.Fd(u32(ev.data.u64))
 			if u32(ev.data.u64 >> 32) == 0 {
-				if fd == keyspace_event_fd() || fd == compute_event_fd() {
+				if fd == keyspace_event_fd() {
+					keyspace_notified = true
+				} else if fd == compute_event_fd() {
 					continue
 				} else if fd == lazy_efd {
 					lazyfree_drain()

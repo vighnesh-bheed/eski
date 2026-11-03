@@ -235,3 +235,23 @@ private_keyspace_record_index_grows_within_budget_and_resets_at_the_fence :: pro
 	testing.expect_value(t, ks.memory_used(&keyspace_pool), 0)
 	testing.expect(t, ks.resume(&keyspace_pool))
 }
+
+@(test)
+keyspace_key_indices_use_the_heap_only_beyond_the_fixed_buffer :: proc(t: ^testing.T) {
+	context.allocator = runtime.heap_allocator()
+	args: [2 * KEYSPACE_KEY_INDICES + 1][]u8
+	args[0] = transmute([]u8)string("DEL")
+	for &arg in args[1:] { arg = transmute([]u8)string("key") }
+	cmd := lookup_command(args[0])
+	testing.expect(t, cmd != nil)
+	if cmd == nil { return }
+	for count in ([?]int{1, KEYSPACE_KEY_INDICES - 1, KEYSPACE_KEY_INDICES, 2 * KEYSPACE_KEY_INDICES}) {
+		argv := args[:count + 1]
+		fixed: [KEYSPACE_KEY_INDICES]int
+		indices := keyspace_key_indices(cmd_spec_lookup(cmd, argv), argv, &fixed)
+		testing.expect_value(t, len(indices), count)
+		testing.expect_value(t, raw_data(indices) == raw_data(fixed[:]), count < KEYSPACE_KEY_INDICES)
+		for index, i in indices { testing.expect_value(t, index, i + 1) }
+		delete(indices)
+	}
+}

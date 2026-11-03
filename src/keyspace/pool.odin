@@ -86,6 +86,7 @@ Shard :: struct {
 Pool :: struct {
 	mutex:        sync.Mutex,
 	quiescent:    sync.Cond,
+	rendezvous:   sync.Cond,
 	shards:       [MAX_WORKERS]Shard,
 	threads:      [MAX_WORKERS]^thread.Thread,
 	worker_enter: proc(),
@@ -94,6 +95,7 @@ Pool :: struct {
 	configured:   int,
 	nthreads:     int,
 	parked:       int,
+	pausing:      int,
 	queued:       int,
 	running:      int,
 	initialized:  bool,
@@ -311,6 +313,11 @@ execute_job :: proc(job: ^Job) {
 }
 
 @(private = "file")
+idle :: proc "contextless" (p: ^Pool) -> bool {
+	return p.queued == 0 && p.running == 0 && p.parked == p.nthreads
+}
+
+@(private = "file")
 notify_completion :: proc "contextless" (fd: linux.Fd) {
 	one := u64(1)
 	for {
@@ -336,7 +343,9 @@ worker_main :: proc(t: ^thread.Thread) {
 			if !shard.parked {
 				shard.parked = true
 				p.parked += 1
-				sync.cond_broadcast(&p.quiescent)
+				if p.pausing > 0 && idle(p) {
+					sync.cond_broadcast(&p.quiescent)
+				}
 			}
 			sync.cond_wait(&shard.ready, &p.mutex)
 		}
@@ -366,22 +375,25 @@ worker_main :: proc(t: ^thread.Thread) {
 			sync.mutex_lock(&p.mutex)
 			if job.abort { p.halted = true }
 			job.executed = true
-			sync.cond_broadcast(&p.quiescent)
+			if job.participants > 1 {
+				sync.cond_broadcast(&p.rendezvous)
+			}
 		} else {
 			for !job.executed {
-				sync.cond_wait(&p.quiescent, &p.mutex)
+				sync.cond_wait(&p.rendezvous, &p.mutex)
 			}
 		}
 		job.departed += 1
 		p.running -= 1
 		complete := job.departed == job.participants
+		notify := complete && p.done_len == 0
 		if complete {
 			p.completed[(p.done_head + p.done_len) % CAPACITY] = job
 			p.done_len += 1
 			intrinsics.atomic_store_explicit(&job.state, .Completed, .Release)
 		}
 		sync.mutex_unlock(&p.mutex)
-		if complete {
+		if notify {
 			notify_completion(p.fd)
 		}
 	}
@@ -407,9 +419,9 @@ init :: proc(p: ^Pool, workers, max_memory: int, worker_enter: proc() = nil, wor
 	p.worker_enter = worker_enter
 	p.worker_leave = worker_leave
 	p.assertion_failure = assertion_failure
-	p.initialized = true
+	intrinsics.atomic_store_explicit(&p.initialized, true, .Release)
 	p.paused = true
-	p.accepting = false
+	intrinsics.atomic_store_explicit(&p.accepting, false, .Release)
 	p.stopping = false
 	sync.mutex_unlock(&p.mutex)
 	if !resume(p) {
@@ -422,6 +434,9 @@ init :: proc(p: ^Pool, workers, max_memory: int, worker_enter: proc() = nil, wor
 resume :: proc(p: ^Pool) -> bool {
 	if p == nil {
 		return false
+	}
+	if intrinsics.atomic_load_explicit(&p.accepting, .Acquire) {
+		return true
 	}
 	sync.mutex_lock(&p.mutex)
 	if !p.initialized || !p.paused && !p.accepting {
@@ -436,7 +451,7 @@ resume :: proc(p: ^Pool) -> bool {
 	if p.nthreads != 0 {
 		p.paused = false
 		p.halted = false
-		p.accepting = true
+		intrinsics.atomic_store_explicit(&p.accepting, true, .Release)
 		sync.mutex_unlock(&p.mutex)
 		return true
 	}
@@ -459,7 +474,7 @@ resume :: proc(p: ^Pool) -> bool {
 	sync.mutex_lock(&p.mutex)
 	p.paused = false
 	p.halted = false
-	p.accepting = true
+	intrinsics.atomic_store_explicit(&p.accepting, true, .Release)
 	sync.mutex_unlock(&p.mutex)
 	return true
 }
@@ -508,7 +523,8 @@ submit :: proc "contextless" (p: ^Pool, job: ^Job) -> bool {
 	job.executed = false
 	job.abort = false
 	job.cancelled = false
-	for owned, owner in owners[:p.configured] {
+	configured := p.configured
+	for &owned, owner in owners[:configured] {
 		if !owned {
 			continue
 		}
@@ -517,31 +533,48 @@ submit :: proc "contextless" (p: ^Pool, job: ^Job) -> bool {
 		shard.len += 1
 		p.queued += 1
 		job.participants += 1
-		sync.cond_signal(&shard.ready)
+		owned = shard.parked
+		if shard.parked {
+			shard.parked = false
+			p.parked -= 1
+		}
 	}
 	p.outstanding += 1
 	intrinsics.atomic_store_explicit(&job.state, .Queued, .Release)
 	sync.mutex_unlock(&p.mutex)
+	for owned, owner in owners[:configured] {
+		if owned {
+			sync.cond_signal(&p.shards[owner].ready)
+		}
+	}
 	return true
 }
 
-poll :: proc "contextless" (p: ^Pool) -> ^Job {
-	if p == nil {
-		return nil
+poll_all :: proc "contextless" (p: ^Pool, out: []^Job) -> int {
+	if p == nil || len(out) == 0 {
+		return 0
 	}
 	sync.mutex_lock(&p.mutex)
-	if p.done_len == 0 {
-		sync.mutex_unlock(&p.mutex)
+	n := min(p.done_len, len(out))
+	for i in 0 ..< n {
+		job := p.completed[p.done_head]
+		p.completed[p.done_head] = nil
+		p.done_head = (p.done_head + 1) % CAPACITY
+		intrinsics.atomic_store_explicit(&job.state, .Idle, .Release)
+		out[i] = job
+	}
+	p.done_len -= n
+	p.outstanding -= n
+	sync.mutex_unlock(&p.mutex)
+	return n
+}
+
+poll :: proc "contextless" (p: ^Pool) -> ^Job {
+	out: [1]^Job
+	if poll_all(p, out[:]) == 0 {
 		return nil
 	}
-	job := p.completed[p.done_head]
-	p.completed[p.done_head] = nil
-	p.done_head = (p.done_head + 1) % CAPACITY
-	p.done_len -= 1
-	p.outstanding -= 1
-	intrinsics.atomic_store_explicit(&job.state, .Idle, .Release)
-	sync.mutex_unlock(&p.mutex)
-	return job
+	return out[0]
 }
 
 pause :: proc "contextless" (p: ^Pool) {
@@ -549,9 +582,11 @@ pause :: proc "contextless" (p: ^Pool) {
 		return
 	}
 	sync.mutex_lock(&p.mutex)
-	p.accepting = false
-	for p.queued != 0 || p.running != 0 || p.parked != p.nthreads {
+	intrinsics.atomic_store_explicit(&p.accepting, false, .Release)
+	for !idle(p) {
+		p.pausing += 1
 		sync.cond_wait(&p.quiescent, &p.mutex)
+		p.pausing -= 1
 	}
 	p.paused = true
 	sync.mutex_unlock(&p.mutex)
@@ -591,9 +626,9 @@ destroy :: proc(p: ^Pool) -> bool {
 		return false
 	}
 	if p.initialized {
+		intrinsics.atomic_store_explicit(&p.initialized, false, .Release)
 		linux.close(p.fd)
 		p.fd = -1
-		p.initialized = false
 	}
 	p.configured = 0
 	p.memory_limit = 0
@@ -601,13 +636,10 @@ destroy :: proc(p: ^Pool) -> bool {
 }
 
 completion_fd :: proc "contextless" (p: ^Pool) -> linux.Fd {
-	if p == nil {
+	if p == nil || !intrinsics.atomic_load_explicit(&p.initialized, .Acquire) {
 		return -1
 	}
-	sync.mutex_lock(&p.mutex)
-	fd := p.fd if p.initialized else linux.Fd(-1)
-	sync.mutex_unlock(&p.mutex)
-	return fd
+	return p.fd
 }
 
 drain_notifications :: proc "contextless" (p: ^Pool) {
@@ -618,10 +650,7 @@ drain_notifications :: proc "contextless" (p: ^Pool) {
 	buf: [8]u8
 	for {
 		_, err := linux.read(fd, buf[:])
-		if err == .EINTR {
-			continue
-		}
-		if err != .NONE {
+		if err != .EINTR {
 			return
 		}
 	}
