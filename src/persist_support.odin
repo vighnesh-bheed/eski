@@ -376,6 +376,16 @@ persist_sample_cow :: proc "contextless" () {
 	intrinsics.volatile_store(&p.cow_ms, i64(ts.time_sec) * 1000 + i64(ts.time_nsec) / 1_000_000)
 }
 
+persist_pace_cow :: proc "contextless" (p: ^Persist_Progress, processed: i64) {
+	if processed % PERSIST_COW_SAMPLE_KEYS != 0 {
+		return
+	}
+	if p.cow_samples > 0 && now_ns() / 1_000_000 - p.cow_ms < PERSIST_COW_SAMPLE_MS {
+		return
+	}
+	persist_sample_cow()
+}
+
 persist_total_keys :: proc "contextless" () -> i64 {
 	n: i64 = 0
 	for &d in dbs {
