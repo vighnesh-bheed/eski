@@ -129,6 +129,8 @@ harness_retry_handler :: proc(c: ^Conn, argv: [][]u8) {
 harness_coordinator :: proc() {
 	config_init()
 	cfg.slowlog_log_slower_than = -1
+	cfg.latency_tracking = false
+	cfg.latency_monitor_threshold = 0
 	db_count = 1
 	db_init()
 	srv.now_ms = 1000
@@ -141,7 +143,7 @@ harness_coordinator :: proc() {
 	tasks: [3]Keyspace_Task
 	for &task, i in tasks {
 		args[i] = {harness_bytes("INCR"), ids[i][:]}
-		task = Keyspace_Task{sequence = u64(i), fd = -1, stats = &st, failed = true, rolled_back = true, command = &command, argv = args[i][:]}
+		task = Keyspace_Task{sequence = u64(i), fd = 0, client_id = 71, token = 99, stats = &st, failed = true, rolled_back = true, command = &command, argv = args[i][:]}
 		task.client.db = db_cur
 		task.client.fd = -1
 		task.job.data = &task
@@ -150,12 +152,11 @@ harness_coordinator :: proc() {
 	keyspace_completion_count = 2
 	keyspace_pending = 3
 	keyspace_next_sequence = 3
-	conn := Conn{id = 71, fd = 0, db = db_cur, keyspace = &tasks[0], keyspace_ready = true, keyspace_token = 99}
-	tasks[0].fd = 0; tasks[0].client_id = 71; tasks[0].token = 99
+	conn := Conn{id = 71, fd = 0, db = db_cur, keyspace_inflight = 3, keyspace_token = 99}
 	srv.conns = make([dynamic]^Conn, 1)
 	srv.conns[0] = &conn
 	keyspace_conn_closed(&conn)
-	assert(conn.keyspace == nil && !conn.keyspace_ready && !tasks[0].job.cancelled)
+	assert(conn.keyspace_inflight == 0 && conn.keyspace_token == 0 && !conn.keyspace_ready && !tasks[0].job.cancelled)
 	conn.id = 72
 	keyspace_publish_completions(true)
 	assert(keyspace_publish_sequence == 0 && keyspace_pending == 3 && harness_retry_count == 0)
@@ -168,17 +169,40 @@ harness_coordinator :: proc() {
 	assert(harness_retry_count == 3 && len(keyspace_retries) == 0)
 	keyspace_publish_completions(true)
 	assert(harness_retry_count == 3)
-	assert(conn.wlen == 0 && !conn.keyspace_ready && conn.keyspace == nil)
+	assert(conn.wlen == 0 && !conn.keyspace_ready && conn.keyspace_inflight == 0 && len(keyspace_ready) == 0)
 	for i in 0 ..< 3 {
 		reader := Conn{fd = -1, db = db_cur}
 		cmd_get(&reader, args[i][:])
 		assert(string(reader.wbuf[:reader.wlen]) == "$1\r\n1\r\n")
 		runtime.heap_free(reader.wbuf)
 	}
+	live := Conn{id = 73, fd = 0, db = db_cur, keyspace_inflight = 3, keyspace_token = 100}
+	srv.conns[0] = &live
+	pipelined: [3]Keyspace_Task
+	for &task, i in pipelined {
+		task = Keyspace_Task{sequence = u64(3 + i), fd = 0, client_id = 73, token = 100, stats = &st, command = &command, argv = args[i][:], integer = i64(i + 1)}
+		task.client.db = db_cur
+		task.client.fd = -1
+		task.job.data = &task
+		if i > 0 { keyspace_completions[3 + i] = &task }
+	}
+	keyspace_completion_count = 2
+	keyspace_pending = 3
+	keyspace_next_sequence = 6
+	keyspace_publish_completions(false)
+	assert(keyspace_publish_sequence == 3 && live.wlen == 0 && live.keyspace_inflight == 3 && !live.keyspace_ready)
+	keyspace_completions[3] = &pipelined[0]
+	keyspace_completion_count = 3
+	keyspace_publish_completions(false)
+	assert(keyspace_publish_sequence == 6 && keyspace_pending == 0 && keyspace_completion_count == 0)
+	assert(string(live.wbuf[:live.wlen]) == ":1\r\n:2\r\n:3\r\n" && live.keyspace_inflight == 0)
+	assert(live.keyspace_ready && len(keyspace_ready) == 1 && keyspace_ready[0].id == 73)
+	runtime.heap_free(live.wbuf)
+	delete(keyspace_ready); keyspace_ready = nil
 	delete(srv.conns); srv.conns = nil
 	keyspace_initialized = false
 	assert(ks.destroy(&keyspace_pool))
-	fmt.println("COORDINATOR|failed_head_blocks|ordered_retry|disconnected_retry|exactly_once|delivery_drop")
+	fmt.println("COORDINATOR|failed_head_blocks|ordered_retry|disconnected_retry|exactly_once|delivery_drop|pipelined_inflight_order|single_resume_ticket")
 }
 
 harness_snapshot :: proc() {

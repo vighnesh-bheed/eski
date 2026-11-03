@@ -213,6 +213,7 @@ execute :: proc(c: ^Conn, argv: [][]u8) {
 	c.last_cmd = cmd.name
 	n := len(argv)
 	if (cmd.arity > 0 && n != cmd.arity) || (cmd.arity < 0 && n < -cmd.arity) {
+		keyspace_settle(c)
 		stat_cur = nil
 		execute_bad_arity(c, cmd)
 		stat_reject(st, argv)
@@ -291,12 +292,16 @@ execute_hooked :: #force_no_inline proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8)
 		return
 	}
 	if !memory_ok && oom_denied(c, cmd, argv) {
+		keyspace_settle(c)
 		reject_oom(c, cmd)
 		stat_reject(st, argv)
 		if ps_exec != nil {
 			pubsub_after(c, nil, nil)
 		}
 		return
+	}
+	if pst.gate_active {
+		keyspace_settle(c)
 	}
 	if pst.gate_active && hooked_persist_gate(c, cmd, argv) {
 		stat_reject(st, argv)

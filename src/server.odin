@@ -80,9 +80,10 @@ Conn :: struct {
 	compute_token: u64,
 	read_eof:    bool,
 	lua_busy_bytes: int,
-	keyspace:    ^Keyspace_Task,
+	keyspace_inflight: int,
 	keyspace_token: u64,
 	keyspace_ready: bool,
+	keyspace_waiting: bool,
 }
 
 Server :: struct {
@@ -761,7 +762,10 @@ resume_held_clients :: proc() {
 }
 
 process_input :: proc(c: ^Conn) {
-	for !c.close_after && c.rpos < c.rlen && c.blocked == .None && c.compute == nil && c.keyspace == nil && !c.keyspace_ready {
+	for !c.close_after && c.rpos < c.rlen && c.blocked == .None && c.compute == nil {
+		if keyspace_pending > 0 && !keyspace_admits(c) {
+			break
+		}
 		start := c.rpos
 		r := parse_command(c)
 		if r != .Command {
@@ -786,7 +790,7 @@ process_input :: proc(c: ^Conn) {
 	if c.close_after || c.rpos >= c.rlen {
 		c.rpos = 0
 		c.rlen = 0
-		if c.kind == .Redis && c.rcap > RBUF_INIT && c.blocked == .None && c.compute == nil && c.keyspace == nil && !c.keyspace_ready && !c.held && .Multi in c.txf {
+		if c.kind == .Redis && c.rcap > RBUF_INIT && c.blocked == .None && c.compute == nil && !keyspace_conn_busy(c) && !c.held && .Multi in c.txf {
 			conn_read_resize(c, RBUF_INIT)
 		}
 	} else if c.rpos > 0 {
@@ -799,7 +803,7 @@ process_input :: proc(c: ^Conn) {
 	if c.need > c.rcap && !c.close_after {
 		conn_read_reserve(c, c.need)
 	}
-	if c.read_eof && c.compute == nil && c.keyspace == nil && !c.keyspace_ready && !c.held {
+	if c.read_eof && c.compute == nil && !keyspace_conn_busy(c) && !c.held {
 		c.close_after = true
 	}
 }
@@ -857,7 +861,7 @@ querybuf_cron_skips :: proc(c: ^Conn) -> bool {
 	if c == nil || c.kind != .Redis {
 		return true
 	}
-	in_flight := c.compute != nil || c.keyspace != nil || c.keyspace_ready
+	in_flight := c.compute != nil || keyspace_conn_busy(c)
 	return in_flight || c.blocked != .None || c.held
 }
 
@@ -935,7 +939,7 @@ conn_read :: proc(c: ^Conn) {
 		}
 	}
 	if eof {
-		if c.compute != nil || c.keyspace != nil || c.keyspace_ready {
+		if c.compute != nil || keyspace_conn_busy(c) {
 			c.read_eof = true
 			epoll_set(c.fd, .MOD, c.want_write, c.id)
 			conn_flush(c)
@@ -1118,7 +1122,7 @@ server_run :: proc() -> bool {
 		if len(acl_doomed) > 0 {
 			acl_close_doomed()
 		}
-		if len(keyspace_ready) > 0 {
+		if keyspace_resume_due() {
 			timeout = 0
 		}
 		el_before_sleep()

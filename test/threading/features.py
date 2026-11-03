@@ -400,6 +400,35 @@ class Features(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(threaded, reference)
 
+    def test_pipelined_retries_and_suppression_keep_order_and_aof(self):
+        with Server(BINARY, workers=0, arguments=(
+                '--keyspace-threads', '2', '--keyspace-max-memory', str(16 << 20),
+                '--appendonly', 'yes', '--appendfsync', 'always')) as server:
+            c = server.client()
+            wait_for(lambda: info(c, 'persistence').get('aof_rewrite_in_progress') == '0', label='initial AOF rewrite')
+            before = info(c)
+            large = b'p' * (4 << 20)
+            c.send_many([('SET', 'pipe:n', 1), ('INCR', 'pipe:n'), ('SET', 'pipe:large', large), ('INCR', 'pipe:n'),
+                         ('LPUSH', 'pipe:n', 'x'), ('GET', 'pipe:n'), ('CLIENT', 'REPLY', 'SKIP'),
+                         ('SET', 'pipe:skipped', large), ('INCR', 'pipe:n'), ('APPEND', 'pipe:tail', 'z'),
+                         ('STRLEN', 'pipe:large')])
+            replies = [c.reply() for _ in range(9)]
+            self.assertEqual(replies[:4], ['OK', 2, 'OK', 3])
+            self.assertIsInstance(replies[4], ServerError)
+            self.assertTrue(str(replies[4]).startswith('WRONGTYPE'), replies[4])
+            self.assertEqual(replies[5:], [b'3', 4, 1, len(large)])
+            self.assertFalse(c.available(0.05))
+            after = info(c)
+            self.assertGreaterEqual(int(after['keyspace_jobs_submitted']), int(before['keyspace_jobs_submitted']) + 8)
+            self.assertGreaterEqual(int(after['keyspace_sync_fallbacks']), int(before['keyspace_sync_fallbacks']) + 2)
+            expected = c.pipeline([('GET', 'pipe:n'), ('STRLEN', 'pipe:large'), ('STRLEN', 'pipe:skipped'), ('GET', 'pipe:tail')])
+            self.assertEqual(expected, [b'4', len(large), len(large), b'z'])
+            server.stop()
+            server.start()
+            restored = server.client()
+            self.assertEqual(restored.pipeline([('GET', 'pipe:n'), ('STRLEN', 'pipe:large'), ('STRLEN', 'pipe:skipped'),
+                                                ('GET', 'pipe:tail')]), expected)
+
     def test_disconnected_accepted_mutation_remains_durable(self):
         with Server(BINARY, workers=0, arguments=(
                 '--keyspace-threads', '4', '--keyspace-max-memory', str(128 << 20),

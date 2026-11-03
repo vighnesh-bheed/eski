@@ -264,7 +264,7 @@ lua_busy_flush :: proc(client: ^Conn) {
 }
 
 lua_busy_read :: proc(run: ^Lua_Invocation, client: ^Conn, budget: ^int) {
-	if client == run.source || client.compute != nil || client.keyspace != nil || client.keyspace_ready || client.blocked != .None || client.held {
+	if client == run.source || client.compute != nil || keyspace_conn_busy(client) || client.blocked != .None || client.held {
 		return
 	}
 	if !conn_protected_ready(client) {

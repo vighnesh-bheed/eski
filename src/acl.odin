@@ -1562,6 +1562,7 @@ acl_reject :: #force_no_inline proc(c: ^Conn, cmd: ^Command, st: ^Cmd_Hot, argv:
 	spec := &cmd_specs[id]
 	c.last_cmd = target.name
 	if acl_auth_required(c) && .No_Auth not_in spec.flags {
+		keyspace_settle(c)
 		stat_cur = nil
 		if cmd.handler == cmd_exec {
 			tx_exec_abort(c, ERR_NOAUTH)
@@ -1579,6 +1580,7 @@ acl_reject :: #force_no_inline proc(c: ^Conn, cmd: ^Command, st: ^Cmd_Hot, argv:
 		return false
 	}
 	acl_log_add(c, res, .Multi if .Multi in c.txf else .Toplevel, argv, pos, nil, transmute([]u8)target.name if res == .Command_Denied else nil)
+	keyspace_settle(c)
 	stat_cur = nil
 	clear(&acl_buf)
 	sb_str(&acl_buf, "NOPERM ")

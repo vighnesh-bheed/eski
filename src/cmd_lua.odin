@@ -400,7 +400,7 @@ lua_inner :: proc(run: ^Lua_Invocation, argv: [][]u8) {
 	cmd.handler(client, argv)
 	run.db = client.db
 	stat_call_slow(client, cmd, hot, argv, mono_now()-start)
-	if client.blocked != .None || client.compute != nil || client.keyspace != nil {
+	if client.blocked != .None || client.compute != nil || client.keyspace_inflight > 0 {
 		store_fatal("Lua inner dispatcher deferred execution invariant")
 	}
 	persist_note(client, cmd, argv, 0, dirty)

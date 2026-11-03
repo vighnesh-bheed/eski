@@ -123,6 +123,7 @@ parse_command :: proc(c: ^Conn) -> Parse_Result {
 }
 
 request_parse_error :: #force_no_inline proc(c: ^Conn, fault: request_parser.Fault, error_byte: u8) {
+	keyspace_settle(c)
 	stat_cur = nil
 	c.close_after = true
 	if fault == .Expected_Bulk {
