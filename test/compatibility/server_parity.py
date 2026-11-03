@@ -82,7 +82,7 @@ class ServerParity(unittest.TestCase):
             cleanup.close()
 
     def connection(self, protocol=2):
-        client = Client(self.port)
+        client = Client(self.port, queue_ping=self.server is not None and KEYSPACE_THREADS > 0)
         self.addCleanup(client.close)
         if protocol == 3:
             client.call('HELLO', 3)

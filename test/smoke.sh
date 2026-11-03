@@ -3968,7 +3968,7 @@ LUA_DEFAULTS = {"lua-max-memory": b"9223372036854775807", "lua-max-output": b"53
                 "lua-max-bridge-memory": b"9223372036854775807", "lua-max-cache-memory": b"9223372036854775807"}
 KEYSPACE_INFO = ("keyspace_threads_configured", "keyspace_threads_active", "keyspace_jobs_pending", "keyspace_memory_used",
                  "keyspace_records", "keyspace_jobs_submitted", "keyspace_jobs_completed", "keyspace_gets", "keyspace_sets",
-                 "keyspace_sync_fallbacks", "keyspace_barriers", "keyspace_worker_nanoseconds")
+                 "keyspace_sync_fallbacks", "keyspace_inline", "keyspace_barriers", "keyspace_worker_nanoseconds")
 SKIP_SET = {"port", "dir", "bind", "requirepass", "masterauth", "tls-cluster", "tls-replication"}
 PROBES = ["abc", "-1", "-9223372036854775808", "9223372036854775807", "18446744073709551615",
           "99999999999999999999", "", "1%", "-5%", "0", "1k", "1kb", "yes", "no", "100 10", "normal 1 2 3"]
@@ -7714,7 +7714,7 @@ CMDS
 			printf 'CONFIG SET slowlog-log-slower-than 10000\nCONFIG SET slowlog-max-len 128\nCONFIG SET latency-monitor-threshold 0\nCONFIG SET latency-tracking yes\nFLUSHALL\nSLOWLOG RESET\nLATENCY RESET\nCONFIG RESETSTAT\n' | ref_pipe >/dev/null
 		}
 		info_layout() {
-			docker exec "$CLI_CONTAINER" redis-cli -p "$1" info "${@:2}" 2>&1 | tr -d '\r' | awk -F: -v keep=" $info_stat_values " -v extra=" eski_version compute_threads_configured compute_threads_active compute_jobs_pending compute_memory_reserved compute_jobs_submitted compute_jobs_completed compute_jobs_cancelled compute_sync_fallbacks compute_worker_nanoseconds keyspace_threads_configured keyspace_threads_active keyspace_jobs_pending keyspace_memory_used keyspace_records keyspace_jobs_submitted keyspace_jobs_completed keyspace_gets keyspace_sets keyspace_sync_fallbacks keyspace_barriers keyspace_worker_nanoseconds " '/^#/ || $0 == "" { print; next } index(extra, " " $1 " ") || $1 ~ /^(cmdstat_|errorstat_|latency_percentiles_usec_)/ { next } index(keep, " " $1 " ") { print; next } { print $1 }'
+			docker exec "$CLI_CONTAINER" redis-cli -p "$1" info "${@:2}" 2>&1 | tr -d '\r' | awk -F: -v keep=" $info_stat_values " -v extra=" eski_version compute_threads_configured compute_threads_active compute_jobs_pending compute_memory_reserved compute_jobs_submitted compute_jobs_completed compute_jobs_cancelled compute_sync_fallbacks compute_worker_nanoseconds keyspace_threads_configured keyspace_threads_active keyspace_jobs_pending keyspace_memory_used keyspace_records keyspace_jobs_submitted keyspace_jobs_completed keyspace_gets keyspace_sets keyspace_sync_fallbacks keyspace_inline keyspace_barriers keyspace_worker_nanoseconds " '/^#/ || $0 == "" { print; next } index(extra, " " $1 " ") || $1 ~ /^(cmdstat_|errorstat_|latency_percentiles_usec_)/ { next } index(keep, " " $1 " ") { print; next } { print $1 }'
 		}
 		info_headers() {
 			docker exec "$CLI_CONTAINER" redis-cli -p "$1" info "${@:2}" 2>&1 | tr -d '\r' | grep '^#'

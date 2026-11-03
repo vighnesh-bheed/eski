@@ -18,7 +18,7 @@ BINARY = ROOT / 'bin/eski'
 class FullKeyspace(unittest.TestCase):
     def setUp(self):
         self.server = Server(BINARY, workers=0, arguments=(
-            '--keyspace-threads', '4', '--keyspace-max-memory', str(16 << 20)))
+            '--keyspace-threads', '4', '--keyspace-max-memory', str(16 << 20)), queue_ping=True)
         self.server.start()
         self.addCleanup(self.server.close)
         self.client = self.server.client()
@@ -136,7 +136,7 @@ class FullKeyspace(unittest.TestCase):
 
     def test_budget_fallback_preserves_accepted_mutations_after_disconnect(self):
         with Server(BINARY, workers=0, arguments=('--keyspace-threads', '2',
-                    '--keyspace-max-memory', str(16 << 10))) as server:
+                    '--keyspace-max-memory', str(16 << 10)), queue_ping=True) as server:
             client = server.client()
             payload = b'x' * (32 << 10)
             client.send_many([('SET', 'k', 'start'), ('APPEND', 'k', payload),
@@ -460,7 +460,7 @@ class FullKeyspace(unittest.TestCase):
 
     def test_dump_restore_all_types_and_absolute_field_expiry(self):
         with Server(BINARY, workers=0, arguments=('--keyspace-threads', '4',
-                    '--keyspace-max-memory', str(128 << 20))) as server:
+                    '--keyspace-max-memory', str(128 << 20)), queue_ping=True) as server:
             c = server.client()
             c.call('SET', 'string', b'\x00value\xff' * 100)
             c.call('RPUSH', 'list', 'a', 'b')
@@ -505,7 +505,7 @@ class FullKeyspace(unittest.TestCase):
         sys.path.insert(0, str(ROOT / 'test' / 'rdb'))
         from rdbcmp import crc64
         with Server(BINARY, workers=0, arguments=('--keyspace-threads', '2',
-                    '--keyspace-max-memory', str(128 << 20))) as server:
+                    '--keyspace-max-memory', str(128 << 20)), queue_ping=True) as server:
             c = server.client()
             c.call('SET', 'target', 'old')
             version = c.call('DUMP', 'target')[-10:-8]

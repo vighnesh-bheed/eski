@@ -19,7 +19,7 @@ REFERENCE_PORT = None
 class Features(unittest.TestCase):
     def setUp(self):
         self.server = Server(BINARY, workers=0, arguments=(
-            '--keyspace-threads', '4', '--keyspace-max-memory', str(128 << 20)))
+            '--keyspace-threads', '4', '--keyspace-max-memory', str(128 << 20)), queue_ping=True)
         self.server.start()
         self.addCleanup(self.server.close)
         self.client = self.server.client()
@@ -30,7 +30,7 @@ class Features(unittest.TestCase):
     def worker_call(self, *args, client=None):
         c = client or self.client
         before = self.submitted(c)
-        result = c.call(*args)
+        result = c.call_before_ping(*args)
         self.assertEqual(self.submitted(c), before + 1, args[:2])
         return result
 
@@ -78,6 +78,53 @@ class Features(unittest.TestCase):
             (b'__keyevent@0__:set', b'events')])
         self.assertEqual(self.client.call('GET', 'events'), b'second')
 
+    def test_lone_commands_on_owned_records_publish_effects_once(self):
+        actor = Client(self.server.port)
+        self.addCleanup(actor.close)
+        self.client.call('CONFIG', 'SET', 'notify-keyspace-events', 'E$g')
+        subscriber = self.server.client()
+        subscriber.call('PSUBSCRIBE', '__keyevent@0__:*')
+        monitor = self.server.client()
+        monitor.call('MONITOR')
+        watcher = self.server.client()
+        watcher.call('WATCH', 'inline')
+        before = info(self.client)
+        self.assertEqual(actor.pipeline([('SET', 'inline', 'worker'), ('GET', 'inline')]), ['OK', b'worker'])
+        self.assertEqual(actor.call('APPEND', 'inline', '+coordinator'), 18)
+        self.assertEqual(actor.call('GET', 'inline'), b'worker+coordinator')
+        with self.assertRaises(ServerError):
+            actor.call('INCR', 'inline')
+        self.assertEqual(actor.call('DEL', 'inline'), 1)
+        actor.send('CLIENT', 'REPLY', 'OFF')
+        actor.send_many([('SET', 'quiet', 'worker'), ('GET', 'quiet')])
+        lines = []
+        while not lines or '"GET" "quiet"' not in lines[-1]:
+            lines.append(str(monitor.read()))
+        actor.send('SET', 'quiet', 'coordinator')
+        while '"SET" "quiet" "coordinator"' not in lines[-1]:
+            lines.append(str(monitor.read()))
+        self.assertEqual(actor.pipeline([('CLIENT', 'REPLY', 'ON'), ('GET', 'quiet')]), ['OK', b'coordinator'])
+        after = info(self.client)
+        deltas = {name: int(after[name]) - int(before[name]) for name in ('keyspace_inline', 'keyspace_jobs_submitted', 'keyspace_sync_fallbacks', 'keyspace_barriers')}
+        self.assertEqual(deltas, {'keyspace_inline': 6, 'keyspace_jobs_submitted': 4, 'keyspace_sync_fallbacks': 1, 'keyspace_barriers': 2})
+        events = []
+        while subscriber.available(0.05):
+            frame = subscriber.read()
+            events.append((frame[2], frame[3]))
+        self.assertEqual(events, [(b'__keyevent@0__:set', b'inline'), (b'__keyevent@0__:append', b'inline'),
+                                  (b'__keyevent@0__:del', b'inline'), (b'__keyevent@0__:set', b'quiet'),
+                                  (b'__keyevent@0__:set', b'quiet')])
+        watcher.call('MULTI')
+        watcher.call('GET', 'inline')
+        self.assertIsNone(watcher.call('EXEC'))
+        actor.call('PING', 'inline-end')
+        while '"inline-end"' not in lines[-1]:
+            lines.append(str(monitor.read()))
+        for command in ('"SET" "inline" "worker"', '"APPEND" "inline" "+coordinator"', '"INCR" "inline"',
+                        '"DEL" "inline"', '"SET" "quiet" "coordinator"'):
+            self.assertEqual(sum(command in line for line in lines), 1, command)
+        self.assertEqual(sum('"GET" "inline"' in line for line in lines), 2)
+
     def test_monitor_sees_original_command_and_live_source(self):
         monitor = self.server.client()
         monitor.call('MONITOR')
@@ -99,7 +146,7 @@ class Features(unittest.TestCase):
         wait_for(lambda: int(info(self.client, 'clients')['blocked_clients']) == 1, label='blocked list waiter')
         self.worker_call('SET', 'unrelated', 'value')
         before = self.submitted()
-        self.assertEqual(self.client.pipeline([('LPUSH', 'waiting', 'payload'), ('DEL', 'waiting')]), [1, 0])
+        self.assertEqual(self.client.pipeline([('LPUSH', 'waiting', 'payload'), ('DEL', 'waiting'), ('PING',)]), [1, 0, 'PONG'])
         self.assertEqual(waiter.reply(), [b'waiting', b'payload'])
         self.assertEqual(self.submitted(), before + 1)
         self.worker_call('RPUSH', 'waiting', 'later')
@@ -108,7 +155,7 @@ class Features(unittest.TestCase):
     def test_aof_restart_replays_all_datatypes_and_cross_db(self):
         with Server(BINARY, workers=0, arguments=(
                 '--keyspace-threads', '4', '--keyspace-max-memory', str(256 << 20),
-                '--appendonly', 'yes', '--appendfsync', 'always')) as server:
+                '--appendonly', 'yes', '--appendfsync', 'always'), queue_ping=True) as server:
             c = server.client()
             wait_for(lambda: info(c, 'persistence').get('aof_rewrite_in_progress') == '0', label='initial AOF rewrite')
             for command in [('SET', 'string', 'value', 'PX', 120000),
@@ -135,8 +182,8 @@ class Features(unittest.TestCase):
 
     def test_postimage_budget_failure_retries_once_without_duplicate_events(self):
         with Server(BINARY, workers=0, arguments=(
-                '--keyspace-threads', '2', '--keyspace-max-memory', str(16 << 20),
-                '--appendonly', 'yes', '--appendfsync', 'always')) as server:
+                '--keyspace-threads', '2', '--keyspace-max-memory', str(2 << 20),
+                '--appendonly', 'yes', '--appendfsync', 'always'), queue_ping=True) as server:
             c = server.client()
             c.call('CONFIG', 'SET', 'notify-keyspace-events', 'E$')
             subscriber = server.client()
@@ -144,8 +191,8 @@ class Features(unittest.TestCase):
             c.call('SET', 'rollback', 'old')
             subscriber.read()
             before = info(c)
-            value = b'z' * (4 << 20)
-            self.assertEqual(c.call('SET', 'rollback', value), 'OK')
+            value = b'z' * (512 << 10)
+            self.assertEqual(c.call_before_ping('SET', 'rollback', value), 'OK')
             self.assertEqual(subscriber.read(), [b'message', b'__keyevent@0__:set', b'rollback'])
             after = info(c)
             self.assertEqual(int(after['keyspace_jobs_submitted']), int(before['keyspace_jobs_submitted']) + 1)
@@ -163,14 +210,14 @@ class Features(unittest.TestCase):
 
     def test_retry_tracking_and_suppressed_reply_transitions(self):
         with Server(BINARY, workers=0, arguments=(
-                '--keyspace-threads', '2', '--keyspace-max-memory', str(16 << 20),
-                '--appendonly', 'yes', '--appendfsync', 'always')) as server:
+                '--keyspace-threads', '2', '--keyspace-max-memory', str(2 << 20),
+                '--appendonly', 'yes', '--appendfsync', 'always'), queue_ping=True) as server:
             admin, tracker = server.client(), server.client()
             tracker.call('HELLO', 3)
             tracker.call('CLIENT', 'TRACKING', 'ON', 'NOLOOP')
             self.assertIsNone(tracker.call('GET', 'suppressed'))
             before = info(admin)
-            value = b's' * (4 << 20)
+            value = b's' * (512 << 10)
             tracker.send_many([('CLIENT', 'REPLY', 'SKIP'), ('SET', 'suppressed', value), ('PING', 'after-skip')])
             self.assertEqual(tracker.reply(), b'after-skip')
             self.assertEqual(tracker.pushes, [])
@@ -189,7 +236,7 @@ class Features(unittest.TestCase):
         for policy in ('noeviction', 'allkeys-lru'):
             with Server(BINARY, workers=0, arguments=(
                     '--keyspace-threads', '4', '--keyspace-max-memory', str(16 << 20),
-                    '--appendonly', 'yes', '--appendfsync', 'always')) as server:
+                    '--appendonly', 'yes', '--appendfsync', 'always'), queue_ping=True) as server:
                 c = server.client()
                 c.call('SET', 'wrongtype', 'string')
                 baseline = int(info(c, 'memory')['used_memory'])
@@ -203,7 +250,9 @@ class Features(unittest.TestCase):
                 def perform(item):
                     actor, command = item
                     barrier.wait()
-                    return actor.pipeline([command])[0]
+                    reply, pong = actor.pipeline([command, ('PING',)])
+                    self.assertEqual(pong, 'PONG')
+                    return reply
                 with ThreadPoolExecutor(max_workers=len(commands)) as pool:
                     results = list(pool.map(perform, zip(clients, commands)))
                 self.assertIsInstance(results[1], ServerError)
@@ -236,7 +285,7 @@ class Features(unittest.TestCase):
         with Server(BINARY, workers=0, arguments=(
                 '--keyspace-threads', '4', '--keyspace-max-memory', str(256 << 20),
                 '--appendonly', 'yes', '--appendfsync', 'always',
-                '--aof-use-rdb-preamble', 'no')) as server:
+                '--aof-use-rdb-preamble', 'no'), queue_ping=True) as server:
             c = server.client()
             c.call('DEBUG', 'SET-ACTIVE-EXPIRE', 0)
             deadline = 1893456000000
@@ -320,8 +369,8 @@ class Features(unittest.TestCase):
         before = info(c, 'stats')
         self.assertEqual(self.worker_call('GET', 'live'), b'value')
         submitted = self.submitted()
-        self.assertIsNone(c.call('GET', 'expired'))
-        self.assertIsNone(c.call('HGET', 'hash', 'field'))
+        self.assertIsNone(c.call_before_ping('GET', 'expired'))
+        self.assertIsNone(c.call_before_ping('HGET', 'hash', 'field'))
         self.assertEqual(self.submitted(), submitted)
         self.assertEqual(c.call('DBSIZE'), 3)
         after = info(c, 'stats')
@@ -382,14 +431,14 @@ class Features(unittest.TestCase):
         transcripts = []
         for workers in (0, 4):
             with Server(BINARY, workers=0, arguments=(
-                    '--keyspace-threads', str(workers), '--keyspace-max-memory', str(128 << 20))) as server:
+                    '--keyspace-threads', str(workers), '--keyspace-max-memory', str(128 << 20)), queue_ping=workers > 0) as server:
                 actor, subscriber = server.client(), server.client()
                 actor.call('CONFIG', 'SET', 'notify-keyspace-events', 'AEnm')
                 subscriber.call('PSUBSCRIBE', '__keyevent@0__:*')
                 rows = []
                 for command in commands:
-                    result = actor.pipeline([command])[0]
-                    actor.call('PING')
+                    result, pong = actor.pipeline([command, ('PING',)])
+                    self.assertEqual(pong, 'PONG')
                     events = []
                     while subscriber.available(0.01):
                         frame = subscriber.read()
@@ -403,7 +452,7 @@ class Features(unittest.TestCase):
     def test_pipelined_retries_and_suppression_keep_order_and_aof(self):
         with Server(BINARY, workers=0, arguments=(
                 '--keyspace-threads', '2', '--keyspace-max-memory', str(16 << 20),
-                '--appendonly', 'yes', '--appendfsync', 'always')) as server:
+                '--appendonly', 'yes', '--appendfsync', 'always'), queue_ping=True) as server:
             c = server.client()
             wait_for(lambda: info(c, 'persistence').get('aof_rewrite_in_progress') == '0', label='initial AOF rewrite')
             before = info(c)
@@ -432,7 +481,7 @@ class Features(unittest.TestCase):
     def test_disconnected_accepted_mutation_remains_durable(self):
         with Server(BINARY, workers=0, arguments=(
                 '--keyspace-threads', '4', '--keyspace-max-memory', str(128 << 20),
-                '--appendonly', 'yes', '--appendfsync', 'always')) as server:
+                '--appendonly', 'yes', '--appendfsync', 'always'), queue_ping=True) as server:
             c = server.client()
             writer = server.client()
             writer.send('MSET', 'disconnect', 'first-second', 'disconnect-peer', 'accepted')

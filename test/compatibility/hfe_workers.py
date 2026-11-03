@@ -16,7 +16,7 @@ WORKERS = 2
 
 class HfeWorkers(unittest.TestCase):
     def setUp(self):
-        self.server = Server(BINARY, workers=0, arguments=('--keyspace-threads', str(WORKERS)))
+        self.server = Server(BINARY, workers=0, arguments=('--keyspace-threads', str(WORKERS)), queue_ping=WORKERS > 0)
         self.addCleanup(self.server.close)
         self.server.start()
         self.client = self.server.client()

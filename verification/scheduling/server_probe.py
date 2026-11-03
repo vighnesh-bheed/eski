@@ -104,14 +104,16 @@ def run(binary, output, label):
             if replies != expected:
                 raise AssertionError('accepted connection history differs: ' + repr(replies))
             checks.extend(('pipeline_fifo', 'immutable_read_result', 'multi_record_reverse_alias', 'rename_conflict'))
-            bad = actor.command('SET', 'fifo', 'bad', 'PX', '0')
-            if not isinstance(bad, tuple) or bad[0] != 'error' or actor.command('GET', 'fifo') != b'AB':
+            actor.socket.sendall(encode(('SET', 'fifo', 'bad', 'PX', '0')) + encode(('GET', 'fifo')))
+            bad, kept = actor.read(), actor.read()
+            if not isinstance(bad, tuple) or bad[0] != 'error' or kept != b'AB':
                 raise AssertionError('failed command changed value')
             checks.append('command_error_preserves_data')
             for index in range(4):
                 writer = Client(port)
                 try:
-                    writer.socket.sendall(encode(('INCR', 'disconnected-' + str(index))))
+                    writer.socket.sendall(encode(('INCR', 'disconnected-' + str(index))) +
+                                          encode(('GET', 'disconnected-' + str(index))))
                 finally:
                     writer.close()
                 deadline = time.monotonic() + 3

@@ -263,7 +263,7 @@ def server_checks(binary, output, label):
         replies = client.pipeline(commands + [('BGSAVE',)])
         if replies[:8] != ['OK'] * 8 or not str(replies[-1]).startswith('Background saving started'):
             raise AssertionError('worker mutation/BGSAVE pipeline failed')
-        if client.call('SET', 'parent-after-fork', 'retained') != 'OK':
+        if client.pipeline([('SET', 'parent-after-fork', 'retained'), ('GET', 'parent-after-fork')]) != ['OK', b'retained']:
             raise AssertionError('parent failed to resume keyspace workers')
         wait_until(lambda: info(client, 'persistence').get('rdb_bgsave_in_progress') == '0')
         state = info(client, 'persistence')
