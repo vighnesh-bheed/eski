@@ -72,7 +72,18 @@ class Parsing(unittest.TestCase):
 
     def test_unknown_workloads_are_refused_before_any_work(self):
         with self.assertRaisesRegex(SystemExit, 'unknown workloads: nope'):
-            ab.main(['--a', 'x', '--b', 'y', '--label', 'l', '--out', '/nonexistent', '--workloads', 'get64-p1-r3k,nope'])
+            ab.main(['--a', 'x', '--b', 'y', '--label', 'l', '--out', '/nonexistent', '--workloads', 'get64-p1-r3k,set64-p16-max,set64-p1-max,nope'])
+
+    def test_offered_rates_follow_from_the_rate_limit_and_only_unthrottled_workloads_have_none(self):
+        connections = 1
+        for arg in ab.COMMON:
+            name, _, value = arg.partition('=')
+            if name in ('--threads', '--clients'):
+                connections *= int(value)
+        for key, (extra, target) in ab.WORKLOADS.items():
+            rates = [int(a.partition('=')[2]) for a in extra if a.startswith('--rate-limiting=')]
+            self.assertEqual(target, rates[0] * connections if rates else None, key)
+            self.assertEqual(key.endswith('-max'), not rates, key)
 
 
 class Throttle(unittest.TestCase):
@@ -207,6 +218,25 @@ class Concurrent(unittest.TestCase):
         result = ab.summarize_session(rows, meta(), None)['get64-p1-r3k']
         self.assertEqual(result['clean_pairs'], 4)
         self.assertEqual(result['package_throttle_runs'], 0)
+
+    def test_a_parent_below_the_fixed_rate_still_pairs_in_the_unthrottled_set_workloads(self):
+        for fixed, unthrottled in (('set64-p1-r3k', 'set64-p1-max'), ('set64-p16-r20k', 'set64-p16-max')):
+            rate = ab.WORKLOADS[fixed][1]
+            for key in (fixed, unthrottled):
+                with self.subTest(workload=key):
+                    rows = session(cost_b=300.0, workload=key, target=ab.WORKLOADS[key][1])
+                    for r in rows:
+                        r['memtier']['ops'] = float(rate if r['variant'] == 'B' else rate // 2)
+                    result = ab.summarize_concurrent(rows, {})[key]
+                    if key == fixed:
+                        self.assertEqual(result['clean_pairs'], 0)
+                        self.assertEqual([(e['round'], e['reasons']) for e in result['excluded']], [(n, ['offered_rate_not_met']) for n in range(1, 9)])
+                        self.assertEqual(result['verdict'], 'insufficient')
+                    else:
+                        self.assertEqual(result['clean_pairs'], 4)
+                        self.assertEqual(result['excluded'], [])
+                        self.assertAlmostEqual(result['cpu_ratio_median'], 0.3, places=3)
+                        self.assertEqual(result['ops_ratio_median'], 2.0)
 
     def test_workloads_are_summarized_separately_in_session_order(self):
         rows = session(workload='get64-p16-max', target=None) + session(workload='ping-p16-r20k', target=640000, ops=640000.0)
