@@ -613,8 +613,9 @@ def local_section(floor):
              'figures. A workload with fewer than three clean pairs is insufficient and the session is repeated later instead of being topped up with extra rounds.', '',
              'The workloads are GET and SET of 64 B at pipeline 1 and 96,000 operations per second per lane, GET and SET at pipeline 16 and 640,000 operations per second, '
              'PING at pipeline 16 and 640,000 operations per second, GET at pipeline 1 and 32,000 operations per second, and unthrottled GET at pipeline 16. The fixed rates '
-             'make both builds process the same offered load. The lanes share the last level cache and memory bandwidth, so ratios are slightly compressed toward 1, and '
-             'throughput on this machine is limited by the load generator, so it is not claimed.', '',
+             'make both builds process the same offered load. Unthrottled GET at pipeline 1 and unthrottled SET at pipelines 1 and 16 can be selected with `--workloads` '
+             'when one build cannot reach a fixed rate and its runs would be excluded under the rules below. The lanes share the last level cache and memory bandwidth, '
+             'so ratios are slightly compressed toward 1, and throughput on this machine is limited by the load generator, so it is not claimed.', '',
              '### Noise rules', '',
              'A measured run is excluded when its lane delivers less than 98 percent of a fixed offered rate, when the server CPU carries more than 30 percent of foreign '
              'task time, when the machine runs on battery, or when the server core\'s own thermal throttle counter rises by more than 100 events per second of the window. '

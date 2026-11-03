@@ -33,6 +33,8 @@ WORKLOADS = {
     'get64-p1-r1k': (['--ratio=0:1', '--key-pattern=R:R', '--pipeline=1', '--rate-limiting=1000'], 32000),
     'get64-p16-max': (['--ratio=0:1', '--key-pattern=R:R', '--pipeline=16'], None),
     'get64-p1-max': (['--ratio=0:1', '--key-pattern=R:R', '--pipeline=1'], None),
+    'set64-p16-max': (['--ratio=1:0', '--key-pattern=R:R', '--pipeline=16'], None),
+    'set64-p1-max': (['--ratio=1:0', '--key-pattern=R:R', '--pipeline=1'], None),
 }
 DEFAULT = 'get64-p1-r3k,set64-p1-r3k,get64-p16-r20k,set64-p16-r20k,ping-p16-r20k,get64-p1-r1k,get64-p16-max'
 SYS = Path('/sys')
