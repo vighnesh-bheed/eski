@@ -258,12 +258,49 @@ global_capacity_retains_completions_across_pause_stop_and_restart :: proc(t: ^te
 	testing.expect(t, count == len(jobs) && pending(&p) == 0)
 	notifications: u64
 	nread, err := linux.read(fd, (cast([^]u8)&notifications)[:size_of(notifications)])
-	testing.expect(t, nread == 8 && err == .NONE && notifications == CAPACITY + 1)
+	testing.expect(t, nread == 8 && err == .NONE && notifications == 1)
 	drain_notifications(&p)
 	buffer: [8]u8
 	_, err = linux.read(fd, buffer[:])
 	testing.expect(t, err == .EAGAIN)
 	testing.expect(t, record_free(&p, r) && memory_used(&p) == 0 && destroy(&p))
+}
+
+read_notifications :: proc(fd: linux.Fd) -> u64 {
+	count: u64
+	_, err := linux.read(fd, (cast([^]u8)&count)[:size_of(count)])
+	return count if err == .NONE else 0
+}
+
+@(test)
+completions_notify_once_per_empty_ring_and_drain_in_one_batch :: proc(t: ^testing.T) {
+	p: Pool
+	testing.expect(t, init(&p, 2, 1 << 20))
+	defer destroy(&p)
+	r := record_new(&p, 0, test_bytes("key"), 0, false, nil, 0)
+	testing.expect(t, r != nil)
+	fd := completion_fd(&p)
+	jobs: [6]Job
+	for &job in jobs[:3] {
+		job.record = r
+		testing.expect(t, submit(&p, &job))
+	}
+	pause(&p)
+	testing.expect(t, p.parked == 2 && read_notifications(fd) == 1 && read_notifications(fd) == 0)
+	out: [CAPACITY]^Job
+	testing.expect(t, poll_all(&p, out[:]) == 3 && out[0] == &jobs[0] && out[1] == &jobs[1] && out[2] == &jobs[2])
+	testing.expect(t, pending(&p) == 0 && poll(&p) == nil && poll_all(&p, out[:]) == 0 && jobs[2].state == .Idle)
+	testing.expect(t, resume(&p) && resume(&p))
+	for &job in jobs[3:] {
+		job.record = r
+		testing.expect(t, submit(&p, &job))
+	}
+	pause(&p)
+	testing.expect(t, read_notifications(fd) == 1)
+	testing.expect(t, poll_all(&p, out[:1]) == 1 && out[0] == &jobs[3] && pending(&p) == 2)
+	testing.expect(t, poll_all(&p, out[:]) == 2 && out[0] == &jobs[4] && out[1] == &jobs[5] && pending(&p) == 0)
+	drain_notifications(&p)
+	testing.expect(t, read_notifications(fd) == 0 && record_free(&p, r) && memory_used(&p) == 0 && destroy(&p))
 }
 
 @(test)

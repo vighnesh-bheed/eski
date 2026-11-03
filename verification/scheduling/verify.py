@@ -214,7 +214,7 @@ def main():
                    'elapsed_seconds': round(time.monotonic() - started, 3),
                    'limitations': [
                        'Finite source-informed SC models; no executable refinement theorem, weak-memory proof or unbounded liveness proof.',
-                       'Progress assumes eventual worker/coordinator scheduling, eventual delivery of internal wakeups, and environment resume.',
+                       'Progress assumes eventual worker/coordinator scheduling, delivery of each modelled signal, broadcast and eventfd write once issued, and environment resume.',
                        'Environment yield self-loops model starvation; all nonstuttering reachable graphs are acyclic; no product deadlock found within bounds.',
                        'Record values abstract allocation, pointer lifetimes, all datatype kernels and every effect payload; original-source fixtures and narrow live probes test selected bridges.',
                        'TSAN covers bounded original pool/coordinator/snapshot paths after a deliberate race control; no whole-engine race-freedom claim.',

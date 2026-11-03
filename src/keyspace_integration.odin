@@ -6,6 +6,7 @@ import ld "ldfloat"
 import "core:sys/linux"
 
 KEYSPACE_INDEX_SLOTS :: 512
+KEYSPACE_KEY_INDICES :: 32
 
 Keyspace_Slot :: struct {
 	hash:   u64,
@@ -76,6 +77,7 @@ keyspace_threads: i64
 keyspace_max_memory: i64 = 128 * 1024 * 1024
 keyspace_initialized: bool
 keyspace_registered: bool
+keyspace_notified: bool
 keyspace_in_fence: bool
 keyspace_index_fixed: [KEYSPACE_INDEX_SLOTS]Keyspace_Slot
 keyspace_index: []Keyspace_Slot
@@ -395,12 +397,13 @@ keyspace_collect :: proc(publish_ready: bool = true) {
 	if !keyspace_initialized {
 		return
 	}
-	ks.drain_notifications(&keyspace_pool)
-	for _ in 0 ..< ks.CAPACITY {
-		job := ks.poll(&keyspace_pool)
-		if job == nil {
-			break
-		}
+	if keyspace_notified {
+		keyspace_notified = false
+		ks.drain_notifications(&keyspace_pool)
+	}
+	jobs: [ks.CAPACITY]^ks.Job = ---
+	count := ks.poll_all(&keyspace_pool, jobs[:])
+	for job in jobs[:count] {
 		task := cast(^Keyspace_Task)job.data
 		if job.cancelled { task.failed = true }
 		if task.failed { keyspace_replay_needed = true }
@@ -632,6 +635,17 @@ keyspace_record :: proc(c: ^Conn, key: []u8) -> ^ks.Record {
 	return r
 }
 
+keyspace_key_indices :: proc(spec: ^Cmd_Spec, argv: [][]u8, fixed: ^[KEYSPACE_KEY_INDICES]int) -> [dynamic]int {
+	indices := transmute([dynamic]int)runtime.Raw_Dynamic_Array{data = fixed, cap = len(fixed), allocator = runtime.nil_allocator()}
+	command_keys(spec, argv, &indices)
+	if len(indices) < len(fixed) {
+		return indices
+	}
+	indices = make([dynamic]int, 0, 2 * len(fixed), runtime.heap_allocator())
+	command_keys(spec, argv, &indices)
+	return indices
+}
+
 keyspace_try :: proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8) -> bool {
 	if !keyspace_candidate(slot, argv) || !keyspace_eligible(c) {
 		keyspace_fence()
@@ -653,9 +667,9 @@ keyspace_try :: proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8) -> bool {
 	if (op == .Mset || op == .Msetnx) && len(argv) % 2 == 0 { keyspace_fence(); return false }
 	spec := cmd_spec_lookup(cmd, argv)
 	if spec == nil || !arity_ok(int(spec.arity), len(argv)) { keyspace_fence(); return false }
-	indices := make([dynamic]int, 0, 0, runtime.heap_allocator())
+	fixed: [KEYSPACE_KEY_INDICES]int = ---
+	indices := keyspace_key_indices(spec, argv, &fixed)
 	defer delete(indices)
-	command_keys(spec, argv, &indices)
 	target_db := c.db.id
 	if relocate {
 		id, _, ok := keyspace_key_target(cmd.name, argv, c.db.id)
