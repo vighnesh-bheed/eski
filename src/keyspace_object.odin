@@ -114,7 +114,7 @@ keyspace_object_seed :: proc(c: ^Conn, key: []u8, owner: int) -> ^ks.Record {
 
 keyspace_object_import :: proc(db: ^Db, r: ^ks.Record) {
 	key := transmute([]u8)r.key
-	e := keyspace_store_object_destination(db, key)
+	e := keyspace_store_object_destination(db, key, r.expire_at)
 	switch Obj_Type(r.kind) {
 	case .String:
 	case .List: list_copy_attach(e, r.object)

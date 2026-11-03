@@ -17,15 +17,17 @@ HUGE_PAGE :: 2 << 20
 Group :: #simd[GROUP_SLOTS]u8
 
 Table :: struct {
-	ctrl:   [^]u8,
-	slots:  #soa[]Slot,
-	gmask:  u64,
-	cap:    int,
-	live:   int,
-	tombs:  int,
-	growth: int,
-	region: [^]u8,
-	size:   int,
+	ctrl:    [^]u8,
+	slots:   #soa[]Slot,
+	groups:  u64,
+	pmask:   u64,
+	cap:     int,
+	live:    int,
+	tombs:   int,
+	growth:  int,
+	warm_at: int,
+	region:  [^]u8,
+	size:    int,
 }
 
 Lookup :: struct {
@@ -36,12 +38,18 @@ Lookup :: struct {
 }
 
 #assert(size_of(Group) == GROUP_SLOTS)
-#assert(size_of(type_of(CTRL_EMPTY)) == 1 && size_of(Slot) <= 24)
+#assert(size_of(type_of(CTRL_EMPTY)) == 1)
 #assert(size_of(#soa[]Slot) == 32)
-#assert(size_of(Table) == 96)
+#assert(size_of(Table) == 112)
 #assert(size_of(Lookup) == 40)
 
-TABLE_SLOT_BYTES :: size_of(Slot) + 1
+SLOT_BYTES :: size_of(Slot_Meta) + size_of(Key_Handle) + size_of(Val_Handle)
+TABLE_SLOT_BYTES :: SLOT_BYTES + 1
+TABLE_GROWTH_NUM :: 5
+TABLE_GROWTH_DEN :: 4
+
+#assert(TABLE_SLOT_BYTES == 19)
+#assert(GROUP_SLOTS * size_of(Slot_Meta) <= 64)
 
 lookup_make :: #force_inline proc "contextless" (key: []u8) -> (l: Lookup) {
 	l.key = key
@@ -77,8 +85,52 @@ hash_h2 :: #force_inline proc "contextless" (h: u64) -> u8 {
 	return u8(h) | 0x80
 }
 
-hash_home :: #force_inline proc "contextless" (h: u64, gmask: u64) -> u64 {
-	return (h >> 7) & gmask
+hash_home :: #force_inline proc "contextless" (h: u64, groups: u64) -> u64 {
+	return u64((u128(h) * u128(groups)) >> 64)
+}
+
+group_floor :: proc "contextless" (groups: u64, g: u64) -> u64 {
+	if g == 0 || g >= groups {
+		return 0
+	}
+	return u64(((u128(g) << 64) + u128(groups - 1)) / u128(groups))
+}
+
+probe_next :: #force_inline proc "contextless" (t: ^Table, g: u64, step: ^u64) -> u64 {
+	step^ += 1
+	n := (g + step^) & t.pmask
+	for n >= t.groups {
+		step^ += 1
+		n = (n + step^) & t.pmask
+	}
+	return n
+}
+
+table_grow_cap :: #force_inline proc "contextless" (cap: int) -> int {
+	return max(cap + GROUP_SLOTS, (cap * TABLE_GROWTH_NUM / TABLE_GROWTH_DEN + GROUP_SLOTS - 1) &~ (GROUP_SLOTS - 1))
+}
+
+table_round_cap :: #force_inline proc "contextless" (n: int) -> int {
+	return max(TABLE_MIN_CAP, (n + GROUP_SLOTS - 1) &~ (GROUP_SLOTS - 1))
+}
+
+key_timed :: #force_inline proc "contextless" (kh: Key_Handle) -> bool {
+	form := kh.small.tag.key_form
+	return (form == FORM_SLAB || form == FORM_HEAP) && kh.slab.timed != 0
+}
+
+key_deadline_ptr :: #force_inline proc "contextless" (kh: Key_Handle, s: ^Slab) -> ^u64 {
+	if kh.small.tag.key_form == FORM_SLAB {
+		return (^u64)(slab_ptr(s, kh.slab.offset - 1))
+	}
+	return (^u64)(kh.heap.addr - DEADLINE_BYTES)
+}
+
+key_deadline :: #force_inline proc "contextless" (kh: Key_Handle, s: ^Slab) -> i64 {
+	if !key_timed(kh) {
+		return 0
+	}
+	return i64(key_deadline_ptr(kh, s)^)
 }
 
 key_bytes :: #force_inline proc "contextless" (kp: ^Key_Handle, s: ^Slab) -> []u8 {
@@ -107,7 +159,7 @@ key_eq :: #force_inline proc "contextless" (a: [^]u8, b: [^]u8, n: int) -> bool 
 @(private = "file")
 key_matches :: #force_inline proc "contextless" (kh: Key_Handle, s: ^Slab, l: ^Lookup) -> bool #no_bounds_check {
 	if l.small {
-		return kh.bits & KEY_CMP_MASK == l.packed
+		return kh.bits & KEY_CMP_MASK == l.packed || (kh.small.tag.key_form == FORM_SLAB && int(kh.slab.len) == len(l.key) && runtime.memory_equal(slab_ptr(s, kh.slab.offset), raw_data(l.key), len(l.key)))
 	}
 	form := kh.small.tag.key_form
 	n := len(l.key)
@@ -135,7 +187,6 @@ prefetch_group :: #force_inline proc "contextless" (t: ^Table, g: u64, want_meta
 	}
 	if want_meta {
 		intrinsics.prefetch_read_data(&t.slots[i].meta, 3)
-		intrinsics.prefetch_read_data(&t.slots[i + GROUP_SLOTS / 2].meta, 3)
 	}
 }
 
@@ -151,11 +202,11 @@ prefetch_value :: #force_inline proc "contextless" (kh: Key_Handle, vh: Val_Hand
 }
 
 table_alloc_size :: #force_inline proc "contextless" (cap: int) -> int {
-	if cap < TABLE_MIN_CAP || cap & (cap - 1) != 0 || cap > (max(int) - TABLE_PAGE - 63) / TABLE_SLOT_BYTES {
+	if cap < TABLE_MIN_CAP || cap & (GROUP_SLOTS - 1) != 0 || cap > (max(int) - TABLE_PAGE - 63) / TABLE_SLOT_BYTES {
 		store_fatal("invalid key table capacity")
 	}
 	ctrl_bytes := (cap + 63) &~ 63
-	return (ctrl_bytes + cap * size_of(Slot) + TABLE_PAGE - 1) &~ (TABLE_PAGE - 1)
+	return (ctrl_bytes + cap * SLOT_BYTES + TABLE_PAGE - 1) &~ (TABLE_PAGE - 1)
 }
 
 table_alloc :: proc "contextless" (cap: int) -> (t: Table) {
@@ -178,9 +229,16 @@ table_alloc :: proc "contextless" (cap: int) -> (t: Table) {
 	keys := ([^]Key_Handle)(&base[ctrl_bytes + cap * size_of(Slot_Meta)])[:cap]
 	vals := ([^]Val_Handle)(&base[ctrl_bytes + cap * (size_of(Slot_Meta) + size_of(Key_Handle))])[:cap]
 	t.slots = soa_zip(meta = metas, key = keys, val = vals)
-	t.gmask = u64(cap / GROUP_SLOTS - 1)
+	t.groups = u64(cap / GROUP_SLOTS)
+	t.pmask = 1
+	for t.pmask < t.groups {
+		t.pmask <<= 1
+	}
+	t.pmask -= 1
 	t.cap = cap
 	t.growth = cap - cap / 8
+	next := table_grow_cap(cap)
+	t.warm_at = (next - cap) * cap / (4 * next)
 	return
 }
 
@@ -193,8 +251,7 @@ table_detach :: proc "contextless" (t: ^Table) {
 }
 
 table_find :: #force_inline proc "contextless" (t: ^Table, s: ^Slab, l: ^Lookup, want_meta: bool) -> int #no_bounds_check {
-	gmask := t.gmask
-	g := hash_home(l.hash, gmask)
+	g := hash_home(l.hash, t.groups)
 	h2 := hash_h2(l.hash)
 	prefetch_group(t, g, want_meta, false)
 	step: u64 = 0
@@ -217,8 +274,7 @@ table_find :: #force_inline proc "contextless" (t: ^Table, s: ^Slab, l: ^Lookup,
 		if group_empty(grp) != 0 {
 			return -1
 		}
-		step += 1
-		g = (g + step) & gmask
+		g = probe_next(t, g, &step)
 	}
 }
 
@@ -227,8 +283,7 @@ table_find_slow :: proc "contextless" (t: ^Table, s: ^Slab, l: ^Lookup, want_met
 }
 
 table_find_slot :: #force_inline proc "contextless" (t: ^Table, s: ^Slab, l: ^Lookup, want_meta: bool) -> (slot: int, found: bool) #no_bounds_check {
-	gmask := t.gmask
-	g := hash_home(l.hash, gmask)
+	g := hash_home(l.hash, t.groups)
 	h2 := hash_h2(l.hash)
 	prefetch_group(t, g, want_meta, true)
 	step: u64 = 0
@@ -258,8 +313,7 @@ table_find_slot :: #force_inline proc "contextless" (t: ^Table, s: ^Slab, l: ^Lo
 		if group_empty(grp) != 0 {
 			return free, false
 		}
-		step += 1
-		g = (g + step) & gmask
+		g = probe_next(t, g, &step)
 	}
 }
 
@@ -274,8 +328,7 @@ table_place :: #force_inline proc "contextless" (t: ^Table, i: int, h: u64) #no_
 }
 
 table_claim :: proc "contextless" (t: ^Table, h: u64) -> int #no_bounds_check {
-	gmask := t.gmask
-	g := hash_home(h, gmask)
+	g := hash_home(h, t.groups)
 	step: u64 = 0
 	for {
 		f := group_free(group_load(t.ctrl, g))
@@ -284,8 +337,7 @@ table_claim :: proc "contextless" (t: ^Table, h: u64) -> int #no_bounds_check {
 			table_place(t, i, h)
 			return i
 		}
-		step += 1
-		g = (g + step) & gmask
+		g = probe_next(t, g, &step)
 	}
 }
 
@@ -327,7 +379,7 @@ table_migrate_group :: proc "contextless" (src, dst: ^Table, s: ^Slab, g: u64, l
 	for k in 0 ..< n {
 		h := hash_bytes(key_bytes(&src.slots[idx[k]].key, s))
 		hashes[k] = h
-		hg := hash_home(h, dst.gmask) << GROUP_SHIFT
+		hg := hash_home(h, dst.groups) << GROUP_SHIFT
 		intrinsics.prefetch_write_data(&dst.ctrl[hg], 3)
 		intrinsics.prefetch_write_data(&dst.slots[hg].meta, 3)
 		intrinsics.prefetch_write_data(&dst.slots[hg].key, 3)

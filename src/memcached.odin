@@ -517,6 +517,20 @@ mc_meta_drop :: proc "contextless" (db: ^Db, bits: u64) #no_bounds_check {
 	}
 }
 
+mc_meta_rekey :: proc "contextless" (db: ^Db, old_bits: u64, new_bits: u64) #no_bounds_check {
+	t := db.mc
+	idx := mc_meta_find(t, old_bits & KEY_CMP_MASK)
+	if idx < 0 {
+		return
+	}
+	m := t.slots[idx]
+	mc_meta_drop(db, old_bits)
+	kh := Key_Handle {
+		bits = new_bits,
+	}
+	mc_meta_set(db, &kh, m.cas, m.flags, int(m.size))
+}
+
 mc_meta_on_erase :: #force_inline proc "contextless" (db: ^Db, kp: ^Key_Handle) {
 	if db.mc != nil {
 		mc_meta_drop(db, kp.bits)
@@ -848,21 +862,16 @@ mc_cap_all :: proc(db: ^Db, at: i64) #no_bounds_check {
 		if t.live == 0 {
 			continue
 		}
-		for g in 0 ..= t.gmask {
+		for g in 0 ..< t.groups {
 			full := group_full(group_load(t.ctrl, g))
 			for full != 0 {
 				i := int(g << GROUP_SHIFT) + int(intrinsics.count_trailing_zeros(full))
 				full &= full - 1
-				mp := &t.slots[i].meta
-				exp := i64(mp.expire_at) if db.expires > 0 else 0
-				if exp == 0 {
-					db.expires += 1
-					mp.expire_at = u64(at)
-				} else if exp > at {
-					mp.expire_at = u64(at)
-				} else {
+				exp := slot_deadline(db, t, i) if db.expires > 0 else 0
+				if exp != 0 && exp <= at {
 					continue
 				}
+				key_set_deadline(db, &t.slots[i].key, at)
 				if aof.feed {
 					aof_mc_pexpireat(key_bytes(&t.slots[i].key, &db.slab), at)
 				}
@@ -1114,7 +1123,7 @@ mc_store :: proc(c: ^Conn, op: Mc_Store, key: []u8, flags: u32, exptime: i64, da
 	switch op {
 	case .Set:
 		if !dead {
-			e, _ = db_upsert_in(db, key)
+			e, _ = db_upsert_timed_in(db, key, at)
 		}
 	case .Add:
 		if db_find_in(db, key) != nil {
@@ -1122,7 +1131,7 @@ mc_store :: proc(c: ^Conn, op: Mc_Store, key: []u8, flags: u32, exptime: i64, da
 			return
 		}
 		if !dead {
-			e, _ = db_upsert_in(db, key)
+			e, _ = db_upsert_timed_in(db, key, at)
 		}
 	case .Replace:
 		e = db_find_in(db, key)

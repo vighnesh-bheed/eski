@@ -51,7 +51,7 @@ Dead :: struct {
 
 #assert(size_of(Entry) == 64)
 #assert(size_of(Db) == 3 * size_of(Table) + 8 + size_of(Slab) + 12 * 8)
-#assert(size_of(Db) == 880)
+#assert(size_of(Db) == 928)
 #assert(offset_of(Db, zctx) == 3 * size_of(Table) + 8 + size_of(Slab) + 11 * 8)
 #assert(offset_of(Db, sctx) == 3 * size_of(Table) + 8 + size_of(Slab) + 10 * 8)
 #assert(size_of(Release) == 24)
@@ -123,6 +123,7 @@ empty_vals: [GROUP_SLOTS]Val_Handle
 table_empty :: proc "contextless" () -> (t: Table) {
 	t.ctrl = ([^]u8)(&empty_ctrl)
 	t.slots = soa_zip(meta = empty_meta[:], key = empty_keys[:], val = empty_vals[:])
+	t.groups = 1
 	t.cap = GROUP_SLOTS
 	return
 }
@@ -307,18 +308,92 @@ key_store_heap :: #force_no_inline proc "contextless" (db: ^Db, kp: ^Key_Handle,
 }
 
 @(private = "file")
+key_store_timed :: proc "contextless" (db: ^Db, kp: ^Key_Handle, key: []u8, at: u64) #no_bounds_check {
+	n := len(key)
+	if n + DEADLINE_BYTES <= SLAB_MAX {
+		off := slab_alloc(&db.slab, n + DEADLINE_BYTES)
+		p := slab_ptr(&db.slab, off)
+		(^u64)(p)^ = at
+		if n > 0 {
+			intrinsics.mem_copy_non_overlapping(&p[DEADLINE_BYTES], raw_data(key), n)
+		}
+		kp.bits = 0
+		kp.slab.offset = off + 1
+		kp.slab.len = u16(n)
+		kp.slab.timed = KEY_TIMED
+		kp.small.tag.key_form = FORM_SLAB
+		return
+	}
+	hp := mem_alloc(n + DEADLINE_BYTES + 8)
+	if hp == nil {
+		store_fatal("out of memory")
+	}
+	(^u64)(hp)^ = at
+	(^int)(&hp[DEADLINE_BYTES])^ = n
+	intrinsics.mem_copy_non_overlapping(&hp[DEADLINE_BYTES + 8], raw_data(key), n)
+	kp.bits = 0
+	kp.heap.addr = uintptr(&hp[DEADLINE_BYTES])
+	kp.heap.timed = KEY_TIMED
+	kp.small.tag.key_form = FORM_HEAP
+	db.heap_objs += 1
+	db.heap_bytes += n + DEADLINE_BYTES + 8
+	db_used_memory += n + DEADLINE_BYTES + 8
+}
+
+@(private = "file")
 key_release :: proc "contextless" (db: ^Db, kp: ^Key_Handle) {
 	switch kp.small.tag.key_form {
 	case FORM_SLAB:
-		slab_free(&db.slab, kp.slab.offset, int(kp.slab.len))
+		if kp.slab.timed != 0 {
+			slab_free(&db.slab, kp.slab.offset - 1, int(kp.slab.len) + DEADLINE_BYTES)
+		} else {
+			slab_free(&db.slab, kp.slab.offset, int(kp.slab.len))
+		}
 	case FORM_HEAP:
+		extra := DEADLINE_BYTES if kp.heap.timed != 0 else 0
 		hp := ([^]u8)(kp.heap.addr)
-		n := (^int)(hp)^ + 8
+		n := (^int)(hp)^ + 8 + extra
 		db.heap_objs -= 1
 		db.heap_bytes -= n
 		db_used_memory -= n
-		mem_free(hp)
+		mem_free(rawptr(kp.heap.addr - uintptr(extra)))
 	}
+}
+
+@(private = "file")
+key_restore :: proc "contextless" (db: ^Db, kp: ^Key_Handle, at: u64) {
+	old := kp^
+	key := key_bytes(&old, &db.slab)
+	if at != 0 {
+		key_store_timed(db, kp, key, at)
+	} else {
+		key_store(db, kp, key)
+	}
+	kp.small.tag.val_form = old.small.tag.val_form
+	key_release(db, &old)
+	if db.mc != nil {
+		mc_meta_rekey(db, old.bits, kp.bits)
+	}
+}
+
+key_set_deadline :: proc "contextless" (db: ^Db, kp: ^Key_Handle, at: i64) {
+	if key_timed(kp^) {
+		if at != 0 {
+			key_deadline_ptr(kp^, &db.slab)^ = u64(at)
+			return
+		}
+		db.expires -= 1
+	} else {
+		if at == 0 {
+			return
+		}
+		db.expires += 1
+	}
+	key_restore(db, kp, u64(at))
+}
+
+slot_deadline :: #force_inline proc "contextless" (db: ^Db, t: ^Table, i: int) -> i64 #no_bounds_check {
+	return key_deadline(t.slots[i].key, &db.slab)
 }
 
 @(private = "file")
@@ -356,7 +431,7 @@ entry_view :: #force_inline proc "contextless" (db: ^Db, t: ^Table, i: int) -> ^
 	e.mp = &t.slots[i].meta
 	e.kp = &t.slots[i].key
 	e.vp = &t.slots[i].val
-	e.expire_at = i64(e.mp.expire_at) if db.expires > 0 else 0
+	e.expire_at = key_deadline(e.kp^, &db.slab) if db.expires > 0 else 0
 	e.heap_tmp = false
 	entry_load(e)
 	return e
@@ -724,15 +799,7 @@ entry_set_expire :: #force_inline proc "contextless" (e: ^Entry, t: i64) {
 		e.expire_at = 0
 		return
 	}
-	old := e.mp.expire_at
-	if old == 0 {
-		if at != 0 {
-			e.db.expires += 1
-		}
-	} else if at == 0 {
-		e.db.expires -= 1
-	}
-	e.mp.expire_at = u64(at)
+	key_set_deadline(e.db, e.kp, at)
 	e.expire_at = at
 }
 
@@ -756,7 +823,7 @@ entry_encoding :: proc "contextless" (e: ^Entry) -> string {
 
 @(private = "file")
 db_locate :: #force_inline proc "contextless" (db: ^Db, l: ^Lookup) -> (^Table, int) {
-	want_meta := db.expires > 0 || !store_no_touch
+	want_meta := !store_no_touch
 	if db.rehash_idx >= 0 {
 		i := table_find_slow(&db.t[0], &db.slab, l, want_meta)
 		if i >= 0 {
@@ -772,12 +839,11 @@ db_erase :: proc "contextless" (db: ^Db, t: ^Table, i: int) #no_bounds_check {
 	kp := &t.slots[i].key
 	mc_meta_on_erase(db, kp)
 	val_release(db, kp, &t.slots[i].val)
-	key_release(db, kp)
-	timed := db.expires > 0 && t.slots[i].meta.expire_at != 0
-	if timed {
+	if key_timed(kp^) {
 		db.expires -= 1
 	}
-	table_erase(t, i, timed)
+	key_release(db, kp)
+	table_erase(t, i, false)
 }
 
 db_erase_expired :: proc "contextless" (db: ^Db, t: ^Table, i: int) {
@@ -807,7 +873,7 @@ db_rehash_swap :: proc "contextless" (db: ^Db) {
 db_rehash_groups :: proc "contextless" (db: ^Db, max_groups: int, want: int) {
 	src := &db.t[0]
 	dst := &db.t[1]
-	groups := i64(src.gmask) + 1
+	groups := i64(src.groups)
 	g := db.rehash_idx
 	moved := 0
 	visited := 0
@@ -883,7 +949,7 @@ db_prepare_next :: #force_no_inline proc "contextless" (db: ^Db) {
 	if db.rehash_idx >= 0 || db.next.region != nil || t.cap <= REHASH_SYNC_CAP || t.live <= t.cap * 7 / 16 || maxmemory_bytes != 0 {
 		return
 	}
-	db.next = table_alloc(t.cap * 2)
+	db.next = table_alloc(table_grow_cap(t.cap))
 	db.next_warm = 0
 	store_warming += 1
 }
@@ -916,7 +982,7 @@ db_make_room :: #force_no_inline proc "contextless" (db: ^Db) -> ^Table {
 	t := &db.t[0]
 	cap := t.cap
 	if t.live > cap * 7 / 16 {
-		cap *= 2
+		cap = table_grow_cap(cap)
 	}
 	if db.next.region != nil && db.next.cap == cap {
 		if db.next_warm < db.next.size {
@@ -939,10 +1005,7 @@ db_make_room :: #force_no_inline proc "contextless" (db: ^Db) -> ^Table {
 @(cold)
 db_shrink :: #force_no_inline proc "contextless" (db: ^Db) {
 	db_drop_next(db)
-	cap := TABLE_MIN_CAP
-	for cap < db.t[0].live * 2 {
-		cap *= 2
-	}
+	cap := table_round_cap(db.t[0].live * 2)
 	if cap < db.t[0].cap {
 		db_rehash_start(db, cap)
 	}
@@ -996,7 +1059,7 @@ db_pressure_shrink :: proc "contextless" (deadline: i64) -> (work: Table_Pressur
 		if !dict_resizing || d.next.region != nil || t.region == nil || t.cap <= TABLE_MIN_CAP || t.live > t.cap / 4 || t.size > 2 * RELEASE_NOW_BYTES {
 			continue
 		}
-		cap := t.cap / 2
+		cap := table_round_cap(t.cap / 2)
 		size := table_alloc_size(cap)
 		if size > RELEASE_NOW_BYTES || size >= t.size || now_ns() >= deadline {
 			continue
@@ -1022,7 +1085,7 @@ db_find_in :: proc(db: ^Db, key: []u8) -> ^Entry #no_bounds_check {
 		return nil
 	}
 	if db.expires > 0 {
-		exp := i64(t.slots[i].meta.expire_at)
+		exp := slot_deadline(db, t, i)
 		if exp != 0 && exp <= expire_now() {
 			if !expiry_deletion_paused() {
 				db_erase_expired(db, t, i)
@@ -1040,7 +1103,7 @@ db_key_state :: proc(db: ^Db, key: []u8) -> (exists: bool, expired: bool) #no_bo
 	if i < 0 {
 		return false, false
 	}
-	exp := i64(t.slots[i].meta.expire_at)
+	exp := slot_deadline(db, t, i)
 	return true, exp != 0 && exp <= srv.now_ms
 }
 
@@ -1050,7 +1113,7 @@ keyspace_store_seed :: proc(db: ^Db, key: []u8) -> (value: []u8, access_word: u3
 	if i < 0 {
 		return nil, 0, false, true
 	}
-	if t.slots[i].meta.expire_at != 0 {
+	if key_timed(t.slots[i].key) {
 		return nil, 0, false, false
 	}
 	e := entry_view(db, t, i)
@@ -1094,20 +1157,26 @@ keyspace_store_import_full :: proc(db: ^Db, key, value: []u8, access_word: u32, 
 		return
 	}
 	if changed {
-		l := lookup_make(key)
-		t, i := db_locate(db, &l)
-		if i >= 0 {
-			entry_set_expire(entry_view(db, t, i), 0)
-		}
+		keyspace_store_clear_lapsed(db, key)
 	}
-	keyspace_store_import(db, key, value, access_word, changed)
+	keyspace_store_import(db, key, value, access_word, changed, expires)
 	if changed {
 		l := lookup_make(key)
 		t, i := db_locate(db, &l)
 		if i >= 0 {
-			e := entry_view(db, t, i)
-			entry_set_expire(e, expires)
-			entry_set_encoding(e, Obj_Encoding(encoding))
+			entry_set_encoding(entry_view(db, t, i), Obj_Encoding(encoding))
+		}
+	}
+}
+
+@(private = "file")
+keyspace_store_clear_lapsed :: proc(db: ^Db, key: []u8) {
+	l := lookup_make(key)
+	t, i := db_locate(db, &l)
+	if i >= 0 {
+		due := slot_deadline(db, t, i)
+		if due != 0 && due <= expire_now() {
+			entry_set_expire(entry_view(db, t, i), 0)
 		}
 	}
 }
@@ -1135,7 +1204,7 @@ keyspace_store_string_copy :: proc(db: ^Db, key: []u8) -> bool {
 }
 
 keyspace_store_import_copy :: proc(db: ^Db, key, value: []u8, access_word: u32, expires: i64, encoding: u8) {
-	e := keyspace_store_object_destination(db, key)
+	e := keyspace_store_object_destination(db, key, expires)
 	enc := Obj_Encoding(encoding)
 	entry_copy_string(e, value, enc)
 	entry_set_encoding(e, enc)
@@ -1153,29 +1222,17 @@ keyspace_store_import_metadata :: proc(db: ^Db, key: []u8, access_word: u32, exp
 	}
 }
 
-keyspace_store_object_destination :: proc(db: ^Db, key: []u8) -> ^Entry {
-	l := lookup_make(key)
-	t, i := db_locate(db, &l)
-	if i >= 0 {
-		entry_set_expire(entry_view(db, t, i), 0)
-	}
+keyspace_store_object_destination :: proc(db: ^Db, key: []u8, expires: i64) -> ^Entry {
+	keyspace_store_clear_lapsed(db, key)
 	saved := store_no_touch
 	store_no_touch = true
 	defer store_no_touch = saved
-	e, _ := db_upsert_in(db, key)
+	e, _ := db_upsert_timed_in(db, key, expires)
 	return e
 }
 
 keyspace_store_import_list :: proc(db: ^Db, key: []u8, object: rawptr, access_word: u32, expires: i64) {
-	l := lookup_make(key)
-	t, i := db_locate(db, &l)
-	if i >= 0 {
-		entry_set_expire(entry_view(db, t, i), 0)
-	}
-	saved := store_no_touch
-	store_no_touch = true
-	defer store_no_touch = saved
-	e, _ := db_upsert_in(db, key)
+	e := keyspace_store_object_destination(db, key, expires)
 	list_copy_attach(e, object)
 	entry_set_expire(e, expires)
 	entry_set_access_word(e, access_word)
@@ -1194,13 +1251,13 @@ lua_store_reply_bound :: proc(db: ^Db, key: []u8) -> u128 {
 	return u128(entry_memory(e))*64 + 128
 }
 
-keyspace_store_import :: proc(db: ^Db, key, value: []u8, access_word: u32, changed: bool) {
+keyspace_store_import :: proc(db: ^Db, key, value: []u8, access_word: u32, changed: bool, expires: i64) {
 	if changed {
 		saved := store_no_touch
 		store_no_touch = true
-		e, _ := db_upsert_in(db, key)
+		e, _ := db_upsert_timed_in(db, key, expires)
 		entry_assign(e, value)
-		entry_set_expire(e, 0)
+		entry_set_expire(e, expires)
 		entry_set_access_word(e, access_word)
 		store_no_touch = saved
 		return
@@ -1235,7 +1292,7 @@ db_remove_in :: proc(db: ^Db, key: []u8) -> (found: bool, expired: bool) #no_bou
 		return false, false
 	}
 	if db.expires > 0 {
-		exp := i64(t.slots[i].meta.expire_at)
+		exp := slot_deadline(db, t, i)
 		expired = exp != 0 && exp <= expire_now()
 	}
 	if expired {
@@ -1253,16 +1310,28 @@ db_upsert :: #force_inline proc(key: []u8) -> (^Entry, bool) {
 	return db_upsert_in(db_cur, key)
 }
 
+db_upsert_timed :: #force_inline proc(key: []u8, at: i64) -> (^Entry, bool) {
+	return db_upsert_timed_in(db_cur, key, at)
+}
+
+db_upsert_timed_in :: proc(db: ^Db, key: []u8, at: i64) -> (^Entry, bool) {
+	saved := store_new_deadline
+	store_new_deadline = clamp(at, 0, MAX_EXPIRE_MS)
+	e, created := db_upsert_in(db, key)
+	store_new_deadline = saved
+	return e, created
+}
+
 db_upsert_in :: proc(db: ^Db, key: []u8) -> (^Entry, bool) #no_bounds_check {
 	l := lookup_make(key)
 	db_rehash_step(db)
 	t := &db.t[0]
-	want_meta := db.expires > 0 || !store_no_touch
+	want_meta := !store_no_touch
 	if db.rehash_idx >= 0 {
 		i := table_find_slow(t, &db.slab, &l, want_meta)
 		if i >= 0 {
 			if db.expires > 0 {
-				exp := i64(t.slots[i].meta.expire_at)
+				exp := slot_deadline(db, t, i)
 				if exp != 0 && exp <= expire_now() {
 					db_erase_expired(db, t, i)
 					key_expired_event(key, db)
@@ -1276,7 +1345,7 @@ db_upsert_in :: proc(db: ^Db, key: []u8) -> (^Entry, bool) #no_bounds_check {
 	i, found := table_find_slot(t, &db.slab, &l, want_meta)
 	if found {
 		if db.expires > 0 {
-			exp := i64(t.slots[i].meta.expire_at)
+			exp := slot_deadline(db, t, i)
 			if exp != 0 && exp <= expire_now() {
 				db_erase_expired(db, t, i)
 				key_expired_event(key, db)
@@ -1290,11 +1359,16 @@ db_upsert_in :: proc(db: ^Db, key: []u8) -> (^Entry, bool) #no_bounds_check {
 		i = table_claim(t, l.hash)
 	} else {
 		table_place(t, i, l.hash)
-		if t.growth <= t.cap >> 3 && db.next.region == nil {
+		if t.growth <= t.warm_at && db.next.region == nil {
 			db_prepare_next(db)
 		}
 	}
-	key_store(db, &t.slots[i].key, key)
+	if store_new_deadline != 0 {
+		key_store_timed(db, &t.slots[i].key, key, u64(store_new_deadline))
+		db.expires += 1
+	} else {
+		key_store(db, &t.slots[i].key, key)
+	}
 	fresh := access_fresh_note()
 	t.slots[i].meta = Slot_Meta {
 		stamp = fresh.stamp,
@@ -1306,7 +1380,7 @@ db_upsert_in :: proc(db: ^Db, key: []u8) -> (^Entry, bool) #no_bounds_check {
 }
 
 db_set :: proc(key: []u8, val: []u8, expire_at: i64) {
-	e, _ := db_upsert(key)
+	e, _ := db_upsert_timed(key, expire_at)
 	entry_assign(e, val)
 	entry_set_expire(e, expire_at)
 }
@@ -1318,8 +1392,9 @@ db_rename :: proc(src: []u8, dst: []u8) -> bool #no_bounds_check {
 	if i < 0 {
 		return false
 	}
-	meta := t.slots[i].meta
-	if meta.expire_at != 0 && i64(meta.expire_at) <= expire_now() {
+	stamp := t.slots[i].meta.stamp
+	due := slot_deadline(db, t, i)
+	if due != 0 && due <= expire_now() {
 		db_erase_expired(db, t, i)
 		key_expired_event(src, db)
 		return false
@@ -1329,13 +1404,13 @@ db_rename :: proc(src: []u8, dst: []u8) -> bool #no_bounds_check {
 	t.slots[i].key.small.tag.val_form = FORM_NONE
 	db_erase(db, t, i)
 	db_find_in(db, dst)
-	e, _ := db_upsert_in(db, dst)
+	e, _ := db_upsert_timed_in(db, dst, due)
 	mc_meta_on_erase(db, e.kp)
 	val_release(db, e.kp, e.vp)
 	e.vp^ = vh
 	e.kp.small.tag.val_form = vform
-	e.mp.stamp = meta.stamp
-	entry_set_expire(e, i64(meta.expire_at))
+	e.mp.stamp = stamp
+	entry_set_expire(e, due)
 	return true
 }
 
@@ -1345,8 +1420,9 @@ db_move :: proc(src: ^Db, dst: ^Db, key: []u8) -> bool #no_bounds_check {
 	if i < 0 {
 		return false
 	}
-	meta := t.slots[i].meta
-	if meta.expire_at != 0 && i64(meta.expire_at) <= expire_now() {
+	stamp := t.slots[i].meta.stamp
+	due := slot_deadline(src, t, i)
+	if due != 0 && due <= expire_now() {
 		db_erase_expired(src, t, i)
 		key_expired_event(key, src)
 		return false
@@ -1354,7 +1430,7 @@ db_move :: proc(src: ^Db, dst: ^Db, key: []u8) -> bool #no_bounds_check {
 	if db_find_in(dst, key) != nil {
 		return false
 	}
-	e, _ := db_upsert_in(dst, key)
+	e, _ := db_upsert_timed_in(dst, key, due)
 	kp := &t.slots[i].key
 	vh := t.slots[i].val
 	form := kp.small.tag.val_form
@@ -1394,8 +1470,8 @@ db_move :: proc(src: ^Db, dst: ^Db, key: []u8) -> bool #no_bounds_check {
 	}
 	e.vp^ = vh
 	e.kp.small.tag.val_form = form
-	e.mp.stamp = meta.stamp
-	entry_set_expire(e, i64(meta.expire_at))
+	e.mp.stamp = stamp
+	entry_set_expire(e, due)
 	db_erase(src, t, i)
 	db_maybe_shrink(src)
 	return true
@@ -1526,8 +1602,9 @@ dead_free_range :: proc "contextless" (t: ^Table, from: int, to: int) -> (releas
 		}
 		kp := &t.slots[i].key
 		if kp.small.tag.key_form == FORM_HEAP {
-			released += (^int)(kp.heap.addr)^ + 8
-			mem_free(rawptr(kp.heap.addr))
+			extra := DEADLINE_BYTES if kp.heap.timed != 0 else 0
+			released += (^int)(kp.heap.addr)^ + 8 + extra
+			mem_free(rawptr(kp.heap.addr - uintptr(extra)))
 		}
 		if kp.small.tag.val_form == FORM_HEAP {
 			bs := (^Big_Str)(t.slots[i].val.ref.addr)
@@ -1650,7 +1727,7 @@ db_expire_slot :: proc(db: ^Db, t: ^Table, slot: int) {
 db_expire_scan :: proc(db: ^Db, deadline: i64) #no_bounds_check {
 	t := &db.t[1] if db.rehash_idx >= 0 else &db.t[0]
 	group := u64(db.expire_cursor) >> GROUP_SHIFT
-	if group > t.gmask {
+	if group >= t.groups {
 		group = 0
 	}
 	budget := min(t.cap, expire_slots_limit) >> GROUP_SHIFT
@@ -1663,7 +1740,11 @@ db_expire_scan :: proc(db: ^Db, deadline: i64) #no_bounds_check {
 		for occupied != 0 {
 			slot := int(group << GROUP_SHIFT) + int(intrinsics.count_trailing_zeros(occupied))
 			occupied &= occupied - 1
-			due := i64(t.slots[slot].meta.expire_at)
+			kh := t.slots[slot].key
+			if !key_timed(kh) {
+				continue
+			}
+			due := i64(key_deadline_ptr(kh, &db.slab)^)
 			switch {
 			case due == 0:
 			case due > now:
@@ -1674,7 +1755,10 @@ db_expire_scan :: proc(db: ^Db, deadline: i64) #no_bounds_check {
 				db_expire_slot(db, t, slot)
 			}
 		}
-		group = (group + 1) & t.gmask
+		group += 1
+		if group == t.groups {
+			group = 0
+		}
 		if visited % pause_every == 0 && now_ns() >= deadline {
 			break
 		}
@@ -1762,7 +1846,7 @@ db_random_key :: proc() -> (key: string, ok: bool) #no_bounds_check {
 			return
 		}
 		if db.expires > 0 {
-			exp := i64(t.slots[i].meta.expire_at)
+			exp := slot_deadline(db, t, i)
 			if exp != 0 && exp <= expire_now() {
 				if !expiry_deletion_paused() {
 					expired_key_copy(&t.slots[i].key, &db.slab)
@@ -1792,13 +1876,13 @@ db_keys :: proc(pat: []u8, all: bool) #no_bounds_check {
 			break
 		}
 		t := &db.t[k]
-		for g in 0 ..= t.gmask {
+		for g in 0 ..< t.groups {
 			full := group_full(group_load(t.ctrl, g))
 			for full != 0 {
 				i := int(g << GROUP_SHIFT) + int(intrinsics.count_trailing_zeros(full))
 				full &= full - 1
 				if db.expires > 0 {
-					exp := i64(t.slots[i].meta.expire_at)
+					exp := slot_deadline(db, t, i)
 					if exp != 0 && exp <= now {
 						continue
 					}
@@ -1826,7 +1910,7 @@ scan_offer :: proc(pass: ^Scan_Pass, t: ^Table, slot: int, name: []u8) #no_bound
 	if pass.filtered && !glob_match(pass.pattern, name, false) {
 		return
 	}
-	due := i64(t.slots[slot].meta.expire_at) if pass.db.expires > 0 else 0
+	due := slot_deadline(pass.db, t, slot) if pass.db.expires > 0 else 0
 	if due != 0 && due <= pass.now {
 		append(&scan_expired, ..name)
 		append(&scan_expired_ends, len(scan_expired))
@@ -1846,7 +1930,7 @@ scan_take_home :: proc(pass: ^Scan_Pass, t: ^Table, home: u64) #no_bounds_check 
 			slot := int(group << GROUP_SHIFT) + int(intrinsics.count_trailing_zeros(occupied))
 			occupied &= occupied - 1
 			name := key_bytes(&t.slots[slot].key, &pass.db.slab)
-			if hash_home(hash_bytes(name), t.gmask) == home {
+			if hash_home(hash_bytes(name), t.groups) == home {
 				pass.examined += 1
 				scan_offer(pass, t, slot, name)
 			}
@@ -1854,23 +1938,8 @@ scan_take_home :: proc(pass: ^Scan_Pass, t: ^Table, home: u64) #no_bounds_check 
 		if group_empty(ctrl) != 0 {
 			return
 		}
-		hop += 1
-		group = (group + hop) & t.gmask
+		group = probe_next(t, group, &hop)
 	}
-}
-
-@(private = "file")
-scan_cursor_step :: proc "contextless" (cursor: u64, mask: u64) -> u64 {
-	bit := mask ~ (mask >> 1)
-	next := cursor & mask
-	for bit != 0 {
-		if next & bit == 0 {
-			return next | bit
-		}
-		next &~= bit
-		bit >>= 1
-	}
-	return 0
 }
 
 @(private = "file")
@@ -1878,23 +1947,22 @@ scan_round :: proc(pass: ^Scan_Pass, cursor: u64) -> u64 {
 	db := pass.db
 	if db.rehash_idx < 0 {
 		only := &db.t[0]
-		scan_take_home(pass, only, cursor & only.gmask)
-		return scan_cursor_step(cursor, only.gmask)
+		home := hash_home(cursor, only.groups)
+		scan_take_home(pass, only, home)
+		return group_floor(only.groups, home + 1)
 	}
 	narrow, wide := &db.t[0], &db.t[1]
-	if narrow.gmask > wide.gmask {
+	if narrow.groups > wide.groups {
 		narrow, wide = wide, narrow
 	}
-	scan_take_home(pass, narrow, cursor & narrow.gmask)
-	spread := narrow.gmask ~ wide.gmask
-	at := cursor
-	for {
-		scan_take_home(pass, wide, at & wide.gmask)
-		at = scan_cursor_step(at, wide.gmask)
-		if at & spread == 0 {
-			return at
-		}
+	home := hash_home(cursor, narrow.groups)
+	scan_take_home(pass, narrow, home)
+	next := group_floor(narrow.groups, home + 1)
+	last := hash_home(next - 1, wide.groups)
+	for g := hash_home(cursor, wide.groups); g <= last; g += 1 {
+		scan_take_home(pass, wide, g)
 	}
+	return next
 }
 
 db_scan :: proc(cursor: u64, count: i64, pat: []u8, has_pat: bool) -> u64 {
@@ -1961,6 +2029,7 @@ SHARED_INTEGER_LIMIT :: 10000
 
 store_no_touch: bool
 store_reconciling: bool
+store_new_deadline: i64
 access_counts_hits: bool
 tally_log_factor := 10
 tally_decay_minutes := 1
@@ -2161,15 +2230,14 @@ scan_expired_ends: [dynamic]int
 
 @(private = "file")
 random_full_slot :: proc "contextless" (t: ^Table) -> int #no_bounds_check {
-	mask := u64(t.cap - 1)
 	for _ in 0 ..< RANDOM_SLOT_PROBES {
-		i := int(rng_next() & mask)
+		i := int((u128(rng_next()) * u128(t.cap)) >> 64)
 		if t.ctrl[i] & 0x80 != 0 {
 			return i
 		}
 	}
 	r := int(rng_next() % u64(t.live))
-	for g in 0 ..= t.gmask {
+	for g in 0 ..< t.groups {
 		full := group_full(group_load(t.ctrl, g))
 		n := int(intrinsics.count_ones(full))
 		if r < n {
@@ -2230,7 +2298,7 @@ db_evict_sample :: proc(db: ^Db, out: []Evict_Sample, volatile: bool, score: Evi
 }
 
 @(private = "file")
-slot_evict_rank :: #force_inline proc "contextless" (meta: Slot_Meta, val: Val_Handle, score: Evict_Score) -> u64 {
+slot_evict_rank :: #force_inline proc "contextless" (meta: Slot_Meta, val: Val_Handle, due: i64, score: Evict_Score) -> u64 {
 	note := Access_Note{stamp = meta.stamp, tally = val.small.tally}
 	switch score {
 	case .Lru:
@@ -2238,7 +2306,7 @@ slot_evict_rank :: #force_inline proc "contextless" (meta: Slot_Meta, val: Val_H
 	case .Lfu:
 		return u64(TALLY_CEILING - lfu_value_of(note.tally, note.stamp, access_minute_now(), tally_decay_minutes))
 	case .Ttl:
-		return max(u64) - u64(meta.expire_at)
+		return max(u64) - u64(due)
 	}
 	return 0
 }
@@ -2248,7 +2316,7 @@ table_evict_sample :: proc(db: ^Db, table: ^Table, picks: []Evict_Sample, timed_
 	taken, window, at := 0, 0, 0
 	if table.live > 0 {
 		window = table.cap if timed_only else min(len(picks) * 10, table.cap)
-		at = int(rng_next() & u64(table.cap - 1))
+		at = int((u128(rng_next()) * u128(table.cap)) >> 64)
 	}
 	for window > 0 && taken < len(picks) {
 		group := u64(at >> GROUP_SHIFT)
@@ -2259,15 +2327,19 @@ table_evict_sample :: proc(db: ^Db, table: ^Table, picks: []Evict_Sample, timed_
 		for occupied != 0 && taken < len(picks) {
 			slot := int(group << GROUP_SHIFT) + int(intrinsics.count_trailing_zeros(occupied))
 			occupied &= occupied - 1
-			meta := table.slots[slot].meta
-			if timed_only && meta.expire_at == 0 {
+			kh := table.slots[slot].key
+			if timed_only && !key_timed(kh) {
 				continue
 			}
-			picks[taken] = {slot_evict_rank(meta, table.slots[slot].val, rank), key_bytes(&table.slots[slot].key, &db.slab)}
+			due := key_deadline(kh, &db.slab) if rank == .Ttl else 0
+			picks[taken] = {slot_evict_rank(table.slots[slot].meta, table.slots[slot].val, due, rank), key_bytes(&table.slots[slot].key, &db.slab)}
 			taken += 1
 		}
 		window -= span
-		at = (at + span) & (table.cap - 1)
+		at += span
+		if at >= table.cap {
+			at -= table.cap
+		}
 	}
 	return taken
 }
@@ -2278,7 +2350,7 @@ db_evict_has :: proc(db: ^Db, key: []u8, volatile: bool) -> bool {
 	if i < 0 {
 		return false
 	}
-	return !volatile || t.slots[i].meta.expire_at != 0
+	return !volatile || key_timed(t.slots[i].key)
 }
 
 db_scan_purge_expired :: proc(count_misses: bool) {

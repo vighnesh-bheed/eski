@@ -256,7 +256,7 @@ set_with_plan :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	if e == nil {
-		e, _ = db_upsert(key)
+		e, _ = db_upsert_timed(key, 0 if .Keepttl in plan.rules else stored_deadline(at))
 	}
 	entry_assign(e, argv[2])
 	if .Keepttl not_in plan.rules {
@@ -382,7 +382,7 @@ setex_generic :: proc(c: ^Conn, argv: [][]u8, unit: Expire_Unit, name: string) {
 		return
 	}
 	key := argv[1]
-	e, _ := db_upsert(key)
+	e, _ := db_upsert_timed(key, stored_deadline(at))
 	entry_assign(e, argv[3])
 	entry_set_expire(e, stored_deadline(at))
 	announce_set(key)

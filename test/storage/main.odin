@@ -1797,7 +1797,7 @@ slab_eviction_progress :: proc() {
 	storage_command(cmd_hset, "HSET", "h", "field", "value")
 	put("victim", string(value[:]))
 	entry_set_expire(db_find(transmute([]u8)string("victim")), srv.now_ms + 60000)
-	check(slab_zero_slabs == 0 && db_cur.slab.live == 96, "eviction starts with a real live slab owner")
+	check(slab_zero_slabs == 0 && db_cur.slab.live == 96 + 16, "eviction starts with a real live slab owner and a timed key cell")
 	old_policy := maxmemory_policy
 	maxmemory_policy = .Volatile_Ttl
 	old_timer := evict_timer
@@ -2038,6 +2038,7 @@ pressure_policy_compaction :: proc() {
 		evict_policy_changed()
 		evict_timer = false
 		buf: [32]u8
+		db_cur.t[0] = table_alloc(4096)
 		for i in 0 ..= 1792 {
 			e, _ := db_upsert(transmute([]u8)fmt.bprintf(buf[:], "key:%d", i))
 			entry_assign(e, transmute([]u8)string("x"))
@@ -2047,9 +2048,9 @@ pressure_policy_compaction :: proc() {
 		}
 		settle()
 		before := mem_storage()
-		check(db_size() == 1793 && db_cur.expires == 896 && db_cur.t[0].cap == 4096 && before.table_allocated == 102400, "mixed policy fixture owns known page-rounded4096-slot table")
-		check(before.slab_live == 6344 && before.metadata_owned == 4096, "mixed protected/volatile long keys and real metadata have independent expected bytes")
-		maxmemory_bytes = u64(base + 100 * 1024)
+		check(db_size() == 1793 && db_cur.expires == 896 && db_cur.t[0].cap == 4096 && before.table_allocated == 77824, "mixed policy fixture owns known page-rounded4096-slot table")
+		check(before.slab_live == 3176 + 896 * 16 && before.metadata_owned == 4096, "mixed protected/volatile long keys, timed key cells and real metadata have independent expected bytes")
+		maxmemory_bytes = u64(base + 64 * 1024)
 		initial := mem_used()
 		peak := initial
 		started := false
@@ -2063,8 +2064,8 @@ pressure_policy_compaction :: proc() {
 		}
 		check(started && db_cur.expires == 0 && db_size() == 897 && db_cur.t[0].cap == 4096 && db_cur.t[1].cap == 2048, "exhausted volatile eviction admits exactly one level without removing protected keys")
 		coexist := mem_storage()
-		check(coexist.table_allocated == 155648 && coexist.slab_live == 3176 && coexist.metadata_owned == 4096, "temporary old-plus-target allocation is fully charged while metadata stays truthful")
-		check(mem_used() == base + 155648 + 3176 + 4096 && mem_used() > int(maxmemory_bytes), "coexisting banks remain genuinely over limit rather than reporting early success")
+		check(coexist.table_allocated == 118784 && coexist.slab_live == 3176 && coexist.metadata_owned == 4096, "temporary old-plus-target allocation is fully charged while metadata stays truthful")
+		check(mem_used() == base + 118784 + 3176 + 4096 && mem_used() > int(maxmemory_bytes), "coexisting banks remain genuinely over limit rather than reporting early success")
 		maxmemory_policy = .Noeviction
 		check(perform_evictions() == .Fail && db_cur.rehash_idx >= 0, "Noeviction does not allow an over-limit write while compaction remains partial")
 		maxmemory_policy = policy
@@ -2082,8 +2083,8 @@ pressure_policy_compaction :: proc() {
 			steps += 1
 		}
 		after := mem_storage()
-		check(db_cur.rehash_idx < 0 && db_cur.t[0].cap == 2048 && after.table_allocated == 53248 && before.table_allocated - after.table_allocated == 49152, "actual table allocation falls by49152bytes after bounded progress")
-		check(after.slab_live == 3176 && after.metadata_owned == 4096 && mem_used() == base + 60520 && perform_evictions() == .Ok, "only actual net allocation reduction resolves memory pressure")
+		check(db_cur.rehash_idx < 0 && db_cur.t[0].cap == 2048 && after.table_allocated == 40960 && before.table_allocated - after.table_allocated == 36864, "actual table allocation falls by36864bytes after bounded progress")
+		check(after.slab_live == 3176 && after.metadata_owned == 4096 && mem_used() == base + 48232 && perform_evictions() == .Ok, "only actual net allocation reduction resolves memory pressure")
 		for i := 0; i <= 1792; i += 2 {
 			e := db_find(transmute([]u8)fmt.bprintf(buf[:], "key:%d", i))
 			check(e != nil && string(e.val) == "x" && e.expire_at == 0, "every protected key survives each volatile policy")
@@ -2095,7 +2096,7 @@ pressure_policy_compaction :: proc() {
 			entry_set_expire(e, srv.now_ms + 10_000_000)
 		}
 		check(db_size() == 1153 && db_cur.expires == 256 && storage_metadata_owned == 4096, "new volatile data is kept while all protected data and metadata remain")
-		fmt.printfln("pressure policy=%s base=%d initial=%d coexist_peak=%d final_before_new=%d table_before/after=%d/%d protected=897 new_volatile=256 metadata=%d steps=%d", EVICT_POLICY_NAMES[policy], base, initial, peak, base + 60520, before.table_allocated, after.table_allocated, after.metadata_owned, steps)
+		fmt.printfln("pressure policy=%s base=%d initial=%d coexist_peak=%d final_before_new=%d table_before/after=%d/%d protected=897 new_volatile=256 metadata=%d steps=%d", EVICT_POLICY_NAMES[policy], base, initial, peak, base + 48232, before.table_allocated, after.table_allocated, after.metadata_owned, steps)
 		storage_clear()
 	}
 	maxmemory_policy = old_policy
@@ -2112,7 +2113,7 @@ pressure_compaction_bounds :: proc() {
 	maxmemory_bytes = u64(mem_used() - 1)
 	pressure_db_next = 0
 	work := db_pressure_shrink(now_ns() + 1_000_000_000)
-	check(work.admitted_bytes == 16384 && db_cur.t[0].cap == 512 && db_cur.rehash_idx < 0 && db_size() == 128, "existing oldcap1024 synchronous exception completes128live moves without raising the ceiling")
+	check(work.admitted_bytes == 12288 && db_cur.t[0].cap == 512 && db_cur.rehash_idx < 0 && db_size() == 128, "existing oldcap1024 synchronous exception completes128live moves without raising the ceiling")
 	storage_clear()
 	db_cur.t[0] = table_alloc(128)
 	put("same", "page")
@@ -2150,11 +2151,11 @@ pressure_compaction_bounds :: proc() {
 	check(work.admitted_bytes == 0 && db_cur.t[1].region == active && db_cur.t[0].live == left, "active grow banks are preserved without nested allocation or pressure drain")
 	storage_clear()
 	db_cur.t[0] = table_alloc(4096)
-	for i in 0 ..< 3073 {
+	for i in 0 ..< 3380 {
 		put(fmt.bprintf(buf[:], "p%d", i), "x")
 	}
 	check(db_cur.next.region != nil, "prepared-next guard uses an actual foreground preparation")
-	for i in 0 ..< 2173 {
+	for i in 0 ..< 2480 {
 		db_remove(transmute([]u8)fmt.bprintf(buf[:], "p%d", i))
 	}
 	next := db_cur.next.region
@@ -2169,11 +2170,11 @@ pressure_compaction_bounds :: proc() {
 		table_detach(&t)
 	}
 	queued := storage_retired[.Table]
-	check(graveyard_len == GRAVEYARD_MAX && queued == GRAVEYARD_MAX * 1638400, "full graveyard fixture owns actual bounded deferred regions")
+	check(graveyard_len == GRAVEYARD_MAX && queued == GRAVEYARD_MAX * 1245184, "full graveyard fixture owns actual bounded deferred regions")
 	maxmemory_bytes = u64(mem_used() - 1)
 	pressure_db_next = 0
 	work = db_pressure_shrink(now_ns() + 1_000_000_000)
-	check(work.admitted_bytes == 819200, "largest admitted half bank requests819200bytes below1MiB")
+	check(work.admitted_bytes == 622592, "largest admitted half bank requests622592bytes below1MiB")
 	for _ in 0 ..< 512 {
 		if db_cur.rehash_idx < 0 {
 			break
@@ -2181,7 +2182,7 @@ pressure_compaction_bounds :: proc() {
 		work = db_pressure_shrink(now_ns() + 1_000_000_000)
 		check(work.admitted_bytes == 0 && work.visited <= 16, "full-queue migration progresses without another allocation")
 	}
-	check(db_cur.rehash_idx < 0 && db_cur.t[0].cap == 32768 && storage_table_allocated() == 819200 && graveyard_len == GRAVEYARD_MAX && storage_retired[.Table] == queued, "existing queue-full fallback releases only bounded1638400byte source at completion")
+	check(db_cur.rehash_idx < 0 && db_cur.t[0].cap == 32768 && storage_table_allocated() == 622592 && graveyard_len == GRAVEYARD_MAX && storage_retired[.Table] == queued, "existing queue-full fallback releases only bounded1245184byte source at completion")
 	check(string(db_find(transmute([]u8)string("hold")).val) == "kept", "full-queue bounded release preserves the moved key")
 	storage_clear()
 }
