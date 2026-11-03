@@ -111,9 +111,9 @@ The package runner exercises debug, sanitizer and release builds. Conformance do
 
 ## Recorded measurements
 
-These results come from the committed [comparison-v1 dataset](bench/testbed/runs/comparison-v1/dataset.json). Every engine uses the same server CPU assignment and memory caps, separate client cores, a fresh dataset and a warmup before timing. The run records power, temperature, CPU-idle and load-generator limits. Invalid repetitions retain their reason, and client-limited measurements remain annotated. These measurements describe the recorded machine and workload; they establish no multicore scaling or universal throughput claim.
-
 <!-- BEGIN GENERATED BENCHMARKS -->
+
+These results come from the committed [comparison-v1 dataset](bench/testbed/runs/comparison-v1/dataset.json). Every engine uses the same server CPU assignment and memory caps, separate client cores, a fresh dataset and a warmup before timing. The run records power, temperature, CPU-idle and load-generator limits. Invalid repetitions retain their reason, and client-limited measurements remain annotated. These measurements describe the recorded machine and workload; they establish no multicore scaling or universal throughput claim.
 
 Recorded medians from `bench/testbed/runs/comparison-v1`, using valid repetitions only. These are measurements from one machine, not a claim about every workload or deployment.
 
@@ -130,14 +130,18 @@ Recorded medians from `bench/testbed/runs/comparison-v1`, using valid repetition
 
 † At least one included repetition was client limited. The observed GET 64 B pipeline 1 median throughput ratio is **1.10x Eski / Redis** (client limited). Client limits affect both measurements, so that ratio is not a guaranteed engine-speed ratio. Excluded repetitions receive no inferred score. [Method, ranges, images and exclusions](docs/benchmarks.md).
 
+Read the [benchmark method and tables](docs/benchmarks.md), the [self-contained report](bench/testbed/runs/comparison-v1/report.html) and the [recorded charts](bench/testbed/runs/comparison-v1/charts/throughput.svg).
+
 <!-- END GENERATED BENCHMARKS -->
 
-Read the [benchmark method and tables](docs/benchmarks.md), the [self-contained report](bench/testbed/runs/comparison-v1/report.html) and the [recorded charts](bench/testbed/runs/comparison-v1/charts/throughput.svg). Reproduce the displayed tables and badges from the committed inputs with:
+Reproduce the displayed tables and badges from the committed inputs with:
 
 ```sh
 python3 -I test/readme_tables.py
 python3 -I test/readme_tables.py --check
 ```
+
+[Run the comparison on a new machine](docs/benchmarks.md#run-the-comparison-on-a-new-machine) gives the commands that measure it again from a clone of this repository.
 
 ## Command groups
 

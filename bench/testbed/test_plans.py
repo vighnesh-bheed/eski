@@ -112,6 +112,25 @@ class PlanTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'gates.power_source must be one of mains, no-power-supply-devices'):
                 plans.validate(broken)
 
+    def test_tracked_designs_validate_and_can_be_published(self):
+        designs = sorted((HERE / 'designs').glob('*.json'))
+        self.assertTrue(designs)
+        for path in [HERE / 'design.json'] + designs:
+            with self.subTest(design=path.name):
+                design = json.loads(path.read_text())
+                root, _ = self.write(design)
+                roles = [scheduler.metrics.cpu_set(design['resources'][name]) for name in ('server_cpus', 'client_cpus', 'control_cpus')]
+                self.assertEqual(sum(map(len, roles)), len(set.union(*roles)))
+                self.assertNotIn(0, set.union(*roles))
+                pool = sorted(roles[1])
+                for item in json.loads((root / 'benchmark' / 'plan.json').read_text())['items']:
+                    spec.validate_item(item, item['key'])
+                    self.assertTrue(all(need <= len(pool) for need in scheduler.client_needs(item['clients'] + [item['warmup']], pool)))
+                experiment = json.loads((root / 'benchmark' / 'experiment.json').read_text())
+                self.assertEqual(experiment['power_source'], design['gates'].get('power_source', 'mains'))
+                self.assertLessEqual({'eski-docker', 'redis'}, set(experiment['targets']))
+                self.assertIn('get64-p1', [workload['key'] for workload in design['workloads']])
+
     def test_invalid_designs_are_rejected(self):
         cases = []
         unpinned = copy.deepcopy(DESIGN)

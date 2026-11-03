@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
@@ -143,11 +144,32 @@ class Inputs(FixtureInputs, unittest.TestCase):
         self.assertIn('Generated from `bench/testbed/runs/cloud-v1/dataset.json`', outputs['docs/benchmarks.md'])
         self.assertIn('--benchmark-results bench/testbed/runs/cloud-v1`', outputs['docs/benchmarks.md'])
         self.assertIn('[recorded report](../bench/testbed/runs/cloud-v1/report.html)', outputs['docs/benchmarks.md'])
+        self.assertIn('[cloud-v1 dataset](bench/testbed/runs/cloud-v1/dataset.json)', outputs['README.md'])
+        self.assertIn('[self-contained report](bench/testbed/runs/cloud-v1/report.html)', outputs['README.md'])
         for value in (None, '', '../escape', 'two words', '.hidden', 'runs/cloud-v1'):
             broken = copy.deepcopy(self.dataset)
             broken['run']['root'] = value
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'run.root'):
                 tables.render_outputs(commands, self.baseline, self.observed, broken, skeleton())
+
+    def test_new_machine_section_uses_the_run_and_names_existing_files(self):
+        commands = {'ping': {'group': 'connection', 'summary': 'Pings.'}}
+        page = tables.render_outputs(commands, self.baseline, self.observed, self.dataset, skeleton())['docs/benchmarks.md']
+        section = page[page.index('## Run the comparison on a new machine'):page.index('## Local relative measurement')]
+        self.assertIn('took 6.89 hours for 132 cases, with a median case of 80 seconds and a median gap of 110 seconds', section)
+        self.assertIn('84 of the 124 valid measurements above are client limited', section)
+        tokens = {token.strip('.,;:()') for token in re.split(r'[\s`]+', section)}
+        named = sorted(token for token in tokens if re.fullmatch(r'(?:bench|test)/[\w./-]+\.(?:py|sh)|bench/testbed/design(?:s/[\w.-]+)?\.json', token))
+        self.assertIn('bench/testbed/designs/cloud-two-client-cores.json', named)
+        self.assertIn('bench/testbed/designs/cloud-four-client-cores.json', named)
+        for name in named:
+            self.assertTrue((ROOT/name).is_file(), name)
+        untimed = copy.deepcopy(self.dataset)
+        for row in untimed['rows']:
+            row.pop('started_at', None)
+        page = tables.render_outputs(commands, self.baseline, self.observed, untimed, skeleton())['docs/benchmarks.md']
+        self.assertNotIn('The recorded run above took', page)
+        self.assertIn('plan about 6 hours of machine time', page)
 
     def test_local_measurement_section_renders_the_recorded_floor(self):
         commands = {'ping': {'group': 'connection', 'summary': 'Pings.'}}
