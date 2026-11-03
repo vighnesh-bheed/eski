@@ -7,6 +7,7 @@ import "core:sys/linux"
 
 KEYSPACE_INDEX_SLOTS :: 512
 KEYSPACE_KEY_INDICES :: 32
+KEYSPACE_CONN_DEPTH :: 16
 
 Keyspace_Slot :: struct {
 	hash:   u64,
@@ -67,9 +68,8 @@ Keyspace_Task :: struct {
 }
 
 Keyspace_Ready :: struct {
-	fd:    linux.Fd,
-	id:    i64,
-	token: u64,
+	fd: linux.Fd,
+	id: i64,
 }
 
 keyspace_pool: ks.Pool
@@ -99,10 +99,40 @@ keyspace_barriers: i64
 keyspace_worker_ns: i64
 keyspace_retries: [dynamic]^Keyspace_Task
 keyspace_ready: [dynamic]Keyspace_Ready
+keyspace_waiting: [dynamic]Keyspace_Ready
 keyspace_draining_ready_bytes: int
 
 keyspace_memory_used :: proc "contextless" () -> int {
-	return ks.memory_used(&keyspace_pool) + cap(keyspace_ready) * size_of(Keyspace_Ready) + cap(keyspace_retries) * size_of(^Keyspace_Task) + keyspace_draining_ready_bytes
+	return ks.memory_used(&keyspace_pool) + (cap(keyspace_ready) + cap(keyspace_waiting)) * size_of(Keyspace_Ready) + cap(keyspace_retries) * size_of(^Keyspace_Task) + keyspace_draining_ready_bytes
+}
+
+keyspace_conn_busy :: #force_inline proc "contextless" (c: ^Conn) -> bool {
+	return c.keyspace_inflight > 0 || c.keyspace_ready || c.keyspace_waiting
+}
+
+keyspace_admits :: proc(c: ^Conn) -> bool {
+	if c.keyspace_inflight >= KEYSPACE_CONN_DEPTH {
+		return false
+	}
+	if keyspace_pending < ks.CAPACITY {
+		c.keyspace_waiting = false
+		return true
+	}
+	if c.keyspace_inflight == 0 && !c.keyspace_waiting {
+		c.keyspace_waiting = true
+		keyspace_ticket(&keyspace_waiting, c)
+	}
+	return false
+}
+
+keyspace_settle :: proc(c: ^Conn) {
+	if c.keyspace_inflight > 0 {
+		keyspace_fence()
+	}
+}
+
+keyspace_resume_due :: #force_inline proc "contextless" () -> bool {
+	return len(keyspace_ready) > 0 || len(keyspace_waiting) > 0 && keyspace_pending < ks.CAPACITY
 }
 
 Keyspace_Op :: enum u8 {
@@ -312,7 +342,7 @@ keyspace_eligible :: proc(c: ^Conn) -> bool {
 	if lua_active != nil {
 		return false
 	}
-	return keyspace_threads > 0 && keyspace_max_memory > 0 && !keyspace_in_fence && !keyspace_replay_needed && c.fd >= 0 && c.kind == .Redis && c.db != nil && c.compute == nil && c.keyspace == nil && !c.keyspace_ready && c.blocked == .None && !c.held && !c.close_after && c.ps - {.Tracking} == {} && .Multi not_in c.txf && tx_exec_conn == nil && !deny_blocking && (ps_exec == nil || ps_exec == c) && !ps_hooked && memory_worker_admissible() && !pst.loading && !pst.serve_while_loading && !pst.in_child && !aof.loading
+	return keyspace_threads > 0 && keyspace_max_memory > 0 && !keyspace_in_fence && !keyspace_replay_needed && c.fd >= 0 && c.kind == .Redis && c.db != nil && c.compute == nil && c.keyspace_inflight < KEYSPACE_CONN_DEPTH && c.blocked == .None && !c.held && !c.close_after && c.ps - {.Tracking} == {} && .Multi not_in c.txf && tx_exec_conn == nil && !deny_blocking && (ps_exec == nil || ps_exec == c) && !ps_hooked && memory_worker_admissible() && !pst.loading && !pst.serve_while_loading && !pst.in_child && !aof.loading
 }
 
 keyspace_start :: proc() -> bool {
@@ -341,12 +371,18 @@ keyspace_event_fd :: proc() -> linux.Fd {
 	return ks.completion_fd(&keyspace_pool) if keyspace_registered else -1
 }
 
-keyspace_queue_ready :: proc(c: ^Conn, token: u64) {
-	c.keyspace_ready = true
+keyspace_ticket :: proc(tickets: ^[dynamic]Keyspace_Ready, c: ^Conn) {
 	saved := context.allocator
 	context.allocator = runtime.heap_allocator()
-	append(&keyspace_ready, Keyspace_Ready{fd = c.fd, id = c.id, token = token})
+	append(tickets, Keyspace_Ready{fd = c.fd, id = c.id})
 	context.allocator = saved
+}
+
+keyspace_queue_ready :: proc(c: ^Conn) {
+	if !c.keyspace_ready {
+		c.keyspace_ready = true
+		keyspace_ticket(&keyspace_ready, c)
+	}
 }
 
 keyspace_complete :: proc(job: ^ks.Job) {
@@ -370,16 +406,16 @@ keyspace_complete :: proc(job: ^ks.Job) {
 	if int(task.fd) >= 0 && int(task.fd) < len(srv.conns) {
 		c = srv.conns[task.fd]
 	}
-	valid := c != nil && c.id == task.client_id && c.keyspace == task && c.keyspace_token == task.token
+	valid := c != nil && c.id == task.client_id && c.keyspace_inflight > 0 && c.keyspace_token == task.token
 	source := c if valid else nil
 	keyspace_features_publish(task, source)
 	if valid {
-		c.keyspace = nil
+		c.keyspace_inflight -= 1
 		c.atime_ms = max(c.atime_ms, lua_connection_clock())
 		if !task.failed && !task.suppressed {
 			keyspace_reply(c, task)
 		}
-		keyspace_queue_ready(c, task.token)
+		keyspace_queue_ready(c)
 	}
 	keyspace_features_after_reply(task, source)
 	if task.failed {
@@ -513,13 +549,17 @@ keyspace_shutdown :: proc() {
 	keyspace_initialized = false
 	delete(keyspace_ready)
 	keyspace_ready = nil
+	delete(keyspace_waiting)
+	keyspace_waiting = nil
 	delete(keyspace_retries)
 	keyspace_retries = nil
 }
 
 keyspace_conn_closed :: proc(c: ^Conn) {
-	c.keyspace = nil
+	c.keyspace_inflight = 0
+	c.keyspace_token = 0
 	c.keyspace_ready = false
+	c.keyspace_waiting = false
 }
 
 keyspace_tick :: proc() {
@@ -528,24 +568,38 @@ keyspace_tick :: proc() {
 	}
 	keyspace_collect()
 	if keyspace_replay_needed { keyspace_fence() }
+	if len(keyspace_waiting) > 0 && keyspace_pending < ks.CAPACITY {
+		waiting := keyspace_waiting
+		keyspace_waiting = nil
+		keyspace_resume(waiting, true)
+	}
 	ready := keyspace_ready
 	keyspace_ready = nil
-	keyspace_draining_ready_bytes += cap(ready) * size_of(Keyspace_Ready)
-	for ticket in ready {
+	keyspace_resume(ready, false)
+}
+
+keyspace_resume :: proc(tickets: [dynamic]Keyspace_Ready, waiting: bool) {
+	keyspace_draining_ready_bytes += cap(tickets) * size_of(Keyspace_Ready)
+	for ticket in tickets {
 		if int(ticket.fd) < 0 || int(ticket.fd) >= len(srv.conns) {
 			continue
 		}
 		c := srv.conns[ticket.fd]
-		if c == nil || c.id != ticket.id || c.keyspace_token != ticket.token || !c.keyspace_ready {
+		if c == nil || c.id != ticket.id {
 			continue
 		}
-
-		c.keyspace_ready = false
+		if waiting {
+			if !c.keyspace_waiting { continue }
+			c.keyspace_waiting = false
+		} else {
+			if !c.keyspace_ready { continue }
+			c.keyspace_ready = false
+		}
 		process_input(c)
 		conn_flush(c)
 	}
-	keyspace_draining_ready_bytes -= cap(ready) * size_of(Keyspace_Ready)
-	delete(ready)
+	keyspace_draining_ready_bytes -= cap(tickets) * size_of(Keyspace_Ready)
+	delete(tickets)
 }
 
 keyspace_task_free :: proc(task: ^Keyspace_Task) {
@@ -737,9 +791,12 @@ keyspace_try :: proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8) -> bool {
 	copy(task.client.name, c.name)
 	task.fd = c.fd
 	task.client_id = c.id
-	keyspace_next_token += 1
-	if keyspace_next_token == 0 { keyspace_next_token += 1 }
-	task.token = keyspace_next_token
+	if c.keyspace_inflight == 0 {
+		keyspace_next_token += 1
+		if keyspace_next_token == 0 { keyspace_next_token += 1 }
+		c.keyspace_token = keyspace_next_token
+	}
+	task.token = c.keyspace_token
 	task.sequence = keyspace_next_sequence
 	task.start = start
 	task.stats = stats
@@ -753,8 +810,7 @@ keyspace_try :: proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8) -> bool {
 		return false
 	}
 	keyspace_next_sequence += 1
-	c.keyspace = task
-	c.keyspace_token = task.token
+	c.keyspace_inflight += 1
 	keyspace_pending += 1
 	keyspace_submitted += 1
 	stat_cur = nil

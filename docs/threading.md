@@ -22,7 +22,7 @@ These settings are immutable after startup and hidden from wildcard CONFIG disco
 
 A diagnostic trace on the development machine on 1 November 2026 measured this path with two workers and 64-byte GET requests. Judged by client throughput, each command cost about two to three times as much as on the coordinator path at pipeline depth one and about nineteen to twenty-eight times as much at depth sixteen. The worker mode is correct but is not yet a speed-up; improvements to the worker path are tracked separately.
 
-Each database/key identity has an owner. Commands touching multiple owners wait for all required owners and execute once, preserving atomic key changes and owner order. Disjoint owners can execute commands concurrently. Each connection waits for its pending command before processing another pipeline command. The coordinator publishes completions, effects and replies in accepted order. An accepted mutation survives client disconnect; delivery is discarded when its original connection no longer exists.
+Each database/key identity has an owner. Commands touching multiple owners wait for all required owners and execute once, preserving atomic key changes and owner order. Disjoint owners can execute commands concurrently. A connection can hold up to 16 accepted commands at once, so a pipeline keeps the workers busy instead of waiting for each completion, and a later command of the same connection observes an earlier one through owner order. The connection stops parsing its pipeline at that bound, or while all 64 pool slots hold accepted commands, and resumes as the coordinator publishes completions; a connection with nothing in flight waits in arrival order for a free slot instead of taking a coordinator fallback. The coordinator publishes completions, effects and replies in accepted order. A command that is not a worker candidate fences before it runs, and an arity, ACL, memory, persistence or protocol error first drains the connection's accepted commands, so replies leave each socket in request order. An accepted mutation survives client disconnect; delivery is discarded when its original connection no longer exists, and commands still unparsed when the connection is reset or killed are not run.
 
 Workers use independently owned values and datatype clones, not mutable legacy table/slab pointers or socket buffers. The coordinator retains an older database view until reconciliation and finds each owned record through a hash index that doubles in size as records accumulate. A barrier drains accepted work, visits every owned record, imports values and metadata without executing those commands again, then releases their storage and returns the index to its fixed initial table. A barrier with no owned records, accepted jobs, staged completions or retries returns at once without pausing the pool, so commands that stay on the coordinator do not wait on an empty pool. Background fork paths join workers before forking; the parent can start workers again while its child writes the independent snapshot. Loading, script/transaction execution and shutdown retain their explicit lifecycle boundaries.
 
@@ -38,13 +38,14 @@ Workers use independently owned values and datatype clones, not mutable legacy t
 | SCAN, KEYS, RANDOMKEY, global operations, EXEC and Lua/functions | Coordinator barriers provide a consistent database view. Transactions and scripts execute atomically with respect to worker commands. |
 | Persistence commands and physical storage diagnostics, including OBJECT and MEMORY inspection | Coordinator barriers retain authoritative lifecycle and storage accounting. |
 | Loading, a persistence child, a held/subscribed connection or transaction execution | Coordinator execution. Tracking alone does not exclude a connection. |
-| Capacity, classification, validation or allocation failure | Coordinator execution or ordered legacy retry after reconciliation. Accepted admission is preserved during retry. |
+| Full pool or a connection at its 16-command bound | The connection pauses parsing until publication frees a slot; there is no coordinator fallback and no barrier. |
+| Classification, validation or allocation failure | Coordinator execution or ordered legacy retry after reconciliation. Accepted admission is preserved during retry. |
 
-The pool accepts at most 64 outstanding jobs, including completed results awaiting coordinator reclamation. Its Linux thread name is `eski-keyspace`; LCS threads use `eski-compute`. Barriers, serialization and cloned data can make short bursts costly. Thread names, counters and callback wall time do not establish speedup.
+The pool accepts at most 64 outstanding jobs, including completed results awaiting coordinator reclamation. The coordinator keeps at most 64 accepted commands unpublished and at most 16 of them from one connection, which leaves room for four connections at full pipeline depth and stops one deep pipeline from holding every slot. The pool's Linux thread name is `eski-keyspace`; LCS threads use `eski-compute`. Barriers, serialization and cloned data can make short bursts costly. Thread names, counters and callback wall time do not establish speedup.
 
 ### Memory and AOF representation
 
-The worker budget charges requested bytes for records, copied arguments, immutable strings, datatype clones, task/results, temporary reservations and the record index once it outgrows its fixed initial table of 512 slots. An index growth that does not fit the budget takes the same coordinator fallback as a record that does not fit. Conservative undo, decode and serialization reservations can force coordinator fallback even when the final value would fit. Owned records and results remain charged until reclaimed; zero pending jobs does not imply zero pool memory. Coordinator ready-ticket bookkeeping is accounted separately.
+The worker budget charges requested bytes for records, copied arguments, immutable strings, datatype clones, task/results, temporary reservations and the record index once it outgrows its fixed initial table of 512 slots. An index growth that does not fit the budget takes the same coordinator fallback as a record that does not fit. Conservative undo, decode and serialization reservations can force coordinator fallback even when the final value would fit. Owned records and results remain charged until reclaimed; zero pending jobs does not imply zero pool memory. Coordinator ready and capacity-wait tickets are accounted separately.
 
 This is not a process-RSS limit. Legacy database objects and independent worker objects can coexist, replies can retain overwritten values, and libc or retired allocation services can retain storage after logical release. Database storage, socket buffers, threads and allocator overhead have additional costs. AOF capture also needs an undo copy and immutable postimage before allowing later owner work; snapshot failure restores worker state and retries the original accepted command once through the coordinator.
 
@@ -59,12 +60,12 @@ Plain worker SET commands retain canonical SET records. Worker hash commands pub
 | `keyspace_threads_configured` | Startup worker count; zero disables this path. |
 | `keyspace_threads_active` | Existing worker threads, including parked threads. |
 | `keyspace_jobs_pending` | Accepted jobs awaiting coordinator completion handling. |
-| `keyspace_memory_used` | Charged pool bytes; excludes separate ready-ticket storage. |
+| `keyspace_memory_used` | Charged pool bytes; excludes separate ticket storage. |
 | `keyspace_records` | Owned key records awaiting reconciliation. |
 | `keyspace_jobs_submitted` | Cumulative accepted worker requests. |
 | `keyspace_jobs_completed` | Handled completions, including disconnected clients and retries. |
 | `keyspace_gets`, `keyspace_sets` | Successfully completed worker GET and SET requests. |
-| `keyspace_sync_fallbacks` | Resource/submission failures and failed accepted jobs sent to legacy retry; not every coordinator-routed command. |
+| `keyspace_sync_fallbacks` | Resource/submission failures and failed accepted jobs sent to legacy retry; not every coordinator-routed command, and not a connection paused by the pool or per-connection bound. |
 | `keyspace_barriers` | Reconciliation barriers that encountered owned records or pending jobs. |
 | `keyspace_worker_nanoseconds` | Sum of worker service wall time, not CPU time. |
 
@@ -72,12 +73,12 @@ Successful deferred command latency includes queueing and coordinator completion
 
 ## Keyspace correctness checks
 
-The current whole-node datatype driver has 26 cases. The feature driver has 14 cases, with only independent Redis replay skipped unless an explicit reference port is supplied. Four memory/frontend cases cover configured limits, actual pressure, LFU and Memcached interactions. Dedicated whole-node address/thread sanitizer runs cover these integrations. Native ownership tests additionally exercise FIFO histories, multi-owner scheduling, immutable references, capacity, cancellation, restart and allocation reclamation.
+The current whole-node datatype driver has 26 cases. The feature driver has 15 cases, with only independent Redis replay skipped unless an explicit reference port is supplied. Four memory/frontend cases cover configured limits, actual pressure, LFU and Memcached interactions. Dedicated whole-node address/thread sanitizer runs cover these integrations. Native ownership tests additionally exercise FIFO histories, multi-owner scheduling, immutable references, capacity, cancellation, restart and allocation reclamation.
 
 | Check | Coverage |
 | --- | --- |
 | `test/threading/full_keyspace.py` | All datatype families/options, multi-key atomicity, RESP2/3, TTL, cross-database identity, COPY/RENAME/MOVE, DUMP/RESTORE and malformed restore payloads. |
-| `test/threading/features.py` | WATCH, tracking/NOLOOP, notifications/monitor ordering, blocked keys, pause/expiry, accepted disconnects, AOF restart, snapshot rollback, pressure/error replay and reply suppression. |
+| `test/threading/features.py` | WATCH, tracking/NOLOOP, notifications/monitor ordering, blocked keys, pause/expiry, accepted disconnects, AOF restart, snapshot rollback, pressure/error replay, pipelined retries and reply suppression. |
 | `test/compatibility/memory_threading.py` | Under-budget admission, LFU/No-Touch, OOM recovery and Memcached metadata/CAS/flush boundaries. |
 | `test/compatibility/hfe_aof.py` | Canonical field-expiry persistence, immediate/lazy deletion, prechecks and database ownership after move/copy/swap. |
 | `test/threading/keyspace.py` | Lifecycle, ownership, admission counters, replies, persistence and shared-endpoint boundaries. |

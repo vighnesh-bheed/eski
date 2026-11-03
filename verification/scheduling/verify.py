@@ -129,7 +129,7 @@ def actual(output, args, identities):
     control['expected_race_detected'] = True
     checks = {'instrumentation_control': control}
     expected_lines = {
-        'POOL': 10, 'COORDINATOR': 5, 'SNAPSHOT': 4,
+        'POOL': 10, 'COORDINATOR': 7, 'SNAPSHOT': 4,
     }
     for label in ('harness', 'harness-tsan'):
         result, text = invoke([output / label], output, label + '.log', environment, timeout=15)
@@ -198,6 +198,7 @@ def main():
         receipt = {'success': True, 'area': 7, 'exhausted': True, 'states': models['states'], 'edges': models['edges'],
                    'scenarios': len(models['scenarios']), 'terminals': models['terminals'],
                    'bounds': {'workers': 2, 'records_max': 3, 'jobs_max': 3, 'internal_retry_per_job_max': 1,
+                              'jobs_per_connection_max': 3, 'connection_bound_max': 3,
                               'disconnect_per_scenario_max': 1, 'pause_resume_cycles_max': 1,
                               'pool_capacity_max': 3, 'explorer_state_cap_per_scenario': 250000,
                               'explorer_deadline_seconds_per_scenario': 90, 'memory_model': 'sequential consistency'},

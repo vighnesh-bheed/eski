@@ -1,7 +1,9 @@
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import signal
 import socket
+import struct
 import sys
 import time
 import unittest
@@ -9,7 +11,7 @@ import unittest
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'test/threading'))
-from support import Server, encode, info, wait_for
+from support import Server, ServerError, encode, info, wait_for
 sys.path.insert(0, str(ROOT / 'test/compatibility'))
 import transport
 
@@ -164,6 +166,125 @@ class RequestLifecycle(unittest.TestCase):
         self.assertIsNone(malformed.reply())
         self.assertIn('invalid bulk length', str(malformed.reply()))
         self.assertEqual(self.control.call('PING'), 'PONG')
+
+    def worker_counters(self):
+        values = info(self.control)
+        return int(values['keyspace_jobs_submitted']), int(values['keyspace_sync_fallbacks'])
+
+    def assert_error(self, value, prefix):
+        self.assertIsInstance(value, ServerError)
+        self.assertTrue(str(value).startswith(prefix), value)
+
+    def test_mixed_pipeline_replies_follow_request_order(self):
+        client = self.named('mixed-order')
+        submitted, _ = self.worker_counters()
+        commands = [('SET', 'order:a', 'one'), ('GET', 'order:a'), ('INCR', 'order:n'), ('GET', 'order:a', 'extra'),
+                    ('INCR', 'order:n'), ('PING',), ('NOSUCHCOMMAND', 'x'), ('GET', 'order:n'),
+                    ('SELECT', 1), ('SET', 'order:a', 'db1'), ('GET', 'order:a'), ('SELECT', 0), ('GET', 'order:a'),
+                    ('MULTI',), ('SET', 'order:a', 'tx'), ('GET', 'order:a'), ('EXEC',),
+                    ('APPEND', 'order:a', '!'), ('CLIENT', 'REPLY', 'SKIP'), ('SET', 'order:b', 'skipped'),
+                    ('GET', 'order:b'), ('CLIENT', 'REPLY', 'OFF'), ('INCR', 'order:n'), ('GET', 'order:n'),
+                    ('CLIENT', 'REPLY', 'ON'), ('HSET', 'order:h', 'f', 'v'), ('HGET', 'order:h', 'f'),
+                    ('INFO', 'keyspace'), ('LPUSH', 'order:a', 'x'), ('MGET', 'order:a', 'order:b', 'order:n'),
+                    ('ECHO', 'end')]
+        client.send_many(commands)
+        replies = [client.reply() for _ in range(len(commands) - 5)]
+        self.assertEqual(replies[:3], ['OK', b'one', 1])
+        self.assert_error(replies[3], 'ERR wrong number of arguments')
+        self.assertEqual(replies[4:6], [2, 'PONG'])
+        self.assert_error(replies[6], 'ERR unknown command')
+        self.assertEqual(replies[7:19], [b'2', 'OK', 'OK', b'db1', 'OK', b'one', 'OK', 'QUEUED', 'QUEUED',
+                                         ['OK', b'tx'], 3, b'skipped'])
+        self.assertEqual(replies[19:22], ['OK', 1, b'v'])
+        self.assertIn(b'db0:keys=', replies[22])
+        self.assert_error(replies[23], 'WRONGTYPE')
+        self.assertEqual(replies[24:], [[b'tx!', b'skipped', b'3'], b'end'])
+        self.assertFalse(client.available(.05))
+        if KEYSPACE_THREADS:
+            self.assertGreaterEqual(self.worker_counters()[0] - submitted, 12)
+
+    def test_acl_rejection_after_accepted_pipeline_commands_keeps_order(self):
+        self.control.call('ACL', 'SETUSER', 'pipeline-reader', 'on', 'nopass', '~*', '+get', '+incr', '+ping', '+auth')
+        self.control.call('SET', 'reject:key', 'kept')
+        reader = self.server.client()
+        reader.call('AUTH', 'pipeline-reader', 'unused')
+        replies = reader.pipeline([('INCR', 'reject:n'), ('GET', 'reject:key'), ('SET', 'reject:key', 'denied'),
+                                   ('GET', 'reject:key'), ('INCR', 'reject:n'), ('PING',)])
+        self.assertEqual(replies[:2], [1, b'kept'])
+        self.assert_error(replies[2], 'NOPERM')
+        self.assertEqual(replies[3:], [b'kept', 2, 'PONG'])
+
+    def test_oom_rejection_after_accepted_pipeline_commands_keeps_order(self):
+        self.control.call('SET', 'reject:key', 'kept')
+        self.control.call('SET', 'reject:n', 2)
+        self.control.call('CONFIG', 'SET', 'maxmemory-policy', 'noeviction')
+        self.control.call('CONFIG', 'SET', 'maxmemory', 1)
+        try:
+            replies = self.control.pipeline([('GET', 'reject:key'), ('SET', 'reject:other', 'v'), ('GET', 'reject:key'),
+                                             ('INCR', 'reject:n'), ('GET', 'reject:n')])
+        finally:
+            self.control.call('CONFIG', 'SET', 'maxmemory', 0)
+        self.assertEqual(replies[0], b'kept')
+        self.assert_error(replies[1], 'OOM')
+        self.assertEqual(replies[2], b'kept')
+        self.assert_error(replies[3], 'OOM')
+        self.assertEqual(replies[4], b'2')
+
+    def test_protocol_error_after_accepted_pipeline_commands_keeps_order(self):
+        client = self.named('protocol-after-accepted')
+        client.socket.sendall(encode(('SET', 'proto:a', 1)) + encode(('INCR', 'proto:a')) + encode(('GET', 'proto:a'))
+                              + b'*1\r\n$xx\r\n')
+        self.assertEqual([client.reply() for _ in range(3)], ['OK', 2, b'2'])
+        self.assert_error(client.reply(), 'ERR Protocol error')
+        with self.assertRaises((EOFError, ConnectionResetError)):
+            client.reply()
+        self.assertEqual(self.control.call('GET', 'proto:a'), b'2')
+
+    def test_disconnect_mid_pipeline_keeps_an_accepted_prefix(self):
+        count = 300
+        keys = ['cut:%03d' % index for index in range(count)]
+        wire = b''.join(encode(('SET', key, index)) for index, key in enumerate(keys))
+        baseline = int(info(self.control, 'clients')['connected_clients'])
+        raw = socket.create_connection(('127.0.0.1', self.server.port), timeout=3)
+        raw.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+        raw.sendall(wire)
+        raw.close()
+        wait_for(lambda: int(info(self.control, 'clients')['connected_clients']) == baseline,
+                 timeout=5, label='reset connection closed')
+        values = self.control.call('MGET', *keys)
+        accepted = next((index for index, value in enumerate(values) if value is None), count)
+        self.assertEqual(values[:accepted], [str(index).encode() for index in range(accepted)])
+        self.assertEqual(values[accepted:], [None] * (count - accepted))
+        half = self.server.client()
+        half.socket.sendall(b''.join(encode(('INCR', 'half:' + key)) for key in keys))
+        half.socket.shutdown(socket.SHUT_WR)
+        self.assertEqual([half.reply() for _ in keys], [1] * count)
+        with self.assertRaises((EOFError, ConnectionResetError)):
+            half.reply()
+        self.assertEqual(self.control.call('MGET', *['half:' + key for key in keys]), [b'1'] * count)
+
+    def test_concurrent_deep_pipelines_keep_per_connection_order(self):
+        connections, depth = 6, 120
+        clients = [self.server.client() for _ in range(connections)]
+        submitted, fallbacks = self.worker_counters()
+        def run(index):
+            commands = []
+            for _ in range(depth):
+                commands += [('INCR', 'deep:%d' % index), ('INCR', 'deep:shared'), ('GET', 'deep:%d' % index)]
+            return clients[index].pipeline(commands)
+        with ThreadPoolExecutor(max_workers=connections) as pool:
+            results = list(pool.map(run, range(connections)))
+        shared = []
+        for replies in results:
+            self.assertEqual(replies[0::3], list(range(1, depth + 1)))
+            self.assertEqual(replies[2::3], [str(value).encode() for value in range(1, depth + 1)])
+            self.assertEqual(replies[1::3], sorted(replies[1::3]))
+            shared += replies[1::3]
+        self.assertEqual(sorted(shared), list(range(1, connections * depth + 1)))
+        if KEYSPACE_THREADS:
+            after_submitted, after_fallbacks = self.worker_counters()
+            self.assertEqual(after_submitted - submitted, connections * depth * 3)
+            self.assertEqual(after_fallbacks, fallbacks)
 
     def test_fragmented_tls_and_unix_requests_use_same_owned_lifecycle(self):
         transport.BINARY = BINARY

@@ -19,6 +19,8 @@ INVARIANTS = (
     'no_lost_worker_wakeup',
     'no_lost_completion_notification',
     'no_lost_quiescence_wakeup',
+    'socket_replies_follow_request_order',
+    'connection_inflight_within_bound',
 )
 
 
@@ -39,6 +41,8 @@ class Scenario:
     capacity: int = 3
     disconnect: int = -1
     pause: bool = False
+    conns: tuple = ()
+    depth: int = 2
 
 
 @dataclasses.dataclass(frozen=True)
@@ -99,6 +103,14 @@ def initial(scenario):
                  (0,) * n, (False,) * n, (False,) * n, (0,) * n,
                  ((),) * n, ((),) * n, (0,) * len(scenario.owners), (), (),
                  (), (), (), (True,) * n)
+
+
+def conn_of(scenario, job):
+    return scenario.conns[job] if scenario.conns else job
+
+
+def unpublished(scenario, state, conn):
+    return [j for j in state.accepted[len(state.published):] if conn_of(scenario, j) == conn]
 
 
 def owners_of(scenario, job, mutant):
@@ -181,20 +193,32 @@ def successors(scenario, s, mutant=''):
     yield 'environment_yield', s
     blocked = s.pause_phase in (1, 4)
     if s.admission < n and not s.fencing and not blocked and s.coordinator != 'take':
-        j = s.admission
-        rejecting = p[j].reject or s.halted or s.pause_phase == 2 or s.outstanding >= scenario.capacity
-        if rejecting:
-            yield 'reject', dataclasses.replace(wake(s), admission=j + 1, rejected=s.rejected + (j,),
-                                               stages=change_tuple(s.stages, j, 'rejected'))
-        else:
-            queues = s.queues
-            parked = s.parked
-            for owner in owners_of(scenario, j, mutant):
-                queues = change_tuple(queues, owner, queues[owner] + (j,))
-                parked = change_tuple(parked, owner, False)
-            yield 'admit_assign_sequence', dataclasses.replace(
-                wake(s), admission=j + 1, accepted=s.accepted + (j,), queues=queues, parked=parked,
-                stages=change_tuple(s.stages, j, 'queued'), outstanding=s.outstanding + 1)
+        pending = len(s.accepted) - len(s.published)
+        for conn in dict.fromkeys(conn_of(scenario, j) for j in range(n)):
+            j = next((i for i in range(n) if conn_of(scenario, i) == conn and s.stages[i] == 'new'), None)
+            if j is None:
+                continue
+            inflight = unpublished(scenario, s, conn)
+            if len(inflight) >= scenario.depth and mutant != 'ignore_connection_bound':
+                continue
+            if pending >= scenario.capacity and mutant != 'ignore_capacity':
+                continue
+            rejecting = p[j].reject or s.halted or s.pause_phase == 2
+            if rejecting:
+                if inflight and mutant != 'reject_without_fence':
+                    continue
+                yield 'reject', dataclasses.replace(wake(s), admission=s.admission + 1, rejected=s.rejected + (j,),
+                                                   stages=change_tuple(s.stages, j, 'rejected'),
+                                                   delivery=s.delivery + ((j, 'reply' if s.connected[j] else 'drop'),))
+            else:
+                queues = s.queues
+                parked = s.parked
+                for owner in owners_of(scenario, j, mutant):
+                    queues = change_tuple(queues, owner, queues[owner] + (j,))
+                    parked = change_tuple(parked, owner, False)
+                yield 'admit_assign_sequence', dataclasses.replace(
+                    wake(s), admission=s.admission + 1, accepted=s.accepted + (j,), queues=queues, parked=parked,
+                    stages=change_tuple(s.stages, j, 'queued'), outstanding=s.outstanding + 1)
     for w in range(2):
         ready = s.workers[w] == -1 and not s.parked[w] and not s.notify[w] and not s.deciding[w]
         if ready and s.queues[w]:
@@ -293,9 +317,11 @@ def successors(scenario, s, mutant=''):
     if s.fencing and len(s.published) == len(s.accepted):
         yield 'fence_finish_resume', dataclasses.replace(s, fencing=False, halted=False, replay=False)
     if scenario.disconnect >= 0:
-        j = scenario.disconnect
-        if j in s.accepted and s.connected[j] and j not in s.published:
-            yield 'disconnect_delivery_only', dataclasses.replace(s, connected=change_tuple(s.connected, j, False))
+        conn = scenario.disconnect
+        if any(s.connected[j] for j in unpublished(scenario, s, conn)):
+            connected = tuple(False if conn_of(scenario, j) == conn and s.stages[j] in ('new', 'queued', 'mutating', 'executed', 'completed')
+                              else live for j, live in enumerate(s.connected))
+            yield 'disconnect_delivery_only', dataclasses.replace(s, connected=connected)
     if scenario.pause:
         if s.pause_phase == 0 and s.coordinator != 'take':
             waiting = 4 if mutant == 'pause_registers_after_check' and not quiescent(s) else 1
@@ -350,6 +376,14 @@ def check(scenario, s, edge=None, previous=None):
             f'coordinator sleeps with completions {s.completed} and no pending notification')
     require(s.pause_phase != 1 or not quiescent(s) or s.quiescent_wake, INVARIANTS[10],
             'pause waits on a quiescent pool without a pending wakeup')
+    for conn in dict.fromkeys(conn_of(scenario, j) for j in range(len(scenario.plans))):
+        replies = [j for j, _ in s.delivery if conn_of(scenario, j) == conn]
+        require(replies == sorted(replies) and len(set(replies)) == len(replies), INVARIANTS[11],
+                f'connection {conn} replies {replies} leave request order')
+        require(len(unpublished(scenario, s, conn)) <= scenario.depth, INVARIANTS[12],
+                f'connection {conn} holds {len(unpublished(scenario, s, conn))} accepted jobs, bound {scenario.depth}')
+    require(len(s.accepted) - len(s.published) <= scenario.capacity, INVARIANTS[12],
+            f'{len(s.accepted) - len(s.published)} accepted unpublished jobs exceed capacity {scenario.capacity}')
     if edge == 'disconnect_delivery_only':
         require(previous.values == s.values and previous.queues == s.queues and
                 previous.outstanding == s.outstanding and previous.stages == s.stages,
@@ -450,19 +484,26 @@ def explore(start, transition, invariant, is_terminal, output, max_states=250000
 def scenarios():
     return (
         Scenario('opposite_owners_aliases', (0, 1), (
-            Plan('write_a', (0,)), Plan('reverse_alias', (1, 0, 1)), Plan('read_alias', (0, 1, 0), False))),
+            Plan('write_a', (0,)), Plan('reverse_alias', (1, 0, 1)), Plan('read_alias', (0, 1, 0), False)),
+                 conns=(0, 0, 1)),
         Scenario('independent_completion_order', (0, 1, 0), (
-            Plan('write_a', (0,)), Plan('write_b', (1,)), Plan('same_owner_read_c_a', (2, 0), False))),
+            Plan('write_a', (0,)), Plan('write_b', (1,)), Plan('same_owner_read_c_a', (2, 0), False)),
+                 conns=(0, 0, 0), depth=3),
         Scenario('abort_retry_disconnect', (0, 1), (
             Plan('rollback_alias', (0, 1, 0), abort=True), Plan('dependent_write', (1,)),
-            Plan('dependent_read', (0, 1), False)), disconnect=0),
+            Plan('dependent_read', (0, 1), False)), disconnect=0, conns=(0, 0, 1)),
         Scenario('independent_abort', (0, 1), (
-            Plan('rollback_a', (0,), abort=True), Plan('write_b', (1,)), Plan('read_b_a', (1, 0), False))),
+            Plan('rollback_a', (0,), abort=True), Plan('write_b', (1,)), Plan('read_b_a', (1, 0), False)),
+                 conns=(0, 1, 0)),
         Scenario('rejected_admission', (0, 1), (
-            Plan('invalid', (0,), reject=True), Plan('accepted', (1,)), Plan('capacity_reject', (0,))), capacity=1),
+            Plan('accepted', (1,)), Plan('invalid_after_accepted', (0,), reject=True), Plan('capacity_wait', (0,))),
+                 capacity=1, conns=(0, 0, 1)),
         Scenario('pause_resume_disconnect', (0, 1), (
             Plan('write_a', (0,)), Plan('alias_write', (1, 0, 1)), Plan('read', (1,), False)),
-                 disconnect=1, pause=True),
+                 disconnect=1, pause=True, conns=(0, 1, 1)),
+        Scenario('connection_depth_bound', (0, 1, 0), (
+            Plan('write_a', (0,)), Plan('write_b', (1,)), Plan('same_owner_read_c_a', (2, 0), False)),
+                 conns=(0, 0, 0), depth=2),
     )
 
 
@@ -508,7 +549,10 @@ def run(output):
             ('drop_disconnected_write', scenarios()[2]),
             ('park_outside_mutex', scenarios()[0]),
             ('take_before_read', scenarios()[1]),
-            ('pause_registers_after_check', scenarios()[5])):
+            ('pause_registers_after_check', scenarios()[5]),
+            ('reject_without_fence', scenarios()[2]),
+            ('ignore_connection_bound', scenarios()[6]),
+            ('ignore_capacity', scenarios()[4])):
         result = explore(initial(scenario), lambda s: successors(scenario, s, mutant),
                          lambda s, edge=None, previous=None: check(scenario, s, edge, previous),
                          lambda s: terminal(scenario, s), output / (mutant + '-witness.json'))
