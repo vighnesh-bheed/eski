@@ -16,6 +16,8 @@ PERSIST_FAILED_SAVE_BACKOFF :: 5
 
 PERSIST_COW_SAMPLE_KEYS :: 1024
 
+PERSIST_COW_SAMPLE_MS :: 1000
+
 PERSIST_CMD_SET :: 1024
 
 ERR_BGSAVE_IN_PROGRESS :: "ERR Background save already in progress"
@@ -417,9 +419,7 @@ persist_publish_progress :: proc(processed: i64) {
 		return
 	}
 	intrinsics.volatile_store(&p.processed, processed)
-	if processed % PERSIST_COW_SAMPLE_KEYS == 0 {
-		persist_sample_cow()
-	}
+	persist_pace_cow(p, processed)
 }
 
 @(private = "file")

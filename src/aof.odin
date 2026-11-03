@@ -3823,9 +3823,7 @@ aof_child_tick :: proc(processed: i64) {
 	p := pst.progress
 	if p != nil {
 		intrinsics.volatile_store(&p.processed, processed)
-		if processed & 1023 == 0 {
-			persist_sample_cow()
-		}
+		persist_pace_cow(p, processed)
 	}
 	if pst.key_save_delay != 0 {
 		persist_debug_delay(pst.key_save_delay)
