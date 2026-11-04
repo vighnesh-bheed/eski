@@ -983,6 +983,9 @@ db_make_room :: #force_no_inline proc "contextless" (db: ^Db) -> ^Table {
 	cap := t.cap
 	if t.live > cap * 7 / 16 {
 		cap = table_grow_cap(cap)
+		if maxmemory_bytes != 0 && u64(mem_used() + table_alloc_size(cap)) > maxmemory_bytes {
+			cap = table_tight_cap(t.cap)
+		}
 	}
 	if db.next.region != nil && db.next.cap == cap {
 		if db.next_warm < db.next.size {

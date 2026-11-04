@@ -2141,7 +2141,7 @@ pressure_compaction_bounds :: proc() {
 	check(work.visited == 0 && work.admitted_bytes == 0 && db_cur.rehash_idx < 0, "no real maxmemory pressure means no cold shrink admission")
 	storage_clear()
 	maxmemory_bytes = 1 << 30
-	for i in 0 ..= 1792 {
+	for i in 0 ..= 1489 {
 		put(fmt.bprintf(buf[:], "g%d", i), "x")
 	}
 	check(db_cur.rehash_idx >= 0 && db_cur.t[1].cap > db_cur.t[0].cap, "active grow guard uses a real foreground-started migration")
