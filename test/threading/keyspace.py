@@ -19,7 +19,8 @@ BINARY = ROOT/'bin/eski'
 FIELDS = ('keyspace_threads_configured', 'keyspace_threads_active', 'keyspace_jobs_pending',
           'keyspace_memory_used', 'keyspace_records', 'keyspace_jobs_submitted',
           'keyspace_jobs_completed', 'keyspace_gets', 'keyspace_sets',
-          'keyspace_sync_fallbacks', 'keyspace_inline', 'keyspace_barriers', 'keyspace_worker_nanoseconds')
+          'keyspace_sync_fallbacks', 'keyspace_inline', 'keyspace_barriers', 'keyspace_worker_signals',
+          'keyspace_worker_nanoseconds')
 
 
 def server(workers=2, memory=8 << 20, arguments=()):
@@ -203,6 +204,19 @@ class Keyspace(unittest.TestCase):
         self.assertEqual(after['keyspace_inline']-before['keyspace_inline'], 2)
         self.assertEqual(after['keyspace_jobs_submitted']-before['keyspace_jobs_submitted'], 2)
         self.assertEqual(self.calls('get'), 5)
+
+    def test_pipelined_jobs_signal_each_parked_owner_once_per_dispatch(self):
+        client = self.server.client()
+        keys = ['signal:%d' % i for i in range(16)]
+        self.assertEqual(client.pipeline([('SET', key, key) for key in keys]), ['OK']*16)
+        before = self.snapshot()
+        for _ in range(8):
+            self.assertEqual(client.pipeline([('GET', key) for key in keys]), [key.encode() for key in keys])
+        after = self.snapshot()
+        signals = after['keyspace_worker_signals']-before['keyspace_worker_signals']
+        self.assertEqual(after['keyspace_jobs_submitted']-before['keyspace_jobs_submitted'], 128)
+        self.assertGreaterEqual(signals, 1)
+        self.assertLessEqual(signals, 16)
 
     def test_disconnected_admitted_set_commits_and_owns_slowlog_identity(self):
         self.admin.call('SET', 'large-output', b'x'*131072)

@@ -13,6 +13,7 @@ foreign libc_runtime_fork {
 runtime_fork_last_usec: i64
 
 runtime_fork :: proc() -> (linux.Pid, linux.Errno) {
+	keyspace_signal_owed()
 	lazyfree_before_fork()
 	aof_bio_before_fork()
 	blocked, saved: linux.Sig_Set

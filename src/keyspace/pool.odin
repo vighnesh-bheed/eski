@@ -9,6 +9,8 @@ import "core:thread"
 CAPACITY :: 64
 MAX_WORKERS :: 64
 
+#assert(MAX_WORKERS <= 64)
+
 Op :: enum u8 {
 	Get,
 	Set,
@@ -111,6 +113,8 @@ Pool :: struct {
 	records:      int,
 	memory_limit: int,
 	memory_bytes: int,
+	owed:         u64,
+	signals:      u64,
 }
 
 @(private)
@@ -523,8 +527,8 @@ submit :: proc "contextless" (p: ^Pool, job: ^Job) -> bool {
 	job.executed = false
 	job.abort = false
 	job.cancelled = false
-	configured := p.configured
-	for &owned, owner in owners[:configured] {
+	wake: u64
+	for owned, owner in owners[:p.configured] {
 		if !owned {
 			continue
 		}
@@ -533,21 +537,38 @@ submit :: proc "contextless" (p: ^Pool, job: ^Job) -> bool {
 		shard.len += 1
 		p.queued += 1
 		job.participants += 1
-		owned = shard.parked
 		if shard.parked {
 			shard.parked = false
 			p.parked -= 1
+			wake |= u64(1) << uint(owner)
 		}
 	}
 	p.outstanding += 1
+	if wake != 0 {
+		intrinsics.atomic_or_explicit(&p.owed, wake, .Release)
+	}
 	intrinsics.atomic_store_explicit(&job.state, .Queued, .Release)
 	sync.mutex_unlock(&p.mutex)
-	for owned, owner in owners[:configured] {
-		if owned {
-			sync.cond_signal(&p.shards[owner].ready)
-		}
-	}
 	return true
+}
+
+signal_owed :: proc "contextless" (p: ^Pool) {
+	if p == nil || intrinsics.atomic_load_explicit(&p.owed, .Relaxed) == 0 {
+		return
+	}
+	owed := intrinsics.atomic_exchange_explicit(&p.owed, 0, .Acq_Rel)
+	count: u64
+	for owed != 0 {
+		owner := intrinsics.count_trailing_zeros(owed)
+		owed &= owed - 1
+		sync.cond_signal(&p.shards[owner].ready)
+		count += 1
+	}
+	intrinsics.atomic_add_explicit(&p.signals, count, .Relaxed)
+}
+
+signal_count :: proc "contextless" (p: ^Pool) -> u64 {
+	return intrinsics.atomic_load_explicit(&p.signals, .Relaxed) if p != nil else 0
 }
 
 execute_inline :: proc(p: ^Pool, job: ^Job) -> bool {
@@ -621,8 +642,10 @@ pause :: proc "contextless" (p: ^Pool) {
 	if p == nil {
 		return
 	}
+	signal_owed(p)
 	sync.mutex_lock(&p.mutex)
 	intrinsics.atomic_store_explicit(&p.accepting, false, .Release)
+	signal_owed(p)
 	for !idle(p) {
 		p.pausing += 1
 		sync.cond_wait(&p.quiescent, &p.mutex)

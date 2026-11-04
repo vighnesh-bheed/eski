@@ -568,6 +568,7 @@ persist_kill_child :: proc() {
 
 @(private = "file")
 persist_reap :: proc(pid: linux.Pid) {
+	keyspace_signal_owed()
 	status: u32
 	for {
 		_, err := linux.wait4(pid, &status, {}, nil)

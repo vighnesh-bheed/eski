@@ -108,6 +108,10 @@ keyspace_memory_used :: proc "contextless" () -> int {
 	return ks.memory_used(&keyspace_pool) + (cap(keyspace_ready) + cap(keyspace_waiting)) * size_of(Keyspace_Ready) + cap(keyspace_retries) * size_of(^Keyspace_Task) + keyspace_draining_ready_bytes
 }
 
+keyspace_signal_owed :: #force_inline proc "contextless" () {
+	ks.signal_owed(&keyspace_pool)
+}
+
 keyspace_conn_busy :: #force_inline proc "contextless" (c: ^Conn) -> bool {
 	return c.keyspace_inflight > 0 || c.keyspace_ready || c.keyspace_waiting
 }
@@ -867,6 +871,7 @@ keyspace_info :: proc(b: ^[dynamic]u8) {
 	info_line_int(b, "keyspace_sync_fallbacks", keyspace_fallbacks)
 	info_line_int(b, "keyspace_inline", keyspace_inline)
 	info_line_int(b, "keyspace_barriers", keyspace_barriers)
+	info_line_int(b, "keyspace_worker_signals", i64(ks.signal_count(&keyspace_pool)))
 	info_line_int(b, "keyspace_worker_nanoseconds", keyspace_worker_ns)
 }
 

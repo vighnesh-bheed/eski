@@ -529,6 +529,7 @@ migrate_resolve :: proc(host: []u8, port: []u8) -> (addr: Migrate_Addr, ok: bool
 
 @(private = "file")
 migrate_wait :: proc(fd: linux.Fd, events: linux.Fd_Poll_Events, deadline: i64) -> bool {
+	keyspace_signal_owed()
 	for {
 		left := deadline - migrate_clock_ms()
 		if left <= 0 {

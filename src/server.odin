@@ -1133,6 +1133,7 @@ server_run :: proc() -> bool {
 		}
 		el_before_sleep()
 		if transport_pending_input() { timeout = 0 }
+		keyspace_signal_owed()
 		diagnostics_work_end()
 		n, werr := linux.epoll_wait(srv.epfd, &events[0], MAX_EVENTS, timeout)
 		diagnostics_work_begin()
@@ -1169,6 +1170,7 @@ server_run :: proc() -> bool {
 			}
 			handle_event(c, ev.events)
 		}
+		keyspace_signal_owed()
 		compute_tick()
 		keyspace_tick()
 		if aof.feed || len(aof.deferred) > 0 || len(aof.buf) > 0 {

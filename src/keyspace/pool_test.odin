@@ -2,6 +2,7 @@ package keyspace
 
 import "base:intrinsics"
 import "base:runtime"
+import "core:sync"
 import "core:sys/linux"
 import "core:testing"
 import "core:thread"
@@ -681,6 +682,63 @@ coordinator_inline_execution_needs_an_empty_accepting_pool_and_halts_on_abort ::
 	testing.expect(t, execute_inline(&p, &after) && records[0].clock == 3 && records[1].clock == 4)
 	testing.expect_value(t, inline_context_count, u32(3))
 	pause(&p)
+	for record in records { testing.expect(t, record_free(&p, record)) }
+	testing.expect(t, memory_used(&p) == 0 && destroy(&p))
+}
+
+wait_pool :: proc(p: ^Pool, parked, completed: int) -> bool {
+	deadline := test_now_ns() + 2_000_000_000
+	for test_now_ns() < deadline {
+		sync.mutex_lock(&p.mutex)
+		ready := p.parked == parked && p.done_len == completed
+		sync.mutex_unlock(&p.mutex)
+		if ready {
+			return true
+		}
+		linux.sched_yield()
+	}
+	return false
+}
+
+owed_owners :: proc "contextless" (p: ^Pool) -> u64 {
+	return intrinsics.atomic_load_explicit(&p.owed, .Relaxed)
+}
+
+@(test)
+parked_owners_wait_for_one_deferred_signal_and_pause_or_stop_signal_owed_owners :: proc(t: ^testing.T) {
+	p: Pool
+	testing.expect(t, init(&p, 2, 1 << 20))
+	records := [2]^Record{
+		record_new(&p, 0, test_bytes("a"), 0, true, test_bytes("a"), 0),
+		record_new(&p, 0, test_bytes("b"), 1, true, test_bytes("b"), 0),
+	}
+	testing.expect(t, records[0] != nil && records[1] != nil && wait_pool(&p, 2, 0))
+	base := signal_count(&p)
+	first := Job{op = .Custom, record = records[0], records = records[:1], executor = multi_owner_increment}
+	second := Job{op = .Custom, record = records[0], records = records[:1], executor = multi_owner_increment}
+	testing.expect(t, submit(&p, &first) && submit(&p, &second))
+	testing.expect(t, owed_owners(&p) == 1 && signal_count(&p) == base)
+	signal_owed(&p)
+	testing.expect(t, owed_owners(&p) == 0 && signal_count(&p) == base + 1)
+	testing.expect(t, wait_pool(&p, 2, 2))
+	testing.expect(t, poll(&p) == &first && poll(&p) == &second && poll(&p) == nil && records[0].clock == 2)
+	signal_owed(&p)
+	testing.expect(t, signal_count(&p) == base + 1)
+	both := Job{op = .Custom, record = records[0], records = records[:], executor = multi_owner_increment}
+	later := Job{op = .Custom, record = records[1], records = records[1:], executor = multi_owner_increment}
+	testing.expect(t, submit(&p, &both) && submit(&p, &later))
+	testing.expect(t, owed_owners(&p) == 3 && signal_count(&p) == base + 1)
+	pause(&p)
+	testing.expect(t, owed_owners(&p) == 0 && signal_count(&p) == base + 3 && pending(&p) == 2 && p.parked == 2)
+	out: [3]^Job
+	testing.expect(t, poll_all(&p, out[:]) == 2 && (out[0] == &both && out[1] == &later || out[0] == &later && out[1] == &both))
+	testing.expect(t, records[0].clock == 3 && records[1].clock == 2 && !both.cancelled && !later.cancelled)
+	testing.expect(t, resume(&p))
+	stopped := Job{op = .Custom, record = records[1], records = records[1:], executor = multi_owner_increment}
+	testing.expect(t, submit(&p, &stopped) && owed_owners(&p) == 2)
+	stop(&p)
+	testing.expect(t, owed_owners(&p) == 0 && signal_count(&p) == base + 4 && active_workers(&p) == 0)
+	testing.expect(t, poll(&p) == &stopped && poll(&p) == nil && !stopped.cancelled && records[1].clock == 3)
 	for record in records { testing.expect(t, record_free(&p, record)) }
 	testing.expect(t, memory_used(&p) == 0 && destroy(&p))
 }
