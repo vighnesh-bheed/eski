@@ -64,7 +64,7 @@ Storage packages manage lists, hashes, sets, sorted sets, packed values, bitmaps
 
 ## Maintenance
 
-Keyspace resizing and member-table migration use bounded work steps. The keyspace table grows by a quarter of its capacity when it reaches seven eighths full, and its capacity is any multiple of the 16-slot group. The event loop also advances maintenance while traffic is quiet. Slab reclamation and lazy freeing have separate work queues. The periodic cron path performs expiry work, persistence scheduling, subscription maintenance, idle-client checks and statistics updates.
+Keyspace resizing and member-table migration use bounded work steps. The keyspace table grows by half of its capacity when it reaches seven eighths full, or by a quarter when maxmemory is set and the larger table would not fit under it, and its capacity is any multiple of the 16-slot group. The event loop also advances maintenance while traffic is quiet. Slab reclamation and lazy freeing have separate work queues. The periodic cron path performs expiry work, persistence scheduling, subscription maintenance, idle-client checks and statistics updates.
 
 Expiry is lazy on access and active through a budgeted sweep over the key handles of each database. Hash field deadlines use a registry so active field expiry can find relevant hashes without sweeping every hash. A key mutation also participates in watched-key invalidation, pub/sub notifications, tracking invalidation and the persistence feed. These effects are coordinated with transaction and blocked-client execution.
 

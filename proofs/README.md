@@ -17,7 +17,7 @@ The first phase contains 276 named contract theorems. The complete kernel invent
 
 | Area | Named theorems | Actual Odin comparison evidence |
 | --- | --- | --- |
-| 1. Hash-table resizing | 132 | 12,275 table operations and 2,266 SCAN rounds, including non-power-of-two capacities, growth and shrink rules, timed keys, partial migration, collisions, deletions and swaps |
+| 1. Hash-table resizing | 132 | 12,275 table operations and 2,254 SCAN rounds, including non-power-of-two capacities, growth and shrink rules, timed keys, partial migration, collisions, deletions and swaps |
 | 2. Worker rollback | 18 | Five internal-failure, success and ordinary command-error fixtures |
 | 3. Expiry and persistence | 25 | 7,958 hash-operation steps, ten ordinary-key translation fixtures and two exact-deadline fixtures |
 | 4. Request parsing | 16 | 1,629 arithmetic guards and 4,042 fragmented-input prefix checks |

@@ -94,7 +94,7 @@ structure Table where
 def emptyTable (cap : Nat) : Table :=
   ⟨List.replicate cap .empty, 0, 0, cap - cap / 8⟩
 
-def growCap (cap : Nat) : Nat := max (cap + 16) ((cap * 5 / 4 + 15) / 16 * 16)
+def growCap (cap : Nat) : Nat := max (cap + 16) ((cap * 3 / 2 + 15) / 16 * 16)
 
 def roundCap (n : Nat) : Nat := max 16 ((n + 15) / 16 * 16)
 
@@ -381,7 +381,7 @@ theorem positive_budget_progress (b : Banks) (i j : Nat) (e : Entry)
   simp [migrateAt, hs, hd, moveOne]
 
 theorem grow_cap_valid (cap : Nat) (h : cap % 16 = 0) :
-    growCap cap % 16 = 0 ∧ cap < growCap cap ∧ cap * 5 / 4 ≤ growCap cap ∧ growCap cap ≤ cap * 5 / 4 + 16 := by
+    growCap cap % 16 = 0 ∧ cap < growCap cap ∧ cap * 3 / 2 ≤ growCap cap ∧ growCap cap ≤ cap * 3 / 2 + 16 := by
   unfold growCap
   omega
 

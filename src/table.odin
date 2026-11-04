@@ -45,8 +45,10 @@ Lookup :: struct {
 
 SLOT_BYTES :: size_of(Slot_Meta) + size_of(Key_Handle) + size_of(Val_Handle)
 TABLE_SLOT_BYTES :: SLOT_BYTES + 1
-TABLE_GROWTH_NUM :: 5
-TABLE_GROWTH_DEN :: 4
+TABLE_GROWTH_NUM :: 3
+TABLE_GROWTH_DEN :: 2
+TABLE_TIGHT_NUM :: 5
+TABLE_TIGHT_DEN :: 4
 
 #assert(TABLE_SLOT_BYTES == 19)
 #assert(GROUP_SLOTS * size_of(Slot_Meta) <= 64)
@@ -108,6 +110,10 @@ probe_next :: #force_inline proc "contextless" (t: ^Table, g: u64, step: ^u64) -
 
 table_grow_cap :: #force_inline proc "contextless" (cap: int) -> int {
 	return max(cap + GROUP_SLOTS, (cap * TABLE_GROWTH_NUM / TABLE_GROWTH_DEN + GROUP_SLOTS - 1) &~ (GROUP_SLOTS - 1))
+}
+
+table_tight_cap :: #force_inline proc "contextless" (cap: int) -> int {
+	return max(cap + GROUP_SLOTS, (cap * TABLE_TIGHT_NUM / TABLE_TIGHT_DEN + GROUP_SLOTS - 1) &~ (GROUP_SLOTS - 1))
 }
 
 table_round_cap :: #force_inline proc "contextless" (n: int) -> int {

@@ -53,7 +53,7 @@ def probe(groups, home):
 
 
 def grow_cap(cap):
-    return max(cap + 16, (cap * 5 // 4 + 15) // 16 * 16)
+    return max(cap + 16, (cap * 3 // 2 + 15) // 16 * 16)
 
 
 def round_cap(n):
@@ -358,7 +358,7 @@ def corpus():
     while scan['cursor']:
         scan_step()
     step('U')
-    assert len(dst) == 432
+    assert len(dst) == 512
     scan_step()
     for index in range(40):
         key = keys[index * 4]
