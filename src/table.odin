@@ -190,6 +190,15 @@ prefetch_group :: #force_inline proc "contextless" (t: ^Table, g: u64, want_meta
 	}
 }
 
+table_prefetch_home :: #force_inline proc "contextless" (t: ^Table, h: u64, write: bool) #no_bounds_check {
+	if t.groups == 0 {
+		return
+	}
+	g := hash_home(h, t.groups)
+	intrinsics.prefetch_read_data(&t.ctrl[g << GROUP_SHIFT], 3)
+	prefetch_group(t, g, true, write)
+}
+
 @(private = "file")
 prefetch_value :: #force_inline proc "contextless" (kh: Key_Handle, vh: Val_Handle, s: ^Slab, write: bool) {
 	if kh.small.tag.val_form == FORM_SLAB {

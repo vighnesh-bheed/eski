@@ -762,9 +762,15 @@ resume_held_clients :: proc() {
 }
 
 process_input :: proc(c: ^Conn) {
+	batch: Batch = ---
+	batch.ahead = c.rpos
+	batch.count, batch.next, batch.keys = 0, 0, 0
 	for !c.close_after && c.rpos < c.rlen && c.blocked == .None && c.compute == nil {
 		if keyspace_pending > 0 && !keyspace_admits(c) {
 			break
+		}
+		if c.rpos >= batch.ahead {
+			batch_scan(c, &batch)
 		}
 		start := c.rpos
 		r := parse_command(c)
@@ -781,7 +787,7 @@ process_input :: proc(c: ^Conn) {
 				break
 			}
 		} else {
-			execute(c, argv_buf[:argc])
+			execute_slot(c, argv_buf[:argc], batch_slot(&batch, start, argv_buf[0]))
 		}
 		if block_work != 0 && block_after_command(c, start) {
 			break

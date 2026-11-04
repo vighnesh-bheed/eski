@@ -24,6 +24,7 @@ Cmd_Slot :: struct {
 	cmd:      ^Command,
 	stats:    ^Cmd_Hot,
 	keyspace: Maybe(Keyspace_Op),
+	keys:     Key_Range,
 }
 
 cmd_table: [CMD_TABLE_SIZE]Cmd_Slot
@@ -60,6 +61,7 @@ table_insert :: proc "contextless" (key: string, cmd: ^Command) #no_bounds_check
 	if op, ok := keyspace_operation(cmd); ok {
 		cur.keyspace = op
 	}
+	cur.keys = command_key_range(cmd)
 	h := cmd_home(cur.key)
 	dist := 0
 	for {
@@ -193,8 +195,11 @@ rename_command :: proc(from: []u8, to: []u8) -> string {
 	return ""
 }
 
-execute :: proc(c: ^Conn, argv: [][]u8) {
-	slot := lookup_entry(argv[0])
+execute :: #force_inline proc(c: ^Conn, argv: [][]u8) {
+	execute_slot(c, argv, lookup_entry(argv[0]))
+}
+
+execute_slot :: proc(c: ^Conn, argv: [][]u8, slot: ^Cmd_Slot) {
 	resolved := slot.cmd if slot != nil else nil
 	diagnostics_command_begin(resolved.name if resolved != nil else "unknown", argv)
 	defer diagnostics_command_end()

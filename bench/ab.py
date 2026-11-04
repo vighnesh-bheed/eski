@@ -21,9 +21,24 @@ SCHEMA = 'eski-local-ab-v2'
 MEMTIER = 'sha256:389090e9ef13701f36f5ac97485742618e648adbf76c008418383594a05c1659'
 LABEL = 'eski-perf-ab=1'
 MAXMEMORY = '6442450944'
-DATASET = ['--key-minimum=1', '--key-maximum=100000', '--key-prefix=testbed:', '--data-size=64']
-PRELOAD = DATASET + ['--ratio=1:0', '--key-pattern=P:P', '--threads=1', '--clients=1', '--requests=100000', '--pipeline=32']
-COMMON = DATASET + ['--print-percentiles=50,99,99.9', '--threads=2', '--clients=16', '--distinct-client-seed', '--run-count=1']
+KEYS = 100000
+
+
+def dataset(keys=KEYS):
+    return ['--key-minimum=1', '--key-maximum=%d' % keys, '--key-prefix=testbed:', '--data-size=64']
+
+
+def preload(keys=KEYS):
+    return dataset(keys) + ['--ratio=1:0', '--key-pattern=P:P', '--threads=1', '--clients=1', '--requests=%d' % keys, '--pipeline=32']
+
+
+def common(keys=KEYS):
+    return dataset(keys) + ['--print-percentiles=50,99,99.9', '--threads=2', '--clients=16', '--distinct-client-seed', '--run-count=1']
+
+
+DATASET = dataset()
+PRELOAD = preload()
+COMMON = common()
 WORKLOADS = {
     'get64-p1-r3k': (['--ratio=0:1', '--key-pattern=R:R', '--pipeline=1', '--rate-limiting=3000'], 96000),
     'set64-p1-r3k': (['--ratio=1:0', '--key-pattern=R:R', '--pipeline=1', '--rate-limiting=3000'], 96000),
@@ -348,16 +363,16 @@ def measure_sequential(args, rnd, variant, binary, extra, out_dir, sensor):
     server = start_server(binary, extra, args.server_cpus, args.port, out_dir)
     rows = []
     try:
-        memtier(out_dir, 'preload', args.port, args.client_cpus, PRELOAD)
+        memtier(out_dir, 'preload', args.port, args.client_cpus, preload(args.keys))
         for key in args.workloads.split(','):
             extra_args, target = WORKLOADS[key]
-            memtier(out_dir, key + '-warmup', args.port, args.client_cpus, COMMON + extra_args + ['--test-time=%d' % args.warmup])
+            memtier(out_dir, key + '-warmup', args.port, args.client_cpus, common(args.keys) + extra_args + ['--test-time=%d' % args.warmup])
             before = snapshot(args.port, server['proc'].pid, args.server_list)
             cb = cpu_times()
             sampler = Sampler(args.server_list[0], sensor)
             sampler.start()
             t0 = time.monotonic()
-            mt = memtier(out_dir, key, args.port, args.client_cpus, COMMON + extra_args + ['--test-time=%d' % args.seconds], sampler)
+            mt = memtier(out_dir, key, args.port, args.client_cpus, common(args.keys) + extra_args + ['--test-time=%d' % args.seconds], sampler)
             t1 = time.monotonic()
             ca = cpu_times()
             sampler.stop_flag = True
@@ -383,12 +398,12 @@ def measure_concurrent(args, rnd, variants, out, sensor):
             lane = dict(variant=v, slot=slot, dir=d, server_list=cpu_list(slot['server_cpus']), client_list=cpu_list(slot['client_cpus']))
             lane['server'] = start_server(variants[v][0], variants[v][1], slot['server_cpus'], slot['port'], d)
             lanes.append(lane)
-        handles = [memtier_start(l['dir'], 'preload', l['slot']['port'], l['slot']['client_cpus'], PRELOAD) for l in lanes]
+        handles = [memtier_start(l['dir'], 'preload', l['slot']['port'], l['slot']['client_cpus'], preload(args.keys)) for l in lanes]
         for h in handles:
             memtier_finish(h)
         for key in args.workloads.split(','):
             extra_args, target = WORKLOADS[key]
-            handles = [memtier_start(l['dir'], key + '-warmup', l['slot']['port'], l['slot']['client_cpus'], COMMON + extra_args + ['--test-time=%d' % args.warmup]) for l in lanes]
+            handles = [memtier_start(l['dir'], key + '-warmup', l['slot']['port'], l['slot']['client_cpus'], common(args.keys) + extra_args + ['--test-time=%d' % args.warmup]) for l in lanes]
             for h in handles:
                 memtier_finish(h)
             for l in lanes:
@@ -398,7 +413,7 @@ def measure_concurrent(args, rnd, variants, out, sensor):
             for l in lanes:
                 l['sampler'] = Sampler(l['server_list'][0], sensor)
                 l['sampler'].start()
-            handles = [memtier_start(l['dir'], key, l['slot']['port'], l['slot']['client_cpus'], COMMON + extra_args + ['--test-time=%d' % args.seconds], l['sampler']) for l in lanes]
+            handles = [memtier_start(l['dir'], key, l['slot']['port'], l['slot']['client_cpus'], common(args.keys) + extra_args + ['--test-time=%d' % args.seconds], l['sampler']) for l in lanes]
             results = [memtier_finish(h) for h in handles]
             t1 = time.monotonic()
             ca = cpu_times()
@@ -596,6 +611,7 @@ def parser():
     p.add_argument('--seconds', type=int, default=20)
     p.add_argument('--warmup', type=int, default=5)
     p.add_argument('--workloads', default=DEFAULT)
+    p.add_argument('--keys', type=int, default=KEYS)
     p.add_argument('--mode', choices=('sequential', 'concurrent'), default='concurrent')
     p.add_argument('--server-cpus', default='1')
     p.add_argument('--client-cpus', default='10,11')
@@ -621,6 +637,8 @@ def main(argv=None):
     unknown = [k for k in args.workloads.split(',') if k not in WORKLOADS]
     if unknown:
         raise SystemExit('unknown workloads: %s' % ', '.join(unknown))
+    if args.keys < 1:
+        raise SystemExit('--keys must be at least 1')
     args.server_list, args.client_list, args.cluster_list = cpu_list(args.server_cpus), cpu_list(args.client_cpus), cpu_list(args.cluster_cpus)
     check = precheck()
     if args.max_load is not None and float(check['loadavg'].split()[0]) >= args.max_load:
@@ -648,7 +666,7 @@ def main(argv=None):
                 governor_b=read(SYS / ('devices/system/cpu/cpu%d/cpufreq/scaling_governor' % second)),
                 epp=read(SYS / ('devices/system/cpu/cpu%d/cpufreq/energy_performance_preference' % first)),
                 max_freq=read(SYS / ('devices/system/cpu/cpu%d/cpufreq/scaling_max_freq' % first)),
-                no_turbo=read(SYS / 'devices/system/cpu/intel_pstate/no_turbo'), rounds=args.rounds, seconds=args.seconds, warmup=args.warmup,
+                no_turbo=read(SYS / 'devices/system/cpu/intel_pstate/no_turbo'), rounds=args.rounds, seconds=args.seconds, warmup=args.warmup, keys=args.keys,
                 workloads=args.workloads.split(','), limits=limits, memtier_image=MEMTIER, argv=sys.argv if argv is None else ['bench/ab.py'] + list(argv),
                 precheck=check, tool_sha256=sha(__file__))
     previous = signal.signal(signal.SIGTERM, interrupt)

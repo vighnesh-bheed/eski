@@ -48,7 +48,7 @@ def floor_record(meta, summary, rows):
     return dict(schema=FLOOR_SCHEMA, session=meta['label'], date=time.strftime('%Y-%m-%d', time.localtime(meta['started'])),
                 binary_sha256=meta['binaries']['A']['sha256'], cpu_model=meta.get('cpu_model'), kernel=meta.get('kernel'),
                 governor=meta.get('governor'), epp=meta.get('epp'), no_turbo=meta.get('no_turbo'), cpus=meta['cpus'], mode=meta.get('mode', 'sequential'),
-                rounds=meta['rounds'], seconds=meta['seconds'], warmup=meta['warmup'], limits=meta.get('limits'),
+                rounds=meta['rounds'], seconds=meta['seconds'], warmup=meta['warmup'], keys=meta.get('keys', ab.KEYS), limits=meta.get('limits'),
                 load=[min(loads), max(loads)] if loads else None, workloads=workloads)
 
 
@@ -90,9 +90,9 @@ def render(meta, summary, rows, floor=None):
     mode = meta.get('mode', 'sequential')
     cpus = meta['cpus']
     lanes = 'lanes server %s / client %s and server %s / client %s' % (cpus['server'], cpus['client'], cpus.get('server_b'), cpus.get('client_b')) if mode == 'concurrent' else 'server CPUs %s, client CPUs %s' % (cpus['server'], cpus['client'])
-    p('Session %s (%s mode): binaries A %s (%s) and B %s (%s), %s, %d rounds of %d s after %d s warmup.' % (
+    p('Session %s (%s mode): binaries A %s (%s) and B %s (%s), %s, %d rounds of %d s after %d s warmup, %d keys.' % (
         meta['label'], mode, Path(meta['binaries']['A']['path']).name, meta['binaries']['A']['sha256'][:12], Path(meta['binaries']['B']['path']).name,
-        meta['binaries']['B']['sha256'][:12], lanes, meta['rounds'], meta['seconds'], meta['warmup']))
+        meta['binaries']['B']['sha256'][:12], lanes, meta['rounds'], meta['seconds'], meta['warmup'], meta.get('keys', ab.KEYS)))
     p('')
     p('| Workload | Clean %s | A ns/cmd median [min, max] | B ns/cmd median [min, max] | B/A paired median [min, max] | Task-only B/A | Excluded runs (reasons) | reads, writes, epoll per cmd | Server MHz median | Client-limited runs | Lane bias |' % ('swap pairs' if mode == 'concurrent' else 'pairs'))
     p('| --- | ---: | ---: | ---: | ---: | ---: | --- | --- | ---: | ---: | ---: |')
@@ -164,6 +164,8 @@ def render(meta, summary, rows, floor=None):
     if floor is not None:
         p('')
         p('Against the A/A floor of session %s (%s, binary %s, server CPUs %s and %s):' % (floor['session'], floor['date'], floor['binary_sha256'][:12], floor['cpus']['server'], floor['cpus'].get('server_b')))
+        if floor.get('keys', ab.KEYS) != meta.get('keys', ab.KEYS):
+            p('  The floor was recorded with %d keys and this session used %d, so the floor is indicative only.' % (floor.get('keys', ab.KEYS), meta.get('keys', ab.KEYS)))
         for key, s in summary.items():
             w = floor['workloads'].get(key)
             f = w['floor'] if w else None

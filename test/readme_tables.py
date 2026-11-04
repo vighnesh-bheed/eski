@@ -652,8 +652,10 @@ def local_section(floor):
               '`python3 -I bench/ab.py --a <parent> --b <candidate> --label <label> --out <results> --workloads <list> --max-load 3`; the defaults are concurrent mode, '
               'eight rounds, the lanes above and ports 39400 and 39401. Report with `python3 -I bench/ab_report.py <results>/<label>`, which reads `' + AB_FLOOR + '` and '
               'states for every workload whether the median lies within, below or above the floor; `--recompute` applies the current rules to an older session. Record a '
-              'new floor with an A/A session of one build against itself and `python3 -I bench/ab_report.py <results>/<label> --write-floor ' + AB_FLOOR + '`. The unit '
-              'tests run with `python3 -I -B bench/test_ab.py`.', '']
+              'new floor with an A/A session of one build against itself and `python3 -I bench/ab_report.py <results>/<label> --write-floor ' + AB_FLOOR + '`. '
+              '`--keys <n>` replaces the 100,000 keys with n keys, preloaded the same way and drawn from the same uniform range, for changes whose effect depends on a key '
+              'space larger than the last level cache; the floor records its key count, and the report marks a reading against a floor from another key count as '
+              'indicative only. The unit tests run with `python3 -I -B bench/test_ab.py`.', '']
     return '\n'.join(lines)
 
 
