@@ -203,6 +203,40 @@ class RequestLifecycle(unittest.TestCase):
         if KEYSPACE_THREADS:
             self.assertGreaterEqual(self.worker_counters()[0] - submitted, 12)
 
+    def look_ahead_pipeline(self, prefix):
+        commands = [('SET', prefix + 'k:%d' % index, index) for index in range(40)]
+        commands += [('BLPOP', prefix + 'block', 0), ('GET', prefix + 'k:0'), ('EVAL', "return redis.call('GET', KEYS[1])", 1, prefix + 'k:1')]
+        wire = b''.join(encode(command) for command in commands) + b'PING\r\n'
+        pairs = []
+        for index in range(70):
+            pairs += [prefix + 'm:%d' % index, index]
+        tail = [('MSET',) + tuple(pairs), ('MGET', prefix + 'k:0', prefix + 'm:69', prefix + 'k:39'), ('RENAME', prefix + 'k:2', prefix + 'k:2b'),
+                ('GET', prefix + 'k:2b'), ('SELECT', 1), ('GET', prefix + 'k:0'), ('SELECT', 0), ('CLIENT', 'REPLY', 'SKIP'), ('GET', prefix + 'k:3'),
+                ('GET', prefix + 'k:4'), ('MULTI',), ('SET', prefix + 'k:5', 'tx'), ('GET', prefix + 'k:5'), ('EXEC',), ('ECHO', 'end')]
+        wire += b''.join(encode(command) for command in tail)
+        expected = ['OK'] * 40 + [[(prefix + 'block').encode(), b'x'], b'0', b'1', 'PONG', 'OK', [b'0', b'69', b'39'], 'OK', b'2', 'OK', None, 'OK',
+                                  b'4', 'OK', 'QUEUED', 'QUEUED', ['OK', b'tx'], b'end']
+        return wire, expected
+
+    def test_look_ahead_window_keeps_blocking_script_inline_and_fragmented_frames_in_order(self):
+        for chunk in (0, 13):
+            prefix = 'ahead%d:' % chunk
+            client = self.named('look-ahead-%d' % chunk)
+            client.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            wire, expected = self.look_ahead_pipeline(prefix)
+            if chunk:
+                for start in range(0, len(wire), chunk):
+                    client.socket.sendall(wire[start:start + chunk])
+                    if start % (chunk * 16) == 0:
+                        time.sleep(.001)
+            else:
+                client.socket.sendall(wire)
+            wait_for(lambda: int(info(self.control, 'clients')['blocked_clients']) == 1, timeout=3, label='pipeline parked on BLPOP')
+            self.assertEqual(self.control.call('LPUSH', prefix + 'block', 'x'), 1)
+            self.assertEqual([client.reply() for _ in expected], expected)
+            self.assertFalse(client.available(.05))
+            self.assertEqual(self.control.call('GET', prefix + 'k:3'), b'3')
+
     def test_acl_rejection_after_accepted_pipeline_commands_keeps_order(self):
         self.control.call('ACL', 'SETUSER', 'pipeline-reader', 'on', 'nopass', '~*', '+get', '+incr', '+ping', '+auth')
         self.control.call('SET', 'reject:key', 'kept')

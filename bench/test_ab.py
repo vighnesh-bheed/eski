@@ -85,6 +85,22 @@ class Parsing(unittest.TestCase):
             self.assertEqual(target, rates[0] * connections if rates else None, key)
             self.assertEqual(key.endswith('-max'), not rates, key)
 
+    def test_the_key_count_defaults_to_the_standard_dataset_and_reaches_every_memtier_phase(self):
+        self.assertEqual(ab.KEYS, 100000)
+        self.assertEqual(ab.parser().parse_args(['--a', 'x', '--b', 'y', '--label', 'l', '--out', 'o']).keys, ab.KEYS)
+        self.assertEqual(ab.DATASET, ['--key-minimum=1', '--key-maximum=100000', '--key-prefix=testbed:', '--data-size=64'])
+        self.assertEqual(ab.PRELOAD, ab.DATASET + ['--ratio=1:0', '--key-pattern=P:P', '--threads=1', '--clients=1', '--requests=100000', '--pipeline=32'])
+        self.assertEqual(ab.COMMON[:len(ab.DATASET)], ab.DATASET)
+        large = 4000000
+        self.assertIn('--key-maximum=4000000', ab.dataset(large))
+        self.assertIn('--requests=4000000', ab.preload(large))
+        self.assertIn('--key-maximum=4000000', ab.common(large))
+        self.assertEqual(ab.common(large)[len(ab.DATASET):], ab.COMMON[len(ab.DATASET):])
+
+    def test_a_key_count_below_one_is_refused_before_any_work(self):
+        with self.assertRaisesRegex(SystemExit, '--keys must be at least 1'):
+            ab.main(['--a', 'x', '--b', 'y', '--label', 'l', '--out', '/nonexistent', '--keys', '0'])
+
 
 class Throttle(unittest.TestCase):
     def counters(self, root, cpu, core, core_ms, package, package_ms):
@@ -310,6 +326,23 @@ class Report(unittest.TestCase):
                 report.floor_record(meta(sha_b=SHA_B), {}, ab_rows)
             with self.assertRaisesRegex(ValueError, 'not a floor record'):
                 report.read_floor(candidate / 'rows.json')
+
+    def test_a_session_states_its_key_count_and_a_floor_from_another_dataset_is_marked(self):
+        rows = session()
+        with tempfile.TemporaryDirectory() as directory:
+            aa = self.write_session(directory, rows, meta())
+            floor_path = Path(directory) / 'floor.json'
+            with redirect_stdout(io.StringIO()):
+                report.main([str(aa), '--write-floor', str(floor_path), '--no-floor'])
+            self.assertEqual(json.loads(floor_path.read_text())['keys'], ab.KEYS)
+            same = dict(meta(sha_b=SHA_B, label='same-keys'), keys=ab.KEYS)
+            text = report.render(same, ab.summarize_session(copy.deepcopy(rows), same), rows, report.read_floor(floor_path))
+            self.assertIn('100000 keys.', text)
+            self.assertNotIn('indicative only', text)
+            large = dict(meta(sha_b=SHA_B, label='large-keys'), keys=4000000)
+            text = report.render(large, ab.summarize_session(copy.deepcopy(rows), large), rows, report.read_floor(floor_path))
+            self.assertIn('4000000 keys.', text)
+            self.assertIn('The floor was recorded with 100000 keys and this session used 4000000, so the floor is indicative only.', text)
 
     def test_report_keeps_the_legacy_table_and_reads_sequential_sessions_without_a_mode(self):
         rows = session(legacy=True)

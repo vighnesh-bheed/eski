@@ -26,6 +26,7 @@ dispatch_test_classes_match :: proc(t: ^testing.T) -> (seen: int, classified: in
 		want, want_ok := keyspace_operation(slot.cmd)
 		got, got_ok := slot.keyspace.?
 		testing.expectf(t, got_ok == want_ok && got == want, "stored keyspace class of %s is %v %v but the switch gives %v %v", slot.key, got, got_ok, want, want_ok)
+		testing.expectf(t, slot.keys == command_key_range(slot.cmd), "stored key range of %s is %v but the registry gives %v", slot.key, slot.keys, command_key_range(slot.cmd))
 		if got_ok {
 			classified += 1
 		}
