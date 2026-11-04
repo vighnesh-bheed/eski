@@ -228,6 +228,18 @@ value_release :: proc "contextless" (v: ^Value) {
 	}
 }
 
+record_key :: #force_inline proc "contextless" (r: ^Record, length: int) -> []u8 {
+	return (cast([^]u8)(uintptr(r) + size_of(Record)))[:length]
+}
+
+record_prefetch :: #force_inline proc "contextless" (r: ^Record, length: int) {
+	first := uintptr(r) &~ 63
+	last := uintptr(r) + size_of(Record) + uintptr(max(length, 1)) - 1
+	for line := first; line <= last && line < first + 4 * 64; line += 64 {
+		intrinsics.prefetch_read_data(rawptr(line), 3)
+	}
+}
+
 record_new :: proc "contextless" (p: ^Pool, db: int, key: []u8, owner: int, exists: bool, seed: []u8, lru: u32) -> ^Record {
 	if p == nil || db < 0 || owner < 0 || len(key) > max(int) - size_of(Record) {
 		return nil

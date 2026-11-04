@@ -171,6 +171,9 @@ class RequestLifecycle(unittest.TestCase):
         values = info(self.control)
         return int(values['keyspace_jobs_submitted']), int(values['keyspace_sync_fallbacks'])
 
+    def inline_count(self):
+        return int(info(self.control)['keyspace_inline'])
+
     def assert_error(self, value, prefix):
         self.assertIsInstance(value, ServerError)
         self.assertTrue(str(value).startswith(prefix), value)
@@ -301,6 +304,7 @@ class RequestLifecycle(unittest.TestCase):
         connections, depth = 6, 120
         clients = [self.server.client() for _ in range(connections)]
         submitted, fallbacks = self.worker_counters()
+        inline = self.inline_count()
         def run(index):
             commands = []
             for _ in range(depth):
@@ -317,7 +321,8 @@ class RequestLifecycle(unittest.TestCase):
         self.assertEqual(sorted(shared), list(range(1, connections * depth + 1)))
         if KEYSPACE_THREADS:
             after_submitted, after_fallbacks = self.worker_counters()
-            self.assertEqual(after_submitted - submitted, connections * depth * 3)
+            self.assertGreater(after_submitted - submitted, 0)
+            self.assertEqual(after_submitted - submitted + self.inline_count() - inline, connections * depth * 3)
             self.assertEqual(after_fallbacks, fallbacks)
 
     def test_fragmented_tls_and_unix_requests_use_same_owned_lifecycle(self):

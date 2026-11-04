@@ -742,3 +742,21 @@ parked_owners_wait_for_one_deferred_signal_and_pause_or_stop_signal_owed_owners 
 	for record in records { testing.expect(t, record_free(&p, record)) }
 	testing.expect(t, memory_used(&p) == 0 && destroy(&p))
 }
+
+@(test)
+record_key_bytes_sit_at_a_fixed_offset_from_the_record :: proc(t: ^testing.T) {
+	p: Pool
+	testing.expect(t, init(&p, 2, 4096))
+	key := [5]u8{'k', 0, 'e', 'y', 255}
+	r := record_new(&p, 7, key[:], 1, false, nil, 0)
+	testing.expect(t, r != nil)
+	if r == nil { return }
+	testing.expect(t, raw_data(record_key(r, len(key))) == raw_data(r.key) && len(record_key(r, len(key))) == len(r.key))
+	expect_bytes(t, record_key(r, len(key)), key[:])
+	record_prefetch(r, len(key))
+	record_prefetch(r, 0)
+	empty := record_new(&p, 0, nil, 0, false, nil, 0)
+	testing.expect(t, empty != nil && len(record_key(empty, 0)) == 0)
+	pause(&p)
+	testing.expect(t, record_free(&p, r) && record_free(&p, empty) && memory_used(&p) == 0 && destroy(&p))
+}

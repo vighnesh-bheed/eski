@@ -280,3 +280,35 @@ batch_scan_prefetches_registry_keys_after_the_first_command_within_its_caps :: p
 	rehashing.t[1] = db.t[0]
 	testing.expect_value(t, batch_test_keys(t, get + get, &rehashing), 1)
 }
+
+@(test)
+batch_scan_records_directory_hashes_only_while_records_are_owned :: proc(t: ^testing.T) {
+	storage: Batch_Test_Table
+	db := Db{rehash_idx = -1, id = 3}
+	db.t[0] = Table{ctrl = &storage.ctrl[0], slots = soa_zip(meta = storage.metas[:], key = storage.keys[:], val = storage.vals[:]), groups = 1, cap = GROUP_SLOTS}
+	get :: "*2\r\n$3\r\nGET\r\n$1\r\na\r\n"
+	other :: "*2\r\n$3\r\nGET\r\n$1\r\nb\r\n"
+	testing.expect(t, keyspace_records == 0 && len(keyspace_index) == 0)
+	if keyspace_records != 0 || len(keyspace_index) != 0 { return }
+	b: Batch
+	batch_test_scan(t, get + other + get, 0, &db, &b)
+	testing.expect_value(t, b.keys, 2)
+	testing.expect_value(t, b.owned, 0)
+	keyspace_records = 1
+	defer keyspace_records = 0
+	batch_test_scan(t, get + other + get, 0, &db, &b)
+	testing.expect_value(t, b.keys, 2)
+	testing.expect_value(t, b.owned, 2)
+	testing.expect_value(t, b.hashes[0], hash_bytes(batch_test_bytes("b")) ~ (u64(db.id) * WY_P1))
+	testing.expect_value(t, b.hashes[1], hash_bytes(batch_test_bytes("a")) ~ (u64(db.id) * WY_P1))
+	empty := Db{rehash_idx = -1, id = 3}
+	batch_test_scan(t, get + other, 0, &empty, &b)
+	testing.expect_value(t, b.count, 2)
+	testing.expect_value(t, b.keys, 1)
+	testing.expect_value(t, b.owned, 1)
+	testing.expect_value(t, b.hashes[0], hash_bytes(batch_test_bytes("b")) ~ (u64(db.id) * WY_P1))
+	keyspace_records = 0
+	batch_test_scan(t, get + other, 0, &empty, &b)
+	testing.expect_value(t, b.count, 0)
+	testing.expect_value(t, b.owned, 0)
+}
