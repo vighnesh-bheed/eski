@@ -1,6 +1,7 @@
 package main
 
 import "core:testing"
+import request_parser "request_parser"
 
 batch_test_bytes :: proc(s: string) -> []u8 {
 	return transmute([]u8)s
@@ -254,7 +255,7 @@ batch_slot_reuses_only_a_record_that_names_the_parsed_command :: proc(t: ^testin
 }
 
 @(test)
-batch_scan_prefetches_registry_keys_after_the_first_command_within_its_caps :: proc(t: ^testing.T) {
+batch_scan_prefetches_registry_keys_of_every_recorded_command_within_its_caps :: proc(t: ^testing.T) {
 	storage: Batch_Test_Table
 	db := Db{rehash_idx = -1}
 	db.t[0] = Table{ctrl = &storage.ctrl[0], slots = soa_zip(meta = storage.metas[:], key = storage.keys[:], val = storage.vals[:]), groups = 1, cap = GROUP_SLOTS}
@@ -263,13 +264,14 @@ batch_scan_prefetches_registry_keys_after_the_first_command_within_its_caps :: p
 	mset :: "*5\r\n$4\r\nMSET\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$1\r\n2\r\n"
 	bitop :: "*5\r\n$5\r\nBITOP\r\n$3\r\nAND\r\n$1\r\nd\r\n$1\r\na\r\n$1\r\nb\r\n"
 	eval :: "*4\r\n$4\r\nEVAL\r\n$8\r\nreturn 1\r\n$1\r\n1\r\n$1\r\na\r\n"
-	testing.expect_value(t, batch_test_keys(t, get, &db), 0)
-	testing.expect_value(t, batch_test_keys(t, get + get + get, &db), 2)
-	testing.expect_value(t, batch_test_keys(t, mset + mset, &db), 2)
-	testing.expect_value(t, batch_test_keys(t, get + ping + bitop + eval, &db), 3)
+	testing.expect_value(t, batch_test_keys(t, get, &db), 1)
+	testing.expect_value(t, batch_test_keys(t, get + get + get, &db), 3)
+	testing.expect_value(t, batch_test_keys(t, mset + mset, &db), 4)
+	testing.expect_value(t, batch_test_keys(t, get + ping + bitop + eval, &db), 4)
+	testing.expect_value(t, batch_test_keys(t, ping + bitop + eval, &db), 3)
 	long := batch_test_concat("*2\r\n$3\r\nGET\r\n$513\r\n", batch_test_concat(string(make([]u8, 513, context.temp_allocator)), "\r\n"))
 	edge := batch_test_concat("*2\r\n$3\r\nGET\r\n$512\r\n", batch_test_concat(string(make([]u8, 512, context.temp_allocator)), "\r\n"))
-	testing.expect_value(t, batch_test_keys(t, batch_test_concat(batch_test_concat(get, long), edge), &db), 1)
+	testing.expect_value(t, batch_test_keys(t, batch_test_concat(batch_test_concat(get, long), edge), &db), 2)
 	wide := "*65\r\n$4\r\nMSET\r\n"
 	for _ in 0 ..< 32 {
 		wide = batch_test_concat(wide, "$1\r\nk\r\n$1\r\nv\r\n")
@@ -278,7 +280,7 @@ batch_scan_prefetches_registry_keys_after_the_first_command_within_its_caps :: p
 	rehashing := db
 	rehashing.rehash_idx = 0
 	rehashing.t[1] = db.t[0]
-	testing.expect_value(t, batch_test_keys(t, get + get, &rehashing), 1)
+	testing.expect_value(t, batch_test_keys(t, get + get, &rehashing), 2)
 }
 
 @(test)
@@ -292,23 +294,105 @@ batch_scan_records_directory_hashes_only_while_records_are_owned :: proc(t: ^tes
 	if keyspace_records != 0 || len(keyspace_index) != 0 { return }
 	b: Batch
 	batch_test_scan(t, get + other + get, 0, &db, &b)
-	testing.expect_value(t, b.keys, 2)
+	testing.expect_value(t, b.keys, 3)
 	testing.expect_value(t, b.owned, 0)
 	keyspace_records = 1
 	defer keyspace_records = 0
 	batch_test_scan(t, get + other + get, 0, &db, &b)
-	testing.expect_value(t, b.keys, 2)
-	testing.expect_value(t, b.owned, 2)
-	testing.expect_value(t, b.hashes[0], hash_bytes(batch_test_bytes("b")) ~ (u64(db.id) * WY_P1))
-	testing.expect_value(t, b.hashes[1], hash_bytes(batch_test_bytes("a")) ~ (u64(db.id) * WY_P1))
+	testing.expect_value(t, b.keys, 3)
+	testing.expect_value(t, b.owned, 3)
+	testing.expect_value(t, b.hashes[0], hash_bytes(batch_test_bytes("a")) ~ (u64(db.id) * WY_P1))
+	testing.expect_value(t, b.hashes[1], hash_bytes(batch_test_bytes("b")) ~ (u64(db.id) * WY_P1))
+	testing.expect_value(t, b.hashes[2], hash_bytes(batch_test_bytes("a")) ~ (u64(db.id) * WY_P1))
 	empty := Db{rehash_idx = -1, id = 3}
 	batch_test_scan(t, get + other, 0, &empty, &b)
 	testing.expect_value(t, b.count, 2)
-	testing.expect_value(t, b.keys, 1)
-	testing.expect_value(t, b.owned, 1)
-	testing.expect_value(t, b.hashes[0], hash_bytes(batch_test_bytes("b")) ~ (u64(db.id) * WY_P1))
+	testing.expect_value(t, b.keys, 2)
+	testing.expect_value(t, b.owned, 2)
+	testing.expect_value(t, b.hashes[0], hash_bytes(batch_test_bytes("a")) ~ (u64(db.id) * WY_P1))
+	testing.expect_value(t, b.hashes[1], hash_bytes(batch_test_bytes("b")) ~ (u64(db.id) * WY_P1))
 	keyspace_records = 0
 	batch_test_scan(t, get + other, 0, &empty, &b)
 	testing.expect_value(t, b.count, 0)
 	testing.expect_value(t, b.owned, 0)
+}
+
+Batch_Test_Read :: struct {
+	scans:    int,
+	keys:     int,
+	recorded: int,
+	looked:   int,
+}
+
+batch_test_read :: proc(t: ^testing.T, input: string, db: ^Db) -> Batch_Test_Read {
+	buffer := make([]u8, len(input), context.temp_allocator)
+	copy(buffer, input)
+	c := Conn{fd = -1, db = db, kind = .Redis, rbuf = raw_data(buffer), rlen = len(input), rcap = len(buffer)}
+	scratch := request_parser.Scratch{args = make([][]u8, 64, context.temp_allocator)}
+	out: Batch_Test_Read
+	b: Batch = ---
+	b.ahead = c.rpos
+	b.count, b.next, b.keys, b.owned = 0, 0, 0, 0
+	for c.rpos < c.rlen {
+		start := c.rpos
+		result := request_parser.parse_array(buffer[c.rpos:c.rlen], &scratch, request_parser.Limits{bulk_max = 1 << 20, base_offset = c.rpos})
+		if result.kind != .Command {
+			break
+		}
+		c.rpos += result.consumed
+		if result.argc == 0 {
+			continue
+		}
+		name := scratch.args[0]
+		ahead := b.ahead
+		expected: ^Cmd_Slot
+		for i in b.next ..< b.count {
+			if b.commands[i].start == start {
+				expected = b.commands[i].slot
+				break
+			}
+		}
+		slot := batch_command_slot(&c, &b, start, name)
+		testing.expect(t, slot == lookup_entry(name))
+		if b.ahead != ahead {
+			out.scans += 1
+			out.keys += b.keys
+			testing.expect_value(t, b.next, 0)
+			testing.expect(t, b.count == 0 || b.commands[0].start == c.rpos)
+			testing.expect(t, b.ahead > c.rpos)
+		}
+		if expected != nil && slot == expected {
+			out.recorded += 1
+		} else {
+			out.looked += 1
+		}
+	}
+	return out
+}
+
+@(test)
+batch_scan_skips_a_read_with_one_request_and_runs_again_when_a_read_holds_more :: proc(t: ^testing.T) {
+	storage: Batch_Test_Table
+	db := Db{rehash_idx = -1}
+	db.t[0] = Table{ctrl = &storage.ctrl[0], slots = soa_zip(meta = storage.metas[:], key = storage.keys[:], val = storage.vals[:]), groups = 1, cap = GROUP_SLOTS}
+	get :: "*2\r\n$3\r\nGET\r\n$1\r\na\r\n"
+	set :: "*3\r\n$3\r\nset\r\n$1\r\nb\r\n$1\r\nv\r\n"
+	ping :: "*1\r\n$4\r\nPING\r\n"
+	empty :: "*0\r\n"
+	single := batch_test_read(t, get, &db)
+	testing.expect_value(t, single, Batch_Test_Read{looked = 1})
+	testing.expect_value(t, batch_test_read(t, set, &db), Batch_Test_Read{looked = 1})
+	testing.expect_value(t, batch_test_read(t, empty + get, &db), Batch_Test_Read{looked = 1})
+	testing.expect_value(t, batch_test_read(t, get + set + ping, &db), Batch_Test_Read{scans = 1, keys = 1, recorded = 2, looked = 1})
+	testing.expect_value(t, batch_test_read(t, get, &db), single)
+	testing.expect_value(t, batch_test_read(t, get + get, &db), Batch_Test_Read{scans = 1, keys = 1, recorded = 1, looked = 1})
+	testing.expect_value(t, batch_test_read(t, get + empty + get, &db), Batch_Test_Read{scans = 1, keys = 1, recorded = 1, looked = 1})
+	testing.expect_value(t, batch_test_read(t, get + "*2\r\n$3\r\nGET\r\n$1", &db), Batch_Test_Read{scans = 1, looked = 1})
+	many := ""
+	for _ in 0 ..< BATCH_AHEAD_COMMANDS + 8 {
+		many = batch_test_concat(many, get)
+	}
+	testing.expect_value(t, batch_test_read(t, many, &db), Batch_Test_Read{scans = 2, keys = BATCH_AHEAD_KEYS + 7, recorded = BATCH_AHEAD_COMMANDS + 7, looked = 1})
+	idle := Db{rehash_idx = -1}
+	testing.expect_value(t, batch_test_read(t, get + set + ping, &idle), Batch_Test_Read{scans = 2, looked = 3})
 }

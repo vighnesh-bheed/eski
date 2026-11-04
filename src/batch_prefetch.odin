@@ -86,6 +86,14 @@ batch_slot :: #force_inline proc(b: ^Batch, start: int, name: []u8) -> ^Cmd_Slot
 	return lookup_entry(name)
 }
 
+batch_command_slot :: #force_inline proc(c: ^Conn, b: ^Batch, start: int, name: []u8) -> ^Cmd_Slot {
+	slot := batch_slot(b, start, name)
+	if c.rpos >= b.ahead && c.rpos < c.rlen {
+		batch_scan(c, b)
+	}
+	return slot
+}
+
 batch_scan :: proc(c: ^Conn, b: ^Batch) #no_bounds_check {
 	from := c.rpos
 	b.count, b.next, b.keys, b.owned = 0, 0, 0, 0
@@ -126,7 +134,7 @@ batch_scan :: proc(c: ^Conn, b: ^Batch) #no_bounds_check {
 					slot = lookup_entry(name)
 					seen, seen_slot = name, slot
 				}
-				if slot != nil && slot.keys.first > 0 && b.count > 0 {
+				if slot != nil && slot.keys.first > 0 {
 					next, last, step, write = int(slot.keys.first), key_range_last(slot.keys, int(count)), int(slot.keys.step), slot.keys.write
 				}
 			} else if i == next && i <= last {
