@@ -10,9 +10,9 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = Path(__file__).resolve().parent
-QUALIFIED_SOURCE = 'a73554637538d725ed785bb5e3c1ef1cabf0ae92d21f308efbd1db8a56c8d07b'
-QUALIFIED_SERVER = '2ed19688bc2f38d941aae69ddde96dffa48cf23d6081f7e831b74410055a4aa3'
-QUALIFIED_TSAN_SERVER = 'f5dbb97bc5e3993205670cbccbfe1f1cad018595b0d943cdf3444a01bcd4cc89'
+QUALIFIED_SOURCE = 'a94ed800e7b613cf43627a47e208fccf38e3e899dd187ac3e67b78a03685c19e'
+QUALIFIED_SERVER = '12e631e338e6097be3029ddbe794e210723a094bebd55a7cae509169b5c42024'
+QUALIFIED_TSAN_SERVER = '9e1f7df8dda63f4ef4693c49bf1871b0203224e00845c5c0525bf63041ea1685'
 INVARIANTS = ['callback_lifetime_requires_join_not_park', 'no_fork_snapshot_with_live_worker_owners',
               'accepted_mutations_and_effects_reconciled_before_snapshot',
               'snapshot_contains_all_accepted_mutations', 'ordinary_libc_fork_runs_registered_hooks',

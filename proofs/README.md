@@ -25,7 +25,7 @@ The first phase contains 276 named contract theorems. The complete kernel invent
 | 6. Memory accounting | 24 | 1,527 pool accounting operations and rollback/ownership checks, plus table-byte, timed-key and key-cell counters on each of the 12,275 table rows |
 | 9. Bit and integer operations | 35 | 49,629 programs containing 100,155 operations |
 
-These checks passed in a fresh aggregate rebuild with Lean 4.35.0 and the repository's Odin toolchain. Each project records its own source, artifact and corpus identities. Validation/traversal rows, whole-parser fast/slow comparisons, ordinary-key translator fixtures and actual Odin correspondence remain tests where the individual documentation says so; their presence does not extend the formal proof claims.
+These checks passed in a fresh aggregate rebuild of development commit 8ac08a9 on 4 November 2026 with Lean 4.35.0 and the repository's Odin toolchain. Each project records its own source, artifact and corpus identities. Validation/traversal rows, whole-parser fast/slow comparisons, ordinary-key translator fixtures and actual Odin correspondence remain tests where the individual documentation says so; their presence does not extend the formal proof claims.
 
 ## Run the first phase
 
