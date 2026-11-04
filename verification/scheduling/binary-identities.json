@@ -2,7 +2,7 @@
   "qualification": "build.sh release and thread-sanitizer builds of the runtime source pinned in source-sha256.json; the receipt fields identify the release and thread-sanitizer build receipts",
   "qualified_build_receipt_sha256": "a4871e50f4d30985ec6832038e7416facfe7f76ac2175073777781fcb8e8d763",
   "qualified_install_receipt_sha256": "14f02dbf6e126d4bed0519f9a97e8604dc2b9905f6694aaea38903d5140f0b63",
-  "release_sha256": "2ed19688bc2f38d941aae69ddde96dffa48cf23d6081f7e831b74410055a4aa3",
-  "source_sha256": "a73554637538d725ed785bb5e3c1ef1cabf0ae92d21f308efbd1db8a56c8d07b",
-  "tsan_sha256": "f5dbb97bc5e3993205670cbccbfe1f1cad018595b0d943cdf3444a01bcd4cc89"
+  "release_sha256": "12e631e338e6097be3029ddbe794e210723a094bebd55a7cae509169b5c42024",
+  "source_sha256": "a94ed800e7b613cf43627a47e208fccf38e3e899dd187ac3e67b78a03685c19e",
+  "tsan_sha256": "9e1f7df8dda63f4ef4693c49bf1871b0203224e00845c5c0525bf63041ea1685"
 }
