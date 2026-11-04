@@ -97,7 +97,7 @@ Excluded values have no median or badge score. Each exclusion retains its record
 
 ## Fill measurement
 
-The separate fill workload uses 10,000,000 generated keys of 64 bytes at pipeline 32. The stored-key count in the receipt is retained as measured.
+The separate fill workload uses 10,000,000 generated keys of 64 bytes at pipeline 32. The stored-key count in the receipt is retained as measured. This recorded fill predates the settle step and read memory as soon as the load generator returned; a fill now reads it once used memory has been stable for three seconds and the server reports no keyspace rehash in progress, at most sixty seconds after the fill.
 
 | Engine | Stored keys | RSS bytes/key | Used bytes/key | Container peak bytes/key | Fill ops/s | p99 ms | Worst request ms |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -165,7 +165,7 @@ The commands use `<revision>` for the Eski revision, `<name>` for the run name, 
 
    Check progress with `exam.sh status` every few minutes at most. The calibration runs its workload once per engine and admits the benchmark only when every engine is valid. `DONE` and `DONE WITH EXCLUSIONS` continue below; an excluded repetition keeps its reason and is never retried. `HELD` and `INTERRUPTED` continue with `<base>/<name>/exam.sh resume` once the cause is gone. A gate hold during the calibration also reads "calibration did not pass for every engine" on the Reason line while the phase progress still shows cases remaining; its unmet gates are listed under `phase_status.pause_reasons` of `exam.sh status --json`, and it can be resumed. A calibration whose cases all finished with an invalid engine cannot be resumed; install a new root after the fix. Whenever the controller stops it writes `exports/results.tar.gz`, `exports/inventory.json` and `exports/receipt.json`; an export after a resume is `results-2.tar.gz`, and the collector takes the archive the receipt names.
 
-5. After `DONE` or `DONE WITH EXCLUSIONS`, run the fill. It refuses while the controller is active, waits for each engine's cooling gate from the design's `fill` block, stores 10,000,000 keys of 64 B per engine with the server core and memory caps of the design, and writes `exports/fill-<stamp>.tar.gz` and `exports/fill-receipt.json`. It exits with status 1 when an engine's fill is not valid; that engine keeps its reason.
+5. After `DONE` or `DONE WITH EXCLUSIONS`, run the fill. It refuses while the controller is active, waits for each engine's cooling gate from the design's `fill` block, stores 10,000,000 keys of 64 B per engine with the server core and memory caps of the design, reads the memory once used memory has been stable for three seconds and the server reports no keyspace rehash in progress, polling once a second for at most sixty seconds after the fill, and writes `exports/fill-<stamp>.tar.gz` and `exports/fill-receipt.json`. It exits with status 1 when an engine's fill is not valid; that engine keeps its reason.
 
    ```sh
    ssh user@HOST <base>/<name>/fill.sh

@@ -155,7 +155,8 @@ def fill_result(path):
                 started_at=value.get('started_at'), finished_at=value.get('finished_at'), source_sha256=sha(path),
                 engines=[{key: entry.get(key) for key in ('target', 'label', 'status', 'error', 'dbsize', 'used_memory', 'used_memory_rss', 'bytes_per_key_rss',
                                                            'bytes_per_key_used', 'cgroup_peak_bytes', 'bytes_per_key_cgroup_peak', 'ops_per_sec', 'p99_ms',
-                                                           'max_ms', 'version', 'image_id', 'package_c_before', 'package_c_after')}
+                                                           'max_ms', 'version', 'image_id', 'package_c_before', 'package_c_after', 'settled', 'settle_s',
+                                                           'settle_timeout_s')}
                          for entry in value.get('engines') or []])
 
 

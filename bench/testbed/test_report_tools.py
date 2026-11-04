@@ -104,9 +104,12 @@ def make_results(root):
 def make_fill(path):
     dump(path, dict(schema='eski-testbed-fill-v1', stamp='20261028-120000', design=dict(keys=10000000, data_size=64, pipeline=32),
                     machine=dict(cpu_model='Fixture CPU @ 2.20GHz'), resources=dict(server_cpus='1'),
-                    engines=[dict(target='eski-docker', label='Eski', status='valid', dbsize=10000000, bytes_per_key_rss=96.5, bytes_per_key_used=90.1, ops_per_sec=1.8e6, max_ms=31.2),
-                             dict(target='redis', label='Redis 7.4.12', status='valid', dbsize=10000000, bytes_per_key_rss=120.0, bytes_per_key_used=110.0, ops_per_sec=1.5e6, max_ms=40.0),
-                             dict(target='valkey', label='Valkey 8.1.11', status='valid', dbsize=10000000, bytes_per_key_rss=100.0, bytes_per_key_used=95.0, ops_per_sec=1.6e6, max_ms=35.0),
+                    engines=[dict(target='eski-docker', label='Eski', status='valid', dbsize=10000000, bytes_per_key_rss=96.5, bytes_per_key_used=90.1, ops_per_sec=1.8e6, max_ms=31.2,
+                                  settled=True, settle_s=5.43, settle_samples=6, settle_timeout_s=60),
+                             dict(target='redis', label='Redis 7.4.12', status='valid', dbsize=10000000, bytes_per_key_rss=120.0, bytes_per_key_used=110.0, ops_per_sec=1.5e6, max_ms=40.0,
+                                  settled=False, settle_s=60.38, settle_samples=61, settle_timeout_s=60),
+                             dict(target='valkey', label='Valkey 8.1.11', status='valid', dbsize=10000000, bytes_per_key_rss=100.0, bytes_per_key_used=95.0, ops_per_sec=1.6e6, max_ms=35.0,
+                                  settled=True, settle_s=3.41, settle_samples=4, settle_timeout_s=60),
                              dict(target='dragonfly', label='Dragonfly 2.0.2', status='failed', error='harness exit 1, None keys')]))
 
 
@@ -151,6 +154,8 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(dataset['machine']['cpus'], dict(server=[1], client=[3, 4], control=[5, 11]))
         self.assertEqual(dataset['machine']['mem_total_bytes'], 16000000 * 1024)
         self.assertEqual(dataset['fill']['engines'][0]['bytes_per_key_rss'], 96.5)
+        self.assertEqual([(row['settled'], row['settle_s'], row['settle_timeout_s']) for row in dataset['fill']['engines']],
+                         [(True, 5.43, 60), (False, 60.38, 60), (True, 3.41, 60), (None, None, None)])
         self.assertEqual(dataset['run']['workflow_status'], 'DONE WITH EXCLUSIONS')
         self.assertTrue(all(row['mem'] < 100 * 1024 ** 2 for row in dataset['rows'] if row['mem']))
         json.dumps(dataset, allow_nan=False)
@@ -190,6 +195,8 @@ class ReportTests(unittest.TestCase):
         fill = (output / 'fill-bytes-per-key.svg').read_text()
         self.assertIn('96.5 B per key', fill)
         self.assertIn('not measured: harness exit 1', fill)
+        self.assertIn('worst request 31.2 ms, memory read 5.4 s after the fill</title>', fill)
+        self.assertIn('memory not settled within 60 s, last read 60.4 s after the fill</title>', fill)
         self.assertIn('Fixture CPU', light)
         self.assertIn('excluded repetition 2', (output / 'latency-p99.svg').read_text())
 
@@ -233,6 +240,8 @@ class ReportTests(unittest.TestCase):
         ratio = cells[('get64-p1', 'eski-docker')]['ops']['median'] / cells[('get64-p1', 'redis')]['ops']['median']
         self.assertIn('%.2fx Redis 7.4.12' % ratio, text)
         self.assertIn('Fixture fill text.', text)
+        self.assertIn('Settle: Eski memory read 5.4 s after the fill; Redis 7.4.12 memory not settled within 60 s, last read 60.4 s after the fill; '
+                      'Valkey 8.1.11 memory read 3.4 s after the fill.', text)
         self.assertIn('<title>Eski Engine Comparison</title>', text)
         self.assertIn('<p><b>Power gate.</b> The power gate was mains: a power supply device of type Mains had to be present', text)
 
@@ -249,6 +258,7 @@ class ReportTests(unittest.TestCase):
         recorded = json.loads((Path(__file__).with_name('runs') / 'comparison-v1' / 'dataset.json').read_text())
         self.assertNotIn('power_source', recorded['machine'])
         text = page.build(recorded)
+        self.assertIn('This fill predates the settle step: its memory was read as soon as the load generator returned.', text)
         self.assertLess(text.index('<p><b>Gates.</b>'), text.index('<p><b>Power gate.</b> The power gate was mains:'))
         self.assertLess(text.index('<p><b>Power gate.</b>'), text.index('<p><b>Quality.</b>'))
 

@@ -483,6 +483,12 @@ def engine_label(dataset, engine, versions=False):
     return str(engine.get('label') or ENGINE_LABELS.get(engine['target'], engine['target']))
 
 
+def settle_cell(engine):
+    if type(engine.get('settle_s')) not in (int, float):
+        return '—'
+    return '%.1f' % engine['settle_s'] + ('' if engine.get('settled') is True else ', not settled')
+
+
 def numeric(value, metric):
     if value is None:
         return '—'
@@ -764,7 +770,9 @@ def new_machine_section(dataset):
              'be resumed; install a new root after the fix. Whenever the controller stops it writes `exports/results.tar.gz`, `exports/inventory.json` and `exports/receipt.json`; an export after a '
              'resume is `results-2.tar.gz`, and the collector takes the archive the receipt names.', '',
              '5. After `DONE` or `DONE WITH EXCLUSIONS`, run the fill. It refuses while the controller is active, waits for each engine\'s cooling gate from the '
-             'design\'s `fill` block, stores 10,000,000 keys of 64 B per engine with the server core and memory caps of the design, and writes '
+             'design\'s `fill` block, stores 10,000,000 keys of 64 B per engine with the server core and memory caps of the design, reads the memory once used '
+             'memory has been stable for three seconds and the server reports no keyspace rehash in progress, polling once a second for at most sixty seconds '
+             'after the fill, and writes '
              '`exports/fill-<stamp>.tar.gz` and `exports/fill-receipt.json`. It exits with status 1 when an engine\'s fill is not valid; that engine keeps its reason.', '',
              '   ```sh', '   ssh user@HOST <base>/<name>/fill.sh', '   ```', '',
              '6. Fetch both archives. Each fetch reads the receipt on the machine, copies the archive it names into `bench/results/<name>/`, checks its sha256 and size '
@@ -882,12 +890,23 @@ def render_outputs(commands, baseline, observed, dataset, readme, ab_floor=None)
         for engine in dataset['engines']:
             for row in cells[(workload['key'], engine['target'])]['excluded']:
                 exclusions.append('| %s | %s | %d | %s |' % (md(workload['name']), md(engine_label(dataset, engine)), row['repetition'], md('; '.join(row['reasons']))))
-    fill_rows = ['| Engine | Stored keys | RSS bytes/key | Used bytes/key | Container peak bytes/key | Fill ops/s | p99 ms | Worst request ms |', '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |']
-    for engine in (dataset.get('fill') or {}).get('engines', []):
+    fill_engines = (dataset.get('fill') or {}).get('engines', [])
+    settle = any('settled' in engine for engine in fill_engines)
+    fill_rows = ['| Engine | Stored keys | RSS bytes/key | Used bytes/key | Container peak bytes/key | Fill ops/s | p99 ms | Worst request ms |' + (' Memory read after s |' if settle else ''),
+                 '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |' + (' ---: |' if settle else '')]
+    for engine in fill_engines:
         if engine.get('status') != 'valid':
-            fill_rows.append('| %s | excluded | — | — | — | — | — | — |' % md(ENGINE_LABELS.get(engine.get('target'), engine.get('label', 'unknown'))))
+            fill_rows.append('| %s | excluded | — | — | — | — | — | — |' % md(ENGINE_LABELS.get(engine.get('target'), engine.get('label', 'unknown'))) + (' — |' if settle else ''))
         else:
-            fill_rows.append('| %s | %s | %.2f | %.2f | %.2f | %s | %.3f | %.3f |' % (md(ENGINE_LABELS.get(engine['target'], engine['label'])), '{:,}'.format(engine['dbsize']), engine['bytes_per_key_rss'], engine['bytes_per_key_used'], engine['bytes_per_key_cgroup_peak'], numeric(engine['ops_per_sec'], 'ops'), engine['p99_ms'], engine['max_ms']))
+            fill_rows.append('| %s | %s | %.2f | %.2f | %.2f | %s | %.3f | %.3f |' % (md(ENGINE_LABELS.get(engine['target'], engine['label'])), '{:,}'.format(engine['dbsize']), engine['bytes_per_key_rss'], engine['bytes_per_key_used'], engine['bytes_per_key_cgroup_peak'], numeric(engine['ops_per_sec'], 'ops'), engine['p99_ms'], engine['max_ms'])
+                             + (' %s |' % settle_cell(engine) if settle else ''))
+    if settle:
+        settle_text = ('Memory is read once used memory has been stable for three seconds and the server reports no keyspace rehash in progress, polled once a '
+                       'second for at most sixty seconds after the fill; the last column gives the seconds from the end of the fill to that reading, and an engine '
+                       'that did not settle keeps its last reading.')
+    else:
+        settle_text = ('This recorded fill predates the settle step and read memory as soon as the load generator returned; a fill now reads it once used '
+                       'memory has been stable for three seconds and the server reports no keyspace rehash in progress, at most sixty seconds after the fill.')
     benchmark_page = ('# Recorded benchmark comparison\n\nGenerated from `' + run + '/dataset.json`, schema `%s`. '
                       'The benchmark phase contains %d planned repetitions, %d valid, %d excluded and %d included client-limited measurements. '
                       'The medians and ranges below are recomputed from included benchmark rows; calibration and excluded rows do not enter them.\n\n'
@@ -910,12 +929,12 @@ def render_outputs(commands, baseline, observed, dataset, readme, ab_floor=None)
                       '## Excluded repetitions\n\n%s\n\nExcluded values have no median or badge score. '
                       'Each exclusion retains its recorded reason; client_limited is a separate annotation on included measurements.\n\n'
                       '## Fill measurement\n\nThe separate fill workload uses %s generated keys of %s bytes at pipeline %s. '
-                      'The stored-key count in the receipt is retained as measured.\n\n%s\n') % (
+                      'The stored-key count in the receipt is retained as measured. %s\n\n%s\n') % (
                           dataset['schema'], dataset['counts']['planned'], dataset['counts']['valid'], dataset['counts']['excluded'], dataset['counts']['client_limited'],
                           dataset.get('machine', {}).get('cpu_model', 'not recorded'), numeric(dataset.get('machine', {}).get('mem_total_bytes', 0), 'mem')+' MiB',
                           ','.join(map(str, dataset.get('machine', {}).get('cpus', {}).get('server', []))), ','.join(map(str, dataset.get('machine', {}).get('cpus', {}).get('client', []))), ','.join(map(str, dataset.get('machine', {}).get('cpus', {}).get('control', []))),
                           method_text, '\n'.join(identities), benchmark_table(dataset, cells), ratio, ' (client limited)' if limited else '', '\n'.join(exclusions),
-                          '{:,}'.format((dataset.get('fill') or {}).get('design', {}).get('keys', 0)), (dataset.get('fill') or {}).get('design', {}).get('data_size', 'not recorded'), (dataset.get('fill') or {}).get('design', {}).get('pipeline', 'not recorded'), '\n'.join(fill_rows))
+                          '{:,}'.format((dataset.get('fill') or {}).get('design', {}).get('keys', 0)), (dataset.get('fill') or {}).get('design', {}).get('data_size', 'not recorded'), (dataset.get('fill') or {}).get('design', {}).get('pipeline', 'not recorded'), settle_text, '\n'.join(fill_rows))
     benchmark_page += '\n' + new_machine_section(dataset) + '\n' + local_section(validate_ab_floor(ab_floor))
     blocks = {'CONFORMANCE': conformance_block, 'BENCHMARKS': benchmark_block, 'COMMANDS': commands_block}
     updated_readme = replace_blocks(readme, blocks)

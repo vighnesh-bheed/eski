@@ -160,7 +160,8 @@ for target in targets:
             value = (owner.get('cgroup') or {}).get('memory.peak')
             if owner.get('event') == 'before-stop' and owner.get('role') == 'server' and str(owner.get('artifact_dir') or '').endswith('/run/' + target) and isinstance(value, (int, float)):
                 peaks.append(value)
-    for field in ('keys_requested', 'dbsize', 'used_memory', 'used_memory_rss', 'bytes_per_key_rss', 'bytes_per_key_used', 'ops_per_sec', 'p50_ms', 'p99_ms', 'p999_ms', 'max_ms', 'error'):
+    for field in ('keys_requested', 'dbsize', 'used_memory', 'used_memory_rss', 'bytes_per_key_rss', 'bytes_per_key_used', 'ops_per_sec', 'p50_ms', 'p99_ms', 'p999_ms', 'max_ms', 'error',
+                  'settled', 'settle_s', 'settle_samples', 'settle_timeout_s'):
         entry[field] = record.get(field)
     entry['cgroup_peak_bytes'] = max(peaks) if peaks else None
     entry['bytes_per_key_cgroup_peak'] = entry['cgroup_peak_bytes'] / entry['dbsize'] if entry['cgroup_peak_bytes'] and entry['dbsize'] else None
@@ -172,7 +173,8 @@ for target in targets:
     if not valid and not entry.get('error'):
         entry['error'] = 'harness exit %d, %s keys' % (code, record.get('dbsize'))
     results.append(entry)
-    print('[%s] %s: %s B/key resident, %s keys, %s ops/s, worst request %s ms' % (target, entry['status'], entry['bytes_per_key_rss'], entry['dbsize'], entry['ops_per_sec'], entry['max_ms']), flush=True)
+    print('[%s] %s: %s B/key resident, %s keys, %s ops/s, worst request %s ms, memory read %s s after the fill, settled %s' % (
+        target, entry['status'], entry['bytes_per_key_rss'], entry['dbsize'], entry['ops_per_sec'], entry['max_ms'], entry['settle_s'], entry['settled']), flush=True)
 processors = [line.split(':', 1)[1].strip() for line in (read('/proc/cpuinfo') or '').splitlines() if line.startswith('model name')]
 fill_result = dict(schema='eski-testbed-fill-v1', root=root.name, stamp=stamp, design=fill, engines=results,
                    machine=dict(hostname=socket.gethostname(), kernel=platform.release(), cpu_model=processors[0] if processors else None),
