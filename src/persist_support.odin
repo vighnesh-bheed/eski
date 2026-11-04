@@ -295,6 +295,7 @@ sleep_microseconds :: proc "contextless" (us: i64) {
 	if us <= 0 {
 		return
 	}
+	keyspace_signal_owed()
 	pending := linux.Time_Spec {
 		time_sec  = uint(us) / 1_000_000,
 		time_nsec = uint(us) % 1_000_000 * 1_000,

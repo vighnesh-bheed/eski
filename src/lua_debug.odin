@@ -40,6 +40,7 @@ lua_debug_shutdown :: proc() {
 		ll_int(&line, i64(pid))
 		ll_end(&line)
 		linux.kill(pid, .SIGTERM)
+		keyspace_signal_owed()
 		status: u32
 		for {
 			_, err := linux.wait4(pid, &status, {}, nil)

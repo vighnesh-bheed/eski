@@ -324,6 +324,7 @@ conn_net_wait :: proc(c: ^Conn, for_write: bool, timeout_ms: i32) -> (ready: boo
 		} else if !for_write && conn_net_pending(c) { return true, .NONE }
 	}
 	fds := [1]linux.Poll_Fd{{fd = c.fd, events = {.OUT} if want_write else {.IN}}}
+	keyspace_signal_owed()
 	count, problem := linux.poll(fds[:], timeout_ms)
 	if problem != .NONE { return false, problem }
 	return count > 0, .NONE

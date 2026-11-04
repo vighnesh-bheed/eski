@@ -60,8 +60,10 @@ harness_pool :: proc() {
 	second_data: Harness_Data
 	second := ks.Job{op = .Custom, record = b, records = []^ks.Record{b}, executor = harness_increment, data = &second_data}
 	assert(ks.submit(&p, &first))
+	ks.signal_owed(&p)
 	harness_wait(&gate.entered)
 	assert(ks.submit(&p, &second))
+	ks.signal_owed(&p)
 	start, _ := linux.clock_gettime(.MONOTONIC)
 	polled: ^ks.Job
 	for polled == nil {
@@ -99,6 +101,7 @@ harness_pool :: proc() {
 	abort_gate: Harness_Data
 	abort_job := ks.Job{op = .Custom, record = a, records = []^ks.Record{a, b}, executor = harness_abort, data = &abort_gate}
 	assert(ks.submit(&p, &abort_job))
+	ks.signal_owed(&p)
 	harness_wait(&abort_gate.entered)
 	cancel_data: Harness_Data
 	cancel_job := ks.Job{op = .Custom, record = b, records = []^ks.Record{b, a}, executor = harness_increment, data = &cancel_data}

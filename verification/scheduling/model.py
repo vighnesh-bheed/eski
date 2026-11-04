@@ -22,6 +22,7 @@ INVARIANTS = (
     'socket_replies_follow_request_order',
     'connection_inflight_within_bound',
     'coordinator_inline_only_without_unpublished_jobs',
+    'owed_owners_signalled_before_coordinator_waits',
 )
 
 
@@ -74,6 +75,7 @@ class State:
     fencing: bool = False
     replay: bool = False
     parked: tuple = (True, True)
+    owed: tuple = (False, False)
     deciding: tuple = (False, False)
     notify: tuple = (False, False)
     efd: bool = False
@@ -150,7 +152,7 @@ def terminal(scenario, state):
             len(state.published) == len(state.accepted) and
             not state.outstanding and not state.completed and not state.staged and
             not state.halted and not state.replay and not state.fencing and
-            all(w == -1 for w in state.workers) and all(state.parked) and
+            all(w == -1 for w in state.workers) and all(state.parked) and not any(state.owed) and
             not any(state.notify) and not any(state.deciding) and not state.efd and
             state.coordinator == 'sleep' and not state.reported and
             (not scenario.pause or state.pause_phase == 3))
@@ -184,6 +186,10 @@ def take_completions(state, phase):
         state, coordinator=phase, completed=(), staged=state.staged + state.completed,
         outstanding=state.outstanding - len(state.completed),
         replay=state.replay or any(state.failed[j] for j in state.completed))
+
+
+def may_sleep(s, mutant):
+    return mutant == 'sleep_without_signal' or not any(s.owed)
 
 
 def inline_allowed(s, mutant):
@@ -242,14 +248,16 @@ def successors(scenario, s, mutant=''):
             else:
                 queues = s.queues
                 parked = s.parked
+                owed = s.owed
                 for owner in owners_of(scenario, j, mutant):
                     queues = change_tuple(queues, owner, queues[owner] + (j,))
+                    owed = change_tuple(owed, owner, owed[owner] or parked[owner])
                     parked = change_tuple(parked, owner, False)
                 yield 'admit_assign_sequence', dataclasses.replace(
                     wake(s), admission=s.admission + 1, accepted=s.accepted + (j,), queues=queues, parked=parked,
-                    stages=change_tuple(s.stages, j, 'queued'), outstanding=s.outstanding + 1)
+                    owed=owed, stages=change_tuple(s.stages, j, 'queued'), outstanding=s.outstanding + 1)
     for w in range(2):
-        ready = s.workers[w] == -1 and not s.parked[w] and not s.notify[w] and not s.deciding[w]
+        ready = s.workers[w] == -1 and not s.parked[w] and not s.owed[w] and not s.notify[w] and not s.deciding[w]
         if ready and s.queues[w]:
             j = s.queues[w][0]
             yield 'worker_arrive', dataclasses.replace(
@@ -304,6 +312,8 @@ def successors(scenario, s, mutant=''):
             else:
                 yield 'worker_commit', dataclasses.replace(s, stages=change_tuple(s.stages, j, 'executed'))
     if not blocked:
+        if s.coordinator != 'sleep' and any(s.owed):
+            yield 'coordinator_signal_owed', dataclasses.replace(s, owed=(False,) * len(s.owed))
         if s.coordinator == 'sleep' and s.efd:
             yield 'coordinator_wake_notified', dataclasses.replace(s, coordinator='read', reported=True)
         if s.coordinator == 'read':
@@ -311,7 +321,7 @@ def successors(scenario, s, mutant=''):
                 yield 'coordinator_poll', take_completions(s, 'take')
             else:
                 yield read_notification(s, 'take')
-        if s.coordinator == 'take':
+        if s.coordinator == 'take' and may_sleep(s, mutant):
             if mutant == 'take_before_read':
                 yield read_notification(s, 'sleep')
             else:
@@ -354,7 +364,8 @@ def successors(scenario, s, mutant=''):
     if scenario.pause:
         if s.pause_phase == 0 and s.coordinator != 'take':
             waiting = 4 if mutant == 'pause_registers_after_check' and not quiescent(s) else 1
-            yield 'pause_close_admission', dataclasses.replace(wake(s), pause_phase=waiting,
+            owed = s.owed if mutant == 'pause_without_signal' else (False,) * len(s.owed)
+            yield 'pause_close_admission', dataclasses.replace(wake(s), pause_phase=waiting, owed=owed,
                                                                quiescent_wake=quiescent(s))
         if s.pause_phase == 4:
             yield 'pause_register_wait', dataclasses.replace(s, pause_phase=1)
@@ -402,10 +413,14 @@ def check(scenario, s, edge=None, previous=None):
             INVARIANTS[4], 'admission partition')
     if edge == 'reject':
         require(previous.accepted == s.accepted and previous.outstanding == s.outstanding and
-                previous.queues == s.queues and previous.values == s.values and previous.parked == s.parked,
+                previous.queues == s.queues and previous.values == s.values and previous.parked == s.parked and
+                previous.owed == s.owed,
                 INVARIANTS[4], 'rejected job changed sequence, resources, data or worker wakeups')
     for w in range(2):
         require(not s.parked[w] or not s.queues[w], INVARIANTS[8], f'worker {w} parked with queued jobs {s.queues[w]}')
+    require(not any(s.owed) or s.coordinator != 'sleep' and s.pause_phase not in (1, 4), INVARIANTS[14],
+            f'owners {[w for w, owed in enumerate(s.owed) if owed]} still owed a signal while the coordinator '
+            f'{"sleeps" if s.coordinator == "sleep" else "waits on a pause"}')
     require(s.coordinator != 'sleep' or not s.completed or s.efd or any(s.notify), INVARIANTS[9],
             f'coordinator sleeps with completions {s.completed} and no pending notification')
     require(s.pause_phase != 1 or not quiescent(s) or s.quiescent_wake, INVARIANTS[10],
@@ -587,7 +602,9 @@ def run(output):
             ('reject_without_fence', scenarios()[2]),
             ('ignore_connection_bound', scenarios()[6]),
             ('ignore_capacity', scenarios()[4]),
-            ('inline_while_unpublished', scenarios()[0])):
+            ('inline_while_unpublished', scenarios()[0]),
+            ('sleep_without_signal', scenarios()[1]),
+            ('pause_without_signal', scenarios()[5])):
         result = explore(initial(scenario), lambda s: successors(scenario, s, mutant),
                          lambda s, edge=None, previous=None: check(scenario, s, edge, previous),
                          lambda s: terminal(scenario, s), output / (mutant + '-witness.json'))

@@ -626,6 +626,7 @@ debug_replybuffer :: proc(c: ^Conn, argv: [][]u8) {
 
 @(cold)
 aof_flush_sleep :: #force_no_inline proc() {
+	keyspace_signal_owed()
 	ts := linux.Time_Spec {
 		time_sec  = uint(aof_flush_sleep_us / 1_000_000),
 		time_nsec = uint(aof_flush_sleep_us % 1_000_000) * 1000,

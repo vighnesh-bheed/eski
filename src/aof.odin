@@ -4366,6 +4366,7 @@ aof_rewrite_done :: proc(exitcode: int, bysignal: int) {
 
 @(private = "file")
 aof_reap :: proc(pid: linux.Pid) {
+	keyspace_signal_owed()
 	status: u32
 	for {
 		if _, err := linux.wait4(pid, &status, {}, nil); err != .EINTR {

@@ -339,6 +339,7 @@ lazyfree_drain :: proc() {
 }
 
 lazyfree_wait :: proc(limit_us: i64, ok: proc() -> bool) -> bool {
+	keyspace_signal_owed()
 	start := now_ns()
 	for lazyfree_jobs_pending() && (now_ns() - start) / 1000 < limit_us {
 		if ok() {
