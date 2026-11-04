@@ -17,7 +17,7 @@ DEADLINE = 4102444800043
 
 class WorkerMetadata(unittest.TestCase):
     def setUp(self):
-        self.server = Server(BINARY, workers=0, arguments=('--keyspace-threads', str(WORKERS)))
+        self.server = Server(BINARY, workers=0, arguments=('--keyspace-threads', str(WORKERS)), queue_ping=WORKERS > 0)
         self.addCleanup(self.server.close)
         self.server.start()
 

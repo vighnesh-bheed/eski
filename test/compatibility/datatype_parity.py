@@ -33,7 +33,7 @@ class DatatypeParity(unittest.TestCase):
         self.client.call('CONFIG', 'SET', 'stream-node-max-bytes', 4096)
 
     def connection(self, protocol=2):
-        client = Client(self.port)
+        client = Client(self.port, queue_ping=REFERENCE_PORT is None and WORKERS > 0)
         self.addCleanup(client.close)
         if protocol == 3:
             client.call('HELLO', 3)
@@ -274,7 +274,7 @@ class DatatypeParity(unittest.TestCase):
     def test_exact_trims_with_limit_from_an_append_only_file_load(self):
         if REFERENCE_PORT is not None:
             self.skipTest('needs a server started from a prepared append only file')
-        server = Server(BINARY, workers=0, arguments=('--appendonly', 'yes', '--stream-node-max-entries', '2', '--keyspace-threads', str(WORKERS)))
+        server = Server(BINARY, workers=0, arguments=('--appendonly', 'yes', '--stream-node-max-entries', '2', '--keyspace-threads', str(WORKERS)), queue_ping=WORKERS > 0)
         self.addCleanup(server.close)
         folder = server.directory / 'appendonlydir'
         folder.mkdir()

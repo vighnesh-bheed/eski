@@ -16,7 +16,7 @@ BINARY = ROOT / 'bin/eski'
 
 class MemoryThreading(unittest.TestCase):
     def server(self, *arguments):
-        server = Server(BINARY, workers=0, arguments=('--keyspace-threads', '2',) + arguments)
+        server = Server(BINARY, workers=0, arguments=('--keyspace-threads', '2',) + arguments, queue_ping=True)
         self.addCleanup(server.close)
         server.start()
         return server

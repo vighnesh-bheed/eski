@@ -21,6 +21,7 @@ INVARIANTS = (
     'no_lost_quiescence_wakeup',
     'socket_replies_follow_request_order',
     'connection_inflight_within_bound',
+    'coordinator_inline_only_without_unpublished_jobs',
 )
 
 
@@ -185,6 +186,32 @@ def take_completions(state, phase):
         replay=state.replay or any(state.failed[j] for j in state.completed))
 
 
+def inline_allowed(s, mutant):
+    if mutant == 'inline_while_unpublished':
+        return True
+    return (len(s.accepted) == len(s.published) and not s.outstanding and not s.completed and not s.staged and
+            not s.replay and not s.fencing)
+
+
+def inline_execute(scenario, s, j):
+    plan = scenario.plans[j]
+    base = dataclasses.replace(wake(s), admission=s.admission + 1, accepted=s.accepted + (j,))
+    if plan.abort:
+        return 'coordinator_inline_abort_stage', dataclasses.replace(
+            base, staged=s.staged + (j,), failed=change_tuple(s.failed, j, True), halted=True, replay=True,
+            stages=change_tuple(s.stages, j, 'completed'))
+    values = s.values
+    observations = []
+    for r in plan.records:
+        observations.append(values[r])
+        if plan.writes:
+            values = change_tuple(values, r, values[r] * 10 + j + 1)
+    return 'coordinator_inline_publish', dataclasses.replace(
+        base, values=values, reads=change_tuple(s.reads, j, tuple(observations)),
+        published=s.published + (j,), effects=s.effects + (j,), stages=change_tuple(s.stages, j, 'published'),
+        delivery=s.delivery + ((j, 'reply' if s.connected[j] else 'drop'),))
+
+
 def successors(scenario, s, mutant=''):
     p = scenario.plans
     n = len(p)
@@ -204,6 +231,8 @@ def successors(scenario, s, mutant=''):
             if pending >= scenario.capacity and mutant != 'ignore_capacity':
                 continue
             rejecting = p[j].reject or s.halted or s.pause_phase == 2
+            if not rejecting and inline_allowed(s, mutant):
+                yield inline_execute(scenario, s, j)
             if rejecting:
                 if inflight and mutant != 'reject_without_fence':
                     continue
@@ -339,6 +368,11 @@ def successors(scenario, s, mutant=''):
 
 
 def check(scenario, s, edge=None, previous=None):
+    if edge in ('coordinator_inline_publish', 'coordinator_inline_abort_stage'):
+        require(len(previous.accepted) == len(previous.published) and not previous.outstanding and
+                not previous.completed and not previous.staged and not previous.halted and not previous.replay and
+                not previous.fencing, INVARIANTS[13],
+                f'coordinator ran job {s.accepted[-1]} inline with accepted unpublished jobs {previous.accepted[len(previous.published):]}')
     active = [j for j, stage in enumerate(s.stages) if stage == 'mutating']
     for i, j in enumerate(active):
         for k in active[:i]:
@@ -552,7 +586,8 @@ def run(output):
             ('pause_registers_after_check', scenarios()[5]),
             ('reject_without_fence', scenarios()[2]),
             ('ignore_connection_bound', scenarios()[6]),
-            ('ignore_capacity', scenarios()[4])):
+            ('ignore_capacity', scenarios()[4]),
+            ('inline_while_unpublished', scenarios()[0])):
         result = explore(initial(scenario), lambda s: successors(scenario, s, mutant),
                          lambda s, edge=None, previous=None: check(scenario, s, edge, previous),
                          lambda s: terminal(scenario, s), output / (mutant + '-witness.json'))

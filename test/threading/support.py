@@ -14,6 +14,15 @@ FIELDS = ('compute_threads_configured', 'compute_threads_active', 'compute_jobs_
           'compute_jobs_cancelled', 'compute_sync_fallbacks', 'compute_worker_nanoseconds')
 
 
+WORKER_LONE = frozenset(name.encode() for name in (
+    'GET', 'SET', 'GETEX', 'GETDEL', 'GETSET', 'SETNX', 'SETEX', 'PSETEX', 'APPEND', 'STRLEN', 'GETRANGE', 'SUBSTR',
+    'SETRANGE', 'INCR', 'DECR', 'INCRBY', 'DECRBY', 'INCRBYFLOAT', 'MGET', 'MSET', 'MSETNX', 'DEL', 'EXISTS',
+    'TOUCH', 'TYPE', 'TTL', 'PTTL', 'EXPIRETIME', 'PEXPIRETIME', 'EXPIRE', 'PEXPIRE', 'EXPIREAT', 'PEXPIREAT',
+    'PERSIST', 'HSET', 'HMSET', 'HSETNX', 'HGET', 'HMGET', 'HEXISTS', 'HSTRLEN', 'HDEL', 'HLEN', 'HINCRBY',
+    'HINCRBYFLOAT', 'HEXPIRE', 'HPEXPIRE', 'HEXPIREAT', 'HPEXPIREAT', 'HTTL', 'HPTTL', 'HEXPIRETIME',
+    'HPEXPIRETIME', 'HPERSIST'))
+
+
 class ServerError(Exception):
     pass
 
@@ -28,10 +37,15 @@ def encode(arguments):
 
 
 class Client:
-    def __init__(self, port, timeout=15):
+    queue_ping = False
+    in_multi = False
+
+    def __init__(self, port, timeout=15, queue_ping=False):
         self.socket = socket.create_connection(('127.0.0.1', port), timeout=timeout)
         self.buffer = bytearray()
         self.pushes = []
+        self.queue_ping = queue_ping
+        self.in_multi = False
 
     def close(self):
         self.socket.close()
@@ -109,8 +123,15 @@ class Client:
         self.socket.sendall(b''.join(encode(command) for command in commands))
 
     def call(self, *arguments):
+        name = (arguments[0] if isinstance(arguments[0], bytes) else str(arguments[0]).encode()).upper()
+        if self.queue_ping and not self.in_multi and name in WORKER_LONE:
+            return self.call_before_ping(*arguments)
         self.send(*arguments)
         value = self.reply()
+        if name == b'MULTI' and value == 'OK':
+            self.in_multi = True
+        elif name in (b'EXEC', b'DISCARD', b'RESET'):
+            self.in_multi = False
         if isinstance(value, ServerError):
             raise value
         return value
@@ -118,6 +139,14 @@ class Client:
     def pipeline(self, commands):
         self.send_many(commands)
         return [self.reply() for _ in commands]
+
+    def call_before_ping(self, *arguments):
+        value, pong = self.pipeline([arguments, ('PING',)])
+        if isinstance(value, ServerError):
+            raise value
+        if pong not in ('PONG', [b'pong', b'']):
+            raise AssertionError('PING queued behind %r answered %r' % (arguments[:1], pong))
+        return value
 
     def available(self, timeout=0):
         return bool(self.buffer) or bool(select.select([self.socket], [], [], timeout)[0])
@@ -150,8 +179,9 @@ def wait_for(predicate, timeout=10, label='condition'):
 
 
 class Server:
-    def __init__(self, binary, workers=2, memory=512 << 20, arguments=()):
+    def __init__(self, binary, workers=2, memory=512 << 20, arguments=(), queue_ping=False):
         self.binary = Path(binary).resolve()
+        self.queue_ping = queue_ping
         self.workers = workers
         self.memory = memory
         self.arguments = list(arguments)
@@ -196,7 +226,7 @@ class Server:
         raise AssertionError('server did not start within 15 seconds')
 
     def client(self, timeout=15):
-        value = Client(self.port, timeout)
+        value = Client(self.port, timeout, self.queue_ping)
         self.clients.append(value)
         return value
 

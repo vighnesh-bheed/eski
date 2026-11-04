@@ -47,7 +47,8 @@ def read_commands(directory):
 class HashExpiryAof(unittest.TestCase):
     def setUp(self):
         self.server = Server(BINARY, workers=0, arguments=('--keyspace-threads', str(KEYSPACE_THREADS), '--appendonly', 'yes',
-                                                         '--appendfsync', 'always', '--aof-use-rdb-preamble', 'no'))
+                                                         '--appendfsync', 'always', '--aof-use-rdb-preamble', 'no'),
+                             queue_ping=KEYSPACE_THREADS > 0)
         self.addCleanup(self.server.close)
         self.server.start()
         self.client = self.server.client()
@@ -201,12 +202,12 @@ class HashExpiryAof(unittest.TestCase):
         for budget in (16 << 20, (42 << 20) + (256 << 10)):
             with Server(BINARY, workers=0, arguments=('--keyspace-threads', str(KEYSPACE_THREADS),
                         '--keyspace-max-memory', str(budget), '--appendonly', 'yes', '--appendfsync', 'always',
-                        '--aof-use-rdb-preamble', 'no')) as server:
+                        '--aof-use-rdb-preamble', 'no'), queue_ping=KEYSPACE_THREADS > 0) as server:
                 c = server.client()
                 c.call('DEBUG', 'SET-ACTIVE-EXPIRE', 0)
                 c.call('CONFIG', 'SET', 'rdbcompression', 'no')
                 before = info(c, 'server')
-                self.assertEqual(c.call('HSET', 'large-hash', 'large', b'x' * (6 << 20)), 1)
+                self.assertEqual(c.call('HSET', 'large-hash', 'large', b'x' * (6 << 20), 'tag', 'small'), 2)
                 after = info(c, 'server')
                 if KEYSPACE_THREADS:
                     self.assertGreater(int(after['keyspace_jobs_submitted']), int(before['keyspace_jobs_submitted']))
@@ -228,6 +229,7 @@ class HashExpiryAof(unittest.TestCase):
                 server.start()
                 restored = server.client()
                 self.assertEqual(restored.call('HSTRLEN', 'large-hash', 'large'), 6 << 20)
+                self.assertEqual(restored.call('HGET', 'large-hash', 'tag'), b'small')
                 self.assertEqual(restored.call('HGETALL', 'small'), [b'bad', b'text'])
                 self.assertEqual(restored.call('HGET', 'peer', 'value'), b'retained')
                 self.assertGreater(restored.call('HPTTL', 'peer', 'FIELDS', 1, 'value')[0], 50000)

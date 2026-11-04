@@ -28,7 +28,7 @@ def add_metadata(client, kind, name):
 
 class ClientMetadata(unittest.TestCase):
     def server(self):
-        server = Server(BINARY, workers=0, arguments=('--keyspace-threads', '2'))
+        server = Server(BINARY, workers=0, arguments=('--keyspace-threads', '2'), queue_ping=True)
         self.addCleanup(server.close)
         server.start()
         return server

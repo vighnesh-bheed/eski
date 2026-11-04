@@ -29,7 +29,7 @@ def free_port():
 
 class ProcessTitle(unittest.TestCase):
     def start(self, arguments=()):
-        server = Server(BINARY, workers=2, arguments=['--keyspace-threads', '2'] + list(arguments))
+        server = Server(BINARY, workers=2, arguments=['--keyspace-threads', '2'] + list(arguments), queue_ping=True)
         self.addCleanup(server.close)
         server.start()
         return server, server.client()

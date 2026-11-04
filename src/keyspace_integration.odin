@@ -44,6 +44,7 @@ Keyspace_Task :: struct {
 	hash_expire_at: i64,
 	access: Memory_Worker_Access,
 	rolled_back: bool,
+	inline: bool,
 	records: []^ks.Record,
 	values: []^ks.Value,
 	results: []^ks.Value,
@@ -95,6 +96,7 @@ keyspace_completed: i64
 keyspace_gets: i64
 keyspace_sets: i64
 keyspace_fallbacks: i64
+keyspace_inline: i64
 keyspace_barriers: i64
 keyspace_worker_ns: i64
 keyspace_retries: [dynamic]^Keyspace_Task
@@ -132,7 +134,7 @@ keyspace_settle :: proc(c: ^Conn) {
 }
 
 keyspace_resume_due :: #force_inline proc "contextless" () -> bool {
-	return len(keyspace_ready) > 0 || len(keyspace_waiting) > 0 && keyspace_pending < ks.CAPACITY
+	return len(keyspace_ready) > 0 || len(keyspace_waiting) > 0 && keyspace_pending < ks.CAPACITY || keyspace_replay_needed
 }
 
 Keyspace_Op :: enum u8 {
@@ -330,6 +332,18 @@ keyspace_operation :: proc "contextless" (cmd: ^Command) -> (Keyspace_Op, bool) 
 	return {}, false
 }
 
+keyspace_constant :: #force_inline proc "contextless" (op: Keyspace_Op, arity, argc: int) -> bool {
+	single := argc == abs(arity)
+	if op <= .Persist {
+		return single || op < .Mget || op > .Touch
+	}
+	return op >= .Hset && op <= .Hpersist && single && (op < .Hgetall || op > .Hvals) && (op < .Hrandfield || op > .Hscan)
+}
+
+keyspace_lone :: #force_inline proc "contextless" (c: ^Conn, slot: ^Cmd_Slot, op: Keyspace_Op, argc: int) -> bool {
+	return c.rpos >= c.rlen && keyspace_constant(op, slot.cmd.arity, argc)
+}
+
 keyspace_candidate :: #force_inline proc(slot: ^Cmd_Slot, argv: [][]u8) -> bool {
 	if keyspace_threads == 0 || slot == nil {
 		return false
@@ -387,6 +401,7 @@ keyspace_queue_ready :: proc(c: ^Conn) {
 
 keyspace_complete :: proc(job: ^ks.Job) {
 	task := cast(^Keyspace_Task)job.data
+	inline := task.inline
 	keyspace_worker_ns += job.elapsed_ns
 	if job.cancelled { task.failed = true }
 	if !task.failed {
@@ -398,8 +413,8 @@ keyspace_complete :: proc(job: ^ks.Job) {
 	}
 	srv.stat_expired += task.expired
 	if !task.failed {
-		if task.op == .Get { keyspace_gets += 1 }
-		if task.op == .Set { keyspace_sets += 1 }
+		if !inline && task.op == .Get { keyspace_gets += 1 }
+		if !inline && task.op == .Set { keyspace_sets += 1 }
 		stat_keyspace_complete(&task.client, task.stats, task.argv, mono_now() - task.start)
 	}
 	c: ^Conn
@@ -415,7 +430,7 @@ keyspace_complete :: proc(job: ^ks.Job) {
 		if !task.failed && !task.suppressed {
 			keyspace_reply(c, task)
 		}
-		keyspace_queue_ready(c)
+		if task.failed || !inline { keyspace_queue_ready(c) }
 	}
 	keyspace_features_after_reply(task, source)
 	if task.failed {
@@ -426,7 +441,15 @@ keyspace_complete :: proc(job: ^ks.Job) {
 		keyspace_fallbacks += 1
 	} else { keyspace_task_free(task) }
 	keyspace_pending -= 1
-	keyspace_completed += 1
+	if !inline { keyspace_completed += 1 }
+}
+
+keyspace_stage :: proc(task: ^Keyspace_Task) {
+	if task.failed { keyspace_replay_needed = true }
+	index := int(task.sequence % ks.CAPACITY)
+	if keyspace_completions[index] != nil { store_fatal("keyspace completion sequence collision") }
+	keyspace_completions[index] = task
+	keyspace_completion_count += 1
 }
 
 keyspace_collect :: proc(publish_ready: bool = true) {
@@ -442,11 +465,7 @@ keyspace_collect :: proc(publish_ready: bool = true) {
 	for job in jobs[:count] {
 		task := cast(^Keyspace_Task)job.data
 		if job.cancelled { task.failed = true }
-		if task.failed { keyspace_replay_needed = true }
-		index := int(task.sequence % ks.CAPACITY)
-		if keyspace_completions[index] != nil { store_fatal("keyspace completion sequence collision") }
-		keyspace_completions[index] = task
-		keyspace_completion_count += 1
+		keyspace_stage(task)
 	}
 	if publish_ready { keyspace_publish_completions(false) }
 }
@@ -705,6 +724,12 @@ keyspace_try :: proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8) -> bool {
 		keyspace_fence()
 		return false
 	}
+	op, _ := slot.keyspace.?
+	lone := keyspace_lone(c, slot, op, len(argv))
+	if lone && keyspace_fence_idle() {
+		keyspace_inline += 1
+		return false
+	}
 	start := mono_now()
 	if !keyspace_start() || keyspace_pending >= ks.CAPACITY {
 		keyspace_fallbacks += 1
@@ -713,7 +738,6 @@ keyspace_try :: proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8) -> bool {
 	}
 	cmd := slot.cmd
 	stats := slot.stats
-	op, _ := slot.keyspace.?
 	restore := op == .Key && cmd.name == "restore"
 	relocate := op == .Key && (cmd.name == "copy" || cmd.name == "move")
 	if (op >= .Hset && op <= .Hpersist) || restore { keyspace_timed = true }
@@ -803,6 +827,18 @@ keyspace_try :: proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8) -> bool {
 	task.suppressed = c.reply & {.Off, .Skip} != {}
 	task.forked = pst.child_pid > 0
 	task.job = ks.Job{op = .Custom, record = task.records[0], records = task.records, context_executor = keyspace_execute_context, clock = access_seconds_now, touch = .No_Touch not_in c.flags && !task.forked, data = task}
+	if lone && keyspace_pending == 0 && keyspace_completion_count == 0 && len(keyspace_retries) == 0 && ks.execute_inline(&keyspace_pool, &task.job) {
+		task.inline = true
+		keyspace_next_sequence += 1
+		c.keyspace_inflight += 1
+		keyspace_pending += 1
+		keyspace_inline += 1
+		stat_cur = nil
+		keyspace_stage(task)
+		keyspace_publish_completions(false)
+		mem_note_peak()
+		return true
+	}
 	if !ks.submit(&keyspace_pool, &task.job) {
 		keyspace_task_free(task)
 		keyspace_fallbacks += 1
@@ -829,6 +865,7 @@ keyspace_info :: proc(b: ^[dynamic]u8) {
 	info_line_int(b, "keyspace_gets", keyspace_gets)
 	info_line_int(b, "keyspace_sets", keyspace_sets)
 	info_line_int(b, "keyspace_sync_fallbacks", keyspace_fallbacks)
+	info_line_int(b, "keyspace_inline", keyspace_inline)
 	info_line_int(b, "keyspace_barriers", keyspace_barriers)
 	info_line_int(b, "keyspace_worker_nanoseconds", keyspace_worker_ns)
 }

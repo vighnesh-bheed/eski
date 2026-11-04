@@ -632,3 +632,55 @@ pool_worker_callback_context_lifecycle :: proc(t: ^testing.T) {
 	testing.expect_value(t, callback_leave_count, u32(4))
 	testing.expect_value(t, callback_context_count, u32(8))
 }
+
+inline_context_count: u32
+
+inline_context_probe :: proc(job: ^Job) {
+	if context.assertion_failure_proc == callback_assertion && context.allocator.procedure == runtime.heap_allocator_proc && context.temp_allocator.procedure == runtime.nil_allocator_proc {
+		intrinsics.atomic_add_explicit(&inline_context_count, 1, .Relaxed)
+	}
+	for record in job.records { record.clock += 1 }
+}
+
+inline_context_abort :: proc(job: ^Job) {
+	job.abort = true
+}
+
+@(test)
+coordinator_inline_execution_needs_an_empty_accepting_pool_and_halts_on_abort :: proc(t: ^testing.T) {
+	inline_context_count = 0
+	p: Pool
+	testing.expect(t, init(&p, 2, 1 << 20, nil, nil, callback_assertion))
+	records := [2]^Record{
+		record_new(&p, 0, test_bytes("a"), 0, true, test_bytes("a"), 0),
+		record_new(&p, 0, test_bytes("b"), 1, true, test_bytes("b"), 0),
+	}
+	missing := Job{op = .Custom, record = records[0], records = records[:]}
+	empty := Job{op = .Custom, record = records[0], context_executor = inline_context_probe}
+	testing.expect(t, !execute_inline(&p, &missing) && !execute_inline(&p, &empty) && !execute_inline(nil, &missing) && !execute_inline(&p, nil))
+	first := Job{op = .Custom, record = records[0], records = records[:], context_executor = inline_context_probe}
+	testing.expect(t, execute_inline(&p, &first))
+	testing.expect(t, first.executed && !first.abort && !first.cancelled && first.state == .Idle && first.elapsed_ns == 0)
+	testing.expect(t, pending(&p) == 0 && records[0].clock == 1 && records[1].clock == 1 && inline_context_count == 1)
+	held := Job{op = .Custom, record = records[1], records = records[1:], executor = multi_owner_increment}
+	testing.expect(t, submit(&p, &held))
+	blocked := Job{op = .Custom, record = records[0], records = records[:], context_executor = inline_context_probe}
+	testing.expect(t, !execute_inline(&p, &blocked) && blocked.state == .Idle && !blocked.executed)
+	pause(&p)
+	testing.expect(t, poll(&p) == &held && poll(&p) == nil && records[1].clock == 2)
+	testing.expect(t, !execute_inline(&p, &blocked))
+	testing.expect(t, resume(&p))
+	testing.expect(t, execute_inline(&p, &blocked) && records[0].clock == 2 && records[1].clock == 3)
+	failing := Job{op = .Custom, record = records[0], records = records[:], context_executor = inline_context_abort}
+	testing.expect(t, execute_inline(&p, &failing) && failing.abort && failing.executed && records[0].clock == 2)
+	after := Job{op = .Custom, record = records[0], records = records[:], context_executor = inline_context_probe}
+	testing.expect(t, !execute_inline(&p, &after) && !submit(&p, &after) && after.state == .Idle)
+	testing.expect(t, resume(&p) && !execute_inline(&p, &after))
+	pause(&p)
+	testing.expect(t, poll(&p) == nil && resume(&p))
+	testing.expect(t, execute_inline(&p, &after) && records[0].clock == 3 && records[1].clock == 4)
+	testing.expect_value(t, inline_context_count, u32(3))
+	pause(&p)
+	for record in records { testing.expect(t, record_free(&p, record)) }
+	testing.expect(t, memory_used(&p) == 0 && destroy(&p))
+}

@@ -550,6 +550,46 @@ submit :: proc "contextless" (p: ^Pool, job: ^Job) -> bool {
 	return true
 }
 
+execute_inline :: proc(p: ^Pool, job: ^Job) -> bool {
+	if p == nil || job == nil || job.op != .Custom || (job.executor == nil && job.context_executor == nil) || len(job.records) == 0 || job.value != nil || job.result != nil {
+		return false
+	}
+	if intrinsics.atomic_load_explicit(&job.state, .Acquire) != .Idle {
+		return false
+	}
+	sync.mutex_lock(&p.mutex)
+	valid := p.accepting && !p.halted && p.outstanding == 0 && p.queued == 0 && p.running == 0
+	for record in job.records {
+		if record == nil || record.pool != p || record.owner < 0 || record.owner >= p.configured {
+			valid = false
+			break
+		}
+	}
+	sync.mutex_unlock(&p.mutex)
+	if !valid {
+		return false
+	}
+	job.result_found = false
+	job.elapsed_ns = 0
+	job.participants = 0
+	job.arrived = 0
+	job.departed = 0
+	job.executed = false
+	job.abort = false
+	job.cancelled = false
+	context.allocator = runtime.heap_allocator()
+	context.temp_allocator = runtime.nil_allocator()
+	context.assertion_failure_proc = p.assertion_failure if p.assertion_failure != nil else context.assertion_failure_proc
+	execute_job(job)
+	job.executed = true
+	if job.abort {
+		sync.mutex_lock(&p.mutex)
+		p.halted = true
+		sync.mutex_unlock(&p.mutex)
+	}
+	return true
+}
+
 poll_all :: proc "contextless" (p: ^Pool, out: []^Job) -> int {
 	if p == nil || len(out) == 0 {
 		return 0
