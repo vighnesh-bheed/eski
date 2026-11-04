@@ -86,8 +86,8 @@ keyspace_object_encoding :: proc "contextless" (kind: Obj_Type, object: rawptr) 
 	return 0
 }
 
-keyspace_object_seed :: proc(c: ^Conn, key: []u8, owner: int) -> ^ks.Record {
-	pointer, kind, clock, expires, eligible := keyspace_store_seed_object(c.db, key)
+keyspace_object_seed :: proc(db: ^Db, key: []u8, owner: int) -> ^ks.Record {
+	pointer, kind, clock, expires, eligible := keyspace_store_seed_object(db, key)
 	if !eligible { return nil }
 	if kind == .Hash { keyspace_timed = true }
 	charge := keyspace_object_memory(kind, pointer)
@@ -99,7 +99,7 @@ keyspace_object_seed :: proc(c: ^Conn, key: []u8, owner: int) -> ^ks.Record {
 		destroy(object); ks.release_external(&keyspace_pool, charge); return nil
 	}
 	if actual < charge { ks.release_external(&keyspace_pool, charge - actual) }
-	r := ks.record_new(&keyspace_pool, c.db.id, key, owner, false, nil, clock)
+	r := ks.record_new(&keyspace_pool, db.id, key, owner, false, nil, clock)
 	if r == nil { destroy(object); ks.release_external(&keyspace_pool, actual); return nil }
 	r.exists = true
 	r.kind = u8(kind)

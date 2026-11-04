@@ -764,7 +764,7 @@ resume_held_clients :: proc() {
 process_input :: proc(c: ^Conn) {
 	batch: Batch = ---
 	batch.ahead = c.rpos
-	batch.count, batch.next, batch.keys = 0, 0, 0
+	batch.count, batch.next, batch.keys, batch.owned = 0, 0, 0, 0
 	for !c.close_after && c.rpos < c.rlen && c.blocked == .None && c.compute == nil {
 		if keyspace_pending > 0 && !keyspace_admits(c) {
 			break

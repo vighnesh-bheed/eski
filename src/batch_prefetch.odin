@@ -1,5 +1,6 @@
 package main
 
+import "base:intrinsics"
 import request_parser "request_parser"
 
 BATCH_AHEAD_COMMANDS :: 32
@@ -17,7 +18,9 @@ Batch :: struct {
 	count:    int,
 	next:     int,
 	keys:     int,
+	owned:    int,
 	commands: [BATCH_AHEAD_COMMANDS]Batch_Command,
+	hashes:   [BATCH_AHEAD_KEYS]u64,
 }
 
 Key_Range :: struct {
@@ -52,11 +55,20 @@ key_range_last :: #force_inline proc "contextless" (r: Key_Range, argc: int) -> 
 	return argc + int(r.last)
 }
 
-batch_prefetch_key :: #force_inline proc "contextless" (db: ^Db, key: []u8, write: bool) {
+batch_prefetch_key :: #force_inline proc "contextless" (b: ^Batch, db: ^Db, key: []u8, write, table, directory: bool) #no_bounds_check {
 	h := hash_bytes(key)
-	table_prefetch_home(&db.t[0], h, write)
-	if db.rehash_idx >= 0 {
-		table_prefetch_home(&db.t[1], h, write)
+	if table {
+		table_prefetch_home(&db.t[0], h, write)
+		if db.rehash_idx >= 0 {
+			table_prefetch_home(&db.t[1], h, write)
+		}
+	}
+	if directory {
+		owned := h ~ (u64(db.id) * WY_P1)
+		slots := keyspace_index_slots()
+		intrinsics.prefetch_read_data(&slots[owned & u64(len(slots) - 1)], 3)
+		b.hashes[b.owned] = owned
+		b.owned += 1
 	}
 }
 
@@ -76,10 +88,15 @@ batch_slot :: #force_inline proc(b: ^Batch, start: int, name: []u8) -> ^Cmd_Slot
 
 batch_scan :: proc(c: ^Conn, b: ^Batch) #no_bounds_check {
 	from := c.rpos
-	b.count, b.next, b.keys = 0, 0, 0
+	b.count, b.next, b.keys, b.owned = 0, 0, 0, 0
 	b.ahead = from + 1
 	db := c.db
-	if db == nil || c.partial_owner != nil || db.t[0].groups == 0 {
+	if db == nil || c.partial_owner != nil {
+		return
+	}
+	table := db.t[0].groups != 0
+	directory := keyspace_records > 0
+	if !table && !directory {
 		return
 	}
 	input := c.rbuf[:c.rlen]
@@ -114,7 +131,7 @@ batch_scan :: proc(c: ^Conn, b: ^Batch) #no_bounds_check {
 				}
 			} else if i == next && i <= last {
 				if b.keys < BATCH_AHEAD_KEYS && length <= BATCH_AHEAD_KEY_BYTES {
-					batch_prefetch_key(db, input[payload:cursor - 2], write)
+					batch_prefetch_key(b, db, input[payload:cursor - 2], write, table, directory)
 					b.keys += 1
 				}
 				next += step
@@ -126,6 +143,9 @@ batch_scan :: proc(c: ^Conn, b: ^Batch) #no_bounds_check {
 	}
 	if at > from {
 		b.ahead = at
+	}
+	if b.owned > 0 {
+		keyspace_index_prefetch(b.hashes[:b.owned])
 	}
 }
 

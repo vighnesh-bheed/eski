@@ -10,9 +10,12 @@ KEYSPACE_KEY_INDICES :: 32
 KEYSPACE_CONN_DEPTH :: 16
 
 Keyspace_Slot :: struct {
-	hash:   u64,
 	record: ^ks.Record,
+	tag:    u32,
+	length: u32,
 }
+
+#assert(size_of(Keyspace_Slot) == 16)
 
 Keyspace_Task :: struct {
 	job:        ks.Job,
@@ -646,21 +649,39 @@ keyspace_index_reset :: proc "contextless" () {
 	if !ks.free(&keyspace_pool, region) { store_fatal("keyspace record index release invariant") }
 }
 
-keyspace_index_find :: proc "contextless" (hash: u64, db: int, key: []u8) -> ^ks.Record {
+keyspace_index_find :: proc "contextless" (hash: u64, key: []u8) -> ^ks.Record {
 	slots := keyspace_index_slots()
 	mask := u64(len(slots) - 1)
+	tag, length := u32(hash), u32(len(key))
 	for i := hash & mask; ; i = (i + 1) & mask {
-		r := slots[i].record
-		if r == nil { return nil }
-		if slots[i].hash == hash && r.db == db && r.key == transmute(string)key { return r }
+		slot := slots[i]
+		if slot.record == nil { return nil }
+		if slot.tag == tag && slot.length == length && string(ks.record_key(slot.record, len(key))) == string(key) { return slot.record }
 	}
 }
 
-keyspace_index_place :: proc "contextless" (slots: []Keyspace_Slot, hash: u64, r: ^ks.Record) {
+keyspace_index_place :: proc "contextless" (slots: []Keyspace_Slot, slot: Keyspace_Slot) {
 	mask := u64(len(slots) - 1)
-	i := hash & mask
+	i := u64(slot.tag) & mask
 	for slots[i].record != nil { i = (i + 1) & mask }
-	slots[i] = Keyspace_Slot{hash = hash, record = r}
+	slots[i] = slot
+}
+
+keyspace_index_prefetch :: proc "contextless" (hashes: []u64) #no_bounds_check {
+	slots := keyspace_index_slots()
+	mask := u64(len(slots) - 1)
+	for hash in hashes {
+		i := hash & mask
+		for _ in 0 ..< 4 {
+			slot := slots[i]
+			if slot.record == nil { break }
+			if slot.tag == u32(hash) {
+				ks.record_prefetch(slot.record, int(slot.length))
+				break
+			}
+			i = (i + 1) & mask
+		}
+	}
 }
 
 keyspace_index_reserve :: proc "contextless" () -> bool {
@@ -668,7 +689,7 @@ keyspace_index_reserve :: proc "contextless" () -> bool {
 	if 2 * (keyspace_records + 1) <= len(slots) {
 		return true
 	}
-	if len(slots) > max(int) / (2 * size_of(Keyspace_Slot)) {
+	if len(slots) > max(int) / (2 * size_of(Keyspace_Slot)) || 2 * len(slots) > 1 << 32 {
 		return false
 	}
 	size := 2 * len(slots)
@@ -679,7 +700,7 @@ keyspace_index_reserve :: proc "contextless" () -> bool {
 	runtime.mem_zero(raw_data(region), len(region))
 	grown := (cast([^]Keyspace_Slot)raw_data(region))[:size]
 	for slot in slots {
-		if slot.record != nil { keyspace_index_place(grown, slot.hash, slot.record) }
+		if slot.record != nil { keyspace_index_place(grown, slot) }
 	}
 	if len(keyspace_index) == 0 { keyspace_index_fixed = {} } else { keyspace_index_reset() }
 	keyspace_index = grown
@@ -687,24 +708,25 @@ keyspace_index_reserve :: proc "contextless" () -> bool {
 }
 
 keyspace_index_insert :: proc "contextless" (hash: u64, r: ^ks.Record) {
-	keyspace_index_place(keyspace_index_slots(), hash, r)
+	keyspace_index_place(keyspace_index_slots(), Keyspace_Slot{record = r, tag = u32(hash), length = u32(len(r.key))})
 	keyspace_records += 1
 }
 
-keyspace_record :: proc(c: ^Conn, key: []u8) -> ^ks.Record {
-	hash := hash_bytes(key) ~ (u64(c.db.id) * WY_P1)
-	if r := keyspace_index_find(hash, c.db.id, key); r != nil { return r }
+keyspace_record :: proc(db: ^Db, key: []u8) -> ^ks.Record {
+	if len(key) > int(max(u32)) { return nil }
+	hash := hash_bytes(key) ~ (u64(db.id) * WY_P1)
+	if r := keyspace_index_find(hash, key); r != nil { return r }
 	if !keyspace_index_reserve() { return nil }
-	seed, clock, expires, encoding, exists, eligible := keyspace_store_seed_full(c.db, key)
+	seed, clock, expires, encoding, exists, eligible := keyspace_store_seed_full(db, key)
 	r: ^ks.Record
 	if eligible {
-		r = ks.record_new(&keyspace_pool, c.db.id, key, int(hash % u64(keyspace_threads)), exists, seed, clock)
+		r = ks.record_new(&keyspace_pool, db.id, key, int(hash % u64(keyspace_threads)), exists, seed, clock)
 		if r == nil { return nil }
 		r.expire_at = expires
 		r.encoding = encoding
-		if exists && encoding == u8(Obj_Encoding.Int) { r.string_copy = keyspace_store_string_copy(c.db, key) }
+		if exists && encoding == u8(Obj_Encoding.Int) { r.string_copy = keyspace_store_string_copy(db, key) }
 	} else {
-		r = keyspace_object_seed(c, key, int(hash % u64(keyspace_threads)))
+		r = keyspace_object_seed(db, key, int(hash % u64(keyspace_threads)))
 		if r == nil { return nil }
 	}
 	if r.expire_at != 0 { keyspace_timed = true }
@@ -804,9 +826,9 @@ keyspace_try :: proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8) -> bool {
 		offset += len(arg)
 	}
 	for i in 0 ..< count {
-		route := c^
-		if relocate && i == 1 { route.db = &dbs[target_db] }
-		task.records[i] = keyspace_record(&route, argv[indices[i]])
+		db := c.db
+		if relocate && i == 1 { db = &dbs[target_db] }
+		task.records[i] = keyspace_record(db, argv[indices[i]])
 		if task.records[i] == nil { keyspace_task_free(task); keyspace_fallbacks += 1; keyspace_fence(); return false }
 	}
 	if restore { task.restore_deep = persist_deep_sanitize(true) && !(pst.sanitize == .Clients && acl_skips_sanitize(c)) }

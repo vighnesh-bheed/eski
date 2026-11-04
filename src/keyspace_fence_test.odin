@@ -1,6 +1,7 @@
 package main
 
 import "base:runtime"
+import "core:slice"
 import "core:testing"
 import ks "keyspace"
 
@@ -142,7 +143,7 @@ keyspace_index_test_insert :: proc(t: ^testing.T, buffer: ^[24]u8, i: int) -> (^
 	key := keyspace_index_test_key(buffer, i)
 	db := i % 2
 	hash := hash_bytes(key) ~ (u64(db) * WY_P1)
-	testing.expect(t, keyspace_index_find(hash, db, key) == nil)
+	testing.expect(t, keyspace_index_find(hash, key) == nil)
 	used := ks.memory_used(&keyspace_pool)
 	if !keyspace_index_reserve() { return nil, 0 }
 	charge := ks.memory_used(&keyspace_pool) - used
@@ -158,9 +159,9 @@ keyspace_index_test_found :: proc(t: ^testing.T, records: []^ks.Record) {
 	for r, i in records {
 		key := keyspace_index_test_key(&buffer, i)
 		db := i % 2
-		testing.expect(t, keyspace_index_find(hash_bytes(key) ~ (u64(db) * WY_P1), db, key) == r)
+		testing.expect(t, keyspace_index_find(hash_bytes(key) ~ (u64(db) * WY_P1), key) == r)
 		other := 1 - db
-		testing.expect(t, keyspace_index_find(hash_bytes(key) ~ (u64(other) * WY_P1), other, key) == nil)
+		testing.expect(t, keyspace_index_find(hash_bytes(key) ~ (u64(other) * WY_P1), key) == nil)
 	}
 }
 
@@ -254,4 +255,60 @@ keyspace_key_indices_use_the_heap_only_beyond_the_fixed_buffer :: proc(t: ^testi
 		for index, i in indices { testing.expect_value(t, index, i + 1) }
 		delete(indices)
 	}
+}
+
+@(test)
+private_keyspace_directory_slot_matches_tag_length_and_key_bytes :: proc(t: ^testing.T) {
+	context.allocator = runtime.heap_allocator()
+	testing.expect(t, !keyspace_initialized && !keyspace_pool.initialized)
+	if keyspace_initialized || keyspace_pool.initialized { return }
+	saved_pool := keyspace_pool
+	saved_barriers, saved_tracking, saved_threshold := keyspace_barriers, cfg.latency_tracking, cfg.latency_monitor_threshold
+	defer {
+		keyspace_pool = saved_pool
+		keyspace_barriers, cfg.latency_tracking, cfg.latency_monitor_threshold = saved_barriers, saved_tracking, saved_threshold
+	}
+	cfg.latency_tracking = false
+	cfg.latency_monitor_threshold = 0
+	tags: [1024]u32
+	for &tag, db in tags { tag = u32(u64(db) * WY_P1) }
+	slice.sort(tags[:])
+	for i in 1 ..< len(tags) { testing.expect(t, tags[i - 1] < tags[i]) }
+	testing.expect(t, ks.init(&keyspace_pool, 2, 1 << 20))
+	keyspace_initialized = true
+	defer {
+		keyspace_initialized = false
+		testing.expect(t, ks.destroy(&keyspace_pool))
+	}
+	key := transmute([]u8)string("alpha")
+	home := 5
+	hash := hash_bytes(key) ~ (u64(home) * WY_P1)
+	r := ks.record_new(&keyspace_pool, home, key, 1, false, nil, 0)
+	testing.expect(t, r != nil && keyspace_index_reserve())
+	if r == nil { return }
+	keyspace_index_insert(hash, r)
+	found := 0
+	for slot in keyspace_index_slots() {
+		if slot.record != r { continue }
+		found += 1
+		testing.expect(t, slot.tag == u32(hash) && slot.length == u32(len(key)))
+	}
+	testing.expect_value(t, found, 1)
+	testing.expect(t, keyspace_index_find(hash, key) == r)
+	testing.expect(t, keyspace_index_find(hash, transmute([]u8)string("alphb")) == nil)
+	testing.expect(t, keyspace_index_find(hash, transmute([]u8)string("alph")) == nil)
+	testing.expect(t, keyspace_index_find(hash, transmute([]u8)string("alphaa")) == nil)
+	testing.expect(t, keyspace_index_find(hash ~ 1, key) == nil)
+	for db in 0 ..< 1024 {
+		if db == home { continue }
+		testing.expect(t, keyspace_index_find(hash_bytes(key) ~ (u64(db) * WY_P1), key) == nil)
+	}
+	small: [1]u8
+	huge := (cast([^]u8)&small[0])[:int(max(u32)) + 1]
+	testing.expect(t, keyspace_record(nil, huge) == nil && keyspace_records == 1)
+	keyspace_index_prefetch([]u64{hash, hash ~ WY_P1, hash ~ 1})
+	keyspace_fence()
+	keyspace_fence_test_settled(t)
+	testing.expect_value(t, ks.memory_used(&keyspace_pool), 0)
+	testing.expect(t, ks.resume(&keyspace_pool))
 }
