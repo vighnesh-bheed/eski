@@ -17,6 +17,8 @@ DRAGONFLY_THREADS="${BENCH_DRAGONFLY_THREADS:-4}"
 SERVER_MEMORY="${BENCH_SERVER_MEMORY:-}"
 CLIENT_MEMORY="${BENCH_CLIENT_MEMORY:-}"
 SERVER_MAXMEMORY="${BENCH_SERVER_MAXMEMORY:-}"
+FILL_SETTLE_TIMEOUT="${BENCH_FILL_SETTLE_TIMEOUT:-60}"
+FILL_SETTLE_STABLE=3
 READY_TIMEOUT=30
 SPEC_VERSION="0.3.46"
 SPEC_SHA256="763f7dd9d453050c0cebe174437e244eeaf9a185e64de18f70bad20ed07e0ca0"
@@ -212,6 +214,28 @@ def mode_memtier(run_dir, target, scenario):
     print(line_for(rec) + f"  ({rec['connections']} conns){extra}")
 
 
+def settle_record(path):
+    info = parse_info(path)
+    trace = []
+    for key, value in info.items():
+        if key.startswith("sample_"):
+            parts = value.split()
+            seconds = num(parts[0]) if parts else None
+            used = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+            rehashing = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+            trace.append([seconds, used, rehashing])
+    settled = {"yes": True, "no": False}.get(info.get("settled"))
+    samples = info.get("settle_samples", "")
+    timeout = info.get("settle_timeout_s", "")
+    return {
+        "settled": settled,
+        "settle_s": num(info.get("settle_s")),
+        "settle_samples": int(samples) if samples.isdigit() else None,
+        "settle_timeout_s": int(timeout) if timeout.isdigit() else None,
+        "settle_trace": trace,
+    }
+
+
 def mode_fill(run_dir, target, scenario, keys_requested):
     rec, stats = memtier_base(run_dir, target, scenario)
     sets = stats.get("Sets") or {}
@@ -231,12 +255,15 @@ def mode_fill(run_dir, target, scenario, keys_requested):
         "bytes_per_key_rss": (rss / dbsize) if rss is not None and dbsize else None,
         "bytes_per_key_used": (used / dbsize) if used is not None and dbsize else None,
     })
+    rec.update(settle_record(tdir / f"{scenario}.settle.txt"))
     append(run_dir, rec)
     bpk = rec["bytes_per_key_rss"]
     bpk_s = "-" if bpk is None else f"{bpk:.1f}"
     rss_s = "-" if rss is None else f"{rss / 1048576:.1f}"
     db_s = "-" if dbsize is None else f"{dbsize:,}"
-    print(line_for(rec) + f"  dbsize {db_s}  rss {rss_s} MiB  {bpk_s} B/key rss")
+    wait_s = "-" if rec["settle_s"] is None else f"{rec['settle_s']:.1f}"
+    settle_line = f"settled after {wait_s} s" if rec["settled"] else f"not settled after {wait_s} s"
+    print(line_for(rec) + f"  dbsize {db_s}  rss {rss_s} MiB  {bpk_s} B/key rss  {settle_line}")
 
 
 def rb_rows(path):
@@ -535,6 +562,9 @@ environment overrides (defaults in brackets):
   BENCH_SERVER_CPUS [0-3]  BENCH_CLIENT_CPUS [4-9]  BENCH_DRAGONFLY_THREADS [4]
   BENCH_SERVER_MEMORY, BENCH_CLIENT_MEMORY [no cap]  memory and swap cap of every server and client container
   BENCH_SERVER_MAXMEMORY [unset]  maxmemory in bytes given to every server
+  BENCH_FILL_SETTLE_TIMEOUT [60]  fill10m polls INFO memory once a second after the fill and reads it once used_memory
+                                  is unchanged for $FILL_SETTLE_STABLE consecutive samples that report no keyspace rehash
+                                  (mem_overhead_db_hashtable_rehashing 0 or absent), waiting at most this many seconds
   BENCH_OUTPUT_DIR [bench/results/<stamp>]  absolute fresh results directory
   BENCH_RUN_ID [pid-random]  label value of every container this run owns
   BENCH_SPEC_CACHE [bench/.spec]  BENCH_OWNER_EVENTS [unset]  ownership events file read by bench/exam.sh
@@ -611,6 +641,7 @@ if [ -n "$PLAN_ARG" ]; then
   PLAN_ARG=$(cd "$(dirname "$PLAN_ARG")" && pwd)/$(basename "$PLAN_ARG")
 fi
 [[ -z "$SERVER_MAXMEMORY" || "$SERVER_MAXMEMORY" =~ ^[1-9][0-9]*$ ]] || die "BENCH_SERVER_MAXMEMORY must be a positive byte count"
+[[ "$FILL_SETTLE_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || die "BENCH_FILL_SETTLE_TIMEOUT must be a positive number of seconds"
 [[ -z "$SERVER_MEMORY" || "$SERVER_MEMORY" =~ ^[1-9][0-9]*[bkmgBKMG]?$ ]] || die "BENCH_SERVER_MEMORY must be a docker memory size such as 8g"
 [[ -z "$CLIENT_MEMORY" || "$CLIENT_MEMORY" =~ ^[1-9][0-9]*[bkmgBKMG]?$ ]] || die "BENCH_CLIENT_MEMORY must be a docker memory size such as 2g"
 
@@ -897,6 +928,7 @@ write_meta() {
     --argjson quick "$([ "$QUICK" = 1 ] && echo true || echo false)" \
     --argjson test_time "$T" \
     --argjson fill_keys "$FILL_KEYS" \
+    --argjson settle_timeout "$FILL_SETTLE_TIMEOUT" --argjson settle_stable "$FILL_SETTLE_STABLE" \
     --arg server_cpus "$SERVER_CPUS" \
     --arg client_cpus "$CLIENT_CPUS" \
     --arg memtier_version "$memtier_version" \
@@ -923,6 +955,7 @@ write_meta() {
       date: $date, run_id: $run_id, label: $label,
       cpu_model: $cpu_model, cpu_count: ($cpu_count | tonumber), kernel: $kernel, os: $os,
       quick: $quick, test_time_s: $test_time, fill_keys: $fill_keys,
+      fill_settle_timeout_s: $settle_timeout, fill_settle_stable_samples: $settle_stable,
       server_cpus: $server_cpus, client_cpus: $client_cpus,
       server_container_memory: (if $server_memory != "" then $server_memory else null end),
       client_container_memory: (if $client_memory != "" then $client_memory else null end),
@@ -1053,6 +1086,44 @@ stop_server() {
   stop_logs
 }
 
+clock_us() { printf -v "$1" '%s' "${EPOCHREALTIME//[!0-9]/}"; }
+
+seconds_of() { printf '%d.%06d' $(($1 / 1000000)) $(($1 % 1000000)); }
+
+settle_memory() {
+  local port=$1 base=$2 start now tick used rehashing last="" stable=0 samples=0 settled=no elapsed=0
+  local limit=$((FILL_SETTLE_TIMEOUT * 1000000))
+  rm -f "$base.info_memory.txt" "$base.settle.txt"
+  clock_us start
+  tick=$start
+  while :; do
+    rcli "$port" INFO memory >"$base.info_sample.txt"
+    clock_us now
+    elapsed=$((now - start))
+    samples=$((samples + 1))
+    used=$(sed -n 's/^used_memory:\([0-9][0-9]*\)$/\1/p' "$base.info_sample.txt")
+    rehashing=$(sed -n 's/^mem_overhead_db_hashtable_rehashing:\([0-9][0-9]*\)$/\1/p' "$base.info_sample.txt")
+    printf 'sample_%d:%s %s %s\n' "$samples" "$(seconds_of "$elapsed")" "${used:--}" "${rehashing:--}" >>"$base.settle.txt"
+    if [ -n "$used" ]; then
+      mv -f "$base.info_sample.txt" "$base.info_memory.txt"
+      if [ "$used" = "$last" ] && [ "${rehashing:-0}" = 0 ]; then stable=$((stable + 1)); else stable=0; fi
+    else
+      stable=0
+    fi
+    last=$used
+    if [ "$stable" -ge "$FILL_SETTLE_STABLE" ]; then
+      settled=yes
+      break
+    fi
+    tick=$((tick + 1000000))
+    [ $((tick - start)) -le "$limit" ] || break
+    clock_us now
+    [ "$tick" -gt "$now" ] && sleep "$(seconds_of $((tick - now)))"
+  done
+  rm -f "$base.info_sample.txt"
+  printf 'settled:%s\nsettle_s:%s\nsettle_samples:%d\nsettle_timeout_s:%d\n' "$settled" "$(seconds_of "$elapsed")" "$samples" "$FILL_SETTLE_TIMEOUT" >>"$base.settle.txt"
+}
+
 flush() {
   local port=$1 i n
   [ "$(rcli "$port" FLUSHALL)" = OK ] || return 1
@@ -1150,7 +1221,7 @@ run_scenario() {
         return 1
       fi
       if run_memtier "$tdir" "$port" "$s" "${FILL_ARGS[@]}"; then
-        rcli "$port" INFO memory >"$tdir/$s.info_memory.txt"
+        settle_memory "$port" "$tdir/$s"
         rcli "$port" DBSIZE >"$tdir/$s.dbsize.txt"
         py fill "$RUN_DIR" "$t" "$s" "$FILL_KEYS"
       else

@@ -171,6 +171,29 @@ class Inputs(FixtureInputs, unittest.TestCase):
         self.assertNotIn('The recorded run above took', page)
         self.assertIn('plan about 6 hours of machine time', page)
 
+    def test_fill_section_states_how_the_memory_was_read(self):
+        commands = {'ping': {'group': 'connection', 'summary': 'Pings.'}}
+        page = tables.render_outputs(commands, self.baseline, self.observed, self.dataset, skeleton())['docs/benchmarks.md']
+        section = page[page.index('## Fill measurement'):page.index('## Run the comparison on a new machine')]
+        self.assertIn('This recorded fill predates the settle step', section)
+        self.assertNotIn('Memory read after s', section)
+        settled = copy.deepcopy(self.dataset)
+        engines = settled['fill']['engines']
+        engines[0].update(settled=True, settle_s=5.43, settle_timeout_s=60)
+        engines[1].update(settled=False, settle_s=60.38, settle_timeout_s=60)
+        engines[2]['status'] = 'failed'
+        page = tables.render_outputs(commands, self.baseline, self.observed, settled, skeleton())['docs/benchmarks.md']
+        section = page[page.index('## Fill measurement'):page.index('## Run the comparison on a new machine')]
+        self.assertIn('Memory is read once used memory has been stable for three seconds', section)
+        self.assertNotIn('predates', section)
+        rows = [line for line in section.splitlines() if line.startswith('| ')]
+        self.assertTrue(rows[0].endswith('| Memory read after s |'))
+        self.assertTrue(all(row.count('|') == rows[0].count('|') for row in rows))
+        self.assertTrue(rows[2].endswith('| 5.4 |'))
+        self.assertTrue(rows[3].endswith('| 60.4, not settled |'))
+        self.assertTrue(rows[4].endswith('| — | — |'))
+        self.assertTrue(rows[5].endswith('| — |'))
+
     def test_local_measurement_section_renders_the_recorded_floor(self):
         commands = {'ping': {'group': 'connection', 'summary': 'Pings.'}}
         floor = dict(schema=tables.AB_FLOOR_SCHEMA, session='aa-test', date='2026-11-02', binary_sha256='c' * 64, cpu_model='Test CPU', kernel='7.0',

@@ -179,6 +179,18 @@ def exclusion_section(dataset):
             '<div class="tablewrap"><table><thead><tr><th class="text">Phase</th><th class="text">Workload</th><th class="text">Engine</th><th>Rep</th><th class="text">State</th><th class="text">Reason</th></tr></thead><tbody>%s</tbody></table></div>' % body)
 
 
+def settle_note(dataset):
+    labels = {engine['target']: engine['label'] for engine in dataset['engines']}
+    rows = [row for row in (dataset.get('fill') or {}).get('engines') or [] if row.get('status') == 'valid']
+    if not rows:
+        return ''
+    timed = [(labels.get(row['target']) or row.get('label') or row['target'], charts.settle_text(row)) for row in rows]
+    timed = [(label, text) for label, text in timed if text]
+    if not timed:
+        return 'This fill predates the settle step: its memory was read as soon as the load generator returned.'
+    return 'Settle: %s.' % '; '.join('%s %s' % (label, text) for label, text in timed)
+
+
 def power_gate(dataset):
     source = (dataset.get('machine') or {}).get('power_source') or 'mains'
     return POWER_GATES.get(source, 'The power gate was %s.' % source)
@@ -195,8 +207,9 @@ def build(dataset):
     fill = charts.fill_figure(dataset, 'css')
     fill_section = ''
     if fill:
-        fill_section = '<section><h2>Memory per key at scale</h2><p class="note">%s</p><div class="figure">%s</div></section>' % (
-            esc((design.get('methodology') or {}).get('fill', '')), fill)
+        settle = settle_note(dataset)
+        fill_section = '<section><h2>Memory per key at scale</h2><p class="note">%s</p>%s<div class="figure">%s</div></section>' % (
+            esc((design.get('methodology') or {}).get('fill', '')), '<p class="note">%s</p>' % esc(settle) if settle else '', fill)
     entries = list((design.get('methodology') or {}).items())
     position = next((index + 1 for index, (name, _) in enumerate(entries) if name == 'gates'), len(entries))
     entries.insert(position, ('power_gate', power_gate(dataset)))

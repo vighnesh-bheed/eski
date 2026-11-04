@@ -199,7 +199,7 @@
     "publication": "Medians over the valid repetitions with the observed minimum and maximum. Excluded repetitions stay visible with their reason. There is no overall score and no cross workload average.",
     "latency": "Closed loop client observed latency; p99 is the per run percentile, never pooled across runs.",
     "memory": "The kernel memory.peak of the server container read just before it stops: it covers preload, warmup and the timed run and is not live key memory or process RSS.",
-    "fill": "A separate fill of 10,000,000 keys of 64 B at pipeline 32 per engine, with the same server core and memory caps, reports resident and used bytes per key and the worst request during the fill.",
+    "fill": "A separate fill of 10,000,000 keys of 64 B at pipeline 32 per engine, with the same server core and memory caps, reports the worst request during the fill and the resident and used bytes per key, read once used memory has been stable for three seconds and the server reports no keyspace rehash in progress, at most sixty seconds after the fill.",
     "isolation": "Docker CPU sets and memory caps separate the roles but share the kernel, the last level cache, memory bandwidth, power and cooling. Simultaneous multithreading is off, so no role shares a physical core."
   }
 }

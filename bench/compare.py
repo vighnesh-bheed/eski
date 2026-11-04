@@ -307,6 +307,7 @@ def fill_table(run, other):
         ("used_memory_rss MiB", "used_memory_rss", f_mib),
         ("bytes_per_key_rss", "bytes_per_key_rss", f_num),
         ("bytes_per_key_used", "bytes_per_key_used", f_num),
+        ("memory settle s", "settle_s", f_num),
     ]
     header = ["fill10m"]
     for t in targets:
@@ -327,7 +328,13 @@ def fill_table(run, other):
             row.append(f_ratio(run.value(a, s, field), run.value(b, s, field)))
         rows.append(row)
     keys = run.meta.get("fill_keys")
-    print_table(f"Bulk load of {f_int(keys)} keys (64-byte values), then INFO memory / DBSIZE", header, rows)
+    note = None
+    if any("settled" in run.get(t, s) for t in targets):
+        note = f"  INFO memory is read once used_memory is unchanged for {run.meta.get('fill_settle_stable_samples', 3)} consecutive one-second samples with no keyspace rehash reported"
+        unsettled = [t for t in targets if run.get(t, s).get("settled") is False]
+        if unsettled:
+            note += f"; not settled within {run.meta.get('fill_settle_timeout_s', 60)} s, last reading kept: {', '.join(unsettled)}"
+    print_table(f"Bulk load of {f_int(keys)} keys (64-byte values), then INFO memory / DBSIZE", header, rows, note)
 
 
 def rb_table(run, other):

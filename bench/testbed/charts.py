@@ -221,6 +221,16 @@ def metric_figure(dataset, metric, theme):
     return '\n'.join(out) + '\n'
 
 
+def settle_text(row):
+    seconds = row.get('settle_s')
+    if seconds is None or type(row.get('settled')) is not bool:
+        return None
+    if row['settled']:
+        return 'memory read %.1f s after the fill' % seconds
+    window = ' within %s s' % row['settle_timeout_s'] if row.get('settle_timeout_s') else ''
+    return 'memory not settled%s, last read %.1f s after the fill' % (window, seconds)
+
+
 def fill_figure(dataset, theme):
     fill = dataset.get('fill')
     if not fill:
@@ -248,9 +258,10 @@ def fill_figure(dataset, theme):
         out.append('<text x="%d" y="%.1f" font-size="12" text-anchor="end" fill="%s">%s</text>' % (left - 10, top + 17, colors['secondary'], esc(label)))
         if row.get('status') == 'valid' and row.get('bytes_per_key_rss'):
             length = max(4.0, plot_w * row['bytes_per_key_rss'] / scale)
-            out.append('<g class="mark"><title>%s</title>' % esc('%s: %.1f bytes per key resident, %s bytes per key used, %s keys, fill at %s, worst request %s ms' % (
+            out.append('<g class="mark"><title>%s</title>' % esc('%s: %.1f bytes per key resident, %s bytes per key used, %s keys, fill at %s, worst request %s ms%s' % (
                 label, row['bytes_per_key_rss'], '%.1f' % row['bytes_per_key_used'] if row.get('bytes_per_key_used') else 'n/a',
-                '{:,}'.format(row['dbsize']) if row.get('dbsize') else 'n/a', exact(row.get('ops_per_sec'), 'ops'), row.get('max_ms'))))
+                '{:,}'.format(row['dbsize']) if row.get('dbsize') else 'n/a', exact(row.get('ops_per_sec'), 'ops'), row.get('max_ms'),
+                ', ' + settle_text(row) if settle_text(row) else '')))
             out.append('<path d="M%d %.1f H%.1f Q%.1f %.1f %.1f %.1f V%.1f Q%.1f %.1f %.1f %.1f H%d Z" fill="%s"/>' % (
                 left, top + 4, left + length - 4, left + length, top + 4, left + length, top + 8, top + 20, left + length, top + 24, left + length - 4, top + 24,
                 left, color(row['target'], dataset['engines'], colors)))
