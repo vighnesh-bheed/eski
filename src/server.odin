@@ -769,9 +769,6 @@ process_input :: proc(c: ^Conn) {
 		if keyspace_pending > 0 && !keyspace_admits(c) {
 			break
 		}
-		if c.rpos >= batch.ahead {
-			batch_scan(c, &batch)
-		}
 		start := c.rpos
 		r := parse_command(c)
 		if r != .Command {
@@ -787,7 +784,7 @@ process_input :: proc(c: ^Conn) {
 				break
 			}
 		} else {
-			execute_slot(c, argv_buf[:argc], batch_slot(&batch, start, argv_buf[0]))
+			execute_slot(c, argv_buf[:argc], batch_command_slot(c, &batch, start, argv_buf[0]))
 		}
 		if block_work != 0 && block_after_command(c, start) {
 			break
