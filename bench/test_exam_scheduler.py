@@ -98,11 +98,14 @@ if key=='partial':
 (root/'summary.json').write_text(json.dumps(dict(meta=dict(complete=True,targets={target:dict(status='ok',image_id='sha256:'+'a'*64)}))))
 (root/'original-argv.json').write_text(json.dumps(item['clients'][0]['argv']))
 (root/'dragonfly-threads.txt').write_text(os.environ['BENCH_DRAGONFLY_THREADS'])
-if key in ('bound','slow','sane'):
+if key in ('bound','slow','sane','stall'):
  ev=os.environ.get('BENCH_OWNER_EVENTS')
  if ev:Path(ev).write_text(json.dumps(dict(event='owner',role='client',pid=os.getpid(),process=dict(start_ticks=1),artifact_dir='run/'+target+'/'+key))+'\\n')
  d=root/target;d.mkdir()
- (d/(key+'.json')).write_text(json.dumps({'ALL STATS':{'Totals':{'Max Latency':4294519.77 if key=='slow' else 12.5,'Time-Serie':[{'second':1,'Max Latency':0.5}]}}}))
+ counts=[1000,1000,300,1000,10] if key=='stall' else [1000,1000,1000,10]
+ series={str(i):{'Count':c,'Max Latency':0.5} for i,c in enumerate(counts)}
+ totals={'Max Latency':4294519.77 if key=='slow' else 548.8 if key=='stall' else 12.5,'Percentile Latencies':{'p50.00':0.1,'p99.00':0.3},'Time-Serie':series}
+ (d/(key+'.json')).write_text(json.dumps({'ALL STATS':{'Totals':totals}}))
 if key=='wait':time.sleep(10)
 sys.exit(7 if key=='fail' else 130 if key=='signal' else 0)
 PY
@@ -559,6 +562,21 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(states['sane']['attempts'][0]['telemetry']['measurement_quality']['latency_sanity']['files'][0]['max_ms'], 12.5)
         self.assertEqual(self.scheduler().run(True)['cases'], state['cases'])
 
+    def test_throughput_collapse_rule_invalidates_and_annotates_tail_stalls(self):
+        self.set_plan(['stall', 'sane'])
+        state = self.scheduler().run()
+        states = {row['key']: row for row in state['cases']}
+        self.assertEqual(states['stall']['state'], 'invalid')
+        details = states['stall']['attempts'][0]['details']
+        self.assertEqual(details['reasons'], ['throughput_collapse'])
+        self.assertEqual(details['annotations'], ['tail_stall'])
+        steadiness = states['stall']['attempts'][0]['telemetry']['measurement_quality']['throughput_steadiness']['files'][0]
+        self.assertEqual((steadiness['seconds'], steadiness['median'], steadiness['collapsed']), (4, 1000, [dict(second=2, count=300)]))
+        self.assertEqual(states['sane']['state'], 'successful')
+        self.assertEqual(states['sane']['attempts'][0]['details']['annotations'], [])
+        self.assertEqual(states['sane']['attempts'][0]['telemetry']['measurement_quality']['throughput_steadiness']['files'][0]['seconds'], 3)
+        self.assertEqual(states['sane']['attempts'][0]['telemetry']['measurement_quality']['kernel_threads']['reasons'], [])
+
     def test_latency_sanity_rule_requires_raw_client_output(self):
         self.set_plan(['good'])
         self.args.max_latency_seconds = 120
@@ -724,6 +742,84 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(scheduler.validity([row], [], args), ['external_cpu_activity', 'thermal_throttling'])
         owner = dict(pid=123, process={'start_ticks': 20})
         self.assertEqual(scheduler.validity([row], [owner], args), ['thermal_throttling'])
+
+    def test_kernel_threads_are_exempt_by_parent_or_name(self):
+        args = type('Args', (), dict(max_temp_c=90, server_cpus='1', client_cpus='2-5'))()
+        exempt = [dict(pid=361, ppid=2, start_ticks=659, comm='jbd2/dm-0-8', cgroup='0::/', cpu_cores=.22),
+                  dict(pid=33291, ppid=2, start_ticks=5, comm='kworker/u64:0-ext4-rsv-conversion', cgroup='0::/', cpu_cores=1.0),
+                  dict(pid=70, ppid=2, start_ticks=5, comm='ksoftirqd/9', cgroup='0::/', cpu_cores=1.0),
+                  dict(pid=71, ppid=2, start_ticks=5, comm='rcu_preempt', cgroup='0::/', cpu_cores=.5),
+                  dict(pid=72, start_ticks=5, comm='jbd2/sda1-8', cgroup='0::/', cpu_cores=.3),
+                  dict(pid=2, ppid=0, start_ticks=1, comm='kthreadd', cgroup='0::/', cpu_cores=.2)]
+        for proc in exempt:
+            with self.subTest(comm=proc['comm']):
+                row = sample()
+                row['external_cpu'] = [proc]
+                self.assertEqual(scheduler.validity([row], [], args), [])
+        row = sample()
+        row['external_cpu'] = [dict(pid=27383, ppid=1, start_ticks=268317, comm='python3', cgroup='0::/system.slice/apt-listchanges.service', cpu_cores=.17)]
+        self.assertEqual(scheduler.validity([row], [], args), ['external_cpu_activity'])
+
+    def test_bound_kernel_thread_is_judged_by_its_cpu(self):
+        args = type('Args', (), dict(max_temp_c=90, server_cpus='1', client_cpus='2-5'))()
+        def check(comm, cores, processor=None):
+            row = sample()
+            proc = dict(pid=99204, ppid=2, start_ticks=7, comm=comm, cgroup='0::/', cpu_cores=cores)
+            if processor is not None:
+                proc['processor'] = processor
+            row['external_cpu'] = [proc]
+            placement = scheduler.reserved_kernel_threads([row], args)
+            return scheduler.validity([row], [], args), placement['annotations'], [(p['cpu'], p['cpu_cores']) for p in placement['server'] + placement['client']]
+        self.assertEqual(check('kworker/1:0+events', .9), (['kernel_thread_on_reserved_cpu'], [], [(1, .9)]))
+        self.assertEqual(check('kworker/1:2H', .1), (['kernel_thread_on_reserved_cpu'], [], [(1, .1)]))
+        self.assertEqual(check('migration/1', .5), (['kernel_thread_on_reserved_cpu'], [], [(1, .5)]))
+        self.assertEqual(check('kworker/3:2+i915-unordered', 1.0), ([], ['kernel_thread_on_client_cpu'], [(3, 1.0)]))
+        self.assertEqual(check('kworker/1:0+events', .05), ([], [], []))
+        self.assertEqual(check('kworker/6:1+events', 1.0), ([], [], []))
+        self.assertEqual(check('kworker/u64:3+events_unbound', 1.0), ([], [], []))
+        self.assertEqual(check('kworker/3:1+events', .9, processor=1), (['kernel_thread_on_reserved_cpu'], [], [(1, .9)]))
+        self.assertEqual(check('kworker/1:1+events', .9, processor=3), ([], ['kernel_thread_on_client_cpu'], [(3, .9)]))
+        self.assertEqual(check('kworker/1:1+events', .9, processor=True), (['kernel_thread_on_reserved_cpu'], [], [(1, .9)]))
+
+    def test_negligible_single_sighting_is_not_external_activity(self):
+        args = type('Args', (), dict(max_temp_c=90))()
+        probe = dict(pid=113910, ppid=113888, start_ticks=973647, comm='memtier_benchma', cgroup='0::/system.slice/docker-7b2d.scope', cpu_cores=.0098, known_build_or_load=True)
+        rows = [sample(), sample(), sample()]
+        rows[1]['external_cpu'] = [probe]
+        self.assertEqual(scheduler.validity(rows, [], args), [])
+        rows[2]['external_cpu'] = [dict(probe)]
+        self.assertEqual(scheduler.validity(rows, [], args), ['external_cpu_activity'])
+        rows[2]['external_cpu'] = []
+        rows[1]['external_cpu'] = [dict(probe, cpu_cores=.05)]
+        self.assertEqual(scheduler.validity(rows, [], args), ['external_cpu_activity'])
+        rows[1]['external_cpu'] = [dict(probe, cpu_cores=None)]
+        self.assertEqual(scheduler.validity(rows, [], args), ['external_cpu_activity'])
+        owner = dict(container='bench-client', cgroup={'path': '/system.slice/docker-7b2d.scope'})
+        rows[1]['external_cpu'] = [dict(probe, cpu_cores=.9)]
+        self.assertEqual(scheduler.validity(rows, [owner], args), [])
+
+    def test_throughput_steadiness_reads_the_per_second_series(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            (run / 'redis').mkdir()
+            row = dict(key='get64-p1')
+            def write(totals):
+                (run / 'redis/get64-p1.json').write_text(json.dumps({'ALL STATS': {'Totals': totals}}))
+            self.assertEqual(scheduler.throughput_steadiness(run, row)['reasons'], [])
+            series = {str(i): {'Count': c} for i, c in enumerate([264021, 263054, 32, 21334, 10487, 32])}
+            write({'Max Latency': 548.863, 'Percentile Latencies': {'p99.00': .223}, 'Time-Serie': series})
+            result = scheduler.throughput_steadiness(run, row)
+            self.assertEqual((result['reasons'], result['annotations']), (['throughput_collapse'], ['tail_stall']))
+            self.assertEqual([c['second'] for c in result['files'][0]['collapsed']], [2, 4])
+            write({'Max Latency': 6.7, 'Percentile Latencies': {'p99.00': .287}, 'Time-Serie': {'0': {'Count': 1000}, '1': {'Count': 990}, '2': {'Count': 32}}})
+            result = scheduler.throughput_steadiness(run, row)
+            self.assertEqual((result['reasons'], result['annotations'], result['files'][0]['seconds']), ([], [], 2))
+            write({'Max Latency': 548.8, 'Percentile Latencies': {'p99.00': 1.5}, 'Time-Serie': {'0': {'Count': 1000}, '1': {'Count': 400}}})
+            self.assertEqual(scheduler.throughput_steadiness(run, row)['annotations'], [])
+            write({'Max Latency': 12.5, 'Time-Serie': [{'second': 1, 'Max Latency': .5}]})
+            self.assertEqual(scheduler.throughput_steadiness(run, row)['reasons'], ['throughput_series_unmeasured'])
+            (run / 'redis/get64-p1.json').write_text('{"ALL STATS": ')
+            self.assertEqual(scheduler.throughput_steadiness(run, row)['reasons'], ['throughput_series_unreadable'])
 
     def test_missing_and_unreadable_sensors_cannot_pass(self):
         args = type('Args', (), dict(max_temp_c=90))()
