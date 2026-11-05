@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 436" width="960" height="436" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif" role="img" aria-labelledby="arch-title arch-desc">
+<title id="arch-title">Eski request path: coordinator loop, keyspace table, optional workers, Lua engines and persistence</title>
+<desc id="arch-desc">TCP connections feed per-connection buffers, the RESP parser and dispatch with arity, ACL and key checks; handlers work on the keyspace table of control bytes, slots and inline, slab or heap values, and the typed reply writer fills output buffers that drain back to the connection. Mutations raise effects for watches, notifications, tracking, MONITOR and the AOF feed. Lua 5.1.5 engines run on the coordinator behind a protected C ABI. Optional keyspace workers execute owned values and publish through a coordinator barrier, optional LCS compute workers run over immutable snapshots, and RDB and AOF persistence run their background work in a forked child.</desc>
+<defs><marker id="head" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0.5 L7.5 4 L0 7.5 z" fill="#52514e"/></marker><marker id="tail" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0.5 L7.5 4 L0 7.5 z" fill="#52514e"/></marker></defs>
+<rect width="960" height="436" fill="#fcfcfb"/>
+<rect x="16" y="40" width="928" height="222" rx="10" fill="none" stroke="#c3c2b7" stroke-width="1"/>
+<text x="30" y="30" font-size="12" font-weight="600" fill="#0b0b0b">Coordinator thread</text>
+<text x="158" y="30" font-size="11" fill="#52514e">one epoll event loop that owns every connection and, by default, the live keyspace; replies keep each connection’s request order</text>
+<rect x="34" y="72" width="112" height="56" rx="6" fill="#e1e0d9"/>
+<text x="90.0" y="90.0" font-size="11.5" font-weight="600" text-anchor="middle" fill="#0b0b0b">TCP connections</text>
+<text x="90.0" y="104.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">IPv4, IPv6, Unix, TLS</text>
+<text x="90.0" y="118.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">readiness from epoll</text>
+<path d="M147.0 100.0 L163.0 100.0" fill="none" stroke="#52514e" stroke-width="1.5" marker-end="url(#head)"/>
+<rect x="164" y="72" width="112" height="56" rx="6" fill="#e1e0d9"/>
+<text x="220.0" y="90.0" font-size="11.5" font-weight="600" text-anchor="middle" fill="#0b0b0b">Connection buffers</text>
+<text x="220.0" y="104.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">input retained until</text>
+<text x="220.0" y="118.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">a request completes</text>
+<path d="M277.0 100.0 L293.0 100.0" fill="none" stroke="#52514e" stroke-width="1.5" marker-end="url(#head)"/>
+<rect x="294" y="72" width="112" height="56" rx="6" fill="#e1e0d9"/>
+<text x="350.0" y="90.0" font-size="11.5" font-weight="600" text-anchor="middle" fill="#0b0b0b">RESP parser</text>
+<text x="350.0" y="104.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">RESP2, RESP3, inline;</text>
+<text x="350.0" y="118.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">array and bulk limits</text>
+<path d="M407.0 100.0 L423.0 100.0" fill="none" stroke="#52514e" stroke-width="1.5" marker-end="url(#head)"/>
+<rect x="424" y="72" width="112" height="56" rx="6" fill="#e1e0d9"/>
+<text x="480.0" y="90.0" font-size="11.5" font-weight="600" text-anchor="middle" fill="#0b0b0b">Dispatch</text>
+<text x="480.0" y="104.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">registry lookup, arity,</text>
+<text x="480.0" y="118.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">ACL, key specs, flags</text>
+<path d="M537.0 100.0 L553.0 100.0" fill="none" stroke="#52514e" stroke-width="1.5" marker-end="url(#head)"/>
+<rect x="554" y="72" width="112" height="56" rx="6" fill="#e1e0d9" stroke="#2a78d6" stroke-width="1.5"/>
+<text x="610.0" y="90.0" font-size="11.5" font-weight="600" text-anchor="middle" fill="#0b0b0b">Keyspace table</text>
+<text x="610.0" y="104.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">control bytes, slots,</text>
+<text x="610.0" y="118.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">inline, slab, heap values</text>
+<path d="M667.0 100.0 L683.0 100.0" fill="none" stroke="#52514e" stroke-width="1.5" marker-end="url(#head)"/>
+<rect x="684" y="72" width="112" height="56" rx="6" fill="#e1e0d9"/>
+<text x="740.0" y="90.0" font-size="11.5" font-weight="600" text-anchor="middle" fill="#0b0b0b">Typed reply writer</text>
+<text x="740.0" y="104.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">protocol-appropriate</text>
+<text x="740.0" y="118.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">RESP2 / RESP3 forms</text>
+<path d="M797.0 100.0 L813.0 100.0" fill="none" stroke="#52514e" stroke-width="1.5" marker-end="url(#head)"/>
+<rect x="814" y="72" width="112" height="56" rx="6" fill="#e1e0d9"/>
+<text x="870.0" y="90.0" font-size="11.5" font-weight="600" text-anchor="middle" fill="#0b0b0b">Output buffers</text>
+<text x="870.0" y="104.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">flushed when the</text>
+<text x="870.0" y="118.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">socket is writable</text>
+<path d="M870.0 71.0 L870.0 58.0 L90.0 58.0 L90.0 70.0" fill="none" stroke="#52514e" stroke-width="1.5" marker-end="url(#head)"/>
+<text x="480.0" y="55" font-size="10" text-anchor="middle" fill="#898781">bytes written back on the same connection</text>
+<rect x="170" y="176" width="230" height="56" rx="6" fill="#fcfcfb" stroke="#c3c2b7" stroke-width="1.5"/>
+<text x="285.0" y="194.0" font-size="11.5" font-weight="600" text-anchor="middle" fill="#0b0b0b">Lua 5.1.5 engines on the coordinator</text>
+<text x="285.0" y="208.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">EVAL VM and Functions VM</text>
+<text x="285.0" y="222.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">protected C ABI; scripts call dispatch</text>
+<path d="M401.0 204.0 L450.0 204.0 L450.0 129.0" fill="none" stroke="#52514e" stroke-width="1.5" marker-end="url(#head)" marker-start="url(#tail)"/>
+<rect x="684" y="176" width="242" height="56" rx="6" fill="#fcfcfb" stroke="#eb6834" stroke-width="1.5"/>
+<text x="805.0" y="194.0" font-size="11.5" font-weight="600" text-anchor="middle" fill="#0b0b0b">Effects of each mutation</text>
+<text x="805.0" y="208.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">watches, notifications, tracking,</text>
+<text x="805.0" y="222.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">MONITOR and the AOF feed</text>
+<path d="M640.0 129.0 L640.0 204.0 L683.0 204.0" fill="none" stroke="#52514e" stroke-width="1.5" marker-end="url(#head)"/>
+<text x="646" y="186" font-size="10" fill="#898781">ordered</text>
+<rect x="340" y="300" width="200" height="62" rx="6" fill="#fcfcfb" stroke="#1baf7a" stroke-width="1.5" stroke-dasharray="5 3"/>
+<text x="440.0" y="321.0" font-size="11.5" font-weight="600" text-anchor="middle" fill="#0b0b0b">Optional LCS compute workers</text>
+<text x="440.0" y="335.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">immutable snapshots and a</text>
+<text x="440.0" y="349.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">private workspace per job</text>
+<path d="M480.0 129.0 L480.0 299.0" fill="none" stroke="#52514e" stroke-width="1.5" marker-end="url(#head)" marker-start="url(#tail)"/>
+<text x="488" y="262" font-size="10" fill="#898781">snapshots down,</text>
+<text x="488" y="274" font-size="10" fill="#898781">completion up</text>
+<rect x="554" y="300" width="220" height="62" rx="6" fill="#fcfcfb" stroke="#1baf7a" stroke-width="1.5" stroke-dasharray="5 3"/>
+<text x="664.0" y="321.0" font-size="11.5" font-weight="600" text-anchor="middle" fill="#0b0b0b">Optional keyspace worker pool</text>
+<text x="664.0" y="335.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">owned values and datatype clones;</text>
+<text x="664.0" y="349.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">coordinator publication barrier</text>
+<path d="M600.0 129.0 L600.0 299.0" fill="none" stroke="#52514e" stroke-width="1.5" marker-end="url(#head)" marker-start="url(#tail)"/>
+<text x="608" y="262" font-size="10" fill="#898781">accept down,</text>
+<text x="608" y="274" font-size="10" fill="#898781">publish up</text>
+<rect x="788" y="300" width="138" height="62" rx="6" fill="#fcfcfb" stroke="#eb6834" stroke-width="1.5"/>
+<text x="857.0" y="321.0" font-size="11.5" font-weight="600" text-anchor="middle" fill="#0b0b0b">Persistence</text>
+<text x="857.0" y="335.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">RDB and AOF rewrite</text>
+<text x="857.0" y="349.0" font-size="10.5" font-weight="400" text-anchor="middle" fill="#52514e">in a forked child</text>
+<path d="M857.0 233.0 L857.0 299.0" fill="none" stroke="#52514e" stroke-width="1.5" marker-end="url(#head)"/>
+<text x="865.0" y="269.5" font-size="10" fill="#898781" text-anchor="start">AOF append</text>
+<line x1="34" x2="276" y1="298" y2="298" stroke="#e1e0d9" stroke-width="1"/>
+<text x="34" y="316" font-size="11" font-weight="600" fill="#0b0b0b">Reading the diagram</text>
+<text x="34" y="332" font-size="10.5" fill="#52514e">Filled boxes are the per-request path on the coordinator.</text>
+<text x="34" y="346" font-size="10.5" fill="#52514e">Dashed boxes are worker threads, disabled by default.</text>
+<text x="34" y="360" font-size="10.5" fill="#52514e">Below the frame, work leaves the coordinator thread.</text>
+<text x="34" y="400" font-size="10.5" fill="#898781">Scratch allocations end with the event-loop iteration; keyspace values, queued work and connection state use owned storage.</text>
+<text x="34" y="414" font-size="10.5" fill="#898781">Expiry, keyspace growth and member-table migration run in bounded steps. Modules, replication, Sentinel and Cluster are outside the node.</text>
+<text x="34" y="428" font-size="10.5" fill="#898781">docs/architecture.md and docs/threading.md give the details.</text>
+</svg>

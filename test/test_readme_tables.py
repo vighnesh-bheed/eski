@@ -132,6 +132,47 @@ class Inputs(FixtureInputs, unittest.TestCase):
                 with self.assertRaises(ValueError):
                     tables.benchmark_cells(dataset)
 
+    def test_ratio_chart_renders_one_row_per_workload_with_exclusions(self):
+        cells = tables.benchmark_cells(self.dataset)
+        light = tables.ratio_figure(self.dataset, cells, 'light')
+        dark = tables.ratio_figure(self.dataset, cells, 'dark')
+        self.assertNotEqual(light, dark)
+        for figure in (light, dark):
+            self.assertIn('<title id="ratio-title">', figure)
+            self.assertIn('<desc id="ratio-desc">', figure)
+            self.assertIn('viewBox="0 0 960 380"', figure)
+            for workload in self.dataset['workloads']:
+                self.assertIn('>%s</text>' % tables.CHARTS.esc(workload['name']), figure)
+            for text in ('>1.10x †</text>', '>1.14x †</text>', '>1.08x †</text>'):
+                self.assertIn(text, figure)
+            self.assertEqual(figure.count('x †</text>'), 7)
+            self.assertIn('>excluded: Eski 0 of 4 repetitions valid</text>', figure)
+            self.assertIn('Intel(R) Core(TM) i7-8750H CPU @ 2.20GHz, run comparison-v1, one server core per engine, 100,000 keys, 32 connections, 60 s timed runs', figure)
+            self.assertEqual(figure.count('<circle '), 2 + 7 * 2)
+            self.assertNotIn('Redis 7', figure)
+        self.assertIn(tables.CHARTS.SERIES['light'][0], light)
+        self.assertIn(tables.CHARTS.INK['dark']['surface'], dark)
+        self.assertNotIn(tables.CHARTS.INK['dark']['surface'], light)
+        cells[('set64-p1', 'redis')].update(ops=None, included=[])
+        figure = tables.ratio_figure(self.dataset, cells, 'light')
+        self.assertIn('>excluded: Redis 0 of 4 repetitions valid</text>', figure)
+        self.assertEqual(figure.count('x †</text>'), 6)
+
+    def test_readme_embeds_the_ratio_chart_above_the_medians_table(self):
+        commands = {'ping': {'group': 'connection', 'summary': 'Pings.'}}
+        outputs = tables.render_outputs(commands, self.baseline, self.observed, self.dataset, skeleton())
+        cells = tables.benchmark_cells(self.dataset)
+        self.assertEqual(outputs['docs/img/throughput-ratio.svg'], tables.ratio_figure(self.dataset, cells, 'light'))
+        self.assertEqual(outputs['docs/img/throughput-ratio-dark.svg'], tables.ratio_figure(self.dataset, cells, 'dark'))
+        readme = outputs['README.md']
+        picture = ('<picture>\n<source media="(prefers-color-scheme: dark)" srcset="docs/img/throughput-ratio-dark.svg">\n'
+                   '<img alt="Eski median throughput relative to the Redis median per workload on Intel(R) Core(TM) i7-8750H CPU @ 2.20GHz: GET 64 B, pipeline 1 1.10x †; ')
+        self.assertIn(picture, readme)
+        self.assertIn('SET and GET 1:1, 64 B, pipeline 16 excluded: Eski 0 of 4 repetitions valid; ', readme)
+        self.assertIn('" src="docs/img/throughput-ratio.svg" width="960">\n</picture>\n\nRecorded medians from', readme)
+        self.assertLess(readme.index('<picture>'), readme.index('| Workload | Eski ops/s |'))
+        self.assertLess(readme.index('they establish no multicore scaling or universal throughput claim.'), readme.index('<picture>'))
+
     def test_run_directory_comes_from_the_rendered_dataset(self):
         self.assertEqual(tables.run_directory(self.dataset), 'bench/testbed/runs/comparison-v1')
         commands = {'ping': {'group': 'connection', 'summary': 'Pings.'}}
@@ -404,6 +445,10 @@ class LiveInputs(FixtureInputs, unittest.TestCase):
         self.assertNotIn('not a guaranteed engine-speed ratio', readme)
         self.assertIn('x observed"', outputs['docs/img/benchmark-ratio.svg'])
         self.assertNotIn('observed, client limited', outputs['docs/img/benchmark-ratio.svg'])
+        figure = tables.ratio_figure(dataset, tables.benchmark_cells(dataset), 'light')
+        self.assertNotIn('† the load generator', figure)
+        self.assertNotIn('x †</text>', figure)
+        self.assertIn('† the load generator', tables.ratio_figure(self.dataset, tables.benchmark_cells(self.dataset), 'light'))
 
     def test_cli_generation_is_deterministic_and_check_does_not_write(self):
         with tempfile.TemporaryDirectory(prefix='eski-doc-test-') as directory:
