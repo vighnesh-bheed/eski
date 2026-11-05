@@ -150,7 +150,7 @@ debug_more :: proc(c: ^Conn, argv: [][]u8) -> bool {
 		reply_ok(c)
 	case n == 2 && eq_nocase(sub, "stringmatch-test"):
 		debug_stringmatch_test()
-		reply_simple(c, "Apparently Redis did not crash: test passed")
+		reply_simple(c, "Apparently the server did not crash: test passed")
 	case n == 2 && eq_nocase(sub, "client-eviction"):
 		debug_client_eviction(c)
 	case n == 4 && eq_nocase(sub, "replybuffer"):

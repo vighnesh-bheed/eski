@@ -327,7 +327,7 @@ lua_inner :: proc(run: ^Lua_Invocation, argv: [][]u8) {
 		return
 	}
 	if !lua_handler_allowed(cmd, spec) {
-		lua_inner_reject(run, "ERR This Redis command is not allowed from script")
+		lua_inner_reject(run, "ERR This command is not allowed from script")
 		stat_reject(hot, argv)
 		return
 	}
