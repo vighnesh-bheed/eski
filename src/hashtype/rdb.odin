@@ -85,7 +85,7 @@ pack_row :: proc(h: Hash, field, value: []u8, deadline: u64, stride: int) {
 		return
 	}
 	pair := [2]lp.Element{lp.entry_from_bytes(field), lp.entry_from_bytes(value)}
-	h.lp = lp.lp_batch_append(h.lp, pair[:])
+	h.lp = lp.lp_append_entries(h.lp, pair[:])
 }
 
 admit_row :: proc(r: ^rdb.Reader, h: Hash, field, value: []u8, deadline: u64, layout: Row_Layout, reserve: int, deep: bool, seen: ^rdb.Dup_Set) -> bool {
@@ -186,7 +186,7 @@ rdb_load_blob :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> Hash {
 	if !rdb.lp_validate_dups(blob, deep, width) {
 		msg := "Hash listpack integrity check failed."
 		if ex {
-			msg = "Hash listpackex integrity check failed."
+			msg = "Hash field-expiry listpack integrity check failed."
 		}
 		rdb.corrupt(r, msg)
 		return nil
@@ -206,7 +206,7 @@ rdb_load_blob :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> Hash {
 	if !rdb_repack_loaded(h) {
 		msg := "Hash listpack integrity check failed."
 		if ex {
-			msg = "Hash listpackex integrity check failed."
+			msg = "Hash field-expiry listpack integrity check failed."
 		}
 		return rdb_fail(r, h, msg)
 	}

@@ -288,8 +288,8 @@ intset_listpack_estimate :: proc "contextless" (is: [^]u8) -> (bytes: int, fits:
 	if int(max(lp.sdigits10(low), lp.sdigits10(high))) > set_max_listpack_value {
 		return 0, false
 	}
-	per_low := lp.lp_estimate_bytes_repeated_integer(low, u64(members))
-	per_high := lp.lp_estimate_bytes_repeated_integer(high, u64(members))
+	per_low := lp.lp_repeated_integer_bytes(low, u64(members))
+	per_high := lp.lp_repeated_integer_bytes(high, u64(members))
 	return max(per_low, per_high), true
 }
 

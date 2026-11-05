@@ -119,9 +119,17 @@ lp_encode_integer_get_type :: proc "contextless" (v: i64, intenc: [^]u8, enclen:
 	}
 }
 
-lp_entry_size_integer :: proc "contextless" (lval: i64) -> int {
-	length := integer_body_size(lval)
+lp_integer_entry_size :: proc "contextless" (value: i64) -> int {
+	length := integer_body_size(value)
 	return length + backlen_width(u64(length))
+}
+
+lp_repeated_integer_bytes :: proc "contextless" (value: i64, repeats: u64) -> int {
+	entry_size := u64(lp_integer_entry_size(value))
+	if repeats > (u64(max(int)) - PACK_HEADER_BYTES - 1) / entry_size {
+		return max(int)
+	}
+	return PACK_HEADER_BYTES + 1 + int(repeats * entry_size)
 }
 
 string_header_size :: proc "contextless" (length: u32) -> int {

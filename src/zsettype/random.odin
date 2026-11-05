@@ -2,10 +2,6 @@ package zsettype
 
 import lp "../listpack"
 
-ZRANDMEMBER_SUB_STRATEGY_MUL :: 3
-
-ZRANDMEMBER_RANDOM_SAMPLE_LIMIT :: 1000
-
 item_from_entry :: proc "contextless" (e: lp.Element) -> Item {
 	if e.text == nil {
 		return Item{ival = e.number, is_int = true}

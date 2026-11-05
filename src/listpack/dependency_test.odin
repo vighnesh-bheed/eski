@@ -19,7 +19,7 @@ header_dependent_backlen_is_repaired_only_after_dependency_breaks :: proc(t: ^te
 	testing.expect(t, lp_validate_integrity(lp, u64(lp_bytes(lp)), true, nil, nil))
 	old_lp := lp
 	old_capacity := lp_malloc_size(lp)
-	lp = lp_batch_append(lp, nil)
+	lp = lp_append_entries(lp, nil)
 	testing.expect(t, lp == old_lp && lp_malloc_size(lp) == old_capacity && lp[7] == 129)
 	cursor: [^]u8
 	lp = lp_insert_integer(lp, 17, padd(lp, lp_bytes(lp) - 1), Placement.Before, &cursor)

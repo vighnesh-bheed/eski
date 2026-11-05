@@ -416,8 +416,8 @@ Pack_Audit :: struct {
 
 @(private)
 audit_deadline :: proc(audit: ^Pack_Audit, at: [^]u8) -> bool {
-	deadline: i64
-	if !lp.lp_get_integer_value(at, &deadline) || deadline < 0 || u64(deadline) > FIELD_DEADLINE_MAX {
+	deadline, ok := lp.lp_integer_at(at)
+	if !ok || deadline < 0 || u64(deadline) > FIELD_DEADLINE_MAX {
 		return false
 	}
 	if deadline == 0 {
@@ -443,17 +443,17 @@ audit_element :: proc(at: [^]u8, declared_count: u32, state: rawptr) -> bool {
 	return column != 2 || audit.width != 3 || audit_deadline(audit, at)
 }
 
-lp_validate_dups :: proc(blob: []u8, deep: bool, tuple_len: int) -> bool {
-	if tuple_len < 1 || len(blob) == 0 {
+lp_validate_dups :: proc(blob: []u8, deep: bool, stride: int) -> bool {
+	if stride < 1 || len(blob) == 0 {
 		return false
 	}
 	pack, size := raw_data(blob), u64(len(blob))
 	if !deep {
 		return lp.lp_validate_integrity(pack, size, false, nil, nil)
 	}
-	audit := Pack_Audit{width = tuple_len}
+	audit := Pack_Audit{width = stride}
 	defer dup_destroy(&audit.names)
-	return lp.lp_validate_integrity(pack, size, true, audit_element, &audit) && audit.visited % tuple_len == 0
+	return lp.lp_validate_integrity(pack, size, true, audit_element, &audit) && audit.visited % stride == 0
 }
 
 lp_copy :: proc "contextless" (blob: []u8) -> [^]u8 {
@@ -499,7 +499,7 @@ ziplist_to_listpack :: proc(blob: []u8, pairs: bool) -> ([^]u8, bool) {
 		pending += 1
 		index += 1
 		if pending == len(batch) {
-			out = lp.lp_batch_append(out, batch[:pending])
+			out = lp.lp_append_entries(out, batch[:pending])
 			pending = 0
 			if out == nil {
 				return nil, false
@@ -511,7 +511,7 @@ ziplist_to_listpack :: proc(blob: []u8, pairs: bool) -> ([^]u8, bool) {
 		return nil, false
 	}
 	if pending > 0 {
-		out = lp.lp_batch_append(out, batch[:pending])
+		out = lp.lp_append_entries(out, batch[:pending])
 		if out == nil {
 			return nil, false
 		}

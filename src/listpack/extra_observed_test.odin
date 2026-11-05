@@ -71,10 +71,10 @@ observed_actual_shrinks_release_spare_capacity_while_same_size_keeps_it :: proc(
 @(test)
 size_estimates_saturate_only_when_mathematical_result_is_unrepresentable :: proc(t: ^testing.T) {
 	for value in ([]i64{0, -1, 127, 128, 4096, min(i64), max(i64)}) {
-		width := u64(lp_entry_size_integer(value))
+		width := u64(lp_integer_entry_size(value))
 		maximum_representable := (u64(max(int)) - 7) / width
-		testing.expect(t, lp_estimate_bytes_repeated_integer(value, maximum_representable) == 7 + int(maximum_representable * width))
-		testing.expect(t, lp_estimate_bytes_repeated_integer(value, maximum_representable + 1) == max(int))
-		testing.expect(t, lp_estimate_bytes_repeated_integer(value, max(u64)) == max(int))
+		testing.expect(t, lp_repeated_integer_bytes(value, maximum_representable) == 7 + int(maximum_representable * width))
+		testing.expect(t, lp_repeated_integer_bytes(value, maximum_representable + 1) == max(int))
+		testing.expect(t, lp_repeated_integer_bytes(value, max(u64)) == max(int))
 	}
 }

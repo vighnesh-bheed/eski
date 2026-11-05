@@ -188,13 +188,10 @@ lp_get_value :: proc "contextless" (p: [^]u8, slen: ^u32, lval: ^i64) -> [^]u8 {
 	return nil
 }
 
-lp_get_integer_value :: proc "contextless" (p: [^]u8, lval: ^i64) -> bool {
-	body, valid := owned_body(p)
+lp_integer_at :: proc "contextless" (at: [^]u8) -> (value: i64, ok: bool) {
+	body, valid := owned_body(at)
 	if !valid || body.is_string {
-		return false
+		return 0, false
 	}
-	if lval != nil {
-		lval^ = body.value
-	}
-	return true
+	return body.value, true
 }
