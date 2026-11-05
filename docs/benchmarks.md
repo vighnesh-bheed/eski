@@ -1,24 +1,24 @@
 # Recorded benchmark comparison
 
-Generated from `bench/testbed/runs/comparison-v1/dataset.json`, schema `eski-testbed-dataset-v1`. The benchmark phase contains 128 planned repetitions, 124 valid, 4 excluded and 84 included client-limited measurements. The medians and ranges below are recomputed from included benchmark rows; calibration and excluded rows do not enter them.
+Generated from `bench/testbed/runs/cloud-v2/dataset.json`, schema `eski-testbed-dataset-v1`. The benchmark phase contains 128 planned repetitions, 128 valid, 0 excluded and 0 included client-limited measurements. The medians and ranges below are recomputed from included benchmark rows; calibration and excluded rows do not enter them.
 
 ## Reproduce the tables
 
-Run `python3 -I test/readme_tables.py --benchmark-results bench/testbed/runs/comparison-v1` and verify with `python3 -I test/readme_tables.py --check`. To render the recorded charts and report, run `python3 -I bench/testbed/charts.py --dataset bench/testbed/runs/comparison-v1/dataset.json --out bench/testbed/runs/comparison-v1/charts` and `python3 -I bench/testbed/page.py --dataset bench/testbed/runs/comparison-v1/dataset.json --out bench/testbed/runs/comparison-v1/report.html`. A new physical experiment follows [run the comparison on a new machine](#run-the-comparison-on-a-new-machine) below; generating tables does not launch it. The [recorded report](../bench/testbed/runs/comparison-v1/report.html), [dataset](../bench/testbed/runs/comparison-v1/dataset.json) and collection receipts are committed together.
+Run `python3 -I test/readme_tables.py --benchmark-results bench/testbed/runs/cloud-v2` and verify with `python3 -I test/readme_tables.py --check`. To render the recorded charts and report, run `python3 -I bench/testbed/charts.py --dataset bench/testbed/runs/cloud-v2/dataset.json --out bench/testbed/runs/cloud-v2/charts` and `python3 -I bench/testbed/page.py --dataset bench/testbed/runs/cloud-v2/dataset.json --out bench/testbed/runs/cloud-v2/report.html`. A new physical experiment follows [run the comparison on a new machine](#run-the-comparison-on-a-new-machine) below; generating tables does not launch it. The [recorded report](../bench/testbed/runs/cloud-v2/report.html), [dataset](../bench/testbed/runs/cloud-v2/dataset.json) and collection receipts are committed together.
 
 ## Method and machine
 
-Machine: Intel(R) Core(TM) i7-8750H CPU @ 2.20GHz; 15851.66 MiB RAM; server CPUs `1`, client CPUs `3,4`, controller CPUs `5,11`.
+Machine: Intel(R) Xeon(R) E-2288G CPU @ 3.70GHz; 63914.20 MiB RAM; server CPUs `1`, client CPUs `2,3,4,5`, controller CPUs `6`.
 
 100,000 keys with numeric ids 1 to 100,000 under one prefix, loaded by one connection at pipeline 32 before every measurement. String workloads hold one value per key; HGET, SISMEMBER and ZSCORE keys hold 16 fields or members and read field or member 8. DBSIZE and sampled replies on keys 1, 50,000 and 99,999 are checked before the warmup.
 
 Eski, Redis, Valkey and Dragonfly each run in a fresh container per measurement with the same CPU set, an 8 GiB memory and swap cap, 6 GiB maxmemory, persistence off and host loopback networking. Dragonfly runs one proactor thread on its single core.
 
-A separate fill of 10,000,000 keys of 64 B at pipeline 32 per engine, with the same server core and memory caps, reports resident and used bytes per key and the worst request during the fill.
+A separate fill of 10,000,000 keys of 64 B at pipeline 32 per engine, with the same server core and memory caps, reports the worst request during the fill and the resident and used bytes per key, read once used memory has been stable for three seconds and the server reports no keyspace rehash in progress, at most sixty seconds after the fill.
 
-Before every case the CPU package must be at or below 55 C, the server and client CPUs at least 95 percent idle, the readings stable for 10 seconds and at least 30 seconds must have passed since the last case; an unmet gate after 600 seconds holds the run. During a case the machine must stay on AC power with readable telemetry, no thermal throttle counter increments, an unchanged frequency policy, a package at or below 90 C and no competing CPU load.
+Before every case the CPU package must be at or below 55 C, the server and client CPUs at least 95 percent idle, the readings stable for 10 seconds and at least 30 seconds must have passed since the last case; an unmet gate after 600 seconds holds the run. During a case the machine must expose readable telemetry, no thermal throttle counter increments, an unchanged frequency policy, a package at or below 90 C and no competing CPU load. The machine has no battery or ACPI power-supply device; the power gate records that absence instead of an AC online reading. Before the calibration the machine is watched idle for 600 seconds, and any process outside the run, kernel threads included, that uses a tenth of a core on a server or client CPU in any sample holds the run.
 
-Docker CPU sets and memory caps separate the roles but share the kernel, the last level cache, memory bandwidth, power and cooling.
+Docker CPU sets and memory caps separate the roles but share the kernel, the last level cache, memory bandwidth, power and cooling. Simultaneous multithreading is off, so no role shares a physical core.
 
 Closed loop client observed latency; p99 is the per run percentile, never pooled across runs.
 
@@ -26,13 +26,13 @@ The kernel memory.peak of the server container read just before it stops: it cov
 
 Medians over the valid repetitions with the observed minimum and maximum. Excluded repetitions stay visible with their reason. There is no overall score and no cross workload average.
 
-A measurement whose raw client output reports a maximum latency beyond 120 seconds is invalid as a histogram range artefact. The timed client's CPU share is recorded and a measurement above 85 percent of its two CPU budget is marked client limited, which makes its throughput a lower bound.
+A measurement whose raw client output reports a maximum latency beyond 120 seconds is invalid as a histogram range artefact. The timed client's CPU share is recorded and a measurement above 85 percent of its four CPU budget is marked client limited, which makes its throughput a lower bound.
 
 Four repetitions per workload and engine. The engine order rotates so that each engine takes every position once per workload. Failed, invalid and skipped cases are never retried silently.
 
-10 seconds of warmup on the loaded dataset, excluded from the statistics, then one 60 second timed run with two client threads of 16 connections each, uniform random keys and pipeline 1 unless the workload names pipeline 16.
+10 seconds of warmup on the loaded dataset, excluded from the statistics, then one 60 second timed run with four client threads of 8 connections each (32 connections, as in comparison-v1), uniform random keys and pipeline 1 unless the workload names pipeline 16.
 
-One physical server core without its hyperthread sibling for every engine, two separate physical cores for the load generator and one physical core for the controller. This is an end to end single core comparison on one machine; it does not measure multicore scaling or maximum capacity.
+One physical server core with simultaneous multithreading disabled for every engine, four separate physical cores for the load generator and one physical core for the controller, on a rented single-socket bare-metal machine. This is an end to end single core comparison on one machine; it does not measure multicore scaling or maximum capacity.
 
 The pinned memtier_benchmark image with its default seed and distinct client seeds, so every engine and repetition sees the same key sequence policy.
 
@@ -40,77 +40,73 @@ The pinned memtier_benchmark image with its default seed and distinct client see
 
 | Engine | Image reference | Measured image ID | Recorded version |
 | --- | --- | --- | --- |
-| Eski | `eski:local` | `sha256:1539a15f6ad985667f2f8f2f93e21a790ae7bc93dadde72dbcdfdbaefb942b79` | eski v=0.1.0 |
-| Redis 7.4.12 | `docker.io/library/redis:7.4.12@sha256:b6b6e3dc0c0952737748e55d5d885272840c7e42ba41ab1d5489f693419882f5` | `sha256:b6b6e3dc0c0952737748e55d5d885272840c7e42ba41ab1d5489f693419882f5` | 7.4.12 |
-| Valkey 8.1.11 | `docker.io/valkey/valkey:8.1.11@sha256:8f836008e0986c36adf50da714c7060cf689dbb335f61fe077939d90fa650809` | `sha256:8f836008e0986c36adf50da714c7060cf689dbb335f61fe077939d90fa650809` | 8.1.11 |
-| Dragonfly 2.0.2 | `ghcr.io/dragonflydb/dragonfly:v2.0.2@sha256:061f00b201b58e12f974e4e96c761a881ee1c05e9d8ee967466a604b7299753b` | `sha256:061f00b201b58e12f974e4e96c761a881ee1c05e9d8ee967466a604b7299753b` | 2.0.2 |
+| Eski | `eski:local` | `sha256:252bef1abda04f2ad9c8be487163ea8409a3d056c534817867a384ff4258eac5` | eski v=0.1.0 license=Apache-2.0 |
+| Redis 7.4.12 | `docker.io/library/redis:7.4.12@sha256:b6b6e3dc0c0952737748e55d5d885272840c7e42ba41ab1d5489f693419882f5` | `sha256:9823645c452a9a994f575ed238e1a4f67365acbf8e842db769060820fab06449` | 7.4.12 |
+| Valkey 8.1.11 | `docker.io/valkey/valkey:8.1.11@sha256:8f836008e0986c36adf50da714c7060cf689dbb335f61fe077939d90fa650809` | `sha256:ca662989648f173e01fb1a1768e7d84ddcaf8b7de135070b59271b0918104eb3` | 8.1.11 |
+| Dragonfly 2.0.2 | `ghcr.io/dragonflydb/dragonfly:v2.0.2@sha256:061f00b201b58e12f974e4e96c761a881ee1c05e9d8ee967466a604b7299753b` | `sha256:e2b395498450f370ed6947a33bc3ada7b70f18a39ae6d64da7b67acc8457f2f7` | 2.0.2 |
 
 ## Valid benchmark measurements
 
 | Workload | Engine | Valid / planned | Throughput median [min, max], ops/s | p99 median [min, max], ms | Container memory peak median, MiB | Client-limited valid runs |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| GET 64 B, pipeline 1 | Eski | 4 / 4 | 203,744 [202,301, 204,910] | 0.271 [0.263, 0.279] | 14.37 | 4 |
-| GET 64 B, pipeline 1 | Redis 7.4.12 | 4 / 4 | 185,291 [183,879, 185,629] | 0.279 [0.279, 0.279] | 22.59 | 4 |
-| GET 64 B, pipeline 1 | Valkey 8.1.11 | 4 / 4 | 183,310 [182,142, 184,854] | 0.283 [0.279, 0.287] | 20.65 | 4 |
-| GET 64 B, pipeline 1 | Dragonfly 2.0.2 | 4 / 4 | 115,306 [114,576, 115,690] | 0.323 [0.319, 0.327] | 52.87 | 0 |
-| SET 64 B, pipeline 1 | Eski | 4 / 4 | 205,353 [203,367, 206,402] | 0.259 [0.255, 0.263] | 14.37 | 4 |
-| SET 64 B, pipeline 1 | Redis 7.4.12 | 4 / 4 | 179,676 [179,296, 180,733] | 0.287 [0.287, 0.287] | 22.49 | 4 |
-| SET 64 B, pipeline 1 | Valkey 8.1.11 | 4 / 4 | 178,454 [177,636, 180,651] | 0.287 [0.287, 0.287] | 20.49 | 4 |
-| SET 64 B, pipeline 1 | Dragonfly 2.0.2 | 4 / 4 | 111,261 [110,584, 112,741] | 0.335 [0.335, 0.343] | 52.79 | 0 |
-| SET and GET 1:1, 64 B, pipeline 1 | Eski | 4 / 4 | 203,606 [202,798, 204,296] | 0.267 [0.255, 0.271] | 14.37 | 4 |
-| SET and GET 1:1, 64 B, pipeline 1 | Redis 7.4.12 | 4 / 4 | 180,511 [179,773, 181,506] | 0.287 [0.287, 0.287] | 22.64 | 4 |
-| SET and GET 1:1, 64 B, pipeline 1 | Valkey 8.1.11 | 4 / 4 | 180,802 [179,811, 182,852] | 0.283 [0.279, 0.287] | 20.59 | 4 |
-| SET and GET 1:1, 64 B, pipeline 1 | Dragonfly 2.0.2 | 4 / 4 | 112,313 [111,892, 112,428] | 0.335 [0.335, 0.335] | 52.84 | 0 |
-| SET and GET 1:1, 64 B, pipeline 16 | Eski | 0 / 4 | excluded | excluded | — | 0 |
-| SET and GET 1:1, 64 B, pipeline 16 | Redis 7.4.12 | 4 / 4 | 1,072,454 [1,066,841, 1,074,650] | 0.659 [0.655, 0.663] | 22.63 | 0 |
-| SET and GET 1:1, 64 B, pipeline 16 | Valkey 8.1.11 | 4 / 4 | 1,084,969 [1,079,172, 1,095,234] | 0.647 [0.639, 0.647] | 21.31 | 0 |
-| SET and GET 1:1, 64 B, pipeline 16 | Dragonfly 2.0.2 | 4 / 4 | 644,218 [641,259, 648,192] | 0.947 [0.943, 0.951] | 58.35 | 0 |
-| GET 1024 B, pipeline 1 | Eski | 4 / 4 | 192,703 [192,130, 193,783] | 0.291 [0.287, 0.295] | 112.80 | 4 |
-| GET 1024 B, pipeline 1 | Redis 7.4.12 | 4 / 4 | 173,901 [172,454, 174,448] | 0.295 [0.295, 0.303] | 137.38 | 4 |
-| GET 1024 B, pipeline 1 | Valkey 8.1.11 | 4 / 4 | 174,958 [173,182, 175,749] | 0.295 [0.295, 0.295] | 135.46 | 4 |
-| GET 1024 B, pipeline 1 | Dragonfly 2.0.2 | 4 / 4 | 106,822 [106,428, 107,753] | 0.351 [0.351, 0.351] | 137.71 | 0 |
-| HGET, 16 fields of 64 B, pipeline 1 | Eski | 4 / 4 | 189,570 [187,367, 191,895] | 0.299 [0.287, 0.303] | 134.24 | 4 |
-| HGET, 16 fields of 64 B, pipeline 1 | Redis 7.4.12 | 4 / 4 | 174,606 [173,782, 175,110] | 0.295 [0.295, 0.295] | 137.40 | 4 |
-| HGET, 16 fields of 64 B, pipeline 1 | Valkey 8.1.11 | 4 / 4 | 175,334 [172,533, 177,240] | 0.287 [0.287, 0.295] | 135.32 | 4 |
-| HGET, 16 fields of 64 B, pipeline 1 | Dragonfly 2.0.2 | 4 / 4 | 112,367 [111,246, 112,858] | 0.331 [0.327, 0.335] | 245.95 | 0 |
-| SISMEMBER, 16 members, pipeline 1 | Eski | 4 / 4 | 196,644 [195,662, 197,100] | 0.279 [0.271, 0.287] | 33.25 | 4 |
-| SISMEMBER, 16 members, pipeline 1 | Redis 7.4.12 | 4 / 4 | 179,359 [176,937, 181,796] | 0.287 [0.279, 0.287] | 33.36 | 4 |
-| SISMEMBER, 16 members, pipeline 1 | Valkey 8.1.11 | 4 / 4 | 182,302 [179,538, 184,069] | 0.279 [0.279, 0.287] | 31.21 | 4 |
-| SISMEMBER, 16 members, pipeline 1 | Dragonfly 2.0.2 | 4 / 4 | 120,372 [120,276, 121,654] | 0.311 [0.311, 0.311] | 98.85 | 0 |
-| ZSCORE, 16 members, pipeline 1 | Eski | 4 / 4 | 192,190 [190,354, 192,593] | 0.295 [0.295, 0.295] | 36.30 | 4 |
-| ZSCORE, 16 members, pipeline 1 | Redis 7.4.12 | 4 / 4 | 178,279 [177,216, 178,875] | 0.287 [0.287, 0.287] | 36.38 | 4 |
-| ZSCORE, 16 members, pipeline 1 | Valkey 8.1.11 | 4 / 4 | 178,465 [177,802, 180,976] | 0.287 [0.279, 0.287] | 34.44 | 4 |
-| ZSCORE, 16 members, pipeline 1 | Dragonfly 2.0.2 | 4 / 4 | 117,307 [116,445, 118,714] | 0.319 [0.311, 0.319] | 70.88 | 0 |
+| GET 64 B, pipeline 1 | Eski | 4 / 4 | 285,885 [283,871, 289,996] | 0.215 [0.207, 0.215] | 14.76 | 0 |
+| GET 64 B, pipeline 1 | Redis 7.4.12 | 4 / 4 | 263,891 [262,031, 266,945] | 0.223 [0.223, 0.223] | 23.00 | 0 |
+| GET 64 B, pipeline 1 | Valkey 8.1.11 | 4 / 4 | 259,754 [259,070, 261,847] | 0.223 [0.223, 0.223] | 21.13 | 0 |
+| GET 64 B, pipeline 1 | Dragonfly 2.0.2 | 4 / 4 | 146,333 [145,254, 147,079] | 0.259 [0.255, 0.263] | 40.17 | 0 |
+| SET 64 B, pipeline 1 | Eski | 4 / 4 | 287,436 [287,326, 290,844] | 0.215 [0.207, 0.215] | 14.91 | 0 |
+| SET 64 B, pipeline 1 | Redis 7.4.12 | 4 / 4 | 255,839 [253,916, 257,515] | 0.231 [0.223, 0.231] | 23.08 | 0 |
+| SET 64 B, pipeline 1 | Valkey 8.1.11 | 4 / 4 | 250,447 [246,844, 253,755] | 0.231 [0.231, 0.231] | 21.04 | 0 |
+| SET 64 B, pipeline 1 | Dragonfly 2.0.2 | 4 / 4 | 139,667 [138,368, 140,223] | 0.271 [0.271, 0.271] | 39.50 | 0 |
+| SET and GET 1:1, 64 B, pipeline 1 | Eski | 4 / 4 | 286,969 [284,414, 290,397] | 0.215 [0.207, 0.215] | 14.91 | 0 |
+| SET and GET 1:1, 64 B, pipeline 1 | Redis 7.4.12 | 4 / 4 | 257,182 [253,780, 257,925] | 0.223 [0.223, 0.231] | 22.85 | 0 |
+| SET and GET 1:1, 64 B, pipeline 1 | Valkey 8.1.11 | 4 / 4 | 253,437 [251,874, 256,579] | 0.231 [0.223, 0.231] | 21.13 | 0 |
+| SET and GET 1:1, 64 B, pipeline 1 | Dragonfly 2.0.2 | 4 / 4 | 140,526 [139,769, 141,610] | 0.267 [0.263, 0.271] | 39.53 | 0 |
+| SET and GET 1:1, 64 B, pipeline 16 | Eski | 4 / 4 | 2,619,156 [2,605,017, 2,662,804] | 0.367 [0.359, 0.367] | 14.96 | 0 |
+| SET and GET 1:1, 64 B, pipeline 16 | Redis 7.4.12 | 4 / 4 | 1,482,209 [1,462,227, 1,491,205] | 0.471 [0.471, 0.471] | 23.09 | 0 |
+| SET and GET 1:1, 64 B, pipeline 16 | Valkey 8.1.11 | 4 / 4 | 1,461,018 [1,439,160, 1,465,153] | 0.471 [0.471, 0.479] | 21.70 | 0 |
+| SET and GET 1:1, 64 B, pipeline 16 | Dragonfly 2.0.2 | 4 / 4 | 811,474 [808,445, 816,253] | 0.723 [0.719, 0.727] | 43.04 | 0 |
+| GET 1024 B, pipeline 1 | Eski | 4 / 4 | 265,856 [263,259, 269,432] | 0.231 [0.223, 0.231] | 112.09 | 0 |
+| GET 1024 B, pipeline 1 | Redis 7.4.12 | 4 / 4 | 239,516 [239,220, 240,795] | 0.239 [0.239, 0.239] | 137.95 | 0 |
+| GET 1024 B, pipeline 1 | Valkey 8.1.11 | 4 / 4 | 238,146 [237,127, 239,002] | 0.239 [0.239, 0.239] | 135.85 | 0 |
+| GET 1024 B, pipeline 1 | Dragonfly 2.0.2 | 4 / 4 | 134,335 [133,782, 135,036] | 0.279 [0.279, 0.279] | 124.32 | 0 |
+| HGET, 16 fields of 64 B, pipeline 1 | Eski | 4 / 4 | 258,774 [251,238, 259,549] | 0.239 [0.231, 0.239] | 132.84 | 0 |
+| HGET, 16 fields of 64 B, pipeline 1 | Redis 7.4.12 | 4 / 4 | 241,966 [239,202, 244,046] | 0.239 [0.239, 0.239] | 137.74 | 0 |
+| HGET, 16 fields of 64 B, pipeline 1 | Valkey 8.1.11 | 4 / 4 | 240,959 [240,318, 243,247] | 0.239 [0.239, 0.239] | 135.68 | 0 |
+| HGET, 16 fields of 64 B, pipeline 1 | Dragonfly 2.0.2 | 4 / 4 | 141,464 [141,291, 141,872] | 0.263 [0.263, 0.263] | 232.21 | 0 |
+| SISMEMBER, 16 members, pipeline 1 | Eski | 4 / 4 | 267,274 [266,654, 272,554] | 0.231 [0.223, 0.231] | 31.71 | 0 |
+| SISMEMBER, 16 members, pipeline 1 | Redis 7.4.12 | 4 / 4 | 255,664 [253,934, 257,613] | 0.231 [0.223, 0.231] | 33.81 | 0 |
+| SISMEMBER, 16 members, pipeline 1 | Valkey 8.1.11 | 4 / 4 | 254,425 [254,101, 254,618] | 0.231 [0.231, 0.231] | 31.90 | 0 |
+| SISMEMBER, 16 members, pipeline 1 | Dragonfly 2.0.2 | 4 / 4 | 155,152 [153,408, 155,487] | 0.247 [0.247, 0.247] | 85.46 | 0 |
+| ZSCORE, 16 members, pipeline 1 | Eski | 4 / 4 | 268,848 [261,169, 271,444] | 0.223 [0.223, 0.231] | 35.03 | 0 |
+| ZSCORE, 16 members, pipeline 1 | Redis 7.4.12 | 4 / 4 | 253,793 [251,238, 254,405] | 0.231 [0.231, 0.231] | 36.69 | 0 |
+| ZSCORE, 16 members, pipeline 1 | Valkey 8.1.11 | 4 / 4 | 251,743 [250,158, 252,420] | 0.231 [0.231, 0.231] | 34.88 | 0 |
+| ZSCORE, 16 members, pipeline 1 | Dragonfly 2.0.2 | 4 / 4 | 148,986 [146,885, 149,687] | 0.255 [0.255, 0.255] | 58.06 | 0 |
 
-Each p99 is a per-run percentile; the table takes the median of those percentiles and does not pool requests. Container memory peak covers preload, warmup and timing, so it is not process RSS or live key memory. Client-limited measurements remain included and annotated. Their observed throughput is limited by the load generator; a ratio between two such observations is not a lower bound on the true ratio between the engines. The badge reports only GET 64 B at pipeline 1: 1.10x observed Eski/Redis median throughput (client limited). There is no overall cross-workload score.
+Each p99 is a per-run percentile; the table takes the median of those percentiles and does not pool requests. Container memory peak covers preload, warmup and timing, so it is not process RSS or live key memory. Client-limited measurements remain included and annotated. Their observed throughput is limited by the load generator; a ratio between two such observations is not a lower bound on the true ratio between the engines. The badge reports only GET 64 B at pipeline 1: 1.08x observed Eski/Redis median throughput. There is no overall cross-workload score.
 
 ## Excluded repetitions
 
 | Workload | Engine | Repetition | Reason |
 | --- | --- | ---: | --- |
-| SET and GET 1:1, 64 B, pipeline 16 | Eski | 1 | case invalid; thermal_throttling |
-| SET and GET 1:1, 64 B, pipeline 16 | Eski | 2 | case invalid; thermal_throttling |
-| SET and GET 1:1, 64 B, pipeline 16 | Eski | 3 | case invalid; thermal_throttling |
-| SET and GET 1:1, 64 B, pipeline 16 | Eski | 4 | case invalid; thermal_throttling |
 
 Excluded values have no median or badge score. Each exclusion retains its recorded reason; client_limited, kernel_thread_on_client_cpu and tail_stall are separate annotations on included measurements. The reason external_cpu_activity names a process outside the run, kernel_thread_on_reserved_cpu a per-CPU kernel thread busy on the server CPU and throughput_collapse a second of the timed run below half of the run's median per-second rate; the machine requirements state the rules.
 
 ## Fill measurement
 
-The separate fill workload uses 10,000,000 generated keys of 64 bytes at pipeline 32. The stored-key count in the receipt is retained as measured. This recorded fill predates the settle step and read memory as soon as the load generator returned; a fill now reads it once used memory has been stable for three seconds and the server reports no keyspace rehash in progress, at most sixty seconds after the fill.
+The separate fill workload uses 10,000,000 generated keys of 64 bytes at pipeline 32. The stored-key count in the receipt is retained as measured. Memory is read once used memory has been stable for three seconds and the server reports no keyspace rehash in progress, polled once a second for at most sixty seconds after the fill; the last column gives the seconds from the end of the fill to that reading, and an engine that did not settle keeps its last reading.
 
-| Engine | Stored keys | RSS bytes/key | Used bytes/key | Container peak bytes/key | Fill ops/s | p99 ms | Worst request ms |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Eski | 10,000,001 | 122.96 | 121.99 | 128.49 | 1,689,637 | 4.191 | 31.231 |
-| Redis | 10,000,001 | 166.46 | 163.44 | 166.06 | 919,163 | 1.479 | 3.535 |
-| Valkey | 10,000,001 | 138.65 | 134.93 | 138.11 | 877,642 | 2.495 | 4.927 |
-| Dragonfly | 10,000,001 | 106.79 | 101.70 | 106.46 | 716,687 | 1.215 | 2.335 |
+| Engine | Stored keys | RSS bytes/key | Used bytes/key | Container peak bytes/key | Fill ops/s | p99 ms | Worst request ms | Memory read after s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Eski | 10,000,001 | 113.18 | 111.99 | 134.19 | 2,428,788 | 0.943 | 5.375 | 3.1 |
+| Redis | 10,000,001 | 159.73 | 156.73 | 166.09 | 1,090,319 | 1.047 | 3.023 | 60.1, not settled |
+| Valkey | 10,000,001 | 138.77 | 134.93 | 138.27 | 1,059,238 | 2.079 | 3.919 | 3.1 |
+| Dragonfly | 10,000,001 | 105.94 | 101.70 | 105.58 | 843,977 | 1.023 | 1.687 | 3.1 |
 
 ## Run the comparison on a new machine
 
 The comparison can be measured again from a clone of this repository. A workstation with docker, python3 and ssh builds the Eski image and drives a separate test machine; the machine runs the exam unattended, and the workstation collects the archives, builds the dataset and regenerates this page. The engine images, the load generator and the jq packages are pinned by digest or sha256 in the design, so two runs of one design differ only in the machine and the Eski revision.
 
-Three designs are tracked, with the same engines, workloads, dataset, repetitions and gates. `bench/testbed/design.json` is the laptop design: server CPU 1, client CPUs 3 and 4, controller CPUs 5 and 11, two client threads of 16 connections and the `mains` power gate. `bench/testbed/designs/cloud-two-client-cores.json` keeps that client for a server: server CPU 2, client CPUs 4 and 5, controller CPU 10 and the `no-power-supply-devices` power gate. `bench/testbed/designs/cloud-four-client-cores.json` spreads the same 32 connections over four client threads of 8 connections on client CPUs 4 to 7, so that the load generator limits fewer measurements; 84 of the 124 valid measurements above are client limited.
+Three designs are tracked, with the same engines, workloads, dataset, repetitions and gates. `bench/testbed/design.json` is the laptop design: server CPU 1, client CPUs 3 and 4, controller CPUs 5 and 11, two client threads of 16 connections and the `mains` power gate. `bench/testbed/designs/cloud-two-client-cores.json` keeps that client for a server: server CPU 2, client CPUs 4 and 5, controller CPU 10 and the `no-power-supply-devices` power gate. `bench/testbed/designs/cloud-four-client-cores.json` spreads the same 32 connections over four client threads of 8 connections on client CPUs 4 to 7, so that the load generator limits fewer measurements; 0 of the 128 valid measurements above are client limited.
 
 ### Machine requirements
 
@@ -131,7 +127,7 @@ Three designs are tracked, with the same engines, workloads, dataset, repetition
 
 ### Time
 
-The recorded run above took 6.89 hours for 132 cases, with a median case of 80 seconds and a median gap of 110 seconds between cases, which the gates spend on rest, stability and cooling. On a server about 125 seconds per case is a fair planning figure: the 132 cases of four engines, eight workloads, four repetitions and the calibration take about 4.6 hours. The installation takes about 20 minutes and the fill a few minutes, so plan about 6 hours of machine time.
+The recorded run above took 4.41 hours for 132 cases, with a median case of 76 seconds and a median gap of 41 seconds between cases, which the gates spend on rest, stability and cooling. On a server about 125 seconds per case is a fair planning figure: the 132 cases of four engines, eight workloads, four repetitions and the calibration take about 4.6 hours. The installation takes about 20 minutes and the fill a few minutes, so plan about 6 hours of machine time.
 
 ### Steps
 

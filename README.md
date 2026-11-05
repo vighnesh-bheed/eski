@@ -113,24 +113,24 @@ The package runner exercises debug, sanitizer and release builds. Conformance do
 
 <!-- BEGIN GENERATED BENCHMARKS -->
 
-These results come from the committed [comparison-v1 dataset](bench/testbed/runs/comparison-v1/dataset.json). Every engine uses the same server CPU assignment and memory caps, separate client cores, a fresh dataset and a warmup before timing. The run records power, temperature, CPU-idle and load-generator limits. Invalid repetitions retain their reason, and client-limited measurements remain annotated. These measurements describe the recorded machine and workload; they establish no multicore scaling or universal throughput claim.
+These results come from the committed [cloud-v2 dataset](bench/testbed/runs/cloud-v2/dataset.json). Every engine uses the same server CPU assignment and memory caps, separate client cores, a fresh dataset and a warmup before timing. The run records power, temperature, CPU-idle and load-generator limits. Invalid repetitions retain their reason, and client-limited measurements remain annotated. These measurements describe the recorded machine and workload; they establish no multicore scaling or universal throughput claim.
 
-Recorded medians from `bench/testbed/runs/comparison-v1`, using valid repetitions only. These are measurements from one machine, not a claim about every workload or deployment.
+Recorded medians from `bench/testbed/runs/cloud-v2`, using valid repetitions only. These are measurements from one machine, not a claim about every workload or deployment.
 
 | Workload | Eski ops/s | Redis ops/s | Valkey ops/s | Dragonfly ops/s |
 | --- | ---: | ---: | ---: | ---: |
-| GET 64 B, pipeline 1 | 203,744 † | 185,291 † | 183,310 † | 115,306 |
-| SET 64 B, pipeline 1 | 205,353 † | 179,676 † | 178,454 † | 111,261 |
-| SET and GET 1:1, 64 B, pipeline 1 | 203,606 † | 180,511 † | 180,802 † | 112,313 |
-| SET and GET 1:1, 64 B, pipeline 16 | excluded (4) | 1,072,454 | 1,084,969 | 644,218 |
-| GET 1024 B, pipeline 1 | 192,703 † | 173,901 † | 174,958 † | 106,822 |
-| HGET, 16 fields of 64 B, pipeline 1 | 189,570 † | 174,606 † | 175,334 † | 112,367 |
-| SISMEMBER, 16 members, pipeline 1 | 196,644 † | 179,359 † | 182,302 † | 120,372 |
-| ZSCORE, 16 members, pipeline 1 | 192,190 † | 178,279 † | 178,465 † | 117,307 |
+| GET 64 B, pipeline 1 | 285,885 | 263,891 | 259,754 | 146,333 |
+| SET 64 B, pipeline 1 | 287,436 | 255,839 | 250,447 | 139,667 |
+| SET and GET 1:1, 64 B, pipeline 1 | 286,969 | 257,182 | 253,437 | 140,526 |
+| SET and GET 1:1, 64 B, pipeline 16 | 2,619,156 | 1,482,209 | 1,461,018 | 811,474 |
+| GET 1024 B, pipeline 1 | 265,856 | 239,516 | 238,146 | 134,335 |
+| HGET, 16 fields of 64 B, pipeline 1 | 258,774 | 241,966 | 240,959 | 141,464 |
+| SISMEMBER, 16 members, pipeline 1 | 267,274 | 255,664 | 254,425 | 155,152 |
+| ZSCORE, 16 members, pipeline 1 | 268,848 | 253,793 | 251,743 | 148,986 |
 
-† At least one included repetition was client limited. The observed GET 64 B pipeline 1 median throughput ratio is **1.10x Eski / Redis** (client limited). Client limits affect both measurements, so that ratio is not a guaranteed engine-speed ratio. Excluded repetitions receive no inferred score. [Method, ranges, images and exclusions](docs/benchmarks.md).
+No included repetition was client limited. The observed GET 64 B pipeline 1 median throughput ratio is **1.08x Eski / Redis**. Excluded repetitions receive no inferred score. [Method, ranges, images and exclusions](docs/benchmarks.md).
 
-Read the [benchmark method and tables](docs/benchmarks.md), the [self-contained report](bench/testbed/runs/comparison-v1/report.html) and the [recorded charts](bench/testbed/runs/comparison-v1/charts/throughput.svg).
+Read the [benchmark method and tables](docs/benchmarks.md), the [self-contained report](bench/testbed/runs/cloud-v2/report.html) and the [recorded charts](bench/testbed/runs/cloud-v2/charts/throughput.svg).
 
 <!-- END GENERATED BENCHMARKS -->
 

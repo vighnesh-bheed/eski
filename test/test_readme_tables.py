@@ -214,7 +214,7 @@ class Inputs(FixtureInputs, unittest.TestCase):
                 tables.render_outputs(commands, self.baseline, self.observed, self.dataset, skeleton(), broken)
 
     def test_default_run_is_the_latest_finished_recorded_run(self):
-        self.assertEqual(tables.published_run(ROOT), (ROOT/'bench/testbed/runs/comparison-v1/dataset.json').resolve())
+        self.assertEqual(tables.published_run(ROOT), (ROOT/'bench/testbed/runs/cloud-v2/dataset.json').resolve())
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             runs = root/tables.RUNS
@@ -388,6 +388,22 @@ class LiveInputs(FixtureInputs, unittest.TestCase):
 
     def tree_state(self, root):
         return {str(p.relative_to(root)): (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns) for p in root.rglob('*') if p.is_file()}
+
+    def test_client_limit_footnote_appears_only_when_a_valid_row_was_limited(self):
+        self.assertIn('† At least one included repetition was client limited.', tables.render_outputs(self.commands, self.baseline, self.observed, self.dataset, skeleton())['README.md'])
+        dataset = copy.deepcopy(self.dataset)
+        for row in dataset['rows']:
+            if row.get('phase') == 'benchmark' and row.get('included'):
+                row['client_limited'] = False
+                row['annotations'] = [a for a in row.get('annotations', []) if a != 'client_limited']
+        dataset['counts']['client_limited'] = 0
+        outputs = tables.render_outputs(self.commands, self.baseline, self.observed, dataset, skeleton())
+        readme = outputs['README.md']
+        self.assertIn('No included repetition was client limited.', readme)
+        self.assertNotIn('† At least one included repetition', readme)
+        self.assertNotIn('not a guaranteed engine-speed ratio', readme)
+        self.assertIn('x observed"', outputs['docs/img/benchmark-ratio.svg'])
+        self.assertNotIn('observed, client limited', outputs['docs/img/benchmark-ratio.svg'])
 
     def test_cli_generation_is_deterministic_and_check_does_not_write(self):
         with tempfile.TemporaryDirectory(prefix='eski-doc-test-') as directory:
