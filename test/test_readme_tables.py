@@ -445,6 +445,10 @@ class LiveInputs(FixtureInputs, unittest.TestCase):
         self.assertNotIn('not a guaranteed engine-speed ratio', readme)
         self.assertIn('x observed"', outputs['docs/img/benchmark-ratio.svg'])
         self.assertNotIn('observed, client limited', outputs['docs/img/benchmark-ratio.svg'])
+        figure = tables.ratio_figure(dataset, tables.benchmark_cells(dataset), 'light')
+        self.assertNotIn('† the load generator', figure)
+        self.assertNotIn('x †</text>', figure)
+        self.assertIn('† the load generator', tables.ratio_figure(self.dataset, tables.benchmark_cells(self.dataset), 'light'))
 
     def test_cli_generation_is_deterministic_and_check_does_not_write(self):
         with tempfile.TemporaryDirectory(prefix='eski-doc-test-') as directory:

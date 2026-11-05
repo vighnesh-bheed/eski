@@ -669,8 +669,9 @@ def ratio_figure(dataset, cells, theme):
         out.append('<text x="%.1f" y="%.1f" font-size="11" font-weight="600" fill="%s" style="font-variant-numeric: tabular-nums">%s</text>' % (
             max(bar_x, xv(row['high'])) + 9, cy + 4, colors['primary'], esc(ratio_text(row))))
     out.append('<text x="12" y="%d" font-size="11" fill="%s">%s</text>' % (bottom + 36, colors['muted'], esc(ratio_context(dataset))))
-    out.append('<text x="12" y="%d" font-size="11" fill="%s">%s</text>' % (
-        bottom + 52, colors['muted'], esc('† the load generator limited Eski or Redis in at least one valid repetition, so that ratio is bounded by the client, not by the engines. Excluded cells have no inferred score.')))
+    if any(row['limited'] for row in rows):
+        out.append('<text x="12" y="%d" font-size="11" fill="%s">%s</text>' % (
+            bottom + 52, colors['muted'], esc('† the load generator limited Eski or Redis in at least one valid repetition, so that ratio is bounded by the client, not by the engines. Excluded cells have no inferred score.')))
     out.append('</svg>')
     return '\n'.join(out) + '\n'
 
