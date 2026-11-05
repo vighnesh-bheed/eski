@@ -299,7 +299,7 @@ elem_bytes :: proc "contextless" (p: [^]u8, buf: ^[lp.DECIMAL_BUFFER_BYTES]u8) -
 
 @(private)
 int_size :: #force_inline proc "contextless" (v: i64) -> int {
-	return lp.lp_entry_size_integer(v)
+	return lp.lp_integer_entry_size(v)
 }
 
 @(private)

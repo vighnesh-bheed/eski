@@ -94,11 +94,11 @@ draw_with_repeats :: proc(pack: [^]u8, tuples: u64, slots: int, width: int, keys
 	fill_picks(pack, picks, width, keys, vals)
 }
 
-lp_random_pair :: proc(lp: [^]u8, total_count: u64, key: ^Element, val: ^Element, tuple_len: int) {
-	if key == nil || lp == nil || tuple_len <= 0 || total_count == 0 {
+lp_random_pair :: proc(lp: [^]u8, total_count: u64, key: ^Element, val: ^Element, stride: int) {
+	if key == nil || lp == nil || stride <= 0 || total_count == 0 {
 		return
 	}
-	walk := tuple_walk(lp, tuple_len)
+	walk := tuple_walk(lp, stride)
 	tuples := min(lp_length(lp) / walk.width, total_count)
 	if tuples == 0 {
 		return
@@ -115,19 +115,19 @@ lp_random_entries :: proc(lp: [^]u8, entries: []Element) {
 	}
 }
 
-lp_random_pairs :: proc(lp: [^]u8, count: int, keys: []Element, vals: []Element, tuple_len: int) {
-	if lp == nil || tuple_len <= 0 || count <= 0 {
+lp_random_pairs :: proc(lp: [^]u8, count: int, keys: []Element, vals: []Element, stride: int) {
+	if lp == nil || stride <= 0 || count <= 0 {
 		return
 	}
 	slots := min(count, len(keys), len(vals)) if len(vals) > 0 else min(count, len(keys))
-	draw_with_repeats(lp, lp_length(lp) / u64(tuple_len), slots, tuple_len, keys, vals)
+	draw_with_repeats(lp, lp_length(lp) / u64(stride), slots, stride, keys, vals)
 }
 
-lp_random_pairs_unique :: proc(lp: [^]u8, count: int, keys: []Element, vals: []Element, tuple_len: int) -> int {
-	if lp == nil || tuple_len < 2 || count <= 0 {
+lp_random_pairs_unique :: proc(lp: [^]u8, count: int, keys: []Element, vals: []Element, stride: int) -> int {
+	if lp == nil || stride < 2 || count <= 0 {
 		return 0
 	}
-	walk := tuple_walk(lp, tuple_len)
+	walk := tuple_walk(lp, stride)
 	tuples := lp_length(lp) / walk.width
 	quota := min(u64(count), u64(len(keys)), tuples)
 	if len(vals) > 0 {
@@ -145,12 +145,12 @@ lp_random_pairs_unique :: proc(lp: [^]u8, count: int, keys: []Element, vals: []E
 	return taken
 }
 
-lp_next_random :: proc(lp: [^]u8, p: [^]u8, index: ^u32, remaining: u32, tuple_len: int) -> [^]u8 {
-	if index == nil || p == nil || lp == nil || tuple_len <= 0 || remaining == 0 {
+lp_next_random :: proc(lp: [^]u8, p: [^]u8, index: ^u32, remaining: u32, stride: int) -> [^]u8 {
+	if index == nil || p == nil || lp == nil || stride <= 0 || remaining == 0 {
 		return nil
 	}
 	entries := lp_length(lp)
-	width := u64(tuple_len)
+	width := u64(stride)
 	start := u64(index^)
 	boundary := (start + width - 1) / width * width
 	if start >= entries || boundary >= entries {

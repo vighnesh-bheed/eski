@@ -48,6 +48,7 @@ TCL_MODE=""
 TCLSH=""
 TCL_DESC=""
 CURRENT_FIXTURE_SNAPSHOT=""
+ARCHIVE_TMP=""
 
 usage() {
 	cat <<EOF
@@ -67,10 +68,14 @@ other units, so after extracting the suite's tests directory, the only part of
 the archive it keeps, the runner removes the tag from the
 top-level start_server lines at
 $REDIS_LIFTS, leaving the nested blocks that need
-servers of their own skipped. External fixture adapters map an explicitly supplied actual stdout path and
-open a fresh unauthenticated body client after nonempty requirepass overrides.
-Cleanup restores the original privileged control even after body errors;
-original assertions and managed fixtures are unchanged. Source hashes are recorded.
+servers of their own skipped. The archive is downloaded to a temporary file
+outside the checkout and deleted once its tests directory is extracted and
+verified. The external server fixture procedure of the Redis suite is replaced by
+a rewrite that records the supplied server stdout path, opens a fresh
+unauthenticated body client after nonempty requirepass overrides and restores
+the saved configuration through the original privileged connection even after
+body errors; original assertions and managed fixtures are unchanged. Source
+hashes are recorded.
 
 With --managed, pristine upstream test files run against isolated processes owned
 by the harness. Assertions and external:skip tags are unchanged. Only the harness
@@ -178,7 +183,7 @@ CACHE_DIR="$CONF_DIR/.$suite"
 TREE_NAME="$suite-$SUITE_TAG"
 TREE="$CACHE_DIR/$TREE_NAME"
 STAMP_VALUE="$SUITE_SHA256${SUITE_LIFTS:+ lifted $SUITE_LIFTS}"
-if [ "$suite" = redis ]; then STAMP_VALUE+=" external-log-v2"; fi
+if [ "$suite" = redis ]; then STAMP_VALUE+=" external-log-v3"; fi
 STAMP_VALUE+=" tests-only-v1"
 if [ "$suite" = "redis" ]; then
 	STUB_DIR="$TREE/src"
@@ -243,6 +248,74 @@ import hashlib
 import json
 import os
 import sys
+EXTERNAL_PROCEDURE = r'''proc run_external_server_test {code overrides} {
+    set conn [redis $::host $::port 0 $::tls]
+    if {$::singledb == 0} {
+        $conn select 9
+    }
+    set entry [dict create host $::host port $::port client $conn config [dict create port $::port]]
+    if {[info exists ::env(ESKI_CONFORMANCE_SERVER_STDOUT)] && [file readable $::env(ESKI_CONFORMANCE_SERVER_STDOUT)]} {
+        dict set entry stdout $::env(ESKI_CONFORMANCE_SERVER_STDOUT)
+    }
+    set depth [llength $::servers]
+    lappend ::servers $entry
+    if {$depth > 0 && $::verbose} {
+        puts "Notice: this start_server block nests inside another one on the shared external server"
+    }
+    $conn flushall
+    $conn function flush
+    set previous [dict create {*}[$conn config get *]]
+    set password ""
+    set guest ""
+    try {
+        foreach {name value} $overrides {
+            $conn config set $name $value
+            if {[string equal -nocase $name requirepass]} {
+                set password $value
+            }
+            if {$name eq "appendonly" && $value eq "yes"} {
+                waitForBgrewriteaof $conn
+            }
+        }
+        if {$password ne ""} {
+            set guest [redis $::host $::port 0 $::tls]
+            set shadow [lindex $::servers $depth]
+            dict set shadow client $guest
+            dict set shadow config requirepass $password
+            lset ::servers $depth $shadow
+        }
+        if {[catch {uplevel 2 $code} failure]} {
+            if {!$::durable} {
+                error $failure $::errorInfo
+            }
+            set report [list [string range $failure 10 end] $::errorInfo]
+            lappend ::tests_failed $report
+            send_data_packet $::test_server_fd err [join $report "\n"]
+            incr ::num_failed
+        }
+    } finally {
+        set current ""
+        if {$depth < [llength $::servers]} {
+            set shadow [lindex $::servers $depth]
+            if {[dict exists $shadow client]} {
+                set current [dict get $shadow client]
+            }
+            dict set shadow client $conn
+            dict set shadow config [dict get $entry config]
+            lset ::servers $depth $shadow
+        }
+        foreach extra [lsort -unique [list $current $guest]] {
+            if {$extra ne "" && $extra ne $conn} {
+                catch {$extra close}
+            }
+        }
+        dict for {name value} $previous {
+            catch {$conn config set $name $value}
+        }
+        set ::servers [lreplace $::servers $depth $depth]
+        catch {$conn close}
+    }
+}'''
 tree, spec, suite = sys.argv[1:]
 for item in spec.split():
     name, numbers = item.rsplit(":", 1)
@@ -261,86 +334,23 @@ if suite == "redis":
     path = os.path.join(tree, "tests/support/server.tcl")
     with open(path, "rb") as handle:
         original = handle.read()
-    needle = b'proc run_external_server_test {code overrides} {\n    set srv {}\n    dict set srv "host" $::host\n    dict set srv "port" $::port\n'
-    if original.count(needle) != 1:
-        sys.exit("unexpected external server fixture dictionary")
-    addition = b'    if {[info exists ::env(ESKI_CONFORMANCE_SERVER_STDOUT)] && [file readable $::env(ESKI_CONFORMANCE_SERVER_STDOUT)]} {\n        dict set srv "stdout" $::env(ESKI_CONFORMANCE_SERVER_STDOUT)\n    }\n'
-    adapted = original.replace(needle, needle + addition, 1)
     if hashlib.sha256(original).hexdigest() != "e412686245be3a0f74592d8d5fe4f52c14c0790fb647c736a8a5e2cac13b72bb":
         sys.exit("unexpected pinned external server fixture input")
-    auth_start_marker = b"    # apply overrides\n"
-    auth_end_marker = b"\n}\n\nproc start_server {options {code undefined}} {\n"
-    proc_start = adapted.index(needle)
-    if adapted.count(auth_end_marker) != 1:
+    lines = original.decode("utf-8").split("\n")
+    header = EXTERNAL_PROCEDURE.split("\n", 1)[0]
+    if lines.count(header) != 1:
+        sys.exit("unexpected external server fixture procedure")
+    first = lines.index(header)
+    last = lines.index("}", first)
+    following = [line for line in lines[last + 1:] if line][:1]
+    if not following or not following[0].startswith("proc start_server "):
         sys.exit("unexpected external server fixture procedure boundary")
-    auth_end = adapted.index(auth_end_marker, proc_start)
-    if adapted[proc_start:auth_end].count(auth_start_marker) != 1:
-        sys.exit("unexpected external server fixture override boundary")
-    auth_start = adapted.index(auth_start_marker, proc_start, auth_end)
-    auth_body = br'''    set external_stack_index [expr {[llength $::servers] - 1}]
-    set external_original_config [dict get [lindex $::servers $external_stack_index] config]
-    set external_body_client ""
-    try {
-        set external_requirepass ""
-        foreach {param val} $overrides {
-            r config set $param $val
-            if {[string equal -nocase $param "requirepass"]} {
-                set external_requirepass $val
-            }
-            if {$param == "appendonly" && $val == "yes"} {
-                waitForBgrewriteaof r
-            }
-        }
-        if {$external_requirepass ne ""} {
-            set external_body_client [redis $::host $::port 0 $::tls]
-            set external_body_srv [lindex $::servers $external_stack_index]
-            dict set external_body_srv client $external_body_client
-            dict set external_body_srv config requirepass $external_requirepass
-            lset ::servers $external_stack_index $external_body_srv
-        }
-        if {[catch {set retval [uplevel 2 $code]} error]} {
-            if {$::durable} {
-                set msg [string range $error 10 end]
-                lappend details $msg
-                lappend details $::errorInfo
-                lappend ::tests_failed $details
-                incr ::num_failed
-                send_data_packet $::test_server_fd err [join $details "\n"]
-            } else {
-                error $error $::errorInfo
-            }
-        }
-    } finally {
-        set external_current_client ""
-        if {$external_stack_index < [llength $::servers]} {
-            set external_cleanup_srv [lindex $::servers $external_stack_index]
-            if {[dict exists $external_cleanup_srv client]} {
-                set external_current_client [dict get $external_cleanup_srv client]
-            }
-            dict set external_cleanup_srv client $client
-            dict set external_cleanup_srv config $external_original_config
-            lset ::servers $external_stack_index $external_cleanup_srv
-        }
-        if {$external_body_client ne ""} {
-            if {$external_current_client ne "" && $external_current_client ne $client} {
-                catch {$external_current_client close}
-            }
-            if {$external_body_client ne $external_current_client} {
-                catch {$external_body_client close}
-            }
-        }
-        dict for {param val} $saved_config {
-            catch {$client config set $param $val}
-        }
-        set ::servers [lreplace $::servers $external_stack_index $external_stack_index]
-        catch {$client close}
-    }'''
-    adapted = adapted[:auth_start] + auth_body + adapted[auth_end:]
+    adapted = "\n".join(lines[:first] + EXTERNAL_PROCEDURE.split("\n") + lines[last + 1:]).encode("utf-8")
     with open(path, "wb") as handle:
         handle.write(adapted)
     receipt = {"path": "tests/support/server.tcl", "original_sha256": hashlib.sha256(original).hexdigest(),
                "adapted_sha256": hashlib.sha256(adapted).hexdigest(), "assertions_modified": False,
-               "reason": "External fixtures read explicitly supplied real stdout and create a fresh unauthenticated body client after nonempty requirepass overrides; original privileged control restores configurations in finally. Managed fixtures and test assertions are unchanged."}
+               "reason": "The external server fixture procedure is replaced by a rewrite of the same behaviour: it records the supplied real stdout path, applies overrides and waits for the AOF rewrite, opens a fresh unauthenticated body client after a nonempty requirepass override, reports body failures to the test server, and restores the saved configuration through the original privileged connection in finally. Managed fixtures and test assertions are unchanged."}
     with open(os.path.join(tree, "external-log-adapter.json"), "w", encoding="utf-8") as handle:
         json.dump(receipt, handle, indent=2)
         handle.write("\n")
@@ -365,44 +375,48 @@ tree_holds_only_tests() {
 	return 0
 }
 
+download_archive() {
+	local got
+	ARCHIVE_TMP="$(mktemp "${TMPDIR:-/tmp}/eski-suite-XXXXXX")" || die "could not create a temporary file for the archive"
+	echo "fetching $SUITE_LABEL $SUITE_TAG from $SUITE_URL"
+	curl --fail --location --silent --show-error --retry 3 --output "$ARCHIVE_TMP" "$SUITE_URL" || die "download of $SUITE_URL failed"
+	got="$(sha256_of "$ARCHIVE_TMP")"
+	[ "$got" = "$SUITE_SHA256" ] || die "sha256 mismatch for the $SUITE_LABEL $SUITE_TAG archive: expected $SUITE_SHA256, got $got"
+}
+
+discard_archive() {
+	if [ -n "$ARCHIVE_TMP" ]; then
+		rm -f "$ARCHIVE_TMP"
+		ARCHIVE_TMP=""
+	fi
+}
+
 fetch_suite() {
 	local stamp="$CACHE_DIR/$TREE_NAME.sha256"
-	local tarball="$CACHE_DIR/$TREE_NAME.tar.gz"
-	local got listing entry staging
+	local listing entry staging
+	rm -f "$CACHE_DIR/$TREE_NAME.tar.gz" "$CACHE_DIR/$TREE_NAME.tar.gz.part"
 	if [ -f "$TREE/tests/test_helper.tcl" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$STAMP_VALUE" ] && tree_holds_only_tests "$TREE"; then
 		return 0
 	fi
 	mkdir -p "$CACHE_DIR" || die "could not create $CACHE_DIR"
-	if [ ! -f "$tarball" ] || [ "$(sha256_of "$tarball")" != "$SUITE_SHA256" ]; then
-		echo "fetching $SUITE_LABEL $SUITE_TAG from $SUITE_URL"
-		rm -f "$tarball.part"
-		if ! curl --fail --location --silent --show-error --retry 3 --output "$tarball.part" "$SUITE_URL"; then
-			rm -f "$tarball.part"
-			die "download of $SUITE_URL failed"
-		fi
-		mv "$tarball.part" "$tarball"
-	fi
-	got="$(sha256_of "$tarball")"
-	if [ "$got" != "$SUITE_SHA256" ]; then
-		rm -f "$tarball"
-		die "sha256 mismatch for $TREE_NAME.tar.gz: expected $SUITE_SHA256, got $got"
-	fi
-	listing="$(tar -tzf "$tarball")" || die "could not list $tarball"
+	download_archive
+	listing="$(tar -tzf "$ARCHIVE_TMP")" || die "could not list the $SUITE_LABEL $SUITE_TAG archive"
 	while IFS= read -r entry; do
 		case "$entry" in
 			"$TREE_NAME/"*) ;;
-			*) die "unexpected path $entry in $tarball" ;;
+			*) die "unexpected path $entry in the $SUITE_LABEL $SUITE_TAG archive" ;;
 		esac
 		case "$entry" in
-			*../*|*/..) die "unexpected path $entry in $tarball" ;;
+			*../*|*/..) die "unexpected path $entry in the $SUITE_LABEL $SUITE_TAG archive" ;;
 		esac
 	done <<<"$listing"
 	rm -rf "$CACHE_DIR"/extract.*
 	staging="$(mktemp -d "$CACHE_DIR/extract.XXXXXX")" || die "could not create a staging directory"
-	if ! tar -xzf "$tarball" -C "$staging" --no-same-owner "$TREE_NAME/tests"; then
+	if ! tar -xzf "$ARCHIVE_TMP" -C "$staging" --no-same-owner "$TREE_NAME/tests"; then
 		rm -rf "$staging"
-		die "could not extract the tests of $tarball"
+		die "could not extract the tests of the $SUITE_LABEL $SUITE_TAG archive"
 	fi
+	discard_archive
 	for entry in "$staging"/* "$staging"/.[!.]* "$staging"/..?* "$staging/$TREE_NAME"/* "$staging/$TREE_NAME"/.[!.]* "$staging/$TREE_NAME"/..?*; do
 		if [ ! -e "$entry" ] && [ ! -L "$entry" ]; then
 			continue
@@ -414,7 +428,7 @@ fetch_suite() {
 	done
 	if [ ! -f "$staging/$TREE_NAME/tests/test_helper.tcl" ]; then
 		rm -rf "$staging"
-		die "$tarball has no tests/test_helper.tcl"
+		die "the $SUITE_LABEL $SUITE_TAG archive has no tests/test_helper.tcl"
 	fi
 	if ! lift_external_skip "$staging/$TREE_NAME"; then
 		rm -rf "$staging"
@@ -581,6 +595,7 @@ cleanup() {
 	stop_unit
 	stop_server
 	snapshot_current_fixture
+	discard_archive
 }
 
 on_signal() {
@@ -644,11 +659,13 @@ if [ "$managed" = 1 ]; then
 	fixture_mode="managed"
 	managed_tree="$(mktemp -d "${TMPDIR:-/tmp}/eski-cf.XXXXXX")" || die "could not reserve short managed fixture path"
 	rmdir "$managed_tree" || die "could not prepare managed fixture directory"
-	managed_args=(--archive "$CACHE_DIR/$TREE_NAME.tar.gz" --destination "$managed_tree"
+	download_archive
+	managed_args=(--archive "$ARCHIVE_TMP" --destination "$managed_tree"
 		--prefix "$TREE_NAME" --server "$server" --sha256 "$SUITE_SHA256")
 	if [ -n "$client_binary" ]; then managed_args+=(--client "$client_binary"); fi
 	if [ -n "$aof_checker" ]; then managed_args+=(--aof-checker "$aof_checker"); fi
 	python3 -I "$CONF_DIR/managed_fixture.py" "${managed_args[@]}" || die "managed fixture preparation failed"
+	discard_archive
 	ln -s "$managed_tree" "$LOG_DIR/managed-suite" || die "could not record managed fixture artifact path"
 	TREE="$managed_tree"
 	fixture_receipt="$LOG_DIR/managed-suite/fixture-receipt.json"

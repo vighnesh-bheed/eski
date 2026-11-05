@@ -1,0 +1,14 @@
+image docker.io/library/redis:7 sha256:4fa24486b8bcca8eec45ee0eb166edc674795e53a2b53d1a9ef263eecebaac85 date 2026-11-05
+reference redis_version:7.4.11
+eski skip-checksum ('+', b'OK')
+redis skip-checksum ('+', b'OK')
+hpexpireat ('*', [(':', b'1')])
+dump type 25 len 43
+eski type25 restore ('+', b'OK') encoding ('$', b'listpackex') hpexpiretime ('*', [(':', b'4102444800000')]) hgetall ('*', [('$', b'f'), ('$', b'v')])
+redis type25 restore ('+', b'OK') encoding ('$', b'listpackex') hpexpiretime ('*', [(':', b'4102444800000')]) hgetall ('*', [('$', b'f'), ('$', b'v')])
+eski type23 restore ('+', b'OK') encoding ('$', b'listpackex') hpexpiretime ('*', [(':', b'4102444800000')]) hgetall ('*', [('$', b'f'), ('$', b'v')])
+redis type23 restore ('+', b'OK') encoding ('$', b'listpackex') hpexpiretime ('*', [(':', b'4102444800000')]) hgetall ('*', [('$', b'f'), ('$', b'v')])
+eski type22 restore ('+', b'OK') encoding ('$', b'listpackex') hpexpiretime ('*', [(':', b'4102444800000')]) hgetall ('*', [('$', b'f'), ('$', b'v')])
+redis type22 restore ('+', b'OK') encoding ('$', b'listpackex') hpexpiretime ('*', [(':', b'4102444800000')]) hgetall ('*', [('$', b'f'), ('$', b'v')])
+redis opcode 244 file: GET k -> ('$', b'v') DBSIZE (':', b'1')
+eski opcode 244 file: GET k -> ('$', b'v') DBSIZE (':', b'1')

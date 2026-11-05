@@ -164,7 +164,7 @@ cmd_docs := [?]Cmd_Doc {
 		summary = "Appends a string to the value of a key. Creates the key if it doesn't exist.",
 		since = "2.0.0",
 		group = .String,
-		complexity = "O(1). The amortized time complexity is O(1) assuming the appended value is small and the already present value is of any size, since the dynamic string library used by Redis will double the free space available on every reallocation.",
+		complexity = "O(1). The amortized time complexity is O(1) assuming the appended value is small and the already present value is of any size, since the dynamic string library used by the server will double the free space available on every reallocation.",
 		acl = {.Write, .String, .Fast},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
@@ -636,7 +636,7 @@ cmd_docs := [?]Cmd_Doc {
 			{"3.2.0", "Added `master` type in for `TYPE` option."},
 			{"5.0.0", "Replaced `slave` `TYPE` with `replica`. `slave` still supported for backward compatibility."},
 			{"6.2.0", "`LADDR` option."},
-			{"7.4.0", "`MAXAGE` option."},
+			{"7.4.0", "`MAXAGE` filter that selects clients connected for at least the given number of seconds."},
 		},
 		args = {
 			{
@@ -889,7 +889,7 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "cluster",
-		summary = "A container for Redis Cluster commands.",
+		summary = "A container for cluster commands.",
 		since = "3.0.0",
 		group = .Cluster,
 		complexity = "Depends on subcommand.",
@@ -1244,7 +1244,7 @@ cmd_docs := [?]Cmd_Doc {
 		summary = "Returns detailed information about all commands.",
 		since = "2.8.13",
 		group = .Server,
-		complexity = "O(N) where N is the total number of Redis commands",
+		complexity = "O(N) where N is the total number of commands",
 		acl = {.Slow, .Connection},
 		tips = {"nondeterministic_output_order"},
 	},
@@ -1320,7 +1320,7 @@ cmd_docs := [?]Cmd_Doc {
 		summary = "Returns a list of command names.",
 		since = "7.0.0",
 		group = .Server,
-		complexity = "O(N) where N is the total number of Redis commands",
+		complexity = "O(N) where N is the total number of commands",
 		acl = {.Slow, .Connection},
 		tips = {"nondeterministic_output_order"},
 		args = {
@@ -1488,7 +1488,7 @@ cmd_docs := [?]Cmd_Doc {
 		summary = "Returns a serialized representation of the value stored at a key.",
 		since = "2.6.0",
 		group = .Generic,
-		complexity = "O(1) to access the key and additional O(N*M) to serialize it, where N is the number of Redis objects composing the value and M their average size. For small string values the time complexity is thus O(1)+O(1*M) where M is small, so simply O(1).",
+		complexity = "O(1) to access the key and additional O(N*M) to serialize it, where N is the number of objects composing the value and M their average size. For small string values the time complexity is thus O(1)+O(1*M) where M is small, so simply O(1).",
 		acl = {.Keyspace, .Read, .Slow},
 		tips = {"nondeterministic_output"},
 		args = {
@@ -2470,7 +2470,7 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "hello",
-		summary = "Handshakes with the Redis server.",
+		summary = "Handshakes with the server.",
 		since = "6.0.0",
 		group = .Connection,
 		complexity = "O(1)",
@@ -2514,10 +2514,10 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "hexpire",
-		summary = "Set expiry for hash field using relative time to expire (seconds)",
+		summary = "Sets a relative expiry in seconds on one or more fields of a hash.",
 		since = "7.4.0",
 		group = .Hash,
-		complexity = "O(N) where N is the number of specified fields",
+		complexity = "O(N) where N is the number of fields named after FIELDS.",
 		acl = {.Write, .Hash, .Fast},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
@@ -2546,10 +2546,10 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "hexpireat",
-		summary = "Set expiry for hash field using an absolute Unix timestamp (seconds)",
+		summary = "Sets an absolute expiry, given as a Unix timestamp in seconds, on one or more fields of a hash.",
 		since = "7.4.0",
 		group = .Hash,
-		complexity = "O(N) where N is the number of specified fields",
+		complexity = "O(N) where N is the number of fields named after FIELDS.",
 		acl = {.Write, .Hash, .Fast},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
@@ -2578,10 +2578,10 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "hexpiretime",
-		summary = "Returns the expiration time of a hash field as a Unix timestamp, in seconds.",
+		summary = "Returns the Unix timestamp in seconds at which each named hash field expires.",
 		since = "7.4.0",
 		group = .Hash,
-		complexity = "O(N) where N is the number of specified fields",
+		complexity = "O(N) where N is the number of fields named after FIELDS.",
 		acl = {.Read, .Hash, .Fast},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
@@ -2706,10 +2706,10 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "hpersist",
-		summary = "Removes the expiration time for each specified field",
+		summary = "Removes the expiry from one or more fields of a hash so they persist with the key.",
 		since = "7.4.0",
 		group = .Hash,
-		complexity = "O(N) where N is the number of specified fields",
+		complexity = "O(N) where N is the number of fields named after FIELDS.",
 		acl = {.Write, .Hash, .Fast},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
@@ -2726,10 +2726,10 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "hpexpire",
-		summary = "Set expiry for hash field using relative time to expire (milliseconds)",
+		summary = "Sets a relative expiry in milliseconds on one or more fields of a hash.",
 		since = "7.4.0",
 		group = .Hash,
-		complexity = "O(N) where N is the number of specified fields",
+		complexity = "O(N) where N is the number of fields named after FIELDS.",
 		acl = {.Write, .Hash, .Fast},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
@@ -2758,10 +2758,10 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "hpexpireat",
-		summary = "Set expiry for hash field using an absolute Unix timestamp (milliseconds)",
+		summary = "Sets an absolute expiry, given as a Unix timestamp in milliseconds, on one or more fields of a hash.",
 		since = "7.4.0",
 		group = .Hash,
-		complexity = "O(N) where N is the number of specified fields",
+		complexity = "O(N) where N is the number of fields named after FIELDS.",
 		acl = {.Write, .Hash, .Fast},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
@@ -2790,10 +2790,10 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "hpexpiretime",
-		summary = "Returns the expiration time of a hash field as a Unix timestamp, in msec.",
+		summary = "Returns the Unix timestamp in milliseconds at which each named hash field expires.",
 		since = "7.4.0",
 		group = .Hash,
-		complexity = "O(N) where N is the number of specified fields",
+		complexity = "O(N) where N is the number of fields named after FIELDS.",
 		acl = {.Read, .Hash, .Fast},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
@@ -2810,10 +2810,10 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "hpttl",
-		summary = "Returns the TTL in milliseconds of a hash field.",
+		summary = "Returns the remaining milliseconds before each named hash field expires.",
 		since = "7.4.0",
 		group = .Hash,
-		complexity = "O(N) where N is the number of specified fields",
+		complexity = "O(N) where N is the number of fields named after FIELDS.",
 		acl = {.Read, .Hash, .Fast},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
@@ -2915,10 +2915,10 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "httl",
-		summary = "Returns the TTL in seconds of a hash field.",
+		summary = "Returns the remaining seconds before each named hash field expires.",
 		since = "7.4.0",
 		group = .Hash,
-		complexity = "O(N) where N is the number of specified fields",
+		complexity = "O(N) where N is the number of fields named after FIELDS.",
 		acl = {.Read, .Hash, .Fast},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
@@ -3209,7 +3209,7 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "lolwut",
-		summary = "Displays computer art and the Redis version",
+		summary = "Displays computer art and the server version",
 		since = "5.0.0",
 		group = .Server,
 		acl = {.Read, .Fast},
@@ -3407,7 +3407,7 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "migrate",
-		summary = "Atomically transfers a key from one Redis instance to another.",
+		summary = "Atomically transfers a key from one server instance to another.",
 		since = "2.6.0",
 		group = .Generic,
 		complexity = "This command actually executes a DUMP+DEL in the source instance, and a RESTORE in the target instance. See the pages of these commands for time complexity. Also an O(N) data transfer between the two instances is performed.",
@@ -3601,7 +3601,7 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "object|encoding",
-		summary = "Returns the internal encoding of a Redis object.",
+		summary = "Returns the internal encoding of an object.",
 		since = "2.2.3",
 		group = .Generic,
 		complexity = "O(1)",
@@ -3613,7 +3613,7 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "object|freq",
-		summary = "Returns the logarithmic access frequency counter of a Redis object.",
+		summary = "Returns the logarithmic access frequency counter of an object.",
 		since = "4.0.0",
 		group = .Generic,
 		complexity = "O(1)",
@@ -3633,7 +3633,7 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "object|idletime",
-		summary = "Returns the time since the last access to a Redis object.",
+		summary = "Returns the time since the last access to an object.",
 		since = "2.2.3",
 		group = .Generic,
 		complexity = "O(1)",
@@ -3967,7 +3967,7 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "readonly",
-		summary = "Enables read-only queries for a connection to a Redis Cluster replica node.",
+		summary = "Enables read-only queries for a connection to a cluster replica node.",
 		since = "3.0.0",
 		group = .Cluster,
 		complexity = "O(1)",
@@ -4062,7 +4062,7 @@ cmd_docs := [?]Cmd_Doc {
 		summary = "Creates a key from the serialized representation of a value.",
 		since = "2.6.0",
 		group = .Generic,
-		complexity = "O(1) to create the new key and additional O(N*M) to reconstruct the serialized value, where N is the number of Redis objects composing the value and M their average size. For small string values the time complexity is thus O(1)+O(1*M) where M is small, so simply O(1). However for sorted set values the complexity is O(N*M*log(N)) because inserting values into sorted sets is O(log(N)).",
+		complexity = "O(1) to create the new key and additional O(N*M) to reconstruct the serialized value, where N is the number of objects composing the value and M their average size. For small string values the time complexity is thus O(1)+O(1*M) where M is small, so simply O(1). However for sorted set values the complexity is O(N*M*log(N)) because inserting values into sorted sets is O(log(N)).",
 		acl = {.Keyspace, .Write, .Slow, .Dangerous},
 		history = {
 			{"3.0.0", "Added the `REPLACE` modifier."},
@@ -4084,7 +4084,7 @@ cmd_docs := [?]Cmd_Doc {
 		summary = "An internal command for migrating keys in a cluster.",
 		since = "3.0.0",
 		group = .Server,
-		complexity = "O(1) to create the new key and additional O(N*M) to reconstruct the serialized value, where N is the number of Redis objects composing the value and M their average size. For small string values the time complexity is thus O(1)+O(1*M) where M is small, so simply O(1). However for sorted set values the complexity is O(N*M*log(N)) because inserting values into sorted sets is O(log(N)).",
+		complexity = "O(1) to create the new key and additional O(N*M) to reconstruct the serialized value, where N is the number of objects composing the value and M their average size. For small string values the time complexity is thus O(1)+O(1*M) where M is small, so simply O(1). However for sorted set values the complexity is O(N*M*log(N)) because inserting values into sorted sets is O(log(N)).",
 		doc_flags = {.Syscmd},
 		acl = {.Keyspace, .Write, .Slow, .Dangerous},
 		history = {
@@ -4450,7 +4450,7 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "shutdown",
-		summary = "Synchronously saves the database(s) to disk and shuts down the Redis server.",
+		summary = "Synchronously saves the database(s) to disk and shuts down the server.",
 		since = "1.0.0",
 		group = .Server,
 		complexity = "O(N) when saving, where N is the total number of keys in all databases when saving data, otherwise O(1)",
@@ -4524,7 +4524,7 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "slaveof",
-		summary = "Sets a Redis server as a replica of another, or promotes it to being a master.",
+		summary = "Sets the server as a replica of another, or promotes it to being a master.",
 		since = "1.0.0",
 		group = .Server,
 		complexity = "O(1)",
@@ -4872,7 +4872,7 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "swapdb",
-		summary = "Swaps two Redis databases.",
+		summary = "Swaps two databases.",
 		since = "4.0.0",
 		group = .Server,
 		complexity = "O(N) where N is the count of clients watching or blocking on keys from both databases.",

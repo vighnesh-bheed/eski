@@ -2697,7 +2697,7 @@ config_startup :: proc() {
 	if cfg.daemonize && !supervised {
 		daemonize()
 		if cfg.pidfile == "" {
-			cfg.pidfile = "/var/run/redis.pid"
+			cfg.pidfile = "/var/run/eski.pid"
 		}
 	}
 	runtime_operations_init()

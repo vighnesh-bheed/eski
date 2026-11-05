@@ -70,7 +70,7 @@ observed_mutations_match_literal_wires_counts_and_returned_cursors :: proc(t: ^t
 			lp = lp_delete_range_with_entry(lp, &cursor, 99)
 		case 4:
 			batch := [4]Element{entry_from_bytes(transmute([]u8)string("x")), entry_from_int(-8), entry_from_bytes(nil), entry_from_int(9)}
-			lp = lp_batch_insert(lp, lp_seek(lp, 1), Placement(fixture.where_), batch[:int(fixture.num)], &cursor)
+			lp = lp_splice_entries(lp, batch[:int(fixture.num)], lp_seek(lp, 1), Placement(fixture.where_), &cursor)
 		case 5:
 			lp = lp_delete_range(lp, i64(fixture.index), fixture.num)
 		case 6:

@@ -13,7 +13,7 @@ mkdir -p /tmp/eski-data
 
 From another terminal, write a value, request `BGSAVE`, wait for `INFO persistence` to show completion and then verify a controlled restart. Background work still has fork, copy-on-write, memory and I/O costs. Keep backups separately from a working directory that an operator can overwrite.
 
-Snapshots and `DUMP` payloads store hashes with field deadlines as RDB types 24 and 25. Loading and `RESTORE` also accept types 22 and 23, the field-expiry encodings written by the 7.4 release candidates, because the released 7.4 server accepts them too; Eski never writes those two types.
+Snapshots and `DUMP` payloads store hashes with field deadlines as RDB types 24 and 25. Loading and `RESTORE` also accept types 22 and 23, the field-expiry encodings written by the 7.4 release candidates, because the released 7.4 server accepts them too; Eski never writes those two types. That acceptance, and the skipping of the slot-info opcode 244 in snapshot files, was confirmed against the reference server with `test/persistence/reference_probe.py`, whose recorded output is `test/persistence/reference_probe.txt`.
 
 ## Append-only files
 
@@ -37,3 +37,5 @@ Function library definitions are saved in RDB snapshots and AOF base files. Thei
 `SHUTDOWN` supports save/no-save and related shutdown controls. A deliberate `NOSAVE` can discard changes not present in durable files. Never use shutdown or restore as an unreviewed probe against an existing instance.
 
 Verify with `bash test/rdb/roundtrip.sh`, `bash test/aof/roundtrip.sh`, `bash test/run_packages.sh`, `bash test/smoke.sh` and `./test/conformance/run.sh --suite redis --units dump`. These include codec, ownership, restart and corruption cases. The [build/test guide](build-run-test.md) explains how smoke obtains corrupt-payload comparison fixtures.
+
+Eski is an independent project, not affiliated with, endorsed or certified by Redis Ltd. Redis is a registered trademark of Redis Ltd.; any rights therein are reserved to Redis Ltd.

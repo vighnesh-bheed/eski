@@ -41,14 +41,14 @@ debug_help := [?]string {
 	"DIGEST-VALUE <key> [<key> ...]",
 	"    Output a hex signature of the values of all the specified keys.",
 	"ERROR <string>",
-	"    Return a Redis protocol error with <string> as message. Useful for clients",
-	"    unit tests to simulate Redis errors.",
+	"    Return a protocol error with <string> as message. Useful for clients",
+	"    unit tests to simulate server errors.",
 	"LEAK <string>",
 	"    Create a memory leak of the input string.",
 	"LOG <message>",
 	"    Write <message> to the server log.",
 	"HTSTATS <dbid> [full]",
-	"    Return hash table statistics of the specified Redis database.",
+	"    Return hash table statistics of the specified database.",
 	"HTSTATS-KEY <key> [full]",
 	"    Like HTSTATS but for the hash table stored at <key>'s value.",
 	"LOADAOF",
@@ -81,7 +81,7 @@ debug_help := [?]string {
 	"      file to the database.",
 	"SET-ACTIVE-EXPIRE <0|1>",
 	"    Setting it to 0 disables expiring keys (and hash-fields) in background ",
-	"    when they are not accessed (otherwise the Redis behavior). Setting it",
+	"    when they are not accessed (otherwise the default behavior). Setting it",
 	"    to 1 reenables back the default.",
 	"QUICKLIST-PACKED-THRESHOLD <size>",
 	"    Sets the threshold for elements to be inserted as plain vs packed nodes",
@@ -150,7 +150,7 @@ debug_more :: proc(c: ^Conn, argv: [][]u8) -> bool {
 		reply_ok(c)
 	case n == 2 && eq_nocase(sub, "stringmatch-test"):
 		debug_stringmatch_test()
-		reply_simple(c, "Apparently Redis did not crash: test passed")
+		reply_simple(c, "Apparently the server did not crash: test passed")
 	case n == 2 && eq_nocase(sub, "client-eviction"):
 		debug_client_eviction(c)
 	case n == 4 && eq_nocase(sub, "replybuffer"):

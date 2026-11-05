@@ -2,7 +2,7 @@
 
 Generated from a temporary instance of the built executable using `COMMAND DOCS`, `COMMAND LIST` and `COMMAND COUNT`. The inventory contains 237 top-level commands and 333 names including subcommands. Metadata describes the protocol surface; the [command-group pages](README.md) and [conformance record](conformance.md) define implemented behavior and remaining gaps. Lua scripts, Function libraries and debugging have the scope documented in [scripting](scripting.md). Replication and clustering remain outside the node scope.
 
-Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test/readme_tables.py --check`. Use `--server HOST:PORT` to inspect an existing instance without starting one. The canonical command-metadata SHA256 is `f4e2e81a055482b30c6ee835368415755f1bb8f868943d9767b88bf7f467de82`.
+Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test/readme_tables.py --check`. Use `--server HOST:PORT` to inspect an existing instance without starting one. The canonical command-metadata SHA256 is `59394b4b9174331baa6663ff0177594986147848923e37b9a4f14b9f368638b3`.
 
 ## Bitmap
 
@@ -41,7 +41,7 @@ Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test
 | `CLIENT UNBLOCK` | `<client-id> [(TIMEOUT \| ERROR)]` | Unblocks a client blocked by a blocking command from a different connection. |
 | `CLIENT UNPAUSE` | — | Resumes processing commands from paused clients. |
 | `ECHO` | `<message>` | Returns the given string. |
-| `HELLO` | `[<protover> [AUTH <username> <password>] [SETNAME <clientname>]]` | Handshakes with the Redis server. |
+| `HELLO` | `[<protover> [AUTH <username> <password>] [SETNAME <clientname>]]` | Handshakes with the server. |
 | `PING` | `[<message>]` | Returns the server's liveliness response. |
 | `QUIT` | — | Closes the connection. |
 | `RESET` | — | Resets the connection. |
@@ -59,13 +59,13 @@ Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test
 | `EXPIREAT` | `<key> <unix-time-seconds> [(NX \| XX \| GT \| LT)]` | Sets the expiration time of a key to a Unix timestamp. |
 | `EXPIRETIME` | `<key>` | Returns the expiration time of a key as a Unix timestamp. |
 | `KEYS` | `<pattern>` | Returns all key names that match a pattern. |
-| `MIGRATE` | `<host> <port> (<key> \| EMPTY-STRING) <destination-db> <timeout> [COPY] [REPLACE] [(AUTH <password> \| AUTH2 <username> <password>)] [KEYS <key> ...]` | Atomically transfers a key from one Redis instance to another. |
+| `MIGRATE` | `<host> <port> (<key> \| EMPTY-STRING) <destination-db> <timeout> [COPY] [REPLACE] [(AUTH <password> \| AUTH2 <username> <password>)] [KEYS <key> ...]` | Atomically transfers a key from one server instance to another. |
 | `MOVE` | `<key> <db>` | Moves a key to another database. |
 | `OBJECT` | — | A container for object introspection commands. |
-| `OBJECT ENCODING` | `<key>` | Returns the internal encoding of a Redis object. |
-| `OBJECT FREQ` | `<key>` | Returns the logarithmic access frequency counter of a Redis object. |
+| `OBJECT ENCODING` | `<key>` | Returns the internal encoding of an object. |
+| `OBJECT FREQ` | `<key>` | Returns the logarithmic access frequency counter of an object. |
 | `OBJECT HELP` | — | Returns helpful text about the different subcommands. |
-| `OBJECT IDLETIME` | `<key>` | Returns the time since the last access to a Redis object. |
+| `OBJECT IDLETIME` | `<key>` | Returns the time since the last access to an object. |
 | `OBJECT REFCOUNT` | `<key>` | Returns the reference count of a value of a key. |
 | `PERSIST` | `<key>` | Removes the expiration time of a key. |
 | `PEXPIRE` | `<key> <milliseconds> [(NX \| XX \| GT \| LT)]` | Sets the expiration time of a key in milliseconds. |
@@ -107,9 +107,9 @@ Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test
 | --- | --- | --- |
 | `HDEL` | `<key> <field> ...` | Deletes one or more fields and their values from a hash. Deletes the hash if no fields remain. |
 | `HEXISTS` | `<key> <field>` | Determines whether a field exists in a hash. |
-| `HEXPIRE` | `<key> <seconds> [(NX \| XX \| GT \| LT)] FIELDS <numfields> <field> ...` | Set expiry for hash field using relative time to expire (seconds) |
-| `HEXPIREAT` | `<key> <unix-time-seconds> [(NX \| XX \| GT \| LT)] FIELDS <numfields> <field> ...` | Set expiry for hash field using an absolute Unix timestamp (seconds) |
-| `HEXPIRETIME` | `<key> FIELDS <numfields> <field> ...` | Returns the expiration time of a hash field as a Unix timestamp, in seconds. |
+| `HEXPIRE` | `<key> <seconds> [(NX \| XX \| GT \| LT)] FIELDS <numfields> <field> ...` | Sets a relative expiry in seconds on one or more fields of a hash. |
+| `HEXPIREAT` | `<key> <unix-time-seconds> [(NX \| XX \| GT \| LT)] FIELDS <numfields> <field> ...` | Sets an absolute expiry, given as a Unix timestamp in seconds, on one or more fields of a hash. |
+| `HEXPIRETIME` | `<key> FIELDS <numfields> <field> ...` | Returns the Unix timestamp in seconds at which each named hash field expires. |
 | `HGET` | `<key> <field>` | Returns the value of a field in a hash. |
 | `HGETALL` | `<key>` | Returns all fields and values in a hash. |
 | `HINCRBY` | `<key> <field> <increment>` | Increments the integer value of a field in a hash by a number. Uses 0 as initial value if the field doesn't exist. |
@@ -118,17 +118,17 @@ Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test
 | `HLEN` | `<key>` | Returns the number of fields in a hash. |
 | `HMGET` | `<key> <field> ...` | Returns the values of all fields in a hash. |
 | `HMSET` | `<key> <field> <value> ...` | Sets the values of multiple fields. |
-| `HPERSIST` | `<key> FIELDS <numfields> <field> ...` | Removes the expiration time for each specified field |
-| `HPEXPIRE` | `<key> <milliseconds> [(NX \| XX \| GT \| LT)] FIELDS <numfields> <field> ...` | Set expiry for hash field using relative time to expire (milliseconds) |
-| `HPEXPIREAT` | `<key> <unix-time-milliseconds> [(NX \| XX \| GT \| LT)] FIELDS <numfields> <field> ...` | Set expiry for hash field using an absolute Unix timestamp (milliseconds) |
-| `HPEXPIRETIME` | `<key> FIELDS <numfields> <field> ...` | Returns the expiration time of a hash field as a Unix timestamp, in msec. |
-| `HPTTL` | `<key> FIELDS <numfields> <field> ...` | Returns the TTL in milliseconds of a hash field. |
+| `HPERSIST` | `<key> FIELDS <numfields> <field> ...` | Removes the expiry from one or more fields of a hash so they persist with the key. |
+| `HPEXPIRE` | `<key> <milliseconds> [(NX \| XX \| GT \| LT)] FIELDS <numfields> <field> ...` | Sets a relative expiry in milliseconds on one or more fields of a hash. |
+| `HPEXPIREAT` | `<key> <unix-time-milliseconds> [(NX \| XX \| GT \| LT)] FIELDS <numfields> <field> ...` | Sets an absolute expiry, given as a Unix timestamp in milliseconds, on one or more fields of a hash. |
+| `HPEXPIRETIME` | `<key> FIELDS <numfields> <field> ...` | Returns the Unix timestamp in milliseconds at which each named hash field expires. |
+| `HPTTL` | `<key> FIELDS <numfields> <field> ...` | Returns the remaining milliseconds before each named hash field expires. |
 | `HRANDFIELD` | `<key> [<count> [WITHVALUES]]` | Returns one or more random fields from a hash. |
 | `HSCAN` | `<key> <cursor> [MATCH <pattern>] [COUNT <count>] [NOVALUES]` | Iterates over fields and values of a hash. |
 | `HSET` | `<key> <field> <value> ...` | Creates or modifies the value of a field in a hash. |
 | `HSETNX` | `<key> <field> <value>` | Sets the value of a field in a hash only when the field doesn't exist. |
 | `HSTRLEN` | `<key> <field>` | Returns the length of the value of a field. |
-| `HTTL` | `<key> FIELDS <numfields> <field> ...` | Returns the TTL in seconds of a hash field. |
+| `HTTL` | `<key> FIELDS <numfields> <field> ...` | Returns the remaining seconds before each named hash field expires. |
 | `HVALS` | `<key>` | Returns all values in a hash. |
 
 ## Hyperloglog
@@ -264,7 +264,7 @@ Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test
 | `LATENCY HISTORY` | `<event>` | Returns timestamp-latency samples for an event. |
 | `LATENCY LATEST` | — | Returns the latest latency samples for all events. |
 | `LATENCY RESET` | `[<event> ...]` | Resets the latency data for one or more events. |
-| `LOLWUT` | `[VERSION <version>]` | Displays computer art and the Redis version |
+| `LOLWUT` | `[VERSION <version>]` | Displays computer art and the server version |
 | `MEMORY` | — | A container for memory diagnostics commands. |
 | `MEMORY DOCTOR` | — | Outputs a memory problems report. |
 | `MEMORY HELP` | — | Returns helpful text about the different subcommands. |
@@ -274,13 +274,13 @@ Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test
 | `MEMORY USAGE` | `<key> [SAMPLES <count>]` | Estimates the memory usage of a key. |
 | `MONITOR` | — | Listens for all requests received by the server in real-time. |
 | `SAVE` | — | Synchronously saves the database(s) to disk. |
-| `SHUTDOWN` | `[(NOSAVE \| SAVE)] [NOW] [FORCE] [ABORT]` | Synchronously saves the database(s) to disk and shuts down the Redis server. |
+| `SHUTDOWN` | `[(NOSAVE \| SAVE)] [NOW] [FORCE] [ABORT]` | Synchronously saves the database(s) to disk and shuts down the server. |
 | `SLOWLOG` | — | A container for slow log commands. |
 | `SLOWLOG GET` | `[<count>]` | Returns the slow log's entries. |
 | `SLOWLOG HELP` | — | Show helpful text about the different subcommands |
 | `SLOWLOG LEN` | — | Returns the number of entries in the slow log. |
 | `SLOWLOG RESET` | — | Clears all entries from the slow log. |
-| `SWAPDB` | `<index1> <index2>` | Swaps two Redis databases. |
+| `SWAPDB` | `<index1> <index2>` | Swaps two databases. |
 | `TIME` | — | Returns the server time. |
 
 ## Set
@@ -411,3 +411,5 @@ Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test
 | `MULTI` | — | Starts a transaction. |
 | `UNWATCH` | — | Forgets about watched keys of a transaction. |
 | `WATCH` | `<key> ...` | Monitors changes to keys to determine the execution of a transaction. |
+
+Eski is an independent project, not affiliated with, endorsed or certified by Redis Ltd. Redis is a registered trademark of Redis Ltd.; any rights therein are reserved to Redis Ltd.

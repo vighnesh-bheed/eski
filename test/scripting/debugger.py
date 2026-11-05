@@ -246,7 +246,7 @@ class Replies(unittest.TestCase):
                 (('r', 'get', 'dbg:nokey'), ['<redis> get dbg:nokey', '<reply> NULL']),
                 (('r', 'nosuchcmd'), ['<redis> nosuchcmd', '<error> Unknown Redis command called from script']),
                 (('r', 'get'), ['<redis> get', '<error> Wrong number of args calling Redis command from script']),
-                (('r', 'hello'), ['<redis> hello', '<error> This Redis command is not allowed from script']),
+                (('r', 'hello'), ['<redis> hello', '<error> This command is not allowed from script']),
                 (('r', 'incr', 'dbg:str'), ['<redis> incr dbg:str', '<error> -ERR value is not an integer or out of range', '<reply> "-ERR value is not an integer or out of range"']),
                 (('r', 'mset', 'a', '1', 'b', '2', 'c', '3', 'd', '4', 'e', '5', 'f'),
                  ['<redis> mset a 1 b 2 c 3 d 4 e ... (1 more)', "<error> -ERR wrong number of arguments for 'mset' command", "<reply> \"-ERR wrong number of arguments for 'mset' command\""]),

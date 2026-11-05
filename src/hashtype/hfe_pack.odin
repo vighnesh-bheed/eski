@@ -8,7 +8,7 @@ convert_to_ex :: proc(h: Hash) {
 		return
 	}
 	count := length(h)
-	if !lp.lp_safe_to_add(h.lp, count * lp.lp_entry_size_integer(0)) {
+	if !lp.lp_safe_to_add(h.lp, count * lp.lp_integer_entry_size(0)) {
 		convert(h)
 		return
 	}
@@ -16,7 +16,7 @@ convert_to_ex :: proc(h: Hash) {
 	it := iterator(h)
 	for next(&it) {
 		entries := [3]lp.Element{value_to_entry(current_field(&it)), value_to_entry(current_value(&it)), lp.entry_from_int(0)}
-		packed = lp.lp_batch_append(packed, entries[:])
+		packed = lp.lp_append_entries(packed, entries[:])
 	}
 	lp.lp_free(h.lp)
 	h.lp = packed
@@ -111,9 +111,9 @@ lpex_add_new :: proc(h: Hash, field, value: []u8, expire_at: u64) {
 	mark := pack_mark(expire_at)
 	tuple := [3]lp.Element{lp.entry_from_bytes(field), lp.entry_from_bytes(value), lp.entry_from_int(mark)}
 	if slot := pack_slot_for(h.lp, mark); slot != nil {
-		h.lp = lp.lp_batch_insert(h.lp, slot, lp.Placement.Before, tuple[:], nil)
+		h.lp = lp.lp_splice_entries(h.lp, tuple[:], slot, lp.Placement.Before, nil)
 	} else {
-		h.lp = lp.lp_batch_append(h.lp, tuple[:])
+		h.lp = lp.lp_append_entries(h.lp, tuple[:])
 	}
 }
 

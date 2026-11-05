@@ -4,12 +4,13 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from managed_fixture import READINESS, prepare
+from managed_fixture import READINESS, READINESS_DECLARATION, READY_COUNTERS, TOPOLOGY_OPTIONS, prepare, ready_gate, topology_line
 
 
 class ManagedFixture(unittest.TestCase):
@@ -28,7 +29,7 @@ proc invoke {config output early} {
     return [wait_server_started $config $output 2147483647]
 }
 proc invoke_descriptor {config output} {
-    set wait_ready true
+    set wait_ready 1
     set code undefined
     return [wait_server_started $config $output 2147483647]
 }
@@ -48,12 +49,17 @@ puts "unexpected=$errors"
             self.assertEqual(result.stdout.splitlines(), ['expected=0', 'descriptor=0', 'unexpected=1'])
 
     def test_generated_launcher_preserves_alias_and_actual_executable_identity(self):
-        archive = Path(__file__).resolve().parent / '.redis/redis-7.4.11.tar.gz'
-        if not archive.is_file():
-            self.skipTest('pinned upstream test archive not present locally')
+        support = ''.join(topology_line(option) for option in TOPOLOGY_OPTIONS)
+        support += READINESS_DECLARATION + '\n}\n'
+        support += ''.join(ready_gate(counter) + '\n}\n' for counter in READY_COUNTERS)
         with tempfile.TemporaryDirectory(prefix='eski-launcher-control-') as temporary:
+            archive = Path(temporary) / 'synthetic.tar.gz'
+            with tarfile.open(archive, 'w:gz') as bundle:
+                source = Path(temporary) / 'server.tcl'
+                source.write_text(support)
+                bundle.add(source, arcname='synthetic/tests/support/server.tcl')
             root = Path(temporary) / 'fixture'
-            prepare(archive, root, 'redis-7.4.11', sys.executable, hashlib.sha256(archive.read_bytes()).hexdigest(), None)
+            prepare(archive, root, 'synthetic', sys.executable, hashlib.sha256(archive.read_bytes()).hexdigest(), None)
             launcher = root / 'src/redis-server'
             code = 'import json,os;print(json.dumps([open("/proc/self/cmdline","rb").read().split(bytes([0]))[0].decode(),os.readlink("/proc/self/exe")]))'
             result = subprocess.run([str(launcher), '-c', code], capture_output=True, text=True, timeout=10)

@@ -23,9 +23,9 @@ PERSIST_CMD_SET :: 1024
 
 ERR_BGSAVE_IN_PROGRESS :: "ERR Background save already in progress"
 
-ERR_MISCONF :: "MISCONF Redis is configured to save RDB snapshots, but it's currently unable to persist to disk. Commands that may modify the data set are disabled, because this instance is configured to report errors during writes if RDB snapshotting fails (stop-writes-on-bgsave-error option). Please check the Redis logs for details about the RDB error."
+ERR_MISCONF :: "MISCONF Eski is configured to save RDB snapshots, but it's currently unable to persist to disk. Commands that may modify the data set are disabled, because this instance is configured to report errors during writes if RDB snapshotting fails (stop-writes-on-bgsave-error option). Please check the Eski logs for details about the RDB error."
 
-ERR_LOADING :: "LOADING Redis is loading the dataset in memory"
+ERR_LOADING :: "LOADING Eski is loading the dataset in memory"
 
 Persist_Sanitize :: enum u8 {
 	No,

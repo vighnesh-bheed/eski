@@ -205,8 +205,8 @@ cmd_lolwut :: proc(c: ^Conn, argv: [][]u8) {
 			sb_str(&output, "\nDedicated to the 8 bit game developers of past and present.\nOriginal 8 bit image from Plaguemon by hikikomori. ")
 		}
 	}
-	sb_str(&output, "Redis ver. ")
-	sb_str(&output, REDIS_COMPAT_VERSION)
+	sb_str(&output, "Eski ver. ")
+	sb_str(&output, VERSION)
 	sb_byte(&output, '\n')
 	reply_verbatim(c, output[:])
 }
