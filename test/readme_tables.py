@@ -739,6 +739,19 @@ def new_machine_section(dataset):
              'seconds holds the run. Disable unattended upgrades and periodic timers, for example with `systemctl disable --now unattended-upgrades apt-daily.timer '
              'apt-daily-upgrade.timer`, and poll the status sparingly. If the idle package sits above about 45 C, raise `cool_temp_c` in a copy of the design and in '
              'its `methodology.gates` sentence.',
+             '- During a case the scheduler reads every machine sample and the raw timed client output. A process outside the run that uses a tenth of a core or more '
+             'in any sample, or a known load generator or compiler at any share, invalidates the case with external_cpu_activity. Outside the run means not an owned '
+             'process, not in the cgroup of a container the run started, not docker or systemd infrastructure (dockerd, containerd, containerd-shim, systemd, '
+             'systemd-journal) and not a kernel thread, recognised by a parent PID of 2 (kthreadd) or a comm starting with kworker/, rcu_, rcuc/, rcub/, jbd2/, '
+             'ksoftirqd/, migration/, kswapd, kcompactd or khugepaged. A process seen in a single sample below two percent of a core, one or two scheduler ticks, is '
+             'ignored; this is the harness\'s own load generator version probe, which runs before any ownership record exists. Kernel threads bound to one CPU '
+             '(kworker/N:, ksoftirqd/N, migration/N, rcuc/N, placed by the recorded processor when the sample has one and by the N in the name otherwise) are judged '
+             'by that CPU: at or above a tenth of a core on a server CPU they invalidate the case with kernel_thread_on_reserved_cpu, on a client CPU they annotate it '
+             'with kernel_thread_on_client_cpu, and unbound workers and kernel threads on other CPUs are exempt. Independently of any named cause, the per-second '
+             'request counts of the timed client, without the trailing partial second, must all stay at or above half of the run\'s median or the case is invalid '
+             'with throughput_collapse, and a run whose maximum latency exceeds 100 ms while its p99 is under 1 ms carries the tail_stall annotation. In the run '
+             '`cloud-v1` the kernel thread rule and the collapse check mark the same 52 of 132 timed runs and no clean one; three further cases carry '
+             'external_cpu_activity for genuine outside work, an apt-listchanges python3 and the systemd-logind, dbus and sshd work of ssh status checks.',
              '- One frequency policy for the whole run. Set the governor once before the installation, for example with `cpupower frequency-set -g performance`, and '
              'leave it; the preflight records the policy of every role CPU, and a change holds the run or invalidates the case.',
              '- Free ports 6379 for Redis, 6380 for Valkey, 6381 for Dragonfly and 6400 for Eski. The engines use host networking on these fixed ports, and the harness '
@@ -953,7 +966,9 @@ def render_outputs(commands, baseline, observed, dataset, readme, ab_floor=None)
                       'The badge reports only GET 64 B at pipeline 1: %.2fx observed Eski/Redis median throughput%s. '
                       'There is no overall cross-workload score.\n\n'
                       '## Excluded repetitions\n\n%s\n\nExcluded values have no median or badge score. '
-                      'Each exclusion retains its recorded reason; client_limited is a separate annotation on included measurements.\n\n'
+                      'Each exclusion retains its recorded reason; client_limited, kernel_thread_on_client_cpu and tail_stall are separate annotations on included measurements. '
+                      'The reason external_cpu_activity names a process outside the run, kernel_thread_on_reserved_cpu a per-CPU kernel thread busy on the server CPU and '
+                      'throughput_collapse a second of the timed run below half of the run\'s median per-second rate; the machine requirements state the rules.\n\n'
                       '## Fill measurement\n\nThe separate fill workload uses %s generated keys of %s bytes at pipeline %s. '
                       'The stored-key count in the receipt is retained as measured. %s\n\n%s\n') % (
                           dataset['schema'], dataset['counts']['planned'], dataset['counts']['valid'], dataset['counts']['excluded'], dataset['counts']['client_limited'],
