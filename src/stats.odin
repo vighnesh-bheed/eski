@@ -440,7 +440,7 @@ stat_error_disable :: proc() {
 		if len(codes) > 0 { sb_str(&codes, ", ") }
 		sb_str(&codes, code)
 	}
-	plog(LOG_WARNING, "Error codes recorded before errorstats stopped: ", string(codes[:]))
+	plog(LOG_WARNING, "Current errors code list: ", string(codes[:]))
 	count := len(stat_errors)
 	bytes := stat_error_memory() + size_of(map[string]i64)
 	detached := cast(^map[string]i64)runtime.heap_alloc(size_of(map[string]i64), false)
