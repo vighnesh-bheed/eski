@@ -240,9 +240,9 @@ class Compatibility(unittest.TestCase):
 
     def test_lolwut_versions_and_protocol(self):
         client = self.client
-        version = info(client, 'server')['redis_version'].encode()
-        self.assertEqual(client.call('LOLWUT'), b'Redis ver. ' + version + b'\n')
-        self.assertEqual(client.call('LOLWUT', 'VERSION', 100), b'Redis ver. ' + version + b'\n')
+        version = info(client, 'server')['eski_version'].encode()
+        self.assertEqual(client.call('LOLWUT'), b'Eski ver. ' + version + b'\n')
+        self.assertEqual(client.call('LOLWUT', 'VERSION', 100), b'Eski ver. ' + version + b'\n')
         skyline = client.call('LOLWUT', 'VERSION', 6, 7, 3)
         self.assertEqual(skyline.count(b' \x1b[0m'), 21)
         schotter = client.call('LOLWUT', 'VERSION', 5, 8, 1, 1).decode()
@@ -252,7 +252,7 @@ class Compatibility(unittest.TestCase):
             client.send('LOLWUT', *arguments)
             self.assertIsInstance(client.reply(), ServerError)
         client.call('HELLO', 3)
-        self.assertEqual(client.call('LOLWUT'), b'Redis ver. ' + version + b'\n')
+        self.assertEqual(client.call('LOLWUT'), b'Eski ver. ' + version + b'\n')
 
     def test_pause_retains_expired_key_without_side_effects(self):
         client = self.client
