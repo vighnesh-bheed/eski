@@ -4281,19 +4281,27 @@ def from_pairs(kind, pairs):
     return ("*", [x for p in pairs for x in p])
 
 
-def canon_docs(t):
+OWN_WORDED_DOCS = {"hexpire", "hexpireat", "hexpiretime", "hpersist", "hpexpire", "hpexpireat", "hpexpiretime", "hpttl", "httl", "client|kill"}
+OWN_WORDED_FIELDS = (b"summary", b"complexity", b"history")
+assert len(OWN_WORDED_DOCS) == 10, "only the nine hash field expiry commands and CLIENT KILL carry Eski's own summary, complexity and history wording; every other COMMAND DOCS entry must match the reference byte for byte"
+
+
+def canon_docs(t, name=b""):
     if t[0] not in "%*":
         return t
+    own = name.decode().lower() in OWN_WORDED_DOCS
     out = []
     for a, b in pairs_of(t):
+        if own and a[1] in OWN_WORDED_FIELDS:
+            continue
         if a[1] == b"subcommands":
-            b = from_pairs(b[0], sorted([(x, canon_docs(y)) for x, y in pairs_of(b)], key=lambda p: p[0][1]))
+            b = from_pairs(b[0], sorted([(x, canon_docs(y, x[1])) for x, y in pairs_of(b)], key=lambda p: p[0][1]))
         out.append((a, b))
     return from_pairs(t[0], out)
 
 
 def canon_reply(t):
-    return from_pairs(t[0], [(x, canon_docs(y)) for x, y in pairs_of(t)])
+    return from_pairs(t[0], [(x, canon_docs(y, x[1])) for x, y in pairs_of(t)])
 
 
 def names_of(t):
@@ -4340,8 +4348,8 @@ def run(proto):
         bad = [n for n in ra if ra[n] != rb.get(n)]
         check(not bad, "resp%d %s entries differ: %s" % (proto, " ".join(args), bad[:10]))
     a, b = j.cmd("COMMAND", "DOCS"), r.cmd("COMMAND", "DOCS")
-    da = dict((x[1].decode(), ser(canon_docs(y))) for x, y in pairs_of(a))
-    db = dict((x[1].decode(), ser(canon_docs(y))) for x, y in pairs_of(b))
+    da = dict((x[1].decode(), ser(canon_docs(y, x[1]))) for x, y in pairs_of(a))
+    db = dict((x[1].decode(), ser(canon_docs(y, x[1]))) for x, y in pairs_of(b))
     check(sorted(da) == sorted(top), "resp%d COMMAND DOCS lists other commands" % proto)
     bad = [n for n in da if da[n] != db.get(n)]
     check(not bad, "resp%d COMMAND DOCS entries differ: %s" % (proto, bad[:10]))

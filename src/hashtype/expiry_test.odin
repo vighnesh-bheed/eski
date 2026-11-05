@@ -192,11 +192,13 @@ expiry_exact_now_read_persist_and_active_contracts :: proc(t: ^testing.T) {
 		defer delete(out)
 		fields := [][]u8{ordinary_bytes("f")}
 		ttl_fields(h, fields, .Pttl, 100, &out)
-		if table {
-			testing.expect_value(t, out[0], i64(0))
-		} else {
-			testing.expect_value(t, out[0], i64(-2))
-		}
+		testing.expect_value(t, out[0], i64(0))
+		clear(&out)
+		ttl_fields(h, fields, .Ttl, 100, &out)
+		testing.expect_value(t, out[0], i64(0))
+		clear(&out)
+		ttl_fields(h, fields, .Pttl, 101, &out)
+		testing.expect_value(t, out[0], i64(-2))
 		_, read := get(h, fields[0], 100)
 		testing.expect_value(t, read, Field_Read{.Live})
 		testing.expect(t, !expire_if_needed(h, 100))

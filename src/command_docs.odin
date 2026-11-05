@@ -636,7 +636,7 @@ cmd_docs := [?]Cmd_Doc {
 			{"3.2.0", "Added `master` type in for `TYPE` option."},
 			{"5.0.0", "Replaced `slave` `TYPE` with `replica`. `slave` still supported for backward compatibility."},
 			{"6.2.0", "`LADDR` option."},
-			{"7.4.0", "`MAXAGE` option."},
+			{"7.4.0", "`MAXAGE` filter that selects clients connected for at least the given number of seconds."},
 		},
 		args = {
 			{
@@ -2514,10 +2514,10 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "hexpire",
-		summary = "Set expiry for hash field using relative time to expire (seconds)",
+		summary = "Sets a relative expiry in seconds on one or more fields of a hash.",
 		since = "7.4.0",
 		group = .Hash,
-		complexity = "O(N) where N is the number of specified fields",
+		complexity = "O(N) where N is the number of fields named after FIELDS.",
 		acl = {.Write, .Hash, .Fast},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
@@ -2546,10 +2546,10 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "hexpireat",
-		summary = "Set expiry for hash field using an absolute Unix timestamp (seconds)",
+		summary = "Sets an absolute expiry, given as a Unix timestamp in seconds, on one or more fields of a hash.",
 		since = "7.4.0",
 		group = .Hash,
-		complexity = "O(N) where N is the number of specified fields",
+		complexity = "O(N) where N is the number of fields named after FIELDS.",
 		acl = {.Write, .Hash, .Fast},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
@@ -2578,10 +2578,10 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "hexpiretime",
-		summary = "Returns the expiration time of a hash field as a Unix timestamp, in seconds.",
+		summary = "Returns the Unix timestamp in seconds at which each named hash field expires.",
 		since = "7.4.0",
 		group = .Hash,
-		complexity = "O(N) where N is the number of specified fields",
+		complexity = "O(N) where N is the number of fields named after FIELDS.",
 		acl = {.Read, .Hash, .Fast},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
@@ -2706,10 +2706,10 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "hpersist",
-		summary = "Removes the expiration time for each specified field",
+		summary = "Removes the expiry from one or more fields of a hash so they persist with the key.",
 		since = "7.4.0",
 		group = .Hash,
-		complexity = "O(N) where N is the number of specified fields",
+		complexity = "O(N) where N is the number of fields named after FIELDS.",
 		acl = {.Write, .Hash, .Fast},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
@@ -2726,10 +2726,10 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "hpexpire",
-		summary = "Set expiry for hash field using relative time to expire (milliseconds)",
+		summary = "Sets a relative expiry in milliseconds on one or more fields of a hash.",
 		since = "7.4.0",
 		group = .Hash,
-		complexity = "O(N) where N is the number of specified fields",
+		complexity = "O(N) where N is the number of fields named after FIELDS.",
 		acl = {.Write, .Hash, .Fast},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
@@ -2758,10 +2758,10 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "hpexpireat",
-		summary = "Set expiry for hash field using an absolute Unix timestamp (milliseconds)",
+		summary = "Sets an absolute expiry, given as a Unix timestamp in milliseconds, on one or more fields of a hash.",
 		since = "7.4.0",
 		group = .Hash,
-		complexity = "O(N) where N is the number of specified fields",
+		complexity = "O(N) where N is the number of fields named after FIELDS.",
 		acl = {.Write, .Hash, .Fast},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
@@ -2790,10 +2790,10 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "hpexpiretime",
-		summary = "Returns the expiration time of a hash field as a Unix timestamp, in msec.",
+		summary = "Returns the Unix timestamp in milliseconds at which each named hash field expires.",
 		since = "7.4.0",
 		group = .Hash,
-		complexity = "O(N) where N is the number of specified fields",
+		complexity = "O(N) where N is the number of fields named after FIELDS.",
 		acl = {.Read, .Hash, .Fast},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
@@ -2810,10 +2810,10 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "hpttl",
-		summary = "Returns the TTL in milliseconds of a hash field.",
+		summary = "Returns the remaining milliseconds before each named hash field expires.",
 		since = "7.4.0",
 		group = .Hash,
-		complexity = "O(N) where N is the number of specified fields",
+		complexity = "O(N) where N is the number of fields named after FIELDS.",
 		acl = {.Read, .Hash, .Fast},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
@@ -2915,10 +2915,10 @@ cmd_docs := [?]Cmd_Doc {
 	},
 	{
 		name = "httl",
-		summary = "Returns the TTL in seconds of a hash field.",
+		summary = "Returns the remaining seconds before each named hash field expires.",
 		since = "7.4.0",
 		group = .Hash,
-		complexity = "O(N) where N is the number of specified fields",
+		complexity = "O(N) where N is the number of fields named after FIELDS.",
 		acl = {.Read, .Hash, .Fast},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
