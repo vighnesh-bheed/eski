@@ -14,6 +14,7 @@ import rx "rax"
 import st "settype"
 import sm "streamtype"
 import zt "zsettype"
+import "sysclock"
 
 AOF_ITEMS_PER_EMITTED_COMMAND :: 64
 
@@ -276,7 +277,7 @@ aof_bytes :: #force_inline proc(s: string) -> []u8 {
 
 @(private = "file")
 aof_now_ms :: proc "contextless" () -> i64 {
-	ts, _ := linux.clock_gettime(.REALTIME)
+	ts, _ := sysclock.realtime()
 	return i64(ts.time_sec) * 1000 + i64(ts.time_nsec) / 1_000_000
 }
 

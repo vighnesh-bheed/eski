@@ -4,6 +4,7 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:c"
 import "core:sys/linux"
+import "sysclock"
 
 when .Address in ODIN_SANITIZER_FLAGS {
 	foreign import diagnostic_native { "../.build/diagnostics/address/libeski-diagnostics.a", "../.build/diagnostics/libunwind.so", "system:dl" }
@@ -157,7 +158,7 @@ diagnostics_report :: proc "contextless" (signal: i32, opaque: rawptr, title: st
 }
 
 diagnostics_now :: proc "contextless" () -> i64 {
-	value, err := linux.clock_gettime(.MONOTONIC)
+	value, err := sysclock.monotonic()
 	return i64(value.time_sec) * 1_000_000_000 + i64(value.time_nsec) if err == .NONE else 0
 }
 

@@ -4,6 +4,7 @@ import "base:runtime"
 import "core:net"
 import "core:sys/linux"
 import "rdb"
+import "sysclock"
 
 ERR_BUSYKEY :: "BUSYKEY Target key name already exists."
 
@@ -386,7 +387,7 @@ migrate_heap_ready :: proc() {
 
 @(private = "file")
 migrate_clock_ms :: proc "contextless" () -> i64 {
-	ts, _ := linux.clock_gettime(.MONOTONIC)
+	ts, _ := sysclock.monotonic()
 	return i64(ts.time_sec) * 1000 + i64(ts.time_nsec) / 1_000_000
 }
 
@@ -401,7 +402,7 @@ migrate_deadline :: proc "contextless" (timeout: i64) -> i64 {
 
 @(private = "file")
 migrate_clock_s :: proc "contextless" () -> i64 {
-	ts, _ := linux.clock_gettime(.MONOTONIC)
+	ts, _ := sysclock.monotonic()
 	return i64(ts.time_sec)
 }
 

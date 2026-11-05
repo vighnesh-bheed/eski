@@ -7,6 +7,7 @@ import "core:sys/linux"
 import ht "hashtype"
 import st "settype"
 import zt "zsettype"
+import "sysclock"
 
 RBUF_INIT :: 16 * 1024
 WBUF_INIT :: 16 * 1024
@@ -123,7 +124,7 @@ update_clock :: #force_inline proc() {
 	if lua_active != nil {
 		return
 	}
-	ts, _ := linux.clock_gettime(.REALTIME)
+	ts, _ := sysclock.realtime()
 	srv.now_us = i64(ts.time_sec) * 1_000_000 + i64(ts.time_nsec / 1000)
 	srv.now_ms = i64(ts.time_sec) * 1000 + i64(ts.time_nsec / 1_000_000)
 	access_seconds_now = u32(srv.now_ms / 1000) & SECONDS_STAMP_MASK

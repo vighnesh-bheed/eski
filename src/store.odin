@@ -6,6 +6,7 @@ import "core:sys/linux"
 import ht "hashtype"
 import st "settype"
 import zt "zsettype"
+import "sysclock"
 
 Entry :: struct {
 	val:       []u8,
@@ -189,7 +190,7 @@ store_fatal :: #force_no_inline proc "contextless" (msg: string) -> ! {
 }
 
 now_ns :: #force_inline proc "contextless" () -> i64 {
-	ts, _ := linux.clock_gettime(.MONOTONIC)
+	ts, _ := sysclock.monotonic()
 	return i64(ts.time_sec) * 1_000_000_000 + i64(ts.time_nsec)
 }
 

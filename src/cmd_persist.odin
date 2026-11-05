@@ -11,6 +11,7 @@ import lr "lua_runtime"
 import st "settype"
 import sm "streamtype"
 import zt "zsettype"
+import "sysclock"
 
 PERSIST_FAILED_SAVE_BACKOFF :: 5
 
@@ -1271,7 +1272,7 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 
 @(private = "file")
 persist_unix_ms :: proc "contextless" () -> i64 {
-	ts, _ := linux.clock_gettime(.REALTIME)
+	ts, _ := sysclock.realtime()
 	return i64(ts.time_sec) * 1000 + i64(ts.time_nsec) / 1_000_000
 }
 

@@ -6,6 +6,7 @@ import "./integer"
 import "base:intrinsics"
 import "base:runtime"
 import "core:sys/linux"
+import "sysclock"
 
 I64_MAX :: max(i64)
 I64_MIN :: min(i64)
@@ -151,7 +152,7 @@ write_fd :: proc(fd: linux.Fd, s: string) {
 }
 
 now_realtime :: proc() -> (sec: i64, usec: i64) {
-	ts, _ := linux.clock_gettime(.REALTIME)
+	ts, _ := sysclock.realtime()
 	return i64(ts.time_sec), i64(ts.time_nsec) / 1000
 }
 

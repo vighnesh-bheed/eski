@@ -5,6 +5,7 @@ import "base:runtime"
 import "core:mem/virtual"
 import "core:sys/linux"
 import "core:sync"
+import "../sysclock"
 
 RESIZE_WRITE_SCANS :: 64
 RESIZE_WRITE_MOVES :: 4
@@ -261,7 +262,7 @@ maintenance_release :: proc "contextless" (budget: int = RESIZE_RELEASE_BYTES, d
 	calls := 0
 	for released < budget && calls < call_budget {
 		if calls > 0 && deadline_ns != 0 {
-			ts, _ := linux.clock_gettime(.MONOTONIC)
+			ts, _ := sysclock.monotonic()
 			if i64(ts.time_sec) * 1_000_000_000 + i64(ts.time_nsec) >= deadline_ns {
 				break
 			}

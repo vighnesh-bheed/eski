@@ -3,6 +3,7 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:sys/linux"
 import "rdb"
+import "sysclock"
 
 foreign import libc_persist_signals "system:c"
 
@@ -127,7 +128,7 @@ ll_begin :: proc "contextless" (l: ^Log_Line, level: u8) {
 	l.skip = log_level_rank(level) < intrinsics.atomic_load_explicit(&cfg.loglevel, .Relaxed)
 	ll_int(l, i64(linux.getpid()))
 	ll_str(l, ":C " if pst.in_child else ":M ")
-	ts, _ := linux.clock_gettime(.REALTIME)
+	ts, _ := sysclock.realtime()
 	secs := i64(ts.time_sec)
 	ms := i64(ts.time_nsec) / 1_000_000
 	days := secs / 86400
@@ -233,7 +234,7 @@ errno_text :: proc "contextless" (e: linux.Errno) -> string {
 }
 
 persist_unix_now :: #force_inline proc "contextless" () -> i64 {
-	ts, _ := linux.clock_gettime(.REALTIME)
+	ts, _ := sysclock.realtime()
 	return i64(ts.time_sec)
 }
 
@@ -367,7 +368,7 @@ persist_sample_cow :: proc "contextless" () {
 		return
 	}
 	cow := persist_private_dirty()
-	ts, _ := linux.clock_gettime(.MONOTONIC)
+	ts, _ := sysclock.monotonic()
 	intrinsics.volatile_store(&p.cow, cow)
 	if cow > intrinsics.volatile_load(&p.cow_peak) {
 		intrinsics.volatile_store(&p.cow_peak, cow)
