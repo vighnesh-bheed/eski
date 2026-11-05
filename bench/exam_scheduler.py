@@ -461,13 +461,69 @@ def policy_problems(sample, expected):
     return ['frequency_policy_changed'] if any(observed.get('cpu' + cpu) != policy for cpu, policy in expected.items()) else []
 
 
+INFRASTRUCTURE = {'dockerd', 'containerd', 'systemd', 'systemd-journal', 'containerd-shim'}
+KERNEL_THREAD_PREFIXES = ('kworker/', 'rcu_', 'rcuc/', 'rcub/', 'jbd2/', 'ksoftirqd/', 'migration/', 'kswapd', 'kcompactd', 'khugepaged')
+BOUND_KERNEL_THREAD = re.compile(r'(?:kworker|ksoftirqd|migration|rcuc)/(\d+)(?::|$)')
+KERNEL_THREAD_MIN_CORES = .1
+NEGLIGIBLE_CORES = .02
+
+
+def kernel_thread(proc):
+    return proc.get('pid') == 2 or proc.get('ppid') == 2 or proc['comm'].startswith(KERNEL_THREAD_PREFIXES)
+
+
+def bound_kernel_thread_cpu(proc):
+    match = BOUND_KERNEL_THREAD.match(proc['comm'])
+    if not match:
+        return None
+    processor = proc.get('processor')
+    return processor if isinstance(processor, int) and not isinstance(processor, bool) else int(match.group(1))
+
+
+def role_cpus(args, role):
+    text = getattr(args, role + '_cpus', None)
+    return metrics.cpu_set(text) if text else set()
+
+
+def reserved_kernel_threads(samples, args):
+    roles = {role: role_cpus(args, role) for role in ('server', 'client')}
+    result = dict(min_cores=KERNEL_THREAD_MIN_CORES, server=[], client=[], reasons=[], annotations=[],
+                  method='per-CPU bound kernel threads (kworker/N:, ksoftirqd/N, migration/N, rcuc/N) at or above the share threshold in any sample, placed by the recorded processor when present and by the CPU in the name otherwise; one on a server CPU invalidates, one on a client CPU is annotated')
+    for index, sample in enumerate(samples):
+        for proc in sample.get('external_cpu', []):
+            cpu = bound_kernel_thread_cpu(proc)
+            cores = finite_measurement(proc.get('cpu_cores'))
+            if cpu is None or cores is None or cores < KERNEL_THREAD_MIN_CORES:
+                continue
+            for role, cpus in roles.items():
+                if cpu in cpus:
+                    result[role].append(dict(sample=index, pid=proc['pid'], comm=proc['comm'], cpu=cpu, cpu_cores=cores))
+    if result['server']:
+        result['reasons'].append('kernel_thread_on_reserved_cpu')
+    if result['client']:
+        result['annotations'].append('kernel_thread_on_client_cpu')
+    return result
+
+
+def owned_process(proc, keys, groups):
+    if (proc['pid'], proc['start_ticks']) in keys:
+        return True
+    lines = (proc.get('cgroup') or '').splitlines()
+    return any(cg and any(line == '0::' + cg or line.startswith('0::' + cg.rstrip('/') + '/') for line in lines) for cg in groups)
+
+
 def validity(samples, owners, args, expected_policy=None):
     reasons = set() if samples else {'telemetry_unavailable'}
     if any(o.get('event') == 'malformed' for o in owners):
         reasons.add('ownership_log_partial')
     keys = {(o.get('pid'), (o.get('process') or {}).get('start_ticks')) for o in owners}
     groups = {o.get('cgroup', {}).get('path') for o in owners if o.get('container')}
-    infrastructure = {'dockerd', 'containerd', 'systemd', 'systemd-journal', 'containerd-shim'}
+    sightings = {}
+    for sample in samples:
+        for proc in sample.get('external_cpu', []):
+            key = (proc['pid'], proc['start_ticks'])
+            sightings[key] = sightings.get(key, 0) + 1
+    reasons.update(reserved_kernel_threads(samples, args)['reasons'])
     policy = None
     for sample in samples:
         reasons.update(sample_problems(sample, args))
@@ -478,10 +534,12 @@ def validity(samples, owners, args, expected_policy=None):
             reasons.add('frequency_policy_changed')
         policy = current_policy
         for proc in sample.get('external_cpu', []):
-            owned = (proc['pid'], proc['start_ticks']) in keys
-            owned |= any(cg and any(line == '0::' + cg or line.startswith('0::' + cg.rstrip('/') + '/') for line in (proc.get('cgroup') or '').splitlines()) for cg in groups)
-            if not owned and proc['comm'] not in infrastructure and not proc['comm'].startswith(('kworker/', 'rcu_', 'containerd-shim')):
-                reasons.add('external_cpu_activity')
+            if owned_process(proc, keys, groups) or proc['comm'] in INFRASTRUCTURE or kernel_thread(proc):
+                continue
+            cores = finite_measurement(proc.get('cpu_cores'))
+            if cores is not None and cores < NEGLIGIBLE_CORES and sightings[(proc['pid'], proc['start_ticks'])] == 1:
+                continue
+            reasons.add('external_cpu_activity')
     return sorted(reasons)
 
 
@@ -562,6 +620,60 @@ def latency_sanity(run_dir, row, limit_seconds):
                 result['reasons'].append('timing_anomaly')
         result['files'].append(entry)
     result['reasons'] = sorted(set(result['reasons']))
+    return result
+
+
+COLLAPSE_FRACTION = .5
+TAIL_STALL_MAX_MS = 100
+TAIL_STALL_P99_MS = 1
+
+
+def per_second_counts(totals):
+    series = totals.get('Time-Serie')
+    if isinstance(series, dict):
+        try:
+            series = [series[key] for key in sorted(series, key=int)]
+        except ValueError:
+            return None
+    if not isinstance(series, list):
+        return None
+    counts = [finite_measurement(entry.get('Count')) if isinstance(entry, dict) else None for entry in series]
+    if not counts or any(count is None for count in counts):
+        return None
+    return counts[:-1] if len(counts) > 1 else counts
+
+
+def throughput_steadiness(run_dir, row):
+    result = dict(collapse_fraction=COLLAPSE_FRACTION, tail_stall_max_ms=TAIL_STALL_MAX_MS, tail_stall_p99_ms=TAIL_STALL_P99_MS, files=[], reasons=[], annotations=[],
+                  method='per-second request counts of the raw timed client JSON without the trailing partial second; a second below half of the run median is a throughput collapse and invalidates; a maximum latency above 100 ms with p99 under 1 ms is annotated tail_stall')
+    for path in sorted(Path(run_dir).glob('*/%s.json' % row['key'])):
+        entry = dict(path=str(path.relative_to(run_dir)), seconds=0, median=None, minimum=None, collapsed=[], max_ms=None, p99_ms=None)
+        try:
+            totals = json.loads(path.read_text())['ALL STATS']['Totals']
+            if not isinstance(totals, dict):
+                raise ValueError('totals')
+        except (OSError, ValueError, KeyError, TypeError):
+            entry['unreadable'] = True
+            result['reasons'].append('throughput_series_unreadable')
+            result['files'].append(entry)
+            continue
+        counts = per_second_counts(totals)
+        if counts is None:
+            result['reasons'].append('throughput_series_unmeasured')
+        else:
+            median = statistics.median(counts)
+            entry.update(seconds=len(counts), median=median, minimum=min(counts),
+                         collapsed=[dict(second=index, count=count) for index, count in enumerate(counts) if count < COLLAPSE_FRACTION * median][:20])
+            if entry['collapsed']:
+                result['reasons'].append('throughput_collapse')
+        percentiles = totals.get('Percentile Latencies')
+        entry['max_ms'] = finite_measurement(totals.get('Max Latency'))
+        entry['p99_ms'] = finite_measurement(percentiles.get('p99.00')) if isinstance(percentiles, dict) else None
+        if entry['max_ms'] is not None and entry['p99_ms'] is not None and entry['max_ms'] > TAIL_STALL_MAX_MS and entry['p99_ms'] < TAIL_STALL_P99_MS:
+            result['annotations'].append('tail_stall')
+        result['files'].append(entry)
+    result['reasons'] = sorted(set(result['reasons']))
+    result['annotations'] = sorted(set(result['annotations']))
     return result
 
 
@@ -811,7 +923,8 @@ class Scheduler:
                     attempt['cleanup'] = self.cleanup(run_id)
         owners = owner_rows(directory / 'owners.jsonl')
         reasons = validity(samples, owners, self.args, self.model['identity']['host']['frequency_policy'])
-        quality = {}
+        quality = dict(kernel_threads=reserved_kernel_threads(samples, self.args), throughput_steadiness=throughput_steadiness(directory / 'run', row))
+        reasons = sorted(set(reasons) | set(quality['throughput_steadiness']['reasons']))
         if self.args.max_client_utilization_pct is not None:
             quality['client_headroom'] = client_headroom(samples, owners, row, self.model['identity']['config']['client_budget_cores'], self.args.max_client_utilization_pct)
             reasons = sorted(set(reasons) | set(quality['client_headroom']['reasons']))
