@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 380" width="960" height="380" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif" role="img" aria-labelledby="ratio-title ratio-desc">
+<title id="ratio-title">Eski throughput relative to Redis per workload, with Valkey and Dragonfly</title>
+<desc id="ratio-desc">Horizontal bars give the Eski median throughput of each workload divided by the Redis median of the same workload on the same server core; the reference line marks 1.0x, thin whiskers span the Eski minimum to maximum over valid repetitions, and smaller markers place the Valkey and Dragonfly medians on the same scale. GET 64 B, pipeline 1 1.10x †; SET 64 B, pipeline 1 1.14x †; SET and GET 1:1, 64 B, pipeline 1 1.13x †; SET and GET 1:1, 64 B, pipeline 16 excluded: Eski 0 of 4 repetitions valid; GET 1024 B, pipeline 1 1.11x †; HGET, 16 fields of 64 B, pipeline 1 1.09x †; SISMEMBER, 16 members, pipeline 1 1.10x †; ZSCORE, 16 members, pipeline 1 1.08x †.</desc>
+<rect width="960" height="380" fill="#1a1a19"/>
+<text x="12" y="24" font-size="16" font-weight="600" fill="#f0efec">Throughput relative to Redis on the same server core</text>
+<text x="12" y="44" font-size="12" fill="#c3c2b7">Eski median of valid repetitions divided by the Redis median of the same workload; higher is better, 1.0x is Redis</text>
+<rect x="12" y="56" width="12" height="12" rx="3" fill="#3987e5"/>
+<text x="29" y="66" font-size="11.5" fill="#c3c2b7">Eski median</text>
+<path d="M112 62 H128 M112 59 V65 M128 59 V65" stroke="#f0efec" stroke-width="1.5" fill="none"/>
+<text x="134" y="66" font-size="11.5" fill="#c3c2b7">Eski min to max</text>
+<line x1="240" x2="256" y1="62" y2="62" stroke="#d95926" stroke-width="2"/>
+<text x="262" y="66" font-size="11.5" fill="#c3c2b7">Redis median, 1.0x</text>
+<circle cx="398" cy="62" r="4.5" fill="#199e70" stroke="#1a1a19" stroke-width="2"/>
+<text x="409" y="66" font-size="11.5" fill="#c3c2b7">Valkey median</text>
+<circle cx="522" cy="62" r="4.5" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
+<text x="533" y="66" font-size="11.5" fill="#c3c2b7">Dragonfly median</text>
+<line x1="251.0" x2="251.0" y1="82" y2="310" stroke="#383835" stroke-width="1"/>
+<text x="251.0" y="324" font-size="10" text-anchor="middle" fill="#898781" style="font-variant-numeric: tabular-nums">0x</text>
+<line x1="348.0" x2="348.0" y1="82" y2="310" stroke="#2c2c2a" stroke-width="1"/>
+<text x="348.0" y="324" font-size="10" text-anchor="middle" fill="#898781" style="font-variant-numeric: tabular-nums">0.2x</text>
+<line x1="445.0" x2="445.0" y1="82" y2="310" stroke="#2c2c2a" stroke-width="1"/>
+<text x="445.0" y="324" font-size="10" text-anchor="middle" fill="#898781" style="font-variant-numeric: tabular-nums">0.4x</text>
+<line x1="542.0" x2="542.0" y1="82" y2="310" stroke="#2c2c2a" stroke-width="1"/>
+<text x="542.0" y="324" font-size="10" text-anchor="middle" fill="#898781" style="font-variant-numeric: tabular-nums">0.6x</text>
+<line x1="639.0" x2="639.0" y1="82" y2="310" stroke="#2c2c2a" stroke-width="1"/>
+<text x="639.0" y="324" font-size="10" text-anchor="middle" fill="#898781" style="font-variant-numeric: tabular-nums">0.8x</text>
+<line x1="736.0" x2="736.0" y1="82" y2="310" stroke="#d95926" stroke-width="1.5"/>
+<text x="736.0" y="324" font-size="10" text-anchor="middle" fill="#898781" style="font-variant-numeric: tabular-nums">1x</text>
+<line x1="833.0" x2="833.0" y1="82" y2="310" stroke="#2c2c2a" stroke-width="1"/>
+<text x="833.0" y="324" font-size="10" text-anchor="middle" fill="#898781" style="font-variant-numeric: tabular-nums">1.2x</text>
+<line x1="930.0" x2="930.0" y1="82" y2="310" stroke="#2c2c2a" stroke-width="1"/>
+<text x="930.0" y="324" font-size="10" text-anchor="middle" fill="#898781" style="font-variant-numeric: tabular-nums">1.4x</text>
+<text x="239" y="104.0" font-size="12" text-anchor="end" fill="#c3c2b7">GET 64 B, pipeline 1</text>
+<g><title>GET 64 B, pipeline 1: Eski 1.10x † of the Redis median, range 1.09x to 1.11x</title>
+<path d="M251 94.0 H780.3 Q784.3 94.0 784.3 98.0 V102.0 Q784.3 106.0 780.3 106.0 H251 Z" fill="#3987e5"/>
+</g>
+<path d="M780.5 100.0 H787.4 M780.5 96.0 V104.0 M787.4 96.0 V104.0" stroke="#f0efec" stroke-width="1.5" fill="none"/>
+<circle cx="730.8" cy="100.0" r="4.5" fill="#199e70" stroke="#1a1a19" stroke-width="2"><title>GET 64 B, pipeline 1: Valkey 0.99x of the Redis median</title></circle>
+<circle cx="552.8" cy="100.0" r="4.5" fill="#c98500" stroke="#1a1a19" stroke-width="2"><title>GET 64 B, pipeline 1: Dragonfly 0.62x of the Redis median</title></circle>
+<text x="796.4" y="104.0" font-size="11" font-weight="600" fill="#f0efec" style="font-variant-numeric: tabular-nums">1.10x †</text>
+<text x="239" y="132.0" font-size="12" text-anchor="end" fill="#c3c2b7">SET 64 B, pipeline 1</text>
+<g><title>SET 64 B, pipeline 1: Eski 1.14x † of the Redis median, range 1.13x to 1.15x</title>
+<path d="M251 122.0 H801.3 Q805.3 122.0 805.3 126.0 V130.0 Q805.3 134.0 801.3 134.0 H251 Z" fill="#3987e5"/>
+</g>
+<path d="M800.0 128.0 H808.1 M800.0 124.0 V132.0 M808.1 124.0 V132.0" stroke="#f0efec" stroke-width="1.5" fill="none"/>
+<circle cx="732.7" cy="128.0" r="4.5" fill="#199e70" stroke="#1a1a19" stroke-width="2"><title>SET 64 B, pipeline 1: Valkey 0.99x of the Redis median</title></circle>
+<circle cx="551.3" cy="128.0" r="4.5" fill="#c98500" stroke="#1a1a19" stroke-width="2"><title>SET 64 B, pipeline 1: Dragonfly 0.62x of the Redis median</title></circle>
+<text x="817.1" y="132.0" font-size="11" font-weight="600" fill="#f0efec" style="font-variant-numeric: tabular-nums">1.14x †</text>
+<text x="239" y="160.0" font-size="12" text-anchor="end" fill="#c3c2b7">SET and GET 1:1, 64 B, pipeline 1</text>
+<g><title>SET and GET 1:1, 64 B, pipeline 1: Eski 1.13x † of the Redis median, range 1.12x to 1.13x</title>
+<path d="M251 150.0 H794.1 Q798.1 150.0 798.1 154.0 V158.0 Q798.1 162.0 794.1 162.0 H251 Z" fill="#3987e5"/>
+</g>
+<path d="M795.9 156.0 H799.9 M795.9 152.0 V160.0 M799.9 152.0 V160.0" stroke="#f0efec" stroke-width="1.5" fill="none"/>
+<circle cx="736.8" cy="156.0" r="4.5" fill="#199e70" stroke="#1a1a19" stroke-width="2"><title>SET and GET 1:1, 64 B, pipeline 1: Valkey 1.00x of the Redis median</title></circle>
+<circle cx="552.8" cy="156.0" r="4.5" fill="#c98500" stroke="#1a1a19" stroke-width="2"><title>SET and GET 1:1, 64 B, pipeline 1: Dragonfly 0.62x of the Redis median</title></circle>
+<text x="808.9" y="160.0" font-size="11" font-weight="600" fill="#f0efec" style="font-variant-numeric: tabular-nums">1.13x †</text>
+<text x="239" y="188.0" font-size="12" text-anchor="end" fill="#c3c2b7">SET and GET 1:1, 64 B, pipeline 16</text>
+<text x="259" y="188.0" font-size="11" fill="#898781">excluded: Eski 0 of 4 repetitions valid</text>
+<text x="239" y="216.0" font-size="12" text-anchor="end" fill="#c3c2b7">GET 1024 B, pipeline 1</text>
+<g><title>GET 1024 B, pipeline 1: Eski 1.11x † of the Redis median, range 1.10x to 1.11x</title>
+<path d="M251 206.0 H784.4 Q788.4 206.0 788.4 210.0 V214.0 Q788.4 218.0 784.4 218.0 H251 Z" fill="#3987e5"/>
+</g>
+<path d="M786.8 212.0 H791.4 M786.8 208.0 V216.0 M791.4 208.0 V216.0" stroke="#f0efec" stroke-width="1.5" fill="none"/>
+<circle cx="738.9" cy="212.0" r="4.5" fill="#199e70" stroke="#1a1a19" stroke-width="2"><title>GET 1024 B, pipeline 1: Valkey 1.01x of the Redis median</title></circle>
+<circle cx="548.9" cy="212.0" r="4.5" fill="#c98500" stroke="#1a1a19" stroke-width="2"><title>GET 1024 B, pipeline 1: Dragonfly 0.61x of the Redis median</title></circle>
+<text x="800.4" y="216.0" font-size="11" font-weight="600" fill="#f0efec" style="font-variant-numeric: tabular-nums">1.11x †</text>
+<text x="239" y="244.0" font-size="12" text-anchor="end" fill="#c3c2b7">HGET, 16 fields of 64 B, pipeline 1</text>
+<g><title>HGET, 16 fields of 64 B, pipeline 1: Eski 1.09x † of the Redis median, range 1.07x to 1.10x</title>
+<path d="M251 234.0 H773.6 Q777.6 234.0 777.6 238.0 V242.0 Q777.6 246.0 773.6 246.0 H251 Z" fill="#3987e5"/>
+</g>
+<path d="M771.4 240.0 H784.0 M771.4 236.0 V244.0 M784.0 236.0 V244.0" stroke="#f0efec" stroke-width="1.5" fill="none"/>
+<circle cx="738.0" cy="240.0" r="4.5" fill="#199e70" stroke="#1a1a19" stroke-width="2"><title>HGET, 16 fields of 64 B, pipeline 1: Valkey 1.00x of the Redis median</title></circle>
+<circle cx="563.1" cy="240.0" r="4.5" fill="#c98500" stroke="#1a1a19" stroke-width="2"><title>HGET, 16 fields of 64 B, pipeline 1: Dragonfly 0.64x of the Redis median</title></circle>
+<text x="793.0" y="244.0" font-size="11" font-weight="600" fill="#f0efec" style="font-variant-numeric: tabular-nums">1.09x †</text>
+<text x="239" y="272.0" font-size="12" text-anchor="end" fill="#c3c2b7">SISMEMBER, 16 members, pipeline 1</text>
+<g><title>SISMEMBER, 16 members, pipeline 1: Eski 1.10x † of the Redis median, range 1.09x to 1.10x</title>
+<path d="M251 262.0 H778.7 Q782.7 262.0 782.7 266.0 V270.0 Q782.7 274.0 778.7 274.0 H251 Z" fill="#3987e5"/>
+</g>
+<path d="M780.1 268.0 H784.0 M780.1 264.0 V272.0 M784.0 264.0 V272.0" stroke="#f0efec" stroke-width="1.5" fill="none"/>
+<circle cx="744.0" cy="268.0" r="4.5" fill="#199e70" stroke="#1a1a19" stroke-width="2"><title>SISMEMBER, 16 members, pipeline 1: Valkey 1.02x of the Redis median</title></circle>
+<circle cx="576.5" cy="268.0" r="4.5" fill="#c98500" stroke="#1a1a19" stroke-width="2"><title>SISMEMBER, 16 members, pipeline 1: Dragonfly 0.67x of the Redis median</title></circle>
+<text x="793.0" y="272.0" font-size="11" font-weight="600" fill="#f0efec" style="font-variant-numeric: tabular-nums">1.10x †</text>
+<text x="239" y="300.0" font-size="12" text-anchor="end" fill="#c3c2b7">ZSCORE, 16 members, pipeline 1</text>
+<g><title>ZSCORE, 16 members, pipeline 1: Eski 1.08x † of the Redis median, range 1.07x to 1.08x</title>
+<path d="M251 290.0 H769.8 Q773.8 290.0 773.8 294.0 V298.0 Q773.8 302.0 769.8 302.0 H251 Z" fill="#3987e5"/>
+</g>
+<path d="M768.8 296.0 H774.9 M768.8 292.0 V300.0 M774.9 292.0 V300.0" stroke="#f0efec" stroke-width="1.5" fill="none"/>
+<circle cx="736.5" cy="296.0" r="4.5" fill="#199e70" stroke="#1a1a19" stroke-width="2"><title>ZSCORE, 16 members, pipeline 1: Valkey 1.00x of the Redis median</title></circle>
+<circle cx="570.1" cy="296.0" r="4.5" fill="#c98500" stroke="#1a1a19" stroke-width="2"><title>ZSCORE, 16 members, pipeline 1: Dragonfly 0.66x of the Redis median</title></circle>
+<text x="783.9" y="300.0" font-size="11" font-weight="600" fill="#f0efec" style="font-variant-numeric: tabular-nums">1.08x †</text>
+<text x="12" y="346" font-size="11" fill="#898781">Intel(R) Core(TM) i7-8750H CPU @ 2.20GHz, run comparison-v1, one server core per engine, 100,000 keys, 32 connections, 60 s timed runs</text>
+<text x="12" y="362" font-size="11" fill="#898781">† the load generator limited Eski or Redis in at least one valid repetition, so that ratio is bounded by the client, not by the engines. Excluded cells have no inferred score.</text>
+</svg>

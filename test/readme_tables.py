@@ -3,6 +3,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 import hashlib
 import html
+import importlib.util
 import json
 import math
 from pathlib import Path
@@ -20,6 +21,17 @@ BLOCKS = ('CONFORMANCE', 'BENCHMARKS', 'COMMANDS')
 RUNS = 'bench/testbed/runs'
 RUN_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*')
 ENGINE_LABELS = {'eski-docker': 'Eski', 'eski': 'Eski', 'redis': 'Redis', 'valkey': 'Valkey', 'dragonfly': 'Dragonfly'}
+RATIO_IMAGE = 'docs/img/throughput-ratio'
+
+
+def load_charts():
+    spec = importlib.util.spec_from_file_location('testbed_charts', ROOT / 'bench/testbed/charts.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+CHARTS = load_charts()
 
 
 class RespError(ValueError):
@@ -534,6 +546,143 @@ def benchmark_ratio(cells):
     return subject['ops']['median'] / reference['ops']['median'], bool(subject['client_limited'] or reference['client_limited'])
 
 
+def ratio_rows(dataset, cells):
+    engines = dataset['engines']
+    subject = next((engine for engine in engines if engine['target'] in CHARTS.SUBJECT), None)
+    reference = next((engine for engine in engines if engine['target'] == 'redis'), None)
+    if subject is None or reference is None:
+        raise ValueError('throughput ratio chart needs Eski and Redis engines')
+    others = [engine for engine in engines if engine is not subject and engine is not reference]
+    planned = dataset['design']['repetitions']
+    rows = []
+    for workload in dataset['workloads']:
+        eski = cells[(workload['key'], subject['target'])]
+        redis = cells[(workload['key'], reference['target'])]
+        row = dict(name=workload['name'], ratio=None, low=None, high=None, limited=False, others=[], excluded=None)
+        if not eski['ops']:
+            row['excluded'] = 'excluded: Eski %d of %d repetitions valid' % (len(eski['included']), planned)
+        elif not redis['ops'] or redis['ops']['median'] <= 0:
+            row['excluded'] = 'excluded: Redis %d of %d repetitions valid' % (len(redis['included']), planned)
+        else:
+            base = redis['ops']['median']
+            row.update(ratio=eski['ops']['median'] / base, low=eski['ops']['min'] / base, high=eski['ops']['max'] / base,
+                       limited=bool(eski['client_limited'] or redis['client_limited']))
+            for engine in others:
+                cell = cells[(workload['key'], engine['target'])]
+                if cell['ops']:
+                    row['others'].append((engine, cell['ops']['median'] / base))
+        rows.append(row)
+    return subject, reference, others, rows
+
+
+def ratio_ticks(top):
+    step = next(candidate for candidate in (0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10, 20, 50, 100, 1000, 10000) if top / candidate <= 7)
+    ticks, value = [], 0.0
+    while value < top - 1e-9:
+        ticks.append(value)
+        value += step
+    ticks.append(value)
+    return ticks
+
+
+def ratio_text(row):
+    return ('%.2fx' % row['ratio'] + (' †' if row['limited'] else '')) if row['ratio'] is not None else row['excluded']
+
+
+def ratio_context(dataset):
+    machine, design = dataset.get('machine') or {}, dataset.get('design') or {}
+    client, data = design.get('client') or {}, design.get('dataset') or {}
+    parts = [machine.get('cpu_model') or 'machine not recorded', 'run ' + dataset['run']['root'], 'one server core per engine']
+    if data.get('keys'):
+        parts.append('{:,} keys'.format(data['keys']))
+    if client.get('threads') and client.get('connections_per_thread'):
+        parts.append('%d connections' % (client['threads'] * client['connections_per_thread']))
+    if client.get('test_seconds'):
+        parts.append('%d s timed runs' % client['test_seconds'])
+    return ', '.join(parts)
+
+
+def ratio_figure(dataset, cells, theme):
+    colors = CHARTS.paint(theme)
+    esc = CHARTS.esc
+    subject, reference, others, rows = ratio_rows(dataset, cells)
+    series = {engine['target']: CHARTS.color(engine['target'], dataset['engines'], colors) for engine in dataset['engines']}
+    width, right, header, row_h, footer = 960, 30, 86, 28, 70
+    left = int(max(200, min(420, 24 + 6.5 * max(len(row['name']) for row in rows))))
+    height = header + row_h * len(rows) + footer
+    plot_w = width - left - right
+    values = [1.0] + [value for row in rows if row['ratio'] is not None for value in (row['high'], *(ratio for _, ratio in row['others']))]
+    ticks = ratio_ticks(max(values) * 1.12)
+    scale = ticks[-1]
+
+    def xv(value):
+        return left + plot_w * min(value, scale) / scale
+
+    out = ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" width="%d" height="%d" font-family="%s" role="img" aria-labelledby="ratio-title ratio-desc">' % (
+        width, height, width, height, esc(CHARTS.FONT))]
+    out.append('<title id="ratio-title">Eski throughput relative to Redis per workload, with Valkey and Dragonfly</title>')
+    out.append('<desc id="ratio-desc">%s</desc>' % esc('Horizontal bars give the Eski median throughput of each workload divided by the Redis median of the same workload on the same server core; '
+                                                        'the reference line marks 1.0x, thin whiskers span the Eski minimum to maximum over valid repetitions, and smaller markers place the '
+                                                        'Valkey and Dragonfly medians on the same scale. ' + '; '.join('%s %s' % (row['name'], ratio_text(row)) for row in rows) + '.'))
+    out.append('<rect width="%d" height="%d" fill="%s"/>' % (width, height, colors['surface']))
+    out.append('<text x="12" y="24" font-size="16" font-weight="600" fill="%s">Throughput relative to Redis on the same server core</text>' % colors['primary'])
+    out.append('<text x="12" y="44" font-size="12" fill="%s">Eski median of valid repetitions divided by the Redis median of the same workload; higher is better, 1.0x is Redis</text>' % colors['secondary'])
+    legend_y = 66
+    out.append('<rect x="12" y="%d" width="12" height="12" rx="3" fill="%s"/>' % (legend_y - 10, series[subject['target']]))
+    out.append('<text x="29" y="%d" font-size="11.5" fill="%s">Eski median</text>' % (legend_y, colors['secondary']))
+    out.append('<path d="M112 %d H128 M112 %d V%d M128 %d V%d" stroke="%s" stroke-width="1.5" fill="none"/>' % (legend_y - 4, legend_y - 7, legend_y - 1, legend_y - 7, legend_y - 1, colors['primary']))
+    out.append('<text x="134" y="%d" font-size="11.5" fill="%s">Eski min to max</text>' % (legend_y, colors['secondary']))
+    out.append('<line x1="240" x2="256" y1="%d" y2="%d" stroke="%s" stroke-width="2"/>' % (legend_y - 4, legend_y - 4, series[reference['target']]))
+    out.append('<text x="262" y="%d" font-size="11.5" fill="%s">Redis median, 1.0x</text>' % (legend_y, colors['secondary']))
+    position = 392
+    for engine in others:
+        label = engine_label(dataset, engine)
+        out.append('<circle cx="%d" cy="%d" r="4.5" fill="%s" stroke="%s" stroke-width="2"/>' % (position + 6, legend_y - 4, series[engine['target']], colors['surface']))
+        out.append('<text x="%d" y="%d" font-size="11.5" fill="%s">%s median</text>' % (position + 17, legend_y, colors['secondary'], esc(label)))
+        position += 17 + 6.6 * (len(label) + 7) + 22
+    top, bottom = header, header + row_h * len(rows)
+    for tick in ticks:
+        x = xv(tick)
+        reference_tick = abs(tick - 1.0) < 1e-9
+        out.append('<line x1="%.1f" x2="%.1f" y1="%d" y2="%d" stroke="%s" stroke-width="%s"/>' % (
+            x, x, top - 4, bottom, series[reference['target']] if reference_tick else (colors['axis'] if tick == 0 else colors['grid']), '1.5' if reference_tick else '1'))
+        out.append('<text x="%.1f" y="%d" font-size="10" text-anchor="middle" fill="%s" style="font-variant-numeric: tabular-nums">%s</text>' % (
+            x, bottom + 14, colors['muted'], ('%g' % tick) + 'x'))
+    for index, row in enumerate(rows):
+        y = top + index * row_h
+        cy = y + row_h / 2
+        out.append('<text x="%d" y="%.1f" font-size="12" text-anchor="end" fill="%s">%s</text>' % (left - 12, cy + 4, colors['secondary'], esc(row['name'])))
+        if row['ratio'] is None:
+            out.append('<text x="%d" y="%.1f" font-size="11" fill="%s">%s</text>' % (left + 8, cy + 4, colors['muted'], esc(row['excluded'])))
+            continue
+        bar_x = xv(row['ratio'])
+        out.append('<g><title>%s</title>' % esc('%s: Eski %s of the Redis median, range %.2fx to %.2fx' % (row['name'], ratio_text(row), row['low'], row['high'])))
+        out.append('<path d="M%d %.1f H%.1f Q%.1f %.1f %.1f %.1f V%.1f Q%.1f %.1f %.1f %.1f H%d Z" fill="%s"/>' % (
+            left, cy - 6, bar_x - 4, bar_x, cy - 6, bar_x, cy - 2, cy + 2, bar_x, cy + 6, bar_x - 4, cy + 6, left, series[subject['target']]))
+        out.append('</g>')
+        if row['high'] > row['low']:
+            out.append('<path d="M%.1f %.1f H%.1f M%.1f %.1f V%.1f M%.1f %.1f V%.1f" stroke="%s" stroke-width="1.5" fill="none"/>' % (
+                xv(row['low']), cy, xv(row['high']), xv(row['low']), cy - 4, cy + 4, xv(row['high']), cy - 4, cy + 4, colors['primary']))
+        for engine, ratio in row['others']:
+            out.append('<circle cx="%.1f" cy="%.1f" r="4.5" fill="%s" stroke="%s" stroke-width="2"><title>%s</title></circle>' % (
+                xv(ratio), cy, series[engine['target']], colors['surface'], esc('%s: %s %.2fx of the Redis median' % (row['name'], engine_label(dataset, engine), ratio))))
+        out.append('<text x="%.1f" y="%.1f" font-size="11" font-weight="600" fill="%s" style="font-variant-numeric: tabular-nums">%s</text>' % (
+            max(bar_x, xv(row['high'])) + 9, cy + 4, colors['primary'], esc(ratio_text(row))))
+    out.append('<text x="12" y="%d" font-size="11" fill="%s">%s</text>' % (bottom + 36, colors['muted'], esc(ratio_context(dataset))))
+    out.append('<text x="12" y="%d" font-size="11" fill="%s">%s</text>' % (
+        bottom + 52, colors['muted'], esc('† the load generator limited Eski or Redis in at least one valid repetition, so that ratio is bounded by the client, not by the engines. Excluded cells have no inferred score.')))
+    out.append('</svg>')
+    return '\n'.join(out) + '\n'
+
+
+def ratio_picture(dataset, cells):
+    rows = ratio_rows(dataset, cells)[3]
+    alt = 'Eski median throughput relative to the Redis median per workload on %s: %s.' % (
+        (dataset.get('machine') or {}).get('cpu_model') or 'the recorded machine', '; '.join('%s %s' % (row['name'], ratio_text(row)) for row in rows))
+    return ('<picture>\n<source media="(prefers-color-scheme: dark)" srcset="%s-dark.svg">\n<img alt="%s" src="%s.svg" width="960">\n</picture>' % (
+        RATIO_IMAGE, html.escape(alt, quote=True), RATIO_IMAGE))
+
+
 def badge(label, value, color):
     left = max(80, len(label) * 6.8 + 16)
     right = max(52, len(value) * 6.8 + 16)
@@ -881,7 +1030,7 @@ def render_outputs(commands, baseline, observed, dataset, readme, ab_floor=None)
                        'server CPU assignment and memory caps, separate client cores, a fresh dataset and a warmup before timing. The run records power, '
                        'temperature, CPU-idle and load-generator limits. Invalid repetitions retain their reason, and client-limited measurements remain '
                        'annotated. These measurements describe the recorded machine and workload; they establish no multicore scaling or universal '
-                       'throughput claim.\n\n'
+                       'throughput claim.\n\n' + ratio_picture(dataset, cells) + '\n\n'
                        'Recorded medians from `' + run + '`, using valid repetitions only. '
                        'These are measurements from one machine, not a claim about every workload or deployment.\n\n%s\n\n'
                        '%s The observed GET 64 B pipeline 1 median throughput ratio is **%.2fx Eski / Redis**%s. %s'
@@ -985,7 +1134,8 @@ def render_outputs(commands, baseline, observed, dataset, readme, ab_floor=None)
         raise ValueError('README must not name competitor server versions')
     return {'README.md': updated_readme, 'docs/commands.md': commands_page, 'docs/conformance.md': conformance_page,
             'docs/benchmarks.md': benchmark_page, 'docs/img/conformance.svg': badge('baseline passes', '%d/%d preserved' % (preserved, expected), '#2f855a' if not regressions else '#b45309'),
-            'docs/img/benchmark-ratio.svg': badge('GET 64 B P1 Eski/Redis', '%.2fx observed%s' % (ratio, ', client limited' if limited else ''), '#2563a6')}
+            'docs/img/benchmark-ratio.svg': badge('GET 64 B P1 Eski/Redis', '%.2fx observed%s' % (ratio, ', client limited' if limited else ''), '#2563a6'),
+            RATIO_IMAGE + '.svg': ratio_figure(dataset, cells, 'light'), RATIO_IMAGE + '-dark.svg': ratio_figure(dataset, cells, 'dark')}
 
 
 def update_outputs(root, outputs, check=False):
