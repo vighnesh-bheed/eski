@@ -702,9 +702,26 @@ def new_machine_section(dataset):
              '`gates.sensor_label`, `coretemp` and `Package id 0` on Intel; the reader also accepts `k10temp` or `zenpower` with `Tctl` or `Tdie`. Every sample also '
              'needs the per-CPU counters under `/sys/devices/system/cpu/cpu*/thermal_throttle`, which Linux exposes on Intel processors; without them every case holds '
              'with `throttle_telemetry_unavailable`. Check `grep . /sys/class/hwmon/hwmon*/name` and `ls /sys/devices/system/cpu/cpu1/thermal_throttle` first.',
-             '- Simultaneous multithreading off with the `nosmt` kernel parameter, so that one CPU number is one physical core: add `nosmt` to '
-             '`GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub`, run `update-grub` and reboot. `/sys/devices/system/cpu/smt/control` then reads `off` and `lscpu` '
-             'reports one thread per core.',
+             '- Simultaneous multithreading off with the `nosmt` kernel parameter, so that one CPU number is one physical core, and the graphics driver blacklisted '
+             'with `modprobe.blacklist=i915`: add `nosmt modprobe.blacklist=i915` to `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub`, run `update-grub` and '
+             'reboot. `/sys/devices/system/cpu/smt/control` then reads `off`, `lscpu` reports one thread per core and `ls /sys/class/drm` lists no `card*` entry. '
+             'A server with another display driver, for example `ast` on a board with a BMC console or `amdgpu` or `nouveau` with a discrete card, blacklists that '
+             'module instead. The installer reads `/proc/modules` and `/sys/class/drm` and refuses to install while a display driver is loaded; '
+             '`--accept-display-driver` installs anyway on a machine that needs its display, and the dataset then records the accepted driver.',
+             '- No kernel work bound to a role CPU. The recorded run `cloud-v1` on a rented Supermicro E-2288G showed two throughput modes with the same engines and '
+             'workloads: the Debian kernel had loaded the `i915` driver on a machine with nothing attached to its display outputs, and its delayed work ran as '
+             'per-CPU bound kernel workers (`kworker/1:0+events`, `kworker/1:2+i915-unordered`) at a full core on the server CPU for 12 to 15 seconds at a time, '
+             'recurring every 35 to 37 seconds for the whole six hours. While the worker ran, the server process fell to a few percent of its core, the first '
+             'request on every connection waited about 545 ms and the case lost a fifth to almost half of its throughput; on a client CPU the same worker cost '
+             'nothing measurable. Loopback has no interrupt, so interrupt affinity, `irqbalance`, `isolcpus` and receive packet steering play no part in it. '
+             'The sampler had recorded the worker in every affected sample, but the validity rule exempted every kernel worker. The exam now records the kernel '
+             'command line, the loaded modules, the DRM devices and `kernel.timer_migration` in the machine section of the dataset, keeps the eight CPU time '
+             'fields, the softirq counters and the interrupt totals of every CPU in every sample, notes the last CPU of every sampled process, and keeps the '
+             'per-second request counts of the timed client in the dataset row as `per_second_ops`, `steady_ops`, `stall_seconds` and `stall_windows`, so a '
+             'collapse is visible in the report. Before the calibration the controller watches the idle machine for `gates.idle_watch_seconds` (600 in both cloud '
+             'designs; the laptop design and local quick runs omit the key or set 0) and holds the run when any process outside the run, kernel threads '
+             'included, uses a tenth of a core on a server or client CPU in any sample, naming the process and the CPU; the bursts recur every 35 to 37 seconds, so '
+             'ten minutes catches them with certainty. `exam.sh status` pins itself to the controller CPU, so polling never disturbs the watch or a case.',
              '- Debian 13. The installer fetches the jq packages pinned in the design\'s `tools.jq` (jq and libjq1 1.7.1-6+deb13u4, libonig5 6.9.9-1+b1) with '
              '`apt-get download`, checks their sha256 and unpacks them with `dpkg-deb` into the run root without root privileges. If the configured archive no longer '
              'offers these versions, add a snapshot.debian.org source dated while it did.',
@@ -752,15 +769,19 @@ def new_machine_section(dataset):
              '3. Install the run root. The installer packs the runner, the plans, the design, the fill script, the image archive and itself into an overlay, streams '
              'it over ssh into `<base>/.overlays` and checks its sha256 on arrival. On the machine it refuses an existing root, verifies every file, fetches jq, '
              'loads the Eski image and checks the binary and source sha256 inside it, pulls the missing pinned images and checks their digests, runs the preflight '
-             '`exam.sh inspect` and freezes `protocol.json`. It starts nothing. A rejected preflight prints the reason and moves the root aside to '
+             '`exam.sh inspect` and freezes `protocol.json` with the kernel command line, the loaded modules and the DRM devices in its machine section. It starts '
+             'nothing. A loaded display driver stops the installation before anything is downloaded, with the module to blacklist in the message. '
+             'A rejected preflight prints the reason and moves the root aside to '
              '`<base>/.failed-<name>-<time>`, so the same name can be installed again. The receipt, also kept as `<base>/<name>/install.json`, records the protocol '
              'sha256, the phase identities, every image ID and the planned measurement counts.', '',
              '   ```sh', '   python3 -I -B bench/testbed/install.py install --host user@HOST --root <name> --base <base> \\',
              '     --design bench/results/<name>-design.json --receipt bench/results/<name>-install.json', '   ```', '',
-             '4. Check the installation, then start the exam. Before the start the status reads `Workflow: NOT STARTED` and shows the package temperature, the power '
-             'gate and the power supply devices, the CPU roles, the memory limits, every engine image ID and the Eski source revision. The first invocation without '
-             'arguments starts the calibration phase and then the benchmark phase once, in a detached tmux session; every later invocation without arguments only '
-             'prints the status.', '',
+             '4. Check the installation, then start the exam. Before the start the status reads `Workflow: NOT STARTED` and shows the kernel command line, the '
+             'display drivers, the package temperature, the power gate and the power supply devices, the CPU roles, the memory limits, every engine image ID and the '
+             'Eski source revision. The first invocation without arguments starts the idle watch, the calibration phase and then the benchmark phase once, in a '
+             'detached tmux session; every later invocation without arguments only prints the status. While the watch runs, the Reason line says so; a failed watch '
+             'holds the run with the offending process and CPU on the Reason line and in `control/idle-watch.json`, and `exam.sh resume` repeats the watch after the '
+             'fix.', '',
              '   ```sh', '   ssh user@HOST <base>/<name>/exam.sh status', '   ssh user@HOST <base>/<name>/exam.sh', '   ```', '',
              '   Check progress with `exam.sh status` every few minutes at most. The calibration runs its workload once per engine and admits the benchmark only when '
              'every engine is valid. `DONE` and `DONE WITH EXCLUSIONS` continue below; an excluded repetition keeps its reason and is never retried. `HELD` and '
@@ -801,13 +822,18 @@ def new_machine_section(dataset):
              '    python3 -I test/readme_tables.py --check', '    ```', '',
              '### Checking a run', '',
              'The run directory lets a reader check the run. `dataset.json` holds every planned repetition of both phases with its state, reasons, client-limited '
-             'annotation, attempt directory and values, together with the machine, the CPU roles, the frequency policy, the sensor, the power gate, the design with '
-             'its methodology, the protocol sha256, the phase identity and the receipt of the results archive. `results.receipt.json` and `results.collected.json` '
+             'annotation, attempt directory and values, the per-second request counts of its timed client with the steady rate and the stall seconds and windows '
+             'derived from them, and the median CPU time shares of the server and client CPUs during the timed run, together with the machine with its kernel '
+             'command line, loaded modules, DRM devices and `kernel.timer_migration` at installation and at launch, the result of the idle watch, the CPU roles, the '
+             'frequency policy, the sensor, the power gate, the design with its methodology, the protocol sha256, the phase identity and the receipt of the results '
+             'archive. `results.receipt.json` and `results.collected.json` '
              'give the sha256, size and file count of the results archive as the machine exported it and as the workstation verified it, `fill.receipt.json` does '
              'the same for the fill archive, and `install.receipt.json` ties the protocol sha256 and the image IDs to the installation.', '',
              'The raw evidence stays in the archives, which are published with the run. Each case keeps its resolved plan, harness log, machine samples, ownership '
-             'events and the raw memtier output under `<phase>/results/cases/<case>/attempt-<n>/`, and every gate sample is in `<phase>/results/gates.jsonl`, '
-             'where the phase is `calibration` or `benchmark`. '
+             'events and the raw memtier output under `<phase>/results/cases/<case>/attempt-<n>/`, every gate sample is in `<phase>/results/gates.jsonl`, '
+             'where the phase is `calibration` or `benchmark`, and the idle watch samples are in `control/idle-watch-<launch>.jsonl`. Every machine sample carries '
+             'the eight `/proc/stat` fields of every CPU with their shares since the previous sample, the `/proc/softirqs` counters and the `/proc/interrupts` '
+             'totals per CPU with their deltas, and the last CPU and kernel-thread flag of every sampled process. '
              'A reader verifies a downloaded archive with `python3 -I bench/testbed/collect.py verify results.tar.gz --receipt '
              'bench/testbed/runs/<name>/results.receipt.json --extract <directory>` and rebuilds the dataset from it with `combine.py` to compare with the committed '
              '`dataset.json`.', '']

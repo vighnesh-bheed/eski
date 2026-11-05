@@ -60,6 +60,22 @@ def plans_module():
     return module
 
 
+def metrics_module(partial):
+    spec = importlib.util.spec_from_file_location('eski_exam_metrics', partial / 'workspace' / 'bench' / 'exam_metrics.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def display_guard(metrics, inventory, accepted):
+    drivers = metrics.display_drivers(inventory)
+    if drivers and not accepted:
+        raise ValueError('a DRM display driver is loaded: %s. Its kernel workers run bound to busy cores and stall the server for seconds at a time, as the i915 driver '
+                         'did in cloud-v1. Blacklist the module on the kernel command line, for example modprobe.blacklist=%s next to nosmt in GRUB_CMDLINE_LINUX_DEFAULT, '
+                         'run update-grub and reboot; or pass --accept-display-driver when this machine needs its display' % (', '.join(drivers), drivers[0]))
+    return drivers
+
+
 def image_archive(manifest, manifest_path):
     archive = (manifest.get('archive') or {}).get('path')
     expected = (manifest.get('archive') or {}).get('sha256')
@@ -147,6 +163,8 @@ def install(args):
             raise ValueError('overlay copy failed or arrived with another sha256: ' + (done.stdout + done.stderr).strip())
         print('copied    %s:%s' % (args.host, remote_name), file=sys.stderr)
         command = 'python3 -I -B - remote --overlay %s --sha256 %s --base %s --root %s' % (remote_name, overlay['sha256'], quoted_base, shlex.quote(args.root))
+        if args.accept_display_driver:
+            command += ' --accept-display-driver'
         done = ssh(args.host, command, input=Path(__file__).read_text(), capture_output=True, text=True)
         sys.stderr.write(done.stderr)
         if done.returncode:
@@ -266,7 +284,7 @@ def preflight(root):
     return json.loads(done.stdout)
 
 
-def remote(args, check=preflight, jq=install_jq, eski=load_eski, engine=pinned_image):
+def remote(args, check=preflight, jq=install_jq, eski=load_eski, engine=pinned_image, inventory=None):
     base = Path(os.path.expanduser(args.base)).resolve()
     root = base / args.root
     if root.exists():
@@ -283,6 +301,12 @@ def remote(args, check=preflight, jq=install_jq, eski=load_eski, engine=pinned_i
         overlay = verify_overlay(partial)
         design = load(partial / 'design.json')
         manifest = load(partial / 'image.json')
+        metrics = metrics_module(partial)
+        machine = (inventory or metrics.machine_inventory)()
+        accepted = bool(getattr(args, 'accept_display_driver', False))
+        drivers = display_guard(metrics, machine, accepted)
+        if drivers:
+            print('accepted  display driver %s stays loaded; its kernel workers can stall role CPUs' % ', '.join(drivers), file=sys.stderr)
         tools = dict(jq=jq(partial, design))
         images = {'eski-docker': eski(partial, manifest)}
         for item in design['engines']:
@@ -319,7 +343,7 @@ def remote(args, check=preflight, jq=install_jq, eski=load_eski, engine=pinned_i
         benchmark = observed['phases']['benchmark']
         protocol = dict(schema=PROTOCOL_SCHEMA, root=args.root, design=design, engines=engines,
                         images={target: value['image_id'] for target, value in images.items()}, phases=phases,
-                        machine=benchmark['host'], resources=benchmark['config'], tools=tools,
+                        machine=dict(benchmark['host'], **machine, display_drivers=drivers, display_driver_accepted=accepted), resources=benchmark['config'], tools=tools,
                         source=dict(revision=manifest['source_revision'], sha256=manifest['source_sha256'], image=images['eski-docker'],
                                     runner={name: benchmark['files'].get('bench/' + name) for name in RUNNER}),
                         frozen_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
@@ -351,11 +375,13 @@ def main(argv=None):
     local.add_argument('--design', type=Path, default=Path(__file__).with_name('design.json'))
     local.add_argument('--image-manifest', type=Path, default=Path(__file__).resolve().parents[1] / 'image.json')
     local.add_argument('--receipt', type=Path)
+    local.add_argument('--accept-display-driver', action='store_true', help='install although a DRM display driver is loaded; its kernel workers can stall role CPUs')
     machine = sub.add_parser('remote')
     machine.add_argument('--overlay', required=True)
     machine.add_argument('--sha256', required=True)
     machine.add_argument('--base', required=True)
     machine.add_argument('--root', required=True)
+    machine.add_argument('--accept-display-driver', action='store_true')
     arguments = list(sys.argv[1:] if argv is None else argv)
     if not arguments or arguments[0] not in ('install', 'remote', '-h', '--help'):
         arguments.insert(0, 'install')

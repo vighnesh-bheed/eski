@@ -19,11 +19,21 @@ SPEC.loader.exec_module(workflow)
 TARGETS = ['eski-docker', 'redis', 'valkey', 'dragonfly']
 
 
-SCHEDULER = '''import hashlib,importlib.util,json,os,signal,sys,time
+SCHEDULER = '''import hashlib,importlib.util,json,os,signal,sys,time,types
 from pathlib import Path
 s=importlib.util.spec_from_file_location('real_scheduler',os.environ['ESKI_TEST_REAL_SCHEDULER'])
 real=importlib.util.module_from_spec(s);s.loader.exec_module(real)
-atomic,atomic_bytes,status_view,metrics,Lock,TERMINAL,canonical=real.atomic,real.atomic_bytes,real.status_view,real.metrics,real.Lock,real.TERMINAL,real.canonical
+atomic,atomic_bytes,status_view,Lock,TERMINAL,canonical=real.atomic,real.atomic_bytes,real.status_view,real.Lock,real.TERMINAL,real.canonical
+metrics=types.SimpleNamespace(**{name:getattr(real.metrics,name) for name in dir(real.metrics) if not name.startswith('_')})
+
+class Reader(real.metrics.Reader):
+ def sample(self,*arguments):
+  value=super().sample(*arguments)
+  behavior=Path(__file__).resolve().parent.parent.parent/'control'/'idle-watch-behavior.json'
+  value['external_cpu']=json.loads(behavior.read_text()).get('external_cpu',[]) if behavior.exists() else []
+  return value
+
+metrics.Reader=Reader
 
 def option(name):
  return sys.argv[sys.argv.index(name)+1]
@@ -171,6 +181,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(status['design']['calibration']['measurements'], 4)
         text = self.invoke('status').stdout
         self.assertTrue(text.startswith('Machine: '))
+        self.assertIn('\nKernel command line: ', text)
+        self.assertRegex(text, r'\nDisplay drivers: .* \| kernel modules: \d+ \| timer_migration: .* \| idle watch: off\n')
+        self.assertEqual(set(status['machine']) >= {'kernel_cmdline', 'kernel_modules', 'drm', 'display_drivers', 'timer_migration', 'idle_watch_seconds'}, True)
         self.assertIn('Design: 2 workloads x 4 engines x 4 repetitions = 32 measurements', text)
         self.assertIn('Engine eski-docker: fixture eski-docker', text)
         self.assertFalse((self.control / 'workflow.json').exists())
@@ -385,6 +398,128 @@ class WorkflowTests(unittest.TestCase):
                 workflow.export_files(self.root)
         with self.assertRaisesRegex(ValueError, 'changed before export: bench/exam_workflow.py'):
             workflow.export_files(self.root)
+
+    def watch(self, seconds, external=None):
+        for phase in ('calibration', 'benchmark'):
+            path = self.root / 'workspace' / 'plans' / phase / 'experiment.json'
+            config = json.loads(path.read_text())
+            config['idle_watch_seconds'] = seconds
+            path.write_text(json.dumps(config))
+            self.profile_entry('plans/%s/experiment.json' % phase)
+        if seconds >= 0:
+            identities = json.loads(self.invoke('inspect').stdout)['phases']
+            protocol = dict(schema='eski-exam-protocol-v1', phases={phase: dict(identity=value['sha256'], plan_sha256=value['plan_sha256']) for phase, value in identities.items()})
+            (self.root / 'protocol.json').write_text(json.dumps(protocol))
+            self.reset()
+        if external is not None:
+            (self.control / 'idle-watch-behavior.json').write_text(json.dumps(dict(external_cpu=external)))
+
+    def test_idle_watch_holds_the_run_before_the_calibration_and_names_the_offender(self):
+        worker = dict(pid=77, start_ticks=5, comm='kworker/1:0+events', cpu_cores=.98, processor=self.cpus[0], kthread=True, cgroup='0::/')
+        self.watch(1, [worker, dict(worker, pid=78, comm='sshd', cpu_cores=.2, processor=max(os.sched_getaffinity(0)) + 1, kthread=False)])
+        status = json.loads(self.invoke('status', '--json').stdout)
+        self.assertEqual(status['machine']['idle_watch_seconds'], 1)
+        self.assertIn('idle watch: 1 s before the calibration', self.invoke('status').stdout)
+        self.start()
+        self.invoke('_run', code=2)
+        state = self.state()
+        self.assertEqual((state['status'], state['phase']), ('HELD', 'calibration'))
+        self.assertIn('kworker/1:0+events on server CPU %d at up to 0.98 cores' % self.cpus[0], state['reason'])
+        self.assertIn('modprobe.blacklist=i915', state['reason'])
+        self.assertNotIn('sshd', state['reason'])
+        self.assertEqual(state['idle_watch']['status'], 'failed')
+        self.assertEqual(self.runs(), [])
+        watch = workflow.load(self.control / 'idle-watch.json')
+        self.assertFalse(watch['passed'])
+        self.assertEqual(watch['cpus'], sorted(self.cpus[:2]))
+        self.assertEqual({item['comm'] for item in watch['offenders']}, {'kworker/1:0+events'})
+        self.assertGreaterEqual(watch['samples'], 2)
+        samples = [json.loads(line) for line in (self.control / watch['samples_file']).read_text().splitlines()]
+        self.assertEqual(len(samples), watch['samples'])
+        self.assertIn('external_cpu', samples[0])
+        self.assertIn('Reason: the idle watch of 1 s before the calibration found', self.invoke('status').stdout)
+        self.assertTrue((self.root / 'exports' / 'results.tar.gz').is_file())
+        (self.control / 'idle-watch-behavior.json').unlink()
+        (self.control / 'tmux-alive').unlink()
+        self.reset()
+        self.invoke('resume')
+        self.invoke('_run')
+        state = self.state()
+        self.assertEqual(state['status'], 'DONE')
+        self.assertEqual(state['idle_watch']['status'], 'passed')
+        self.assertEqual(self.runs(), [('calibration', 'run'), ('benchmark', 'run')])
+        watch = workflow.load(self.control / 'idle-watch.json')
+        self.assertTrue(watch['passed'])
+        self.assertEqual(watch['launch'], 2)
+        self.assertTrue((self.control / 'idle-watch-2.jsonl').is_file())
+        machine = workflow.load(self.control / 'machine.json')
+        self.assertEqual(machine['launch'], 2)
+        self.assertEqual(set(machine) >= {'cmdline', 'modules', 'drm', 'timer_migration', 'display_drivers', 'captured_at'}, True)
+        with tarfile.open(self.root / 'exports' / workflow.load(self.root / 'exports' / 'receipt.json')['archive']) as handle:
+            names = set(handle.getnames())
+        self.assertLessEqual({'control/idle-watch.json', 'control/idle-watch-1.jsonl', 'control/idle-watch-2.jsonl', 'control/machine.json'}, names)
+
+    def test_idle_watch_is_off_without_the_key_and_a_signal_interrupts_it(self):
+        self.start()
+        self.invoke('_run')
+        self.assertFalse((self.control / 'idle-watch.json').exists())
+        self.assertNotIn('idle_watch', self.state())
+        self.assertIn('idle watch: off', self.invoke('status').stdout)
+        self.assertEqual(workflow.experiment(self.root, 'benchmark').get('idle_watch_seconds'), None)
+        self.watch(-1)
+        with self.assertRaisesRegex(ValueError, 'idle_watch_seconds must be a non-negative integer'):
+            workflow.experiment(self.root, 'benchmark')
+        self.watch(600)
+        with patch.dict(os.environ, self.env, clear=True):
+            _, arguments, _ = workflow.phase_arguments(self.root, 'benchmark')
+        self.assertNotIn('--idle-watch-seconds', arguments)
+
+    def test_idle_watch_unit(self):
+        class Clock:
+            at = 0
+
+            def monotonic(self):
+                return self.at
+
+            def sleep(self, delay):
+                self.at += delay
+
+        rows = [dict(wall_time=1, external_cpu=[]), dict(wall_time=2, external_cpu=[dict(comm='kworker/2:1+i915-unordered', pid=9, processor=2, cpu_cores=1.0, kthread=True)]),
+                dict(wall_time=3, external_cpu=[dict(comm='python3', pid=10, processor=10, cpu_cores=.5, kthread=False), dict(comm='kworker/u16:3', pid=11, processor=None, cpu_cores=.3, kthread=True)])]
+        reader = type('Reader', (), dict(calls=0, sample=lambda self, *_: rows[min(self.calls, len(rows) - 1)]))
+        reader = reader()
+        original = reader.sample
+        def sample(*arguments):
+            value = original(*arguments)
+            reader.calls += 1
+            return value
+        reader.sample = sample
+        recorded = []
+        clock = Clock()
+        result = workflow.idle_watch(reader, 2, 1, {2, 4}, clock=clock, record=recorded.append)
+        self.assertEqual((result['passed'], result['samples'], result['elapsed'], result['interrupted']), (False, 3, 2, False))
+        self.assertEqual([(item['comm'], item['cpu'], item['sample']) for item in result['offenders']], [('kworker/2:1+i915-unordered', 2, 2), ('kworker/u16:3', None, 3)])
+        self.assertEqual(len(recorded), 3)
+        reason = workflow.idle_watch_reason(result, dict(server={2}, client={4}, control={10}))
+        self.assertIn('kworker/2:1+i915-unordered on server CPU 2 at up to 1.00 cores in 1 of 3 samples', reason)
+        self.assertIn('kworker/u16:3 on unknown CPU None', reason)
+        clean = workflow.idle_watch(type('R', (), dict(sample=lambda self, *_: rows[0]))(), 3, 1, {2}, clock=Clock())
+        self.assertEqual((clean['passed'], clean['samples']), (True, 4))
+        stopped = workflow.idle_watch(type('R', (), dict(sample=lambda self, *_: rows[0]))(), 3, 1, {2}, clock=Clock(), stop=lambda: True)
+        self.assertEqual((stopped['passed'], stopped['samples'], stopped['interrupted']), (False, 0, True))
+
+    def test_status_pins_itself_to_the_controller_cpus(self):
+        before = os.sched_getaffinity(0)
+        try:
+            with patch.dict(os.environ, self.env, clear=True):
+                workflow.pin_control(self.root)
+                self.assertEqual(os.sched_getaffinity(0), {self.cpus[2]})
+        finally:
+            os.sched_setaffinity(0, before)
+        shutil.rmtree(self.root / 'workspace' / 'plans' / 'benchmark')
+        with patch.dict(os.environ, self.env, clear=True):
+            workflow.pin_control(self.root)
+        self.assertEqual(os.sched_getaffinity(0), before)
 
     def test_experiment_fields_are_closed(self):
         path = self.root / 'workspace' / 'plans' / 'benchmark' / 'experiment.json'

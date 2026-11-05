@@ -4,11 +4,15 @@ import math
 import os
 from pathlib import Path
 import re
+import statistics
 import subprocess
 import time
 
 
 POLICY_FIELDS = ('scaling_governor', 'scaling_driver', 'energy_performance_preference', 'scaling_min_freq', 'scaling_max_freq')
+CPU_FIELDS = ('user', 'nice', 'system', 'idle', 'iowait', 'irq', 'softirq', 'steal')
+PF_KTHREAD = 0x00200000
+DISPLAY_DRIVERS = ('i915', 'xe', 'amdgpu', 'radeon', 'nouveau', 'ast', 'mgag200', 'simpledrm', 'virtio_gpu', 'vmwgfx', 'bochs', 'cirrus', 'qxl', 'gma500_gfx')
 
 
 def frequency_policy(cpus, sys=Path('/sys')):
@@ -37,6 +41,98 @@ def number(path, scale=1):
         return value if math.isfinite(value) else None
     except (TypeError, ValueError):
         return None
+
+
+def softirqs(proc=Path('/proc')):
+    lines = (read(proc / 'softirqs') or '').splitlines()
+    if not lines:
+        return None
+    cpus = [cpu.lower() for cpu in lines[0].split()]
+    result = {}
+    for line in lines[1:]:
+        name, separator, rest = line.partition(':')
+        values = rest.split()
+        if separator and name.strip() and len(values) == len(cpus) and all(value.isdigit() for value in values):
+            result[name.strip()] = dict(zip(cpus, map(int, values)))
+    return result
+
+
+def interrupts(proc=Path('/proc')):
+    lines = (read(proc / 'interrupts') or '').splitlines()
+    if not lines:
+        return None
+    cpus = [cpu.lower() for cpu in lines[0].split()]
+    totals = dict.fromkeys(cpus, 0)
+    for line in lines[1:]:
+        values = line.partition(':')[2].split()[:len(cpus)]
+        if len(values) == len(cpus) and all(value.isdigit() for value in values):
+            for cpu, value in zip(cpus, values):
+                totals[cpu] += int(value)
+    return totals
+
+
+def counter_deltas(current, previous):
+    if current is None or previous is None:
+        return None
+    result = {}
+    for key, value in current.items():
+        before = previous.get(key)
+        if isinstance(value, dict):
+            result[key] = counter_deltas(value, before if isinstance(before, dict) else None)
+        else:
+            result[key] = value - before if before is not None and value >= before else None
+    return result
+
+
+def machine_inventory(root=Path('/')):
+    root = Path(root)
+    modules = sorted(line.split()[0] for line in (read(root / 'proc/modules') or '').splitlines() if line.split())
+    directory = root / 'sys/class/drm'
+    try:
+        entries = sorted(path.name for path in directory.iterdir())
+    except OSError:
+        entries = None
+    cards = {}
+    for name in entries or []:
+        if re.fullmatch(r'card\d+', name):
+            driver = directory / name / 'device/driver'
+            cards[name] = driver.resolve().name if driver.exists() else None
+    migration = read(root / 'proc/sys/kernel/timer_migration')
+    return dict(cmdline=read(root / 'proc/cmdline'), modules=modules, drm=dict(available=entries is not None, entries=entries, cards=cards),
+                timer_migration=int(migration) if migration and migration.isdigit() else None)
+
+
+def display_drivers(inventory):
+    found = set(inventory.get('modules') or []) & set(DISPLAY_DRIVERS)
+    for card, driver in ((inventory.get('drm') or {}).get('cards') or {}).items():
+        found.add(driver or card)
+    return sorted(found)
+
+
+def memtier_series(data):
+    stats = data.get('ALL STATS') if isinstance(data, dict) else None
+    if stats is None and isinstance(data, dict):
+        merged = [key for key in data if key.startswith('AGGREGATED AVERAGE RESULTS')]
+        stats = data[merged[0]] if merged else None
+    series = ((stats or {}).get('Totals') or {}).get('Time-Serie') if isinstance(stats, dict) else None
+    result = dict(available=False, seconds=0, per_second_ops=None, steady_ops_per_sec=None, stall_seconds=None, stall_windows=None, min_second_ratio=None,
+                  method='memtier per-second request counts of the timed client; the trailing partial second is dropped; steady rate is the median full second; a stall second delivers under half the steady rate; windows are runs of consecutive stall seconds')
+    if not isinstance(series, dict) or not series:
+        result['reason'] = 'no per-second series in the raw client output'
+        return result
+    try:
+        counts = [int(series[key]['Count']) for key in sorted(series, key=int)]
+    except (KeyError, TypeError, ValueError):
+        result['reason'] = 'unreadable per-second series'
+        return result
+    if len(counts) > 1 and counts[-1] < .5 * statistics.median(counts[:-1]):
+        counts = counts[:-1]
+    steady = statistics.median(counts)
+    stalls = [count < .5 * steady for count in counts] if steady > 0 else [False] * len(counts)
+    result.update(available=True, seconds=len(counts), per_second_ops=counts, steady_ops_per_sec=steady, stall_seconds=sum(stalls),
+                  stall_windows=sum(1 for index, stalled in enumerate(stalls) if stalled and (index == 0 or not stalls[index - 1])),
+                  min_second_ratio=min(counts) / steady if steady > 0 else None)
+    return result
 
 
 def cpu_set(text):
@@ -82,6 +178,7 @@ def process(pid, proc=Path('/proc')):
                     state=tail[0], ppid=int(tail[1]), group=int(tail[2]),
                     ticks=int(tail[11]) + int(tail[12]), start_ticks=int(tail[19]),
                     rss_bytes=int(tail[21]) * os.sysconf('SC_PAGE_SIZE'),
+                    processor=int(tail[36]) if len(tail) > 36 else None, kthread=bool(int(tail[6]) & PF_KTHREAD),
                     cgroup=read(proc / str(pid) / 'cgroup'))
     except (ValueError, IndexError):
         return None
@@ -128,6 +225,9 @@ class Reader:
         self.preferred = sensor
         self.chip, self.label = chip, label
         self.previous_cpu = None
+        self.previous_fields = None
+        self.previous_softirqs = None
+        self.previous_interrupts = None
         self.previous_processes = {}
         self.previous_time = None
         self.previous_throttle = None
@@ -172,12 +272,26 @@ class Reader:
 
     def sample(self, group=None, owners=()):
         at = time.monotonic()
-        cpu = {}
+        cpu, fields = {}, {}
         for line in (read(self.proc / 'stat') or '').splitlines():
             if re.match(r'^cpu(?:\d+)? ', line):
                 words = line.split()
                 values = list(map(int, words[1:9]))
                 cpu[words[0]] = (sum(values), values[3])
+                fields[words[0]] = values
+        shares = {}
+        if self.previous_fields:
+            for key, values in fields.items():
+                before = self.previous_fields.get(key)
+                deltas = [now - old for now, old in zip(values, before)] if before else []
+                shares[key] = {name: round(100 * delta / sum(deltas), 2) for name, delta in zip(CPU_FIELDS, deltas)} if deltas and sum(deltas) > 0 and min(deltas) >= 0 else None
+        self.previous_fields = fields
+        soft = softirqs(self.proc)
+        soft_delta = counter_deltas(soft, self.previous_softirqs)
+        self.previous_softirqs = soft
+        irq = interrupts(self.proc)
+        irq_delta = counter_deltas(irq, self.previous_interrupts)
+        self.previous_interrupts = irq
         idle = {}
         resets = []
         if self.previous_cpu:
@@ -250,12 +364,14 @@ class Reader:
             snapshots.append(item)
         return dict(wall_time=time.time(), monotonic=at, idle_pct=idle, ac_online=ac, power_supply=supplies,
                     package=self.sensor(), throttle=throttle, throttle_delta=throttle_delta,
-                    frequency_khz=frequencies, frequency_policy=policies, cpu_ticks=cpu, loadavg=read(self.proc / 'loadavg'),
+                    frequency_khz=frequencies, frequency_policy=policies, cpu_ticks=cpu, cpu_fields=fields, cpu_share_pct=shares,
+                    softirqs=soft, softirq_delta=soft_delta, interrupts=irq, interrupt_delta=irq_delta, loadavg=read(self.proc / 'loadavg'),
                     memory=read(self.proc / 'meminfo'), pressure={k: read(self.proc / 'pressure' / k) for k in ('cpu', 'memory', 'io')},
                     owned_processes=observed, owned_cgroups=snapshots, disappeared=gone,
                     external_cpu=external, counter_resets=resets,
                     availability=dict(cpu=bool(cpu), process_scan=bool(processes), throttle=bool(throttle), frequency=any(v is not None for v in frequencies.values()),
                                       ac=bool(ac) and all(value is not None for value in ac.values()), power_supply=supplies is not None,
+                                      softirqs=bool(soft), interrupts=bool(irq),
                                       cgroup_version=2 if (self.sys / 'fs/cgroup/cgroup.controllers').exists() else None))
 
 

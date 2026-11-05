@@ -28,6 +28,7 @@ EXPERIMENT_FIELDS = ('targets', 'server_cpus', 'client_cpus', 'control_cpus', 's
                      'stable_seconds', 'max_wait', 'sample_seconds', 'min_free_bytes', 'resource_policy',
                      'max_client_utilization_pct', 'max_latency_seconds')
 OPTIONAL_FIELDS = ('package_sensor', 'power_source')
+WORKFLOW_FIELDS = ('idle_watch_seconds',)
 ACTIVE = ('STARTING', 'RUNNING')
 FINISHED = ('DONE', 'DONE WITH EXCLUSIONS')
 EXPORTED_DIRECTORIES = ('control', 'calibration/results', 'benchmark/results')
@@ -104,12 +105,15 @@ def experiment(root, phase):
     value = load(workspace(root) / 'plans' / phase / 'experiment.json')
     if value.get('schema') != EXPERIMENT_SCHEMA:
         raise ValueError(phase + ' experiment.json has an unsupported schema')
-    unknown = set(value) - set(EXPERIMENT_FIELDS) - set(OPTIONAL_FIELDS) - {'schema'}
+    unknown = set(value) - set(EXPERIMENT_FIELDS) - set(OPTIONAL_FIELDS) - set(WORKFLOW_FIELDS) - {'schema'}
     missing = [name for name in EXPERIMENT_FIELDS if name not in value]
     if unknown or missing:
         raise ValueError('%s experiment.json fields differ: unknown %s, missing %s' % (phase, sorted(unknown), missing))
     if not isinstance(value['targets'], list) or not value['targets'] or not all(isinstance(t, str) for t in value['targets']):
         raise ValueError(phase + ' targets must be a nonempty list of names')
+    watch = value.get('idle_watch_seconds', 0)
+    if type(watch) is not int or watch < 0:
+        raise ValueError(phase + ' idle_watch_seconds must be a non-negative integer number of seconds')
     return value
 
 
@@ -210,6 +214,57 @@ def phase_view(root, phase, module):
                 pause_reasons=reasons, controller_alive=view.get('controller_alive', False))
 
 
+def idle_watch(reader, seconds, interval, cpus, clock=time, stop=lambda: False, record=None):
+    start = clock.monotonic()
+    offenders, samples = [], 0
+    while not stop():
+        sample = reader.sample()
+        samples += 1
+        for proc in sample.get('external_cpu') or []:
+            if proc.get('processor') is None or proc.get('processor') in cpus:
+                offenders.append(dict(comm=proc.get('comm'), pid=proc.get('pid'), cpu=proc.get('processor'), cores=proc.get('cpu_cores'),
+                                      kthread=proc.get('kthread'), wall_time=sample.get('wall_time'), sample=samples))
+        if record is not None:
+            record(dict(wall_time=sample.get('wall_time'), monotonic=sample.get('monotonic'), idle_pct=sample.get('idle_pct'), loadavg=sample.get('loadavg'),
+                        external_cpu=sample.get('external_cpu'), cpu_share_pct=sample.get('cpu_share_pct')))
+        if clock.monotonic() - start >= seconds:
+            break
+        clock.sleep(interval)
+    return dict(seconds=seconds, interval=interval, elapsed=clock.monotonic() - start, samples=samples, cpus=sorted(cpus),
+                offenders=offenders, passed=not offenders and not stop(), interrupted=bool(stop()),
+                rule='every process outside the run, kernel threads included, that used at least a tenth of a core on a server or client CPU in any sample')
+
+
+def idle_watch_reason(result, roles):
+    groups = {}
+    for item in result['offenders']:
+        group = groups.setdefault((item['comm'], item['cpu']), dict(samples=0, cores=0))
+        group['samples'] += 1
+        group['cores'] = max(group['cores'], item['cores'] or 0)
+    parts = []
+    for (comm, cpu), group in sorted(groups.items(), key=lambda entry: -entry[1]['samples']):
+        role = next((name for name, cpus in roles.items() if cpu in cpus), 'unknown')
+        parts.append('%s on %s CPU %s at up to %.2f cores in %d of %d samples' % (comm, role, cpu, group['cores'], group['samples'], result['samples']))
+    return ('the idle watch of %d s before the calibration found %s; a kernel worker bound to a role CPU usually comes from a loaded display driver, so blacklist '
+            'it on the kernel command line (for example modprobe.blacklist=i915), reboot and resume' % (result['seconds'], '; '.join(parts)))
+
+
+def idle_watch_phase(root, module, launch, stop):
+    config = experiment(root, 'calibration')
+    seconds = config.get('idle_watch_seconds', 0)
+    if not seconds:
+        return None
+    roles = {role: module.metrics.cpu_set(config[role + '_cpus']) for role in ('server', 'client', 'control')}
+    reader = module.metrics.Reader(config.get('package_sensor'), config.get('sensor_chip', 'coretemp'), config.get('sensor_label', 'Package id 0'))
+    samples = control(root) / ('idle-watch-%d.jsonl' % launch)
+    result = idle_watch(reader, seconds, config.get('sample_seconds', 1), roles['server'] | roles['client'], stop=stop,
+                        record=lambda row: module.metrics.append_json(samples, row))
+    result.update(launch=launch, samples_file=samples.name, started_at=time.time() - result['elapsed'], finished_at=time.time(),
+                  reason=None if result['passed'] else idle_watch_reason(result, roles) if result['offenders'] else 'the idle watch was interrupted')
+    module.atomic(control(root) / 'idle-watch.json', result)
+    return result
+
+
 def os_release(module):
     release = {}
     for line in (module.metrics.read('/etc/os-release') or '').splitlines():
@@ -244,7 +299,11 @@ def machine_description(root, module):
     engines = load(engines_path).get('engines', []) if engines_path.exists() else []
     profile_path = workspace(root) / 'profile.json'
     profile = load(profile_path) if profile_path.exists() else {}
+    inventory = source.machine_inventory()
     return dict(hostname=socket.gethostname(), os=os_release(module).get('PRETTY_NAME'), kernel=platform.release(),
+                kernel_cmdline=inventory['cmdline'], kernel_modules=inventory['modules'], drm=inventory['drm'],
+                display_drivers=source.display_drivers(inventory), timer_migration=inventory['timer_migration'],
+                idle_watch_seconds=config.get('idle_watch_seconds', 0),
                 cpu_model=processors[0].get('model name') if processors else None,
                 physical_cores=len(physical) or None, logical_cores=len(processors) or os.cpu_count(),
                 ram_total_bytes=memory.get('MemTotal'), ram_available_bytes=memory.get('MemAvailable'),
@@ -272,7 +331,11 @@ def status(root):
         effective.update(status='INTERRUPTED', reason='the detached session ended before the controller started; read control/workflow.log, then resume explicitly')
     phase = state.get('phase', 'calibration')
     view = phase_view(root, phase, module)
-    reason = effective.get('reason') or ('; '.join(view['pause_reasons']) if view['pause_reasons'] else None) or REASONS[effective['status']]
+    watch = state.get('idle_watch') or {}
+    reason = effective.get('reason') or ('; '.join(view['pause_reasons']) if view['pause_reasons'] else None)
+    if reason is None and effective['status'] == 'RUNNING' and watch.get('status') == 'watching':
+        reason = 'the idle watch of %s s samples the machine before the calibration starts' % watch.get('seconds')
+    reason = reason or REASONS[effective['status']]
     receipt_path = root / 'exports' / 'receipt.json'
     return dict(status=effective['status'], phase=phase, phase_status=view, reason=reason, workflow=state,
                 machine=machine_description(root, module), design=design_counts(root), session=session(root),
@@ -289,6 +352,11 @@ def show(root, as_json=False, error=None):
         return details
     machine = details['machine']
     print('Machine: %s | %s | kernel %s' % (machine['hostname'], machine['os'] or 'OS unavailable', machine['kernel']))
+    print('Kernel command line: %s' % (machine['kernel_cmdline'] or 'unavailable'))
+    print('Display drivers: %s | kernel modules: %d | timer_migration: %s | idle watch: %s' % (
+        ', '.join(machine['display_drivers']) or 'none', len(machine['kernel_modules']),
+        'unavailable' if machine['timer_migration'] is None else machine['timer_migration'],
+        '%d s before the calibration' % machine['idle_watch_seconds'] if machine['idle_watch_seconds'] else 'off'))
     print('CPU: %s | %s physical / %s logical cores' % (machine['cpu_model'] or 'unavailable', machine['physical_cores'] or 'unavailable', machine['logical_cores']))
     print('RAM: %s total / %s available | disk free: %s' % (gib(machine['ram_total_bytes']), gib(machine['ram_available_bytes']), gib(machine['disk_free_bytes'])))
     sensor = machine['package_temperature']
@@ -407,6 +475,9 @@ def run(root):
             os.sched_setaffinity(0, frozen['phases']['benchmark']['config']['cpus']['control'])
             state['control_cpus'] = sorted(os.sched_getaffinity(0))
             module.atomic(path, state)
+            inventory = module.metrics.machine_inventory()
+            module.atomic(control(root) / 'machine.json', dict(inventory, display_drivers=module.metrics.display_drivers(inventory),
+                                                                launch=int(state.get('launches') or 1), captured_at=time.time()))
             for phase in PHASES:
                 if stopped:
                     break
@@ -423,6 +494,20 @@ def run(root):
                         break
                     state['phase'] = phase
                     module.atomic(path, state)
+                    if phase == 'calibration':
+                        seconds = experiment(root, phase).get('idle_watch_seconds', 0)
+                        if seconds:
+                            state['idle_watch'] = dict(status='watching', seconds=seconds, started_at=time.time())
+                            module.atomic(path, state)
+                        watch = idle_watch_phase(root, module, int(state.get('launches') or 1), lambda: stopped)
+                        if watch is not None:
+                            state['idle_watch'] = dict(status='passed' if watch['passed'] else 'failed', seconds=seconds, samples=watch['samples'],
+                                                       offenders=len(watch['offenders']), started_at=watch['started_at'], finished_at=watch['finished_at'])
+                        if stopped:
+                            break
+                        if watch is not None and not watch['passed']:
+                            state.update(status='HELD', reason=watch['reason'])
+                            break
                     executable, arguments, environment = phase_arguments(root, phase)
                     started = checkpoint.exists() or (root / phase / 'results' / 'identity.json').exists()
                     command = ['resume', '--retry-interrupted'] if started else ['run']
@@ -579,6 +664,14 @@ The controller writes exports/results.tar.gz, exports/inventory.json and exports
 it stops, whatever the outcome.'''
 
 
+def pin_control(root):
+    try:
+        config = experiment(root, 'benchmark')
+        os.sched_setaffinity(0, scheduler_module(root).metrics.cpu_set(config['control_cpus']))
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('--root', type=Path, required=True)
@@ -590,6 +683,8 @@ def main(argv=None):
         if args.command == 'help':
             print(HELP)
             return 0
+        if args.command != '_run':
+            pin_control(root)
         if args.command == 'status':
             show(root, args.json)
             return 0

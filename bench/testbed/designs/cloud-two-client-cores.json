@@ -174,7 +174,8 @@
     "min_free_bytes": 10737418240,
     "max_client_utilization_pct": 85,
     "max_latency_seconds": 120,
-    "power_source": "no-power-supply-devices"
+    "power_source": "no-power-supply-devices",
+    "idle_watch_seconds": 600
   },
   "fill": {
     "scenario": "fill10m",
@@ -194,7 +195,7 @@
     "sample": "10 seconds of warmup on the loaded dataset, excluded from the statistics, then one 60 second timed run with two client threads of 16 connections each, uniform random keys and pipeline 1 unless the workload names pipeline 16.",
     "seeds": "The pinned memtier_benchmark image with its default seed and distinct client seeds, so every engine and repetition sees the same key sequence policy.",
     "repetitions": "Four repetitions per workload and engine. The engine order rotates so that each engine takes every position once per workload. Failed, invalid and skipped cases are never retried silently.",
-    "gates": "Before every case the CPU package must be at or below 55 C, the server and client CPUs at least 95 percent idle, the readings stable for 10 seconds and at least 30 seconds must have passed since the last case; an unmet gate after 600 seconds holds the run. During a case the machine must expose readable telemetry, no thermal throttle counter increments, an unchanged frequency policy, a package at or below 90 C and no competing CPU load. The machine has no battery or ACPI power-supply device; the power gate records that absence instead of an AC online reading.",
+    "gates": "Before every case the CPU package must be at or below 55 C, the server and client CPUs at least 95 percent idle, the readings stable for 10 seconds and at least 30 seconds must have passed since the last case; an unmet gate after 600 seconds holds the run. During a case the machine must expose readable telemetry, no thermal throttle counter increments, an unchanged frequency policy, a package at or below 90 C and no competing CPU load. The machine has no battery or ACPI power-supply device; the power gate records that absence instead of an AC online reading. Before the calibration the machine is watched idle for 600 seconds, and any process outside the run, kernel threads included, that uses a tenth of a core on a server or client CPU in any sample holds the run.",
     "quality": "A measurement whose raw client output reports a maximum latency beyond 120 seconds is invalid as a histogram range artefact. The timed client's CPU share is recorded and a measurement above 85 percent of its two CPU budget is marked client limited, which makes its throughput a lower bound.",
     "publication": "Medians over the valid repetitions with the observed minimum and maximum. Excluded repetitions stay visible with their reason. There is no overall score and no cross workload average.",
     "latency": "Closed loop client observed latency; p99 is the per run percentile, never pooled across runs.",

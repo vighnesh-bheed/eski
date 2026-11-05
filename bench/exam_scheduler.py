@@ -677,6 +677,35 @@ def throughput_steadiness(run_dir, row):
     return result
 
 
+def throughput_series(run_dir, row):
+    paths = sorted(Path(run_dir).glob('*/%s.json' % row['key']))
+    if not paths:
+        return dict(available=False, reason='no raw timed client output')
+    try:
+        result = metrics.memtier_series(json.loads(paths[-1].read_text()))
+    except (OSError, ValueError):
+        return dict(available=False, reason='unreadable raw timed client output', path=str(paths[-1].relative_to(run_dir)))
+    result['path'] = str(paths[-1].relative_to(run_dir))
+    return result
+
+
+def role_cpu_shares(samples, roles, owners=(), key=None):
+    owner = timed_client(owners, key) if key else None
+    window = samples
+    if owner:
+        window = [s for s in samples if any(p.get('pid') == owner['pid'] and p.get('start_ticks') == owner['process'].get('start_ticks') for p in s.get('owned_processes', []))] or samples
+    result = dict(window='timed client lifetime' if owner and window is not samples else 'whole case', samples=len(window), roles={})
+    for role, cpus in roles.items():
+        columns = {name: [] for name in metrics.CPU_FIELDS}
+        for sample in window:
+            rows = [share for share in ((sample.get('cpu_share_pct') or {}).get('cpu%d' % cpu) for cpu in sorted(cpus)) if share]
+            if rows:
+                for name in metrics.CPU_FIELDS:
+                    columns[name].append(sum(share[name] for share in rows) / len(rows))
+        result['roles'][role] = {name: statistics.median(values) if values else None for name, values in columns.items()}
+    return result
+
+
 def result_status(directory, row, returncode, reasons, expected_plan=None):
     try:
         summary = load(directory / 'summary.json')
@@ -931,6 +960,7 @@ class Scheduler:
         if self.args.max_latency_seconds is not None:
             quality['latency_sanity'] = latency_sanity(directory / 'run', row, self.args.max_latency_seconds)
             reasons = sorted(set(reasons) | set(quality['latency_sanity']['reasons']))
+        quality['throughput_series'] = throughput_series(directory / 'run', row)
         attempt['cleanup'] = self.cleanup(run_id)
         if self.interrupted or child.returncode in (-signal.SIGTERM, -signal.SIGINT, 130, 143):
             state, details = 'interrupted', dict(reasons=reasons, returncode=child.returncode)
@@ -957,6 +987,7 @@ class Scheduler:
                         old[field] = max(old[field] or 0, proc[source])
         attempt['telemetry']['process_sampled_maxima'] = list(peaks.values())
         attempt['telemetry']['measurement_quality'] = quality
+        attempt['telemetry']['role_cpu_share_pct'] = role_cpu_shares(samples, self.model['roles'], owners, row['key'])
         attempt['telemetry']['ownership_available'] = {role: any(o.get('role') == role and o.get('process') for o in owners) for role in ('server', 'client')}
         attempt['telemetry']['unavailable'] = [role + ' ownership not observed; no exclusive process/cgroup measurement claimed' for role, available in attempt['telemetry']['ownership_available'].items() if not available]
         attempt['telemetry']['server_pre_stop_cgroup_peaks'] = [dict(pid=o.get('pid'), container=o.get('container'), artifact_dir=o.get('artifact_dir'), memory_peak_bytes=o.get('cgroup', {}).get('memory.peak'), scope=o.get('peak_scope')) for o in owners if o.get('container') and o.get('event') == 'before-stop' and o.get('role') == 'server']

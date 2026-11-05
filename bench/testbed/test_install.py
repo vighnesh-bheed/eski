@@ -73,8 +73,13 @@ class InstallTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'no exported archive'):
             install.build_overlay(REPOSITORY, DESIGN, self.manifest_path, 'other', self.work / 'other.tar')
 
-    def fakes(self, fail=False):
+    def fakes(self, fail=False, drivers=()):
         calls = []
+
+        def inventory():
+            calls.append('inventory')
+            return dict(cmdline='BOOT_IMAGE=/vmlinuz nosmt modprobe.blacklist=i915', modules=sorted(['xfs', 'overlay', *drivers]),
+                        drm=dict(available=True, entries=['card0', 'renderD128'] if drivers else [], cards={'card0': drivers[0]} if drivers else {}), timer_migration=1)
 
         def jq(partial, design):
             calls.append('jq')
@@ -101,10 +106,26 @@ class InstallTests(unittest.TestCase):
                                                        config=dict(targets=['eski-docker', 'redis', 'valkey', 'dragonfly'], repetitions=repetitions, cpus=dict(server=[1])),
                                                        host=dict(cpu_model='Fixture CPU'), files={'bench/' + name: '3' * 64 for name in install.RUNNER})
             return dict(phases=dict(calibration=identity('calibration', 1), benchmark=identity('benchmark', 4)))
-        return calls, dict(check=check, jq=jq, eski=eski, engine=engine)
+        return calls, dict(check=check, jq=jq, eski=eski, engine=engine, inventory=inventory)
 
-    def arguments(self, root='comparison-v1'):
-        return argparse.Namespace(base=str(self.base), root=root, overlay=str(self.overlay), sha256=self.built['sha256'])
+    def arguments(self, root='comparison-v1', accept=False):
+        return argparse.Namespace(base=str(self.base), root=root, overlay=str(self.overlay), sha256=self.built['sha256'], accept_display_driver=accept)
+
+    def test_a_loaded_display_driver_is_refused_before_any_download_unless_accepted(self):
+        calls, fakes = self.fakes(drivers=('i915',))
+        with self.assertRaisesRegex(ValueError, 'display driver is loaded: i915.*modprobe.blacklist=i915.*--accept-display-driver'):
+            install.remote(self.arguments(), **fakes)
+        self.assertEqual(calls, ['inventory'])
+        self.assertFalse((self.base / 'comparison-v1').exists())
+        self.assertFalse(list(self.base.glob('.comparison-v1.partial-*')))
+        calls, fakes = self.fakes(drivers=('i915',))
+        self.assertEqual(install.remote(self.arguments(accept=True), **fakes), 0)
+        machine = json.loads((self.base / 'comparison-v1' / 'protocol.json').read_text())['machine']
+        self.assertEqual((machine['display_drivers'], machine['display_driver_accepted'], machine['cpu_model']), (['i915'], True, 'Fixture CPU'))
+        self.assertEqual(machine['drm']['cards'], {'card0': 'i915'})
+        self.assertIn('modprobe.blacklist=i915', machine['cmdline'])
+        self.assertEqual(machine['timer_migration'], 1)
+        self.assertIn('i915', machine['modules'])
 
     def test_remote_installs_a_new_root_beside_earlier_ones_without_starting(self):
         calls, fakes = self.fakes()
@@ -119,6 +140,9 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(profile['schema'], 'eski-exam-profile-v1')
         protocol = json.loads((root / 'protocol.json').read_text())
         self.assertEqual(protocol['phases']['benchmark']['identity'], 'b' * 64)
+        self.assertEqual((protocol['machine']['display_drivers'], protocol['machine']['display_driver_accepted']), ([], False))
+        self.assertEqual(protocol['machine']['modules'], ['overlay', 'xfs'])
+        self.assertEqual(protocol['machine']['cmdline'], 'BOOT_IMAGE=/vmlinuz nosmt modprobe.blacklist=i915')
         self.assertEqual(protocol['phases']['calibration']['identity'], 'c' * 64)
         self.assertEqual(protocol['design']['gates']['power_source'], 'mains')
         for phase in ('calibration', 'benchmark'):
@@ -137,7 +161,7 @@ class InstallTests(unittest.TestCase):
         self.assertFalse((root / 'control').exists())
         self.assertEqual((self.base / 'earlier-root' / 'marker').read_text(), 'untouched')
         self.assertEqual(sorted(path.name for path in self.base.iterdir()), ['comparison-v1', 'earlier-root'])
-        self.assertEqual(calls[0:2], ['jq', 'eski'])
+        self.assertEqual(calls[0:3], ['inventory', 'jq', 'eski'])
         self.assertEqual(calls[-1], 'check')
         with self.assertRaisesRegex(ValueError, 'already exists'):
             install.remote(self.arguments(), **self.fakes()[1])

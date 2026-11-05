@@ -62,6 +62,8 @@ def validate(design):
         raise ValueError('design lacks ' + ', '.join(missing))
     if gates.get('power_source', 'mains') not in POWER_SOURCES:
         raise ValueError('gates.power_source must be one of ' + ', '.join(POWER_SOURCES))
+    if 'idle_watch_seconds' in gates and (type(gates['idle_watch_seconds']) is not int or gates['idle_watch_seconds'] < 0):
+        raise ValueError('gates.idle_watch_seconds must be a non-negative integer number of seconds')
     dataset = design.get('dataset') or {}
     client = design.get('client') or {}
     for name, value in (('dataset.keys', dataset.get('keys')), ('dataset.members', dataset.get('members')), ('client.threads', client.get('threads')),
@@ -203,6 +205,8 @@ def experiment(design, phase):
     value.update({name: resources[name] for name in RESOURCES})
     value.update({name: gates[name] for name in GATES})
     value['power_source'] = gates.get('power_source', 'mains')
+    if 'idle_watch_seconds' in gates:
+        value['idle_watch_seconds'] = gates['idle_watch_seconds']
     return value
 
 
