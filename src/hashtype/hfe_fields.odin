@@ -108,7 +108,7 @@ field_ttl :: proc(h: Hash, field: []u8, kind: Ttl_Kind, now: u64) -> i64 {
 		return TTL_NO_FIELD
 	case deadline == DEADLINE_UNSET:
 		return TTL_NO_DEADLINE
-	case deadline < now, deadline == now && h.encoding == .Listpack_Ex:
+	case deadline < now:
 		return TTL_NO_FIELD
 	}
 	span := deadline

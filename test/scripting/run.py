@@ -632,7 +632,7 @@ class Parity(Fixture):
         self.client.call('ACL', 'SETUSER', 'parity_chan', 'on', 'nopass', '+@all', '~*', 'resetchannels', '&allowed')
         cases = (('parity_cmd', "return redis.call('set','a','b')", "ERR ACL failure in script: User parity_cmd has no permissions to run the 'set' command script:"),
                  ('parity_cmd', "return redis.pcall('SET','a','b')", "ERR ACL failure in script: User parity_cmd has no permissions to run the 'set' command"),
-                 ('parity_cmd', "return redis.call('client','kill','id','9999')", 'ERR This Redis command is not allowed from script script:'),
+                 ('parity_cmd', "return redis.call('client','kill','id','9999')", 'ERR This command is not allowed from script script:'),
                  ('parity_key', "return redis.call('get','bar')", 'ERR ACL failure in script: No permissions to access a key script:'),
                  ('parity_key', "return redis.call('mget','foo1','bar')", 'ERR ACL failure in script: No permissions to access a key script:'),
                  ('parity_chan', "return redis.call('publish','other','x')", 'ERR ACL failure in script: No permissions to access a channel script:'))

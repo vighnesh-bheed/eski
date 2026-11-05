@@ -25,3 +25,5 @@ After processing a returned ID, use `XACK key group id ...` to remove it from th
 `XINFO STREAM`, `GROUPS` and `CONSUMERS` inspect local state; `XSETID` adjusts stream metadata subject to validation. Consumer groups support local acknowledgement bookkeeping. They do not provide replicated durability, an external side-effect transaction or exactly-once processing; an application should tolerate redelivery and choose [persistence](persistence.md) deliberately.
 
 Verify with `bash test/streamtype/compare.sh`, `bash test/run_packages.sh` and `./test/conformance/run.sh --suite redis --units type/stream,type/stream-cgroups`. Consult [commands](commands.md) for the registry and [conformance](conformance.md) for recorded results.
+
+Eski is an independent project, not affiliated with, endorsed or certified by Redis Ltd. Redis is a registered trademark of Redis Ltd.; any rights therein are reserved to Redis Ltd.

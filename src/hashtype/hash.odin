@@ -304,7 +304,7 @@ set :: proc(h: Hash, field, value: []u8, keep_ttl := false) -> (updated: bool) {
 			updated = true
 		} else {
 			ent := [2]lp.Element{lp.entry_from_bytes(field), lp.entry_from_bytes(value)}
-			h.lp = lp.lp_batch_append(h.lp, ent[:])
+			h.lp = lp.lp_append_entries(h.lp, ent[:])
 		}
 	}
 	if h.encoding != .Hashtable && length(h) > hash_max_listpack_entries {

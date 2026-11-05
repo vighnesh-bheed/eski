@@ -2,13 +2,13 @@ package listpack
 
 import "core:testing"
 
-random_tuple_pack :: proc(tuple_len: int) -> [^]u8 {
+random_tuple_pack :: proc(stride: int) -> [^]u8 {
 	lp := lp_new(0)
 	values := [4]string{"v0", "v1", "v2", "v3"}
 	for value, index in values {
 		lp = lp_append_integer(lp, i64((index + 1) * 10))
 		lp = lp_append(lp, transmute([]u8)value)
-		if tuple_len == 3 {
+		if stride == 3 {
 			lp = lp_append_integer(lp, 999)
 		}
 	}
@@ -38,17 +38,17 @@ seeded_sampling_preserves_draw_order_unique_pack_order_and_tuple_alignment :: pr
 			testing.expect(t, lp_rand() == value)
 		}
 	}
-	for tuple_len in 2..=3 {
-		lp := random_tuple_pack(tuple_len)
+	for stride in 2..=3 {
+		lp := random_tuple_pack(stride)
 		keys, vals: [32]Element
 		lp_srand(1234)
-		lp_random_pairs(lp, len(keys), keys[:], vals[:], tuple_len)
+		lp_random_pairs(lp, len(keys), keys[:], vals[:], stride)
 		for key, index in keys {
 			expect_sample_pair(t, key, vals[index])
 		}
 		lp_srand(1234)
 		repeated_keys, repeated_vals: [32]Element
-		lp_random_pairs(lp, len(keys), repeated_keys[:], repeated_vals[:], tuple_len)
+		lp_random_pairs(lp, len(keys), repeated_keys[:], repeated_vals[:], stride)
 		for key, index in keys {
 			testing.expect(t, repeated_keys[index].number == key.number && repeated_vals[index].text == vals[index].text)
 		}
@@ -57,7 +57,7 @@ seeded_sampling_preserves_draw_order_unique_pack_order_and_tuple_alignment :: pr
 				keys[index] = entry_from_int(555)
 				vals[index] = entry_from_int(555)
 			}
-			written := lp_random_pairs_unique(lp, requested, keys[:], vals[:], tuple_len)
+			written := lp_random_pairs_unique(lp, requested, keys[:], vals[:], stride)
 			testing.expect(t, written == min(requested, 4))
 			previous := i64(0)
 			for index in 0..<written {
@@ -69,13 +69,13 @@ seeded_sampling_preserves_draw_order_unique_pack_order_and_tuple_alignment :: pr
 		}
 		for _ in 0..<32 {
 			key, val: Element
-			lp_random_pair(lp, 4, &key, &val, tuple_len)
+			lp_random_pair(lp, 4, &key, &val, stride)
 			expect_sample_pair(t, key, val)
 		}
 		for remaining in ([]u32{1, 2, 4}) {
 			index := u32(0)
-			cursor := lp_next_random(lp, lp_first(lp), &index, remaining, tuple_len)
-			testing.expect(t, index % u32(tuple_len) == 0 && index / u32(tuple_len) <= 4 - remaining)
+			cursor := lp_next_random(lp, lp_first(lp), &index, remaining, stride)
+			testing.expect(t, index % u32(stride) == 0 && index / u32(stride) <= 4 - remaining)
 			testing.expect(t, cursor == lp_seek(lp, i64(index)))
 			if remaining == 4 {
 				testing.expect(t, index == 0 && cursor == lp_first(lp))
@@ -84,12 +84,12 @@ seeded_sampling_preserves_draw_order_unique_pack_order_and_tuple_alignment :: pr
 		index := u32(0)
 		cursor := lp_first(lp)
 		for remaining := u32(4); remaining > 0; remaining -= 1 {
-			cursor = lp_next_random(lp, cursor, &index, remaining, tuple_len)
-			testing.expect(t, cursor == lp_seek(lp, i64((4 - remaining) * u32(tuple_len))))
-			for _ in 0..<tuple_len {
+			cursor = lp_next_random(lp, cursor, &index, remaining, stride)
+			testing.expect(t, cursor == lp_seek(lp, i64((4 - remaining) * u32(stride))))
+			for _ in 0..<stride {
 				cursor = lp_next(lp, cursor)
 			}
-			index += u32(tuple_len)
+			index += u32(stride)
 		}
 		lp_free(lp)
 	}

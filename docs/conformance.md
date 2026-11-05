@@ -94,3 +94,5 @@ Build with `./build.sh`, then run `./test/conformance/run.sh --suite redis --tag
 ## Recorded failures
 
 No test failures were recorded.
+
+Eski is an independent project, not affiliated with, endorsed or certified by Redis Ltd. Redis is a registered trademark of Redis Ltd.; any rights therein are reserved to Redis Ltd.

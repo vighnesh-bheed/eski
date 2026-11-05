@@ -18,7 +18,6 @@ Element :: struct {
 	number:   i64,
 }
 
-Element_Matcher :: #type proc(pack: [^]u8, at: [^]u8, state: rawptr, text: [^]u8, measure: i64) -> int
 Element_Visitor :: #type proc(at: [^]u8, declared_count: u32, state: rawptr) -> bool
 
 empty_string_byte: u8
@@ -142,40 +141,4 @@ decode_body :: proc "contextless" (data: []u8, offset: int) -> (Body, bool) {
 		string_length = int(string_length),
 		is_string = true,
 	}, true
-}
-
-lp_encoding_is_7bit_uint :: proc "contextless" (b: u8) -> bool {
-	return b < 128
-}
-
-lp_encoding_is_6bit_str :: proc "contextless" (b: u8) -> bool {
-	return b >= 128 && b < 192
-}
-
-lp_encoding_is_13bit_int :: proc "contextless" (b: u8) -> bool {
-	return b >= 192 && b < 224
-}
-
-lp_encoding_is_12bit_str :: proc "contextless" (b: u8) -> bool {
-	return b >= 224 && b < 240
-}
-
-lp_encoding_is_32bit_str :: proc "contextless" (b: u8) -> bool {
-	return b == 240
-}
-
-lp_encoding_is_16bit_int :: proc "contextless" (b: u8) -> bool {
-	return b == 241
-}
-
-lp_encoding_is_24bit_int :: proc "contextless" (b: u8) -> bool {
-	return b == 242
-}
-
-lp_encoding_is_32bit_int :: proc "contextless" (b: u8) -> bool {
-	return b == 243
-}
-
-lp_encoding_is_64bit_int :: proc "contextless" (b: u8) -> bool {
-	return b == 244
 }

@@ -48,3 +48,5 @@ The reporter records the coordinator command name, argument count and bounded ar
 `FUNCTION` loads, lists, deletes, flushes, dumps and restores executable libraries; `FCALL` and `FCALL_RO` invoke their registered functions. Lua evaluation, persistent libraries and interactive debugging use the documented [scripting API](scripting.md). Modules, replication, Sentinel and Cluster remain excluded even where a config name or metadata category is accepted. The separate Rust coordination product is not part of this executable.
 
 Verify with `bash test/run_packages.sh`, `bash test/smoke.sh` and `./test/conformance/run.sh --suite redis --units info,info-command,introspection,introspection-2,latency-monitor,slowlog,limits,maxmemory,memefficiency,lazyfree`. [Conformance](conformance.md) distinguishes accounting/introspection differences from tests requiring excluded features.
+
+Eski is an independent project, not affiliated with, endorsed or certified by Redis Ltd. Redis is a registered trademark of Redis Ltd.; any rights therein are reserved to Redis Ltd.

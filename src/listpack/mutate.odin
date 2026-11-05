@@ -117,14 +117,14 @@ insert_entries :: proc(lp: [^]u8, p: [^]u8, where_: Placement, entries: []Elemen
 	return result
 }
 
-lp_batch_insert :: proc(lp: [^]u8, p: [^]u8, where_: Placement, entries: []Element, newp: ^[^]u8) -> [^]u8 {
+lp_splice_entries :: proc(pack: [^]u8, entries: []Element, anchor: [^]u8, placement: Placement, cursor: ^[^]u8) -> [^]u8 {
 	if len(entries) == 0 {
-		return lp
+		return pack
 	}
-	if where_ != Placement.Before && where_ != Placement.After {
+	if placement != Placement.Before && placement != Placement.After {
 		return nil
 	}
-	return insert_entries(lp, p, where_, entries, newp)
+	return insert_entries(pack, anchor, placement, entries, cursor)
 }
 
 lp_insert_string :: proc(lp: [^]u8, s: []u8, p: [^]u8, where_: Placement, newp: ^[^]u8) -> [^]u8 {
@@ -165,11 +165,11 @@ lp_prepend_integer :: proc(lp: [^]u8, lval: i64) -> [^]u8 {
 	return lp_insert_integer(lp, lval, padd(lp, PACK_HEADER_BYTES), Placement.Before, nil)
 }
 
-lp_batch_append :: proc(lp: [^]u8, entries: []Element) -> [^]u8 {
-	if lp == nil {
+lp_append_entries :: proc(pack: [^]u8, entries: []Element) -> [^]u8 {
+	if pack == nil {
 		return nil
 	}
-	return lp_batch_insert(lp, padd(lp, lp_bytes(lp) - 1), Placement.Before, entries, nil)
+	return lp_splice_entries(pack, entries, padd(pack, lp_bytes(pack) - 1), Placement.Before, nil)
 }
 
 lp_replace :: proc(lp: [^]u8, p: ^[^]u8, s: []u8) -> [^]u8 {

@@ -1449,7 +1449,7 @@ aof_keep_deferring :: proc(now: i64) -> bool {
 		return true
 	}
 	aof.delayed_fsync += 1
-	plog(LOG_NOTICE, "Asynchronous AOF fsync is taking too long (disk is busy?). Writing the AOF buffer without waiting for fsync to complete, this may slow down Redis.")
+	plog(LOG_NOTICE, "Asynchronous AOF fsync is taking too long (disk is busy?). Writing the AOF buffer without waiting for fsync to complete, this may slow down Eski.")
 	return false
 }
 

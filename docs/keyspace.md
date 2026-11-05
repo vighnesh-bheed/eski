@@ -24,3 +24,5 @@ redis-cli -p 6399 TYPE demo:copy
 `WAIT` and `WAITAOF` are compatibility commands, not replication. `WAIT` validates arguments and reports zero replicas. `WAITAOF` can wait for local AOF synchronization and reports zero replica acknowledgements; requesting a local acknowledgement with AOF disabled is an error. See [persistence](persistence.md).
 
 Verify storage/expiry/sort ownership with `bash test/run_packages.sh`, and run `./test/conformance/run.sh --suite redis --units keyspace,expire,sort`. Replication remains excluded. Lua inner commands have the restrictions described in [scripting](scripting.md); [conformance](conformance.md) records the selected tests and implementation differences.
+
+Eski is an independent project, not affiliated with, endorsed or certified by Redis Ltd. Redis is a registered trademark of Redis Ltd.; any rights therein are reserved to Redis Ltd.

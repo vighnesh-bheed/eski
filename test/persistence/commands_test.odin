@@ -280,8 +280,8 @@ write_gate_and_retry :: proc(t: ^testing.T) {
 	j.pst.lastbgsave_err = false
 	j.pst.loading = true
 	j.persist_update_gate()
-	expect_reply(t, cmd("SET", "x", "1"), "-LOADING Redis is loading the dataset in memory\r\n", "loading gate")
-	expect_reply(t, cmd("GET", "x"), "-LOADING Redis is loading the dataset in memory\r\n", "loading gate read")
+	expect_reply(t, cmd("SET", "x", "1"), "-LOADING Eski is loading the dataset in memory\r\n", "loading gate")
+	expect_reply(t, cmd("GET", "x"), "-LOADING Eski is loading the dataset in memory\r\n", "loading gate read")
 	testing.expect(t, strings.has_prefix(cmd("INFO", "persistence"), "$"))
 	expect_reply(t, cmd("LASTSAVE"), integer(j.pst.lastsave), "lastsave while loading")
 	j.pst.loading = false

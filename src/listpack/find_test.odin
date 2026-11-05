@@ -19,7 +19,7 @@ comparison_and_find_keep_numeric_adoption_strict_and_stride_relative :: proc(t: 
 	testing.expect(t, lp_find(lp, lp_first(lp), nil, max(u32)) == nil)
 	for value in ([]i64{0, -4096, 4096, min(i64), max(i64)}) {
 		for count in ([]u64{0, 1, 10, 65536}) {
-			testing.expect(t, lp_estimate_bytes_repeated_integer(value, count) == 7 + lp_entry_size_integer(value) * int(count))
+			testing.expect(t, lp_repeated_integer_bytes(value, count) == 7 + lp_integer_entry_size(value) * int(count))
 		}
 	}
 }

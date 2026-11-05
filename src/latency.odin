@@ -226,7 +226,7 @@ Advice :: enum {
 @(private = "file")
 latency_report :: proc(b: ^[dynamic]u8) {
 	if len(latency_events) == 0 && cfg.latency_monitor_threshold == 0 {
-		sb_str(b, "I'm sorry, Dave, I can't do that. Latency monitoring is disabled in this Redis instance. You may use \"CONFIG SET latency-monitor-threshold <milliseconds>.\" in order to enable it. If we weren't in a deep space mission I'd suggest to take a look at https://redis.io/topics/latency-monitor.\n")
+		sb_str(b, "I'm sorry, Dave, I can't do that. Latency monitoring is disabled in this Eski instance. You may use \"CONFIG SET latency-monitor-threshold <milliseconds>.\" in order to enable it. If we weren't in a deep space mission I'd suggest to take a look at https://redis.io/topics/latency-monitor.\n")
 		return
 	}
 	adv: bit_set[Advice]
@@ -235,7 +235,7 @@ latency_report :: proc(b: ^[dynamic]u8) {
 	for ts in latency_events {
 		eventnum += 1
 		if eventnum == 1 {
-			sb_str(b, "Dave, I have observed latency spikes in this Redis instance. You don't mind talking about it, do you Dave?\n\n")
+			sb_str(b, "Dave, I have observed latency spikes in this Eski instance. You don't mind talking about it, do you Dave?\n\n")
 		}
 		ls := latency_analyze(ts)
 		sb_int(b, i64(eventnum))
@@ -333,11 +333,11 @@ latency_report :: proc(b: ^[dynamic]u8) {
 		advices += 1
 	}
 	if eventnum == 0 && advices == 0 {
-		sb_str(b, "Dave, no latency spike was observed during the lifetime of this Redis instance, not in the slightest bit. I honestly think you ought to sit down calmly, take a stress pill, and think things over.\n")
+		sb_str(b, "Dave, no latency spike was observed during the lifetime of this Eski instance, not in the slightest bit. I honestly think you ought to sit down calmly, take a stress pill, and think things over.\n")
 		return
 	}
 	if eventnum > 0 && advices == 0 {
-		sb_str(b, "\nWhile there are latency events logged, I'm not able to suggest any easy fix. Please use the Redis community to get some help, providing this report in your help request.\n")
+		sb_str(b, "\nWhile there are latency events logged, I'm not able to suggest any easy fix. Please use the community to get some help, providing this report in your help request.\n")
 		return
 	}
 	sb_str(b, "\nI have a few advices for you:\n\n")
@@ -345,9 +345,9 @@ latency_report :: proc(b: ^[dynamic]u8) {
 		sb_str(b, "- If you are using a virtual machine, consider upgrading it with a faster one using a hypervisior that provides less latency during fork() calls. Xen is known to have poor fork() performance. Even in the context of the same VM provider, certain kinds of instances can execute fork faster than others.\n")
 	}
 	if .Slowlog_Enabled in adv {
-		sb_str(b, "- There are latency issues with potentially slow commands you are using. Try to enable the Slow Log Redis feature using the command 'CONFIG SET slowlog-log-slower-than ")
+		sb_str(b, "- There are latency issues with potentially slow commands you are using. Try to enable the Slow Log Eski feature using the command 'CONFIG SET slowlog-log-slower-than ")
 		sb_int(b, cfg.latency_monitor_threshold * 1000)
-		sb_str(b, "'. If the Slow log is disabled Redis is not able to log slow commands execution for you.\n")
+		sb_str(b, "'. If the Slow log is disabled Eski is not able to log slow commands execution for you.\n")
 	}
 	if .Slowlog_Tuning in adv {
 		sb_str(b, "- Your current Slow Log configuration only logs events that are slower than your configured latency monitor threshold. Please use 'CONFIG SET slowlog-log-slower-than ")
@@ -358,19 +358,19 @@ latency_report :: proc(b: ^[dynamic]u8) {
 		sb_str(b, "- Check your Slow Log to understand what are the commands you are running which are too slow to execute. Please check https://redis.io/commands/slowlog for more information.\n")
 	}
 	if .Scheduler in adv {
-		sb_str(b, "- The system is slow to execute Redis code paths not containing system calls. This usually means the system does not provide Redis CPU time to run for long periods. You should try to:\n  1) Lower the system load.\n  2) Use a computer / VM just for Redis if you are running other software in the same system.\n  3) Check if you have a \"noisy neighbour\" problem.\n  4) Check with 'redis-cli --intrinsic-latency 100' what is the intrinsic latency in your system.\n  5) Check if the problem is allocator-related by recompiling Redis with MALLOC=libc, if you are using Jemalloc. However this may create fragmentation problems.\n")
+		sb_str(b, "- The system is slow to execute Eski code paths not containing system calls. This usually means the system does not provide Eski CPU time to run for long periods. You should try to:\n  1) Lower the system load.\n  2) Use a computer / VM just for Eski if you are running other software in the same system.\n  3) Check if you have a \"noisy neighbour\" problem.\n  4) Check with 'redis-cli --intrinsic-latency 100' what is the intrinsic latency in your system.\n")
 	}
 	if .Local_Disk in adv {
 		sb_str(b, "- It is strongly advised to use local disks for persistence, especially if you are using AOF. Remote disks provided by platform-as-a-service providers are known to be slow.\n")
 	}
 	if .Ssd in adv {
-		sb_str(b, "- SSD disks are able to reduce fsync latency, and total time needed for snapshotting and AOF log rewriting (resulting in smaller memory usage). With extremely high write load SSD disks can be a good option. However Redis should perform reasonably with high load using normal disks. Use this advice as a last resort.\n")
+		sb_str(b, "- SSD disks are able to reduce fsync latency, and total time needed for snapshotting and AOF log rewriting (resulting in smaller memory usage). With extremely high write load SSD disks can be a good option. However Eski should perform reasonably with high load using normal disks. Use this advice as a last resort.\n")
 	}
 	if .Data_Writeback in adv {
-		sb_str(b, "- Mounting ext3/4 filesystems with data=writeback can provide a performance boost compared to data=ordered, however this mode of operation provides less guarantees, and sometimes it can happen that after a hard crash the AOF file will have a half-written command at the end and will require to be repaired before Redis restarts.\n")
+		sb_str(b, "- Mounting ext3/4 filesystems with data=writeback can provide a performance boost compared to data=ordered, however this mode of operation provides less guarantees, and sometimes it can happen that after a hard crash the AOF file will have a half-written command at the end and will require to be repaired before Eski restarts.\n")
 	}
 	if .Disk_Contention in adv {
-		sb_str(b, "- Try to lower the disk contention. This is often caused by other disk intensive processes running in the same computer (including other Redis instances).\n")
+		sb_str(b, "- Try to lower the disk contention. This is often caused by other disk intensive processes running in the same computer (including other Eski instances).\n")
 	}
 	if .No_Appendfsync in adv {
 		sb_str(b, "- Assuming from the point of view of data safety this is viable in your environment, you could try to enable the 'no-appendfsync-on-rewrite' option, so that fsync will not be performed while there is a child rewriting the AOF file or producing an RDB file (the moment where there is high disk contention).\n")
@@ -382,16 +382,16 @@ latency_report :: proc(b: ^[dynamic]u8) {
 		sb_str(b, "- Latency during the AOF atomic rename operation or when the final difference is flushed to the AOF file at the end of the rewrite, sometimes is caused by very high write load, causing the AOF buffer to get very large. If possible try to send less commands to accomplish the same work, or use Lua scripts to group multiple operations into a single EVALSHA call.\n")
 	}
 	if .Hz in adv && config_hz_current < 100 {
-		sb_str(b, "- In order to make the Redis keys expiring process more incremental, try to set the 'hz' configuration parameter to 100 using 'CONFIG SET hz 100'.\n")
+		sb_str(b, "- In order to make the Eski keys expiring process more incremental, try to set the 'hz' configuration parameter to 100 using 'CONFIG SET hz 100'.\n")
 	}
 	if .Large_Objects in adv {
 		sb_str(b, "- Deleting, expiring or evicting (because of maxmemory policy) large objects is a blocking operation. If you have very large objects that are often deleted, expired, or evicted, try to fragment those objects into multiple smaller objects.\n")
 	}
 	if .Mass_Eviction in adv {
-		sb_str(b, "- Sudden changes to the 'maxmemory' setting via 'CONFIG SET', or allocation of large objects via sets or sorted sets intersections, STORE option of SORT, Redis Cluster large keys migrations (RESTORE command), may create sudden memory pressure forcing the server to block trying to evict keys. \n")
+		sb_str(b, "- Sudden changes to the 'maxmemory' setting via 'CONFIG SET', or allocation of large objects via sets or sorted sets intersections, STORE option of SORT, large key migrations between nodes (RESTORE command), may create sudden memory pressure forcing the server to block trying to evict keys. \n")
 	}
 	if .Disable_Thp in adv {
-		sb_str(b, "- I detected a non zero amount of anonymous huge pages used by your process. This creates very serious latency events in different conditions, especially when Redis is persisting on disk. To disable THP support use the command 'echo never > /sys/kernel/mm/transparent_hugepage/enabled', make sure to also add it into /etc/rc.local so that the command will be executed again after a reboot. Note that even if you have already disabled THP, you still need to restart the Redis process to get rid of the huge pages already created.\n")
+		sb_str(b, "- I detected a non zero amount of anonymous huge pages used by your process. This creates very serious latency events in different conditions, especially when Eski is persisting on disk. To disable THP support use the command 'echo never > /sys/kernel/mm/transparent_hugepage/enabled', make sure to also add it into /etc/rc.local so that the command will be executed again after a reboot. Note that even if you have already disabled THP, you still need to restart the Eski process to get rid of the huge pages already created.\n")
 	}
 }
 
