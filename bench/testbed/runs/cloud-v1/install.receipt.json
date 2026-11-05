@@ -1,0 +1,54 @@
+{
+ "base": "/home/debian/eski-exam",
+ "images": {
+  "dragonfly": {
+   "image_id": "sha256:e2b395498450f370ed6947a33bc3ada7b70f18a39ae6d64da7b67acc8457f2f7",
+   "pulled": true,
+   "reference": "ghcr.io/dragonflydb/dragonfly:v2.0.2@sha256:061f00b201b58e12f974e4e96c761a881ee1c05e9d8ee967466a604b7299753b"
+  },
+  "eski-docker": {
+   "image_id": "sha256:49afbcaba262d10f0c7152e55ed722a159204d3027b71eec63f4938700d26a15",
+   "pulled": false,
+   "reference": "eski:local"
+  },
+  "memtier": {
+   "image_id": "sha256:42d0a65fb77c18c0df167172db29efd562d542c0d53c609c4aaeb31343d3f183",
+   "pulled": true,
+   "reference": "docker.io/redislabs/memtier_benchmark:2.5.2@sha256:389090e9ef13701f36f5ac97485742618e648adbf76c008418383594a05c1659"
+  },
+  "redis": {
+   "image_id": "sha256:9823645c452a9a994f575ed238e1a4f67365acbf8e842db769060820fab06449",
+   "pulled": true,
+   "reference": "docker.io/library/redis:7.4.12@sha256:b6b6e3dc0c0952737748e55d5d885272840c7e42ba41ab1d5489f693419882f5"
+  },
+  "valkey": {
+   "image_id": "sha256:ca662989648f173e01fb1a1768e7d84ddcaf8b7de135070b59271b0918104eb3",
+   "pulled": true,
+   "reference": "docker.io/valkey/valkey:8.1.11@sha256:8f836008e0986c36adf50da714c7060cf689dbb335f61fe077939d90fa650809"
+  }
+ },
+ "installed_at": "2026-11-04T21:25:39.178845+00:00",
+ "overlay": {
+  "files": 17,
+  "path": "/home/debian/eski-exam/.overlays/cloud-v1-035c6d4d7cf7.tar",
+  "sha256": "035c6d4d7cf72ffd6d11c0e0ceb8a17c60d3e0467f763ce891179fe6d0ff28bb"
+ },
+ "phase_identities": {
+  "benchmark": "e1e00ef861abf3bd3d80a37423eb60446749135f778defba86678621a43e0a25",
+  "calibration": "a5aab9d3dbdf3fd62954990cb6bf6748e4a4165d11ab0b7bb3f83dce34a67176"
+ },
+ "planned_measurements": {
+  "benchmark": 128,
+  "calibration": 4
+ },
+ "protocol_sha256": "27366d68d25f3ae7b3564122e71c07997fdede71f9f323797c3443649688f0bc",
+ "root": "/home/debian/eski-exam/cloud-v1",
+ "schema": "eski-testbed-install-v1",
+ "siblings": [],
+ "start_command": "/home/debian/eski-exam/cloud-v1/exam.sh",
+ "started": false,
+ "status_command": "/home/debian/eski-exam/cloud-v1/exam.sh status",
+ "tools": {
+  "jq": "jq-1.7"
+ }
+}

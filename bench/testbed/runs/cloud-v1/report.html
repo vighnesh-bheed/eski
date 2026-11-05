@@ -1,0 +1,1071 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Eski Engine Comparison</title>
+<style>
+:root { color-scheme: light; --page: #f9f9f7; --surface: #fcfcfb; --ink-1: #0b0b0b; --ink-2: #52514e; --ink-3: #898781; --grid: #e1e0d9; --axis: #c3c2b7;
+  --border: rgba(11,11,11,0.10); --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { color-scheme: dark; --page: #0d0d0d; --surface: #1a1a19; --ink-1: #f0efec; --ink-2: #c3c2b7;
+  --ink-3: #898781; --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10); --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500; } }
+:root[data-theme="dark"] { color-scheme: dark; --page: #0d0d0d; --surface: #1a1a19; --ink-1: #f0efec; --ink-2: #c3c2b7; --ink-3: #898781; --grid: #2c2c2a;
+  --axis: #383835; --border: rgba(255,255,255,0.10); --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink-1); font-family: system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  font-size: 15px; line-height: 1.5; padding: 32px 16px 64px; }
+main { max-width: 1120px; margin: 0 auto; display: grid; gap: 32px; }
+h1 { font-size: clamp(24px, 3.4vw, 34px); line-height: 1.15; margin: 0; font-weight: 650; text-wrap: balance; }
+h2 { font-size: 20px; margin: 0 0 10px; font-weight: 650; }
+h3 { font-size: 16px; margin: 0; font-weight: 600; }
+p { margin: 0; max-width: 78ch; }
+.eyebrow { font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
+.lede { color: var(--ink-2); font-size: 16px; }
+header { display: grid; gap: 10px; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 20px; color: var(--ink-2); font-size: 14px; }
+.legend span { display: inline-flex; align-items: center; gap: 8px; }
+.swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.hollow { width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid var(--ink-1); display: inline-block; }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 24px; }
+.facts div { border-top: 1px solid var(--grid); padding-top: 6px; font-size: 14px; overflow-wrap: anywhere; }
+.facts b { display: block; font-size: 11.5px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--ink-3); font-weight: 600; }
+.workload { display: grid; gap: 8px; padding-top: 16px; border-top: 1px solid var(--grid); }
+.panels { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 4px; }
+.panel svg, .figure svg { display: block; width: 100%; height: auto; }
+.figure { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 4px; }
+.note { color: var(--ink-2); font-size: 14px; }
+.tablewrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+table { border-collapse: collapse; font-size: 13px; width: 100%; }
+th, td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; font-variant-numeric: tabular-nums; }
+th { color: var(--ink-3); font-weight: 600; font-size: 11.5px; letter-spacing: 0.04em; text-transform: uppercase; position: sticky; top: 0; background: var(--surface); }
+td.text, th.text { text-align: left; }
+td.reason { text-align: left; white-space: normal; min-width: 260px; color: var(--ink-2); }
+tr.excluded td { color: var(--ink-3); }
+details summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
+details summary:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
+code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.9em; overflow-wrap: anywhere; }
+@media (max-width: 760px) { .panels { grid-template-columns: 1fr; } body { padding-top: 20px; } }
+</style>
+</head>
+<body>
+<main>
+<header>
+<div class="eyebrow">Benchmark test bed, run cloud-v1, workflow DONE WITH EXCLUSIONS</div>
+<h1>Eski, Redis, Valkey and Dragonfly on one server core, four client cores</h1>
+<p class="lede">Bars are medians over the valid repetitions of each workload, whiskers the observed minimum and maximum; each panel has its own scale. 114 of 128 planned measurements are valid, 14 are excluded and 0 valid ones were client limited. The calibration phase ran 4 cases before the benchmark and 4 of them were valid; calibration values never enter the medians.</p>
+<div class="legend"><span><i class="swatch" style="background: var(--series-1)"></i>Eski</span><span><i class="swatch" style="background: var(--series-2)"></i>Redis 7.4.12</span><span><i class="swatch" style="background: var(--series-3)"></i>Valkey 8.1.11</span><span><i class="swatch" style="background: var(--series-4)"></i>Dragonfly 2.0.2</span><span><i class="hollow"></i>Excluded repetition, with its reason in the tooltip and the tables</span></div>
+</header>
+<section class="workload"><h3>GET 64 B, pipeline 1</h3><p class="note">Eski median throughput 244,645 ops/s at p99 0.215 ms; relative throughput: 0.94x Redis 7.4.12, 1.39x Valkey 8.1.11, 1.67x Dragonfly 2.0.2.</p><div class="panels"><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="GET 64 B, pipeline 1, Throughput" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">Throughput</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">operations per second, higher is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="131.5" y2="131.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="134.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">100K</text>
+<line x1="44" x2="332" y1="91.0" y2="91.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="94.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">200K</text>
+<line x1="44" x2="332" y1="50.5" y2="50.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="53.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">300K</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">400K</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 244,645 ops/s, range 185,318 ops/s to 280,599 ops/s over 4 valid repetitions</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V76.9 Q68.0 72.9 72.0 72.9 H88.0 Q92.0 72.9 92.0 76.9 V172.0 Z" fill="var(--series-1)"/>
+<path d="M80.0 58.4 V96.9 M76.0 58.4 H84.0 M76.0 96.9 H84.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<text x="80.0" y="53.4" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">245K</text>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 260,747 ops/s, range 259,761 ops/s to 262,881 ops/s over 4 valid repetitions</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V70.4 Q140.0 66.4 144.0 66.4 H160.0 Q164.0 66.4 164.0 70.4 V172.0 Z" fill="var(--series-2)"/>
+<path d="M152.0 65.5 V66.8 M148.0 65.5 H156.0 M148.0 66.8 H156.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 176,384 ops/s, range 173,391 ops/s to 179,377 ops/s over 2 valid repetitions. excluded repetition 3 (148,495 ops/s): case invalid; external cpu activity. excluded repetition 4 (142,299 ops/s): case invalid; external cpu activity</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V104.6 Q212.0 100.6 216.0 100.6 H232.0 Q236.0 100.6 236.0 104.6 V172.0 Z" fill="var(--series-3)"/>
+<path d="M224.0 99.4 V101.8 M220.0 99.4 H228.0 M220.0 101.8 H228.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<circle cx="242.0" cy="111.9" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+<circle cx="242.0" cy="114.4" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 146,517 ops/s, range 101,344 ops/s to 146,846 ops/s over 4 valid repetitions</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V116.7 Q284.0 112.7 288.0 112.7 H304.0 Q308.0 112.7 308.0 116.7 V172.0 Z" fill="var(--series-4)"/>
+<path d="M296.0 112.5 V131.0 M292.0 112.5 H300.0 M292.0 131.0 H300.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+</g>
+</svg></div><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="GET 64 B, pipeline 1, p99 latency" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">p99 latency</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">milliseconds, lower is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="131.5" y2="131.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="134.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.1</text>
+<line x1="44" x2="332" y1="91.0" y2="91.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="94.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.2</text>
+<line x1="44" x2="332" y1="50.5" y2="50.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="53.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.3</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.4</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 0.215 ms, range 0.215 ms to 0.215 ms over 4 valid repetitions</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V88.9 Q68.0 84.9 72.0 84.9 H88.0 Q92.0 84.9 92.0 88.9 V172.0 Z" fill="var(--series-1)"/>
+<text x="80.0" y="79.9" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">0.215</text>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 0.223 ms, range 0.223 ms to 0.223 ms over 4 valid repetitions</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V85.7 Q140.0 81.7 144.0 81.7 H160.0 Q164.0 81.7 164.0 85.7 V172.0 Z" fill="var(--series-2)"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 0.223 ms, range 0.223 ms to 0.223 ms over 2 valid repetitions. excluded repetition 3 (0.223 ms): case invalid; external cpu activity. excluded repetition 4 (0.231 ms): case invalid; external cpu activity</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V85.7 Q212.0 81.7 216.0 81.7 H232.0 Q236.0 81.7 236.0 85.7 V172.0 Z" fill="var(--series-3)"/>
+<circle cx="242.0" cy="81.7" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+<circle cx="242.0" cy="78.4" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 0.287 ms, range 0.271 ms to 0.287 ms over 4 valid repetitions</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V59.8 Q284.0 55.8 288.0 55.8 H304.0 Q308.0 55.8 308.0 59.8 V172.0 Z" fill="var(--series-4)"/>
+<path d="M296.0 55.8 V62.2 M292.0 55.8 H300.0 M292.0 62.2 H300.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+</g>
+</svg></div><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="GET 64 B, pipeline 1, Server memory peak" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">Server memory peak</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">MiB, lower is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="118.0" y2="118.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="121.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">20</text>
+<line x1="44" x2="332" y1="64.0" y2="64.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="67.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">40</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">60</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 14.7 MiB, range 14.7 MiB to 14.8 MiB over 4 valid repetitions</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V136.2 Q68.0 132.2 72.0 132.2 H88.0 Q92.0 132.2 92.0 136.2 V172.0 Z" fill="var(--series-1)"/>
+<path d="M80.0 132.0 V132.4 M76.0 132.0 H84.0 M76.0 132.4 H84.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<text x="80.0" y="127.0" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">14.7</text>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 23.0 MiB, range 22.7 MiB to 23.2 MiB over 4 valid repetitions</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V114.0 Q140.0 110.0 144.0 110.0 H160.0 Q164.0 110.0 164.0 114.0 V172.0 Z" fill="var(--series-2)"/>
+<path d="M152.0 109.5 V110.7 M148.0 109.5 H156.0 M148.0 110.7 H156.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 21.0 MiB, range 20.9 MiB to 21.1 MiB over 2 valid repetitions. excluded repetition 3 (20.9 MiB): case invalid; external cpu activity. excluded repetition 4 (21.1 MiB): case invalid; external cpu activity</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V119.3 Q212.0 115.3 216.0 115.3 H232.0 Q236.0 115.3 236.0 119.3 V172.0 Z" fill="var(--series-3)"/>
+<path d="M224.0 115.0 V115.7 M220.0 115.0 H228.0 M220.0 115.7 H228.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<circle cx="242.0" cy="115.4" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+<circle cx="242.0" cy="114.9" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 40.3 MiB, range 39.4 MiB to 40.6 MiB over 4 valid repetitions</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V67.3 Q284.0 63.3 288.0 63.3 H304.0 Q308.0 63.3 308.0 67.3 V172.0 Z" fill="var(--series-4)"/>
+<path d="M296.0 62.3 V65.6 M292.0 62.3 H300.0 M292.0 65.6 H300.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+</g>
+</svg></div></div></section>
+<section class="workload"><h3>SET 64 B, pipeline 1</h3><p class="note">Eski median throughput 241,782 ops/s at p99 0.215 ms; relative throughput: 0.96x Redis 7.4.12, 0.98x Valkey 8.1.11, 2.05x Dragonfly 2.0.2.</p><div class="panels"><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="SET 64 B, pipeline 1, Throughput" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">Throughput</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">operations per second, higher is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="131.5" y2="131.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="134.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">100K</text>
+<line x1="44" x2="332" y1="91.0" y2="91.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="94.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">200K</text>
+<line x1="44" x2="332" y1="50.5" y2="50.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="53.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">300K</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">400K</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 241,782 ops/s, range 156,106 ops/s to 287,465 ops/s over 4 valid repetitions</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V78.1 Q68.0 74.1 72.0 74.1 H88.0 Q92.0 74.1 92.0 78.1 V172.0 Z" fill="var(--series-1)"/>
+<path d="M80.0 55.6 V108.8 M76.0 55.6 H84.0 M76.0 108.8 H84.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<text x="80.0" y="50.6" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">242K</text>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 251,949 ops/s, range 175,691 ops/s to 255,417 ops/s over 4 valid repetitions</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V74.0 Q140.0 70.0 144.0 70.0 H160.0 Q164.0 70.0 164.0 74.0 V172.0 Z" fill="var(--series-2)"/>
+<path d="M152.0 68.6 V100.8 M148.0 68.6 H156.0 M148.0 100.8 H156.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 247,855 ops/s, range 161,042 ops/s to 250,636 ops/s over 3 valid repetitions. excluded repetition 3 (140,350 ops/s): case invalid; external cpu activity</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V75.6 Q212.0 71.6 216.0 71.6 H232.0 Q236.0 71.6 236.0 75.6 V172.0 Z" fill="var(--series-3)"/>
+<path d="M224.0 70.5 V106.8 M220.0 70.5 H228.0 M220.0 106.8 H228.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<circle cx="242.0" cy="115.2" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 117,723 ops/s, range 88,512 ops/s to 137,923 ops/s over 4 valid repetitions</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V128.3 Q284.0 124.3 288.0 124.3 H304.0 Q308.0 124.3 308.0 128.3 V172.0 Z" fill="var(--series-4)"/>
+<path d="M296.0 116.1 V136.2 M292.0 116.1 H300.0 M292.0 136.2 H300.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+</g>
+</svg></div><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="SET 64 B, pipeline 1, p99 latency" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">p99 latency</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">milliseconds, lower is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="131.5" y2="131.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="134.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.1</text>
+<line x1="44" x2="332" y1="91.0" y2="91.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="94.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.2</text>
+<line x1="44" x2="332" y1="50.5" y2="50.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="53.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.3</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.4</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 0.215 ms, range 0.207 ms to 0.215 ms over 4 valid repetitions</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V88.9 Q68.0 84.9 72.0 84.9 H88.0 Q92.0 84.9 92.0 88.9 V172.0 Z" fill="var(--series-1)"/>
+<path d="M80.0 84.9 V88.2 M76.0 84.9 H84.0 M76.0 88.2 H84.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<text x="80.0" y="79.9" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">0.215</text>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 0.231 ms, range 0.223 ms to 0.231 ms over 4 valid repetitions</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V82.4 Q140.0 78.4 144.0 78.4 H160.0 Q164.0 78.4 164.0 82.4 V172.0 Z" fill="var(--series-2)"/>
+<path d="M152.0 78.4 V81.7 M148.0 78.4 H156.0 M148.0 81.7 H156.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 0.231 ms, range 0.231 ms to 0.231 ms over 3 valid repetitions. excluded repetition 3 (0.231 ms): case invalid; external cpu activity</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V82.4 Q212.0 78.4 216.0 78.4 H232.0 Q236.0 78.4 236.0 82.4 V172.0 Z" fill="var(--series-3)"/>
+<circle cx="242.0" cy="78.4" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 0.303 ms, range 0.287 ms to 0.303 ms over 4 valid repetitions</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V53.3 Q284.0 49.3 288.0 49.3 H304.0 Q308.0 49.3 308.0 53.3 V172.0 Z" fill="var(--series-4)"/>
+<path d="M296.0 49.3 V55.8 M292.0 49.3 H300.0 M292.0 55.8 H300.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+</g>
+</svg></div><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="SET 64 B, pipeline 1, Server memory peak" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">Server memory peak</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">MiB, lower is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="118.0" y2="118.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="121.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">20</text>
+<line x1="44" x2="332" y1="64.0" y2="64.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="67.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">40</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">60</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 14.8 MiB, range 14.7 MiB to 14.8 MiB over 4 valid repetitions</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V136.0 Q68.0 132.0 72.0 132.0 H88.0 Q92.0 132.0 92.0 136.0 V172.0 Z" fill="var(--series-1)"/>
+<path d="M80.0 132.0 V132.4 M76.0 132.0 H84.0 M76.0 132.4 H84.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<text x="80.0" y="127.0" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">14.8</text>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 22.9 MiB, range 22.8 MiB to 23.1 MiB over 4 valid repetitions</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V114.0 Q140.0 110.0 144.0 110.0 H160.0 Q164.0 110.0 164.0 114.0 V172.0 Z" fill="var(--series-2)"/>
+<path d="M152.0 109.7 V110.4 M148.0 109.7 H156.0 M148.0 110.4 H156.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 20.9 MiB, range 20.9 MiB to 21.2 MiB over 3 valid repetitions. excluded repetition 3 (20.9 MiB): case invalid; external cpu activity</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V119.5 Q212.0 115.5 216.0 115.5 H232.0 Q236.0 115.5 236.0 119.5 V172.0 Z" fill="var(--series-3)"/>
+<path d="M224.0 114.9 V115.6 M220.0 114.9 H228.0 M220.0 115.6 H228.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<circle cx="242.0" cy="115.5" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 39.6 MiB, range 39.4 MiB to 40.2 MiB over 4 valid repetitions</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V69.0 Q284.0 65.0 288.0 65.0 H304.0 Q308.0 65.0 308.0 69.0 V172.0 Z" fill="var(--series-4)"/>
+<path d="M296.0 63.4 V65.6 M292.0 63.4 H300.0 M292.0 65.6 H300.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+</g>
+</svg></div></div></section>
+<section class="workload"><h3>SET and GET 1:1, 64 B, pipeline 1</h3><p class="note">Eski median throughput 237,218 ops/s at p99 0.215 ms; relative throughput: 1.41x Redis 7.4.12, 0.94x Valkey 8.1.11, 2.02x Dragonfly 2.0.2.</p><div class="panels"><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="SET and GET 1:1, 64 B, pipeline 1, Throughput" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">Throughput</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">operations per second, higher is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="131.5" y2="131.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="134.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">100K</text>
+<line x1="44" x2="332" y1="91.0" y2="91.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="94.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">200K</text>
+<line x1="44" x2="332" y1="50.5" y2="50.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="53.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">300K</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">400K</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 237,218 ops/s, range 188,398 ops/s to 282,531 ops/s over 4 valid repetitions</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V79.9 Q68.0 75.9 72.0 75.9 H88.0 Q92.0 75.9 92.0 79.9 V172.0 Z" fill="var(--series-1)"/>
+<path d="M80.0 57.6 V95.7 M76.0 57.6 H84.0 M76.0 95.7 H84.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<text x="80.0" y="52.6" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">237K</text>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 168,230 ops/s, range 167,722 ops/s to 177,877 ops/s over 3 valid repetitions. excluded repetition 1 (166,450 ops/s): case invalid; external cpu activity</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V107.9 Q140.0 103.9 144.0 103.9 H160.0 Q164.0 103.9 164.0 107.9 V172.0 Z" fill="var(--series-2)"/>
+<path d="M152.0 100.0 V104.1 M148.0 100.0 H156.0 M148.0 104.1 H156.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<circle cx="170.0" cy="104.6" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 252,022 ops/s, range 166,121 ops/s to 257,708 ops/s over 4 valid repetitions</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V73.9 Q212.0 69.9 216.0 69.9 H232.0 Q236.0 69.9 236.0 73.9 V172.0 Z" fill="var(--series-3)"/>
+<path d="M224.0 67.6 V104.7 M220.0 67.6 H228.0 M220.0 104.7 H228.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 117,363 ops/s, range 76,007 ops/s to 139,518 ops/s over 4 valid repetitions</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V128.5 Q284.0 124.5 288.0 124.5 H304.0 Q308.0 124.5 308.0 128.5 V172.0 Z" fill="var(--series-4)"/>
+<path d="M296.0 115.5 V141.2 M292.0 115.5 H300.0 M292.0 141.2 H300.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+</g>
+</svg></div><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="SET and GET 1:1, 64 B, pipeline 1, p99 latency" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">p99 latency</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">milliseconds, lower is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="131.5" y2="131.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="134.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.1</text>
+<line x1="44" x2="332" y1="91.0" y2="91.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="94.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.2</text>
+<line x1="44" x2="332" y1="50.5" y2="50.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="53.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.3</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.4</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 0.215 ms, range 0.215 ms to 0.215 ms over 4 valid repetitions</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V88.9 Q68.0 84.9 72.0 84.9 H88.0 Q92.0 84.9 92.0 88.9 V172.0 Z" fill="var(--series-1)"/>
+<text x="80.0" y="79.9" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">0.215</text>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 0.231 ms, range 0.231 ms to 0.231 ms over 3 valid repetitions. excluded repetition 1 (0.231 ms): case invalid; external cpu activity</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V82.4 Q140.0 78.4 144.0 78.4 H160.0 Q164.0 78.4 164.0 82.4 V172.0 Z" fill="var(--series-2)"/>
+<circle cx="170.0" cy="78.4" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 0.227 ms, range 0.223 ms to 0.231 ms over 4 valid repetitions</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V84.1 Q212.0 80.1 216.0 80.1 H232.0 Q236.0 80.1 236.0 84.1 V172.0 Z" fill="var(--series-3)"/>
+<path d="M224.0 78.4 V81.7 M220.0 78.4 H228.0 M220.0 81.7 H228.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 0.295 ms, range 0.287 ms to 0.303 ms over 4 valid repetitions</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V56.5 Q284.0 52.5 288.0 52.5 H304.0 Q308.0 52.5 308.0 56.5 V172.0 Z" fill="var(--series-4)"/>
+<path d="M296.0 49.3 V55.8 M292.0 49.3 H300.0 M292.0 55.8 H300.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+</g>
+</svg></div><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="SET and GET 1:1, 64 B, pipeline 1, Server memory peak" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">Server memory peak</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">MiB, lower is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="118.0" y2="118.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="121.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">20</text>
+<line x1="44" x2="332" y1="64.0" y2="64.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="67.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">40</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">60</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 14.8 MiB, range 14.6 MiB to 14.8 MiB over 4 valid repetitions</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V136.0 Q68.0 132.0 72.0 132.0 H88.0 Q92.0 132.0 92.0 136.0 V172.0 Z" fill="var(--series-1)"/>
+<path d="M80.0 131.9 V132.5 M76.0 131.9 H84.0 M76.0 132.5 H84.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<text x="80.0" y="126.9" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">14.8</text>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 23.1 MiB, range 22.9 MiB to 23.1 MiB over 3 valid repetitions. excluded repetition 1 (22.9 MiB): case invalid; external cpu activity</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V113.8 Q140.0 109.8 144.0 109.8 H160.0 Q164.0 109.8 164.0 113.8 V172.0 Z" fill="var(--series-2)"/>
+<path d="M152.0 109.6 V110.1 M148.0 109.6 H156.0 M148.0 110.1 H156.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<circle cx="170.0" cy="110.2" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 21.0 MiB, range 20.9 MiB to 21.2 MiB over 4 valid repetitions</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V119.2 Q212.0 115.2 216.0 115.2 H232.0 Q236.0 115.2 236.0 119.2 V172.0 Z" fill="var(--series-3)"/>
+<path d="M224.0 114.7 V115.7 M220.0 114.7 H228.0 M220.0 115.7 H228.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 40.1 MiB, range 39.6 MiB to 40.6 MiB over 4 valid repetitions</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V67.8 Q284.0 63.8 288.0 63.8 H304.0 Q308.0 63.8 308.0 67.8 V172.0 Z" fill="var(--series-4)"/>
+<path d="M296.0 62.3 V65.1 M292.0 62.3 H300.0 M292.0 65.1 H300.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+</g>
+</svg></div></div></section>
+<section class="workload"><h3>SET and GET 1:1, 64 B, pipeline 16</h3><p class="note">Eski median throughput 2,179,538 ops/s at p99 0.375 ms; relative throughput: 2.20x Redis 7.4.12, 1.50x Valkey 8.1.11, 3.46x Dragonfly 2.0.2.</p><div class="panels"><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="SET and GET 1:1, 64 B, pipeline 16, Throughput" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">Throughput</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">operations per second, higher is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="118.0" y2="118.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="121.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">1M</text>
+<line x1="44" x2="332" y1="64.0" y2="64.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="67.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">2M</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">3M</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 2,179,538 ops/s, range 1,502,179 ops/s to 2,590,011 ops/s over 4 valid repetitions</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V58.3 Q68.0 54.3 72.0 54.3 H88.0 Q92.0 54.3 92.0 58.3 V172.0 Z" fill="var(--series-1)"/>
+<path d="M80.0 32.1 V90.9 M76.0 32.1 H84.0 M76.0 90.9 H84.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<text x="80.0" y="27.1" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">2.18M</text>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 988,890 ops/s, range 940,741 ops/s to 1,470,699 ops/s over 4 valid repetitions</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V122.6 Q140.0 118.6 144.0 118.6 H160.0 Q164.0 118.6 164.0 122.6 V172.0 Z" fill="var(--series-2)"/>
+<path d="M152.0 92.6 V121.2 M148.0 92.6 H156.0 M148.0 121.2 H156.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 1,448,979 ops/s, range 1,434,618 ops/s to 1,463,341 ops/s over 2 valid repetitions. excluded repetition 2 (809,502 ops/s): case invalid; external cpu activity. excluded repetition 4 (1,449,344 ops/s): case invalid; external cpu activity</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V97.8 Q212.0 93.8 216.0 93.8 H232.0 Q236.0 93.8 236.0 97.8 V172.0 Z" fill="var(--series-3)"/>
+<path d="M224.0 93.0 V94.5 M220.0 93.0 H228.0 M220.0 94.5 H228.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<circle cx="242.0" cy="128.3" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+<circle cx="242.0" cy="93.7" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 629,804 ops/s, range 465,355 ops/s to 794,253 ops/s over 2 valid repetitions. excluded repetition 3 (796,029 ops/s): case invalid; external cpu activity. excluded repetition 4 (800,675 ops/s): case invalid; external cpu activity</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V142.0 Q284.0 138.0 288.0 138.0 H304.0 Q308.0 138.0 308.0 142.0 V172.0 Z" fill="var(--series-4)"/>
+<path d="M296.0 129.1 V146.9 M292.0 129.1 H300.0 M292.0 146.9 H300.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<circle cx="314.0" cy="129.0" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+<circle cx="314.0" cy="128.8" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+</g>
+</svg></div><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="SET and GET 1:1, 64 B, pipeline 16, p99 latency" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">p99 latency</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">milliseconds, lower is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="131.5" y2="131.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="134.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.25</text>
+<line x1="44" x2="332" y1="91.0" y2="91.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="94.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.5</text>
+<line x1="44" x2="332" y1="50.5" y2="50.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="53.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.75</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">1</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 0.375 ms, range 0.375 ms to 0.383 ms over 4 valid repetitions</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V115.2 Q68.0 111.2 72.0 111.2 H88.0 Q92.0 111.2 92.0 115.2 V172.0 Z" fill="var(--series-1)"/>
+<path d="M80.0 110.0 V111.2 M76.0 110.0 H84.0 M76.0 111.2 H84.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<text x="80.0" y="105.0" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">0.375</text>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 0.495 ms, range 0.495 ms to 0.495 ms over 4 valid repetitions</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V95.8 Q140.0 91.8 144.0 91.8 H160.0 Q164.0 91.8 164.0 95.8 V172.0 Z" fill="var(--series-2)"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 0.499 ms, range 0.495 ms to 0.503 ms over 2 valid repetitions. excluded repetition 2 (0.503 ms): case invalid; external cpu activity. excluded repetition 4 (0.511 ms): case invalid; external cpu activity</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V95.2 Q212.0 91.2 216.0 91.2 H232.0 Q236.0 91.2 236.0 95.2 V172.0 Z" fill="var(--series-3)"/>
+<path d="M224.0 90.5 V91.8 M220.0 90.5 H228.0 M220.0 91.8 H228.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<circle cx="242.0" cy="90.5" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+<circle cx="242.0" cy="89.2" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 0.835 ms, range 0.791 ms to 0.879 ms over 2 valid repetitions. excluded repetition 3 (0.783 ms): case invalid; external cpu activity. excluded repetition 4 (0.783 ms): case invalid; external cpu activity</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V40.7 Q284.0 36.7 288.0 36.7 H304.0 Q308.0 36.7 308.0 40.7 V172.0 Z" fill="var(--series-4)"/>
+<path d="M296.0 29.6 V43.9 M292.0 29.6 H300.0 M292.0 43.9 H300.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<circle cx="314.0" cy="45.2" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+<circle cx="314.0" cy="45.2" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+</g>
+</svg></div><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="SET and GET 1:1, 64 B, pipeline 16, Server memory peak" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">Server memory peak</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">MiB, lower is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="118.0" y2="118.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="121.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">20</text>
+<line x1="44" x2="332" y1="64.0" y2="64.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="67.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">40</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">60</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 14.8 MiB, range 14.6 MiB to 14.9 MiB over 4 valid repetitions</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V136.1 Q68.0 132.1 72.0 132.1 H88.0 Q92.0 132.1 92.0 136.1 V172.0 Z" fill="var(--series-1)"/>
+<path d="M80.0 131.8 V132.6 M76.0 131.8 H84.0 M76.0 132.6 H84.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<text x="80.0" y="126.8" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">14.8</text>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 22.9 MiB, range 22.9 MiB to 23.1 MiB over 4 valid repetitions</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V114.1 Q140.0 110.1 144.0 110.1 H160.0 Q164.0 110.1 164.0 114.1 V172.0 Z" fill="var(--series-2)"/>
+<path d="M152.0 109.6 V110.2 M148.0 109.6 H156.0 M148.0 110.2 H156.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 21.8 MiB, range 21.8 MiB to 21.8 MiB over 2 valid repetitions. excluded repetition 2 (21.8 MiB): case invalid; external cpu activity. excluded repetition 4 (22.1 MiB): case invalid; external cpu activity</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V117.2 Q212.0 113.2 216.0 113.2 H232.0 Q236.0 113.2 236.0 117.2 V172.0 Z" fill="var(--series-3)"/>
+<path d="M224.0 113.1 V113.2 M220.0 113.1 H228.0 M220.0 113.2 H228.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<circle cx="242.0" cy="113.1" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+<circle cx="242.0" cy="112.4" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 44.9 MiB, range 44.9 MiB to 44.9 MiB over 2 valid repetitions. excluded repetition 3 (45.0 MiB): case invalid; external cpu activity. excluded repetition 4 (44.9 MiB): case invalid; external cpu activity</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V54.7 Q284.0 50.7 288.0 50.7 H304.0 Q308.0 50.7 308.0 54.7 V172.0 Z" fill="var(--series-4)"/>
+<path d="M296.0 50.7 V50.8 M292.0 50.7 H300.0 M292.0 50.8 H300.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<circle cx="314.0" cy="50.5" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+<circle cx="314.0" cy="50.9" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+</g>
+</svg></div></div></section>
+<section class="workload"><h3>GET 1024 B, pipeline 1</h3><p class="note">Eski median throughput 259,063 ops/s at p99 0.239 ms; relative throughput: 1.08x Redis 7.4.12, 1.51x Valkey 8.1.11, 1.96x Dragonfly 2.0.2.</p><div class="panels"><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="GET 1024 B, pipeline 1, Throughput" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">Throughput</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">operations per second, higher is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="118.0" y2="118.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="121.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">100K</text>
+<line x1="44" x2="332" y1="64.0" y2="64.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="67.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">200K</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">300K</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 259,063 ops/s, range 178,781 ops/s to 261,717 ops/s over 3 valid repetitions. excluded repetition 3 (258,528 ops/s): case invalid; external cpu activity</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V36.1 Q68.0 32.1 72.0 32.1 H88.0 Q92.0 32.1 92.0 36.1 V172.0 Z" fill="var(--series-1)"/>
+<path d="M80.0 30.7 V75.5 M76.0 30.7 H84.0 M76.0 75.5 H84.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<text x="80.0" y="25.7" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">259K</text>
+<circle cx="98.0" cy="32.4" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 239,505 ops/s, range 236,773 ops/s to 239,978 ops/s over 3 valid repetitions. excluded repetition 3 (186,181 ops/s): case invalid; external cpu activity</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V46.7 Q140.0 42.7 144.0 42.7 H160.0 Q164.0 42.7 164.0 46.7 V172.0 Z" fill="var(--series-2)"/>
+<path d="M152.0 42.4 V44.1 M148.0 42.4 H156.0 M148.0 44.1 H156.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<circle cx="170.0" cy="71.5" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 171,395 ops/s, range 137,830 ops/s to 236,405 ops/s over 4 valid repetitions</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V83.4 Q212.0 79.4 216.0 79.4 H232.0 Q236.0 79.4 236.0 83.4 V172.0 Z" fill="var(--series-3)"/>
+<path d="M224.0 44.3 V97.6 M220.0 44.3 H228.0 M220.0 97.6 H228.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 132,166 ops/s, range 131,445 ops/s to 133,005 ops/s over 3 valid repetitions. excluded repetition 4 (134,073 ops/s): case invalid; external cpu activity</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V104.6 Q284.0 100.6 288.0 100.6 H304.0 Q308.0 100.6 308.0 104.6 V172.0 Z" fill="var(--series-4)"/>
+<path d="M296.0 100.2 V101.0 M292.0 100.2 H300.0 M292.0 101.0 H300.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<circle cx="314.0" cy="99.6" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+</g>
+</svg></div><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="GET 1024 B, pipeline 1, p99 latency" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">p99 latency</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">milliseconds, lower is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="131.5" y2="131.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="134.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.1</text>
+<line x1="44" x2="332" y1="91.0" y2="91.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="94.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.2</text>
+<line x1="44" x2="332" y1="50.5" y2="50.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="53.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.3</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.4</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 0.239 ms, range 0.231 ms to 0.239 ms over 3 valid repetitions. excluded repetition 3 (0.239 ms): case invalid; external cpu activity</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V79.2 Q68.0 75.2 72.0 75.2 H88.0 Q92.0 75.2 92.0 79.2 V172.0 Z" fill="var(--series-1)"/>
+<path d="M80.0 75.2 V78.4 M76.0 75.2 H84.0 M76.0 78.4 H84.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<text x="80.0" y="70.2" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">0.239</text>
+<circle cx="98.0" cy="75.2" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 0.239 ms, range 0.239 ms to 0.239 ms over 3 valid repetitions. excluded repetition 3 (0.239 ms): case invalid; external cpu activity</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V79.2 Q140.0 75.2 144.0 75.2 H160.0 Q164.0 75.2 164.0 79.2 V172.0 Z" fill="var(--series-2)"/>
+<circle cx="170.0" cy="75.2" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 0.239 ms, range 0.239 ms to 0.239 ms over 4 valid repetitions</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V79.2 Q212.0 75.2 216.0 75.2 H232.0 Q236.0 75.2 236.0 79.2 V172.0 Z" fill="var(--series-3)"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 0.311 ms, range 0.311 ms to 0.311 ms over 3 valid repetitions. excluded repetition 4 (0.311 ms): case invalid; external cpu activity</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V50.0 Q284.0 46.0 288.0 46.0 H304.0 Q308.0 46.0 308.0 50.0 V172.0 Z" fill="var(--series-4)"/>
+<circle cx="314.0" cy="46.0" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+</g>
+</svg></div><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="GET 1024 B, pipeline 1, Server memory peak" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">Server memory peak</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">MiB, lower is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="118.0" y2="118.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="121.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">50</text>
+<line x1="44" x2="332" y1="64.0" y2="64.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="67.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">100</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">150</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 113.2 MiB, range 113.1 MiB to 113.3 MiB over 3 valid repetitions. excluded repetition 3 (113.2 MiB): case invalid; external cpu activity</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V53.7 Q68.0 49.7 72.0 49.7 H88.0 Q92.0 49.7 92.0 53.7 V172.0 Z" fill="var(--series-1)"/>
+<path d="M80.0 49.6 V49.9 M76.0 49.6 H84.0 M76.0 49.9 H84.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<text x="80.0" y="44.6" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">113</text>
+<circle cx="98.0" cy="49.7" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 137.6 MiB, range 137.6 MiB to 137.7 MiB over 3 valid repetitions. excluded repetition 3 (137.9 MiB): case invalid; external cpu activity</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V27.3 Q140.0 23.3 144.0 23.3 H160.0 Q164.0 23.3 164.0 27.3 V172.0 Z" fill="var(--series-2)"/>
+<path d="M152.0 23.3 V23.4 M148.0 23.3 H156.0 M148.0 23.4 H156.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<circle cx="170.0" cy="23.1" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 135.8 MiB, range 135.6 MiB to 135.9 MiB over 4 valid repetitions</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V29.3 Q212.0 25.3 216.0 25.3 H232.0 Q236.0 25.3 236.0 29.3 V172.0 Z" fill="var(--series-3)"/>
+<path d="M224.0 25.2 V25.6 M220.0 25.2 H228.0 M220.0 25.6 H228.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 124.2 MiB, range 123.8 MiB to 124.2 MiB over 3 valid repetitions. excluded repetition 4 (124.3 MiB): case invalid; external cpu activity</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V41.8 Q284.0 37.8 288.0 37.8 H304.0 Q308.0 37.8 308.0 41.8 V172.0 Z" fill="var(--series-4)"/>
+<path d="M296.0 37.8 V38.2 M292.0 37.8 H300.0 M292.0 38.2 H300.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<circle cx="314.0" cy="37.7" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+</g>
+</svg></div></div></section>
+<section class="workload"><h3>HGET, 16 fields of 64 B, pipeline 1</h3><p class="note">Eski median throughput 226,112 ops/s at p99 0.239 ms; relative throughput: 0.94x Redis 7.4.12, 0.94x Valkey 8.1.11, 1.61x Dragonfly 2.0.2.</p><div class="panels"><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="HGET, 16 fields of 64 B, pipeline 1, Throughput" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">Throughput</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">operations per second, higher is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="118.0" y2="118.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="121.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">100K</text>
+<line x1="44" x2="332" y1="64.0" y2="64.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="67.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">200K</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">300K</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 226,112 ops/s, range 151,960 ops/s to 257,848 ops/s over 4 valid repetitions</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V53.9 Q68.0 49.9 72.0 49.9 H88.0 Q92.0 49.9 92.0 53.9 V172.0 Z" fill="var(--series-1)"/>
+<path d="M80.0 32.8 V89.9 M76.0 32.8 H84.0 M76.0 89.9 H84.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<text x="80.0" y="27.8" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">226K</text>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 240,044 ops/s, range 163,282 ops/s to 243,689 ops/s over 4 valid repetitions</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V46.4 Q140.0 42.4 144.0 42.4 H160.0 Q164.0 42.4 164.0 46.4 V172.0 Z" fill="var(--series-2)"/>
+<path d="M152.0 40.4 V83.8 M148.0 40.4 H156.0 M148.0 83.8 H156.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 240,906 ops/s, range 169,192 ops/s to 243,681 ops/s over 4 valid repetitions</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V45.9 Q212.0 41.9 216.0 41.9 H232.0 Q236.0 41.9 236.0 45.9 V172.0 Z" fill="var(--series-3)"/>
+<path d="M224.0 40.4 V80.6 M220.0 40.4 H228.0 M220.0 80.6 H228.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 140,202 ops/s, range 140,136 ops/s to 140,246 ops/s over 3 valid repetitions. excluded repetition 4 (139,994 ops/s): case invalid; external cpu activity</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V100.3 Q284.0 96.3 288.0 96.3 H304.0 Q308.0 96.3 308.0 100.3 V172.0 Z" fill="var(--series-4)"/>
+<path d="M296.0 96.3 V96.3 M292.0 96.3 H300.0 M292.0 96.3 H300.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<circle cx="314.0" cy="96.4" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+</g>
+</svg></div><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="HGET, 16 fields of 64 B, pipeline 1, p99 latency" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">p99 latency</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">milliseconds, lower is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="131.5" y2="131.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="134.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.1</text>
+<line x1="44" x2="332" y1="91.0" y2="91.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="94.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.2</text>
+<line x1="44" x2="332" y1="50.5" y2="50.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="53.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.3</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.4</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 0.239 ms, range 0.239 ms to 0.247 ms over 4 valid repetitions</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V79.2 Q68.0 75.2 72.0 75.2 H88.0 Q92.0 75.2 92.0 79.2 V172.0 Z" fill="var(--series-1)"/>
+<path d="M80.0 72.0 V75.2 M76.0 72.0 H84.0 M76.0 75.2 H84.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<text x="80.0" y="67.0" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">0.239</text>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 0.239 ms, range 0.231 ms to 0.239 ms over 4 valid repetitions</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V79.2 Q140.0 75.2 144.0 75.2 H160.0 Q164.0 75.2 164.0 79.2 V172.0 Z" fill="var(--series-2)"/>
+<path d="M152.0 75.2 V78.4 M148.0 75.2 H156.0 M148.0 78.4 H156.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 0.231 ms, range 0.231 ms to 0.239 ms over 4 valid repetitions</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V82.4 Q212.0 78.4 216.0 78.4 H232.0 Q236.0 78.4 236.0 82.4 V172.0 Z" fill="var(--series-3)"/>
+<path d="M224.0 75.2 V78.4 M220.0 75.2 H228.0 M220.0 78.4 H228.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 0.295 ms, range 0.295 ms to 0.303 ms over 3 valid repetitions. excluded repetition 4 (0.295 ms): case invalid; external cpu activity</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V56.5 Q284.0 52.5 288.0 52.5 H304.0 Q308.0 52.5 308.0 56.5 V172.0 Z" fill="var(--series-4)"/>
+<path d="M296.0 49.3 V52.5 M292.0 49.3 H300.0 M292.0 52.5 H300.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<circle cx="314.0" cy="52.5" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+</g>
+</svg></div><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="HGET, 16 fields of 64 B, pipeline 1, Server memory peak" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">Server memory peak</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">MiB, lower is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="118.0" y2="118.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="121.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">100</text>
+<line x1="44" x2="332" y1="64.0" y2="64.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="67.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">200</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">300</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 132.9 MiB, range 132.7 MiB to 133.0 MiB over 4 valid repetitions</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V104.2 Q68.0 100.2 72.0 100.2 H88.0 Q92.0 100.2 92.0 104.2 V172.0 Z" fill="var(--series-1)"/>
+<path d="M80.0 100.2 V100.4 M76.0 100.2 H84.0 M76.0 100.4 H84.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<text x="80.0" y="95.2" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">133</text>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 137.9 MiB, range 137.6 MiB to 138.1 MiB over 4 valid repetitions</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V101.5 Q140.0 97.5 144.0 97.5 H160.0 Q164.0 97.5 164.0 101.5 V172.0 Z" fill="var(--series-2)"/>
+<path d="M152.0 97.4 V97.7 M148.0 97.4 H156.0 M148.0 97.7 H156.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 135.8 MiB, range 135.7 MiB to 135.9 MiB over 4 valid repetitions</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V102.7 Q212.0 98.7 216.0 98.7 H232.0 Q236.0 98.7 236.0 102.7 V172.0 Z" fill="var(--series-3)"/>
+<path d="M224.0 98.6 V98.7 M220.0 98.6 H228.0 M220.0 98.7 H228.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 232.2 MiB, range 232.1 MiB to 232.3 MiB over 3 valid repetitions. excluded repetition 4 (232.3 MiB): case invalid; external cpu activity</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V50.6 Q284.0 46.6 288.0 46.6 H304.0 Q308.0 46.6 308.0 50.6 V172.0 Z" fill="var(--series-4)"/>
+<path d="M296.0 46.6 V46.7 M292.0 46.6 H300.0 M292.0 46.7 H300.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<circle cx="314.0" cy="46.6" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+</g>
+</svg></div></div></section>
+<section class="workload"><h3>SISMEMBER, 16 members, pipeline 1</h3><p class="note">Eski median throughput 271,875 ops/s at p99 0.223 ms; relative throughput: 1.21x Redis 7.4.12, 1.07x Valkey 8.1.11, 1.77x Dragonfly 2.0.2.</p><div class="panels"><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="SISMEMBER, 16 members, pipeline 1, Throughput" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">Throughput</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">operations per second, higher is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="118.0" y2="118.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="121.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">100K</text>
+<line x1="44" x2="332" y1="64.0" y2="64.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="67.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">200K</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">300K</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 271,875 ops/s, range 172,964 ops/s to 275,631 ops/s over 4 valid repetitions</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V29.2 Q68.0 25.2 72.0 25.2 H88.0 Q92.0 25.2 92.0 29.2 V172.0 Z" fill="var(--series-1)"/>
+<path d="M80.0 23.2 V78.6 M76.0 23.2 H84.0 M76.0 78.6 H84.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<text x="80.0" y="18.2" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">272K</text>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 224,084 ops/s, range 174,384 ops/s to 254,737 ops/s over 4 valid repetitions</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V55.0 Q140.0 51.0 144.0 51.0 H160.0 Q164.0 51.0 164.0 55.0 V172.0 Z" fill="var(--series-2)"/>
+<path d="M152.0 34.4 V77.8 M148.0 34.4 H156.0 M148.0 77.8 H156.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 254,385 ops/s, range 175,183 ops/s to 254,670 ops/s over 4 valid repetitions</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V38.6 Q212.0 34.6 216.0 34.6 H232.0 Q236.0 34.6 236.0 38.6 V172.0 Z" fill="var(--series-3)"/>
+<path d="M224.0 34.5 V77.4 M220.0 34.5 H228.0 M220.0 77.4 H228.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 153,949 ops/s, range 152,243 ops/s to 155,918 ops/s over 4 valid repetitions</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V92.9 Q284.0 88.9 288.0 88.9 H304.0 Q308.0 88.9 308.0 92.9 V172.0 Z" fill="var(--series-4)"/>
+<path d="M296.0 87.8 V89.8 M292.0 87.8 H300.0 M292.0 89.8 H300.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+</g>
+</svg></div><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="SISMEMBER, 16 members, pipeline 1, p99 latency" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">p99 latency</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">milliseconds, lower is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="131.5" y2="131.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="134.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.1</text>
+<line x1="44" x2="332" y1="91.0" y2="91.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="94.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.2</text>
+<line x1="44" x2="332" y1="50.5" y2="50.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="53.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.3</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.4</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 0.223 ms, range 0.223 ms to 0.231 ms over 4 valid repetitions</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V85.7 Q68.0 81.7 72.0 81.7 H88.0 Q92.0 81.7 92.0 85.7 V172.0 Z" fill="var(--series-1)"/>
+<path d="M80.0 78.4 V81.7 M76.0 78.4 H84.0 M76.0 81.7 H84.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<text x="80.0" y="73.4" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">0.223</text>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 0.227 ms, range 0.223 ms to 0.231 ms over 4 valid repetitions</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V84.1 Q140.0 80.1 144.0 80.1 H160.0 Q164.0 80.1 164.0 84.1 V172.0 Z" fill="var(--series-2)"/>
+<path d="M152.0 78.4 V81.7 M148.0 78.4 H156.0 M148.0 81.7 H156.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 0.223 ms, range 0.223 ms to 0.231 ms over 4 valid repetitions</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V85.7 Q212.0 81.7 216.0 81.7 H232.0 Q236.0 81.7 236.0 85.7 V172.0 Z" fill="var(--series-3)"/>
+<path d="M224.0 78.4 V81.7 M220.0 78.4 H228.0 M220.0 81.7 H228.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 0.275 ms, range 0.271 ms to 0.279 ms over 4 valid repetitions</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V64.6 Q284.0 60.6 288.0 60.6 H304.0 Q308.0 60.6 308.0 64.6 V172.0 Z" fill="var(--series-4)"/>
+<path d="M296.0 59.0 V62.2 M292.0 59.0 H300.0 M292.0 62.2 H300.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+</g>
+</svg></div><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="SISMEMBER, 16 members, pipeline 1, Server memory peak" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">Server memory peak</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">MiB, lower is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="131.5" y2="131.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="134.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">25</text>
+<line x1="44" x2="332" y1="91.0" y2="91.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="94.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">50</text>
+<line x1="44" x2="332" y1="50.5" y2="50.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="53.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">75</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">100</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 31.8 MiB, range 31.6 MiB to 31.9 MiB over 4 valid repetitions</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V124.5 Q68.0 120.5 72.0 120.5 H88.0 Q92.0 120.5 92.0 124.5 V172.0 Z" fill="var(--series-1)"/>
+<path d="M80.0 120.2 V120.7 M76.0 120.2 H84.0 M76.0 120.7 H84.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<text x="80.0" y="115.2" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">31.8</text>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 33.7 MiB, range 33.4 MiB to 33.8 MiB over 4 valid repetitions</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V121.5 Q140.0 117.5 144.0 117.5 H160.0 Q164.0 117.5 164.0 121.5 V172.0 Z" fill="var(--series-2)"/>
+<path d="M152.0 117.2 V117.9 M148.0 117.2 H156.0 M148.0 117.9 H156.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 31.8 MiB, range 31.6 MiB to 31.9 MiB over 4 valid repetitions</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V124.5 Q212.0 120.5 216.0 120.5 H232.0 Q236.0 120.5 236.0 124.5 V172.0 Z" fill="var(--series-3)"/>
+<path d="M224.0 120.4 V120.8 M220.0 120.4 H228.0 M220.0 120.8 H228.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 85.6 MiB, range 85.4 MiB to 86.2 MiB over 4 valid repetitions</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V37.3 Q284.0 33.3 288.0 33.3 H304.0 Q308.0 33.3 308.0 37.3 V172.0 Z" fill="var(--series-4)"/>
+<path d="M296.0 32.3 V33.7 M292.0 32.3 H300.0 M292.0 33.7 H300.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+</g>
+</svg></div></div></section>
+<section class="workload"><h3>ZSCORE, 16 members, pipeline 1</h3><p class="note">Eski median throughput 265,661 ops/s at p99 0.231 ms; relative throughput: 1.62x Redis 7.4.12, 1.58x Valkey 8.1.11, 2.33x Dragonfly 2.0.2.</p><div class="panels"><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="ZSCORE, 16 members, pipeline 1, Throughput" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">Throughput</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">operations per second, higher is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="118.0" y2="118.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="121.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">100K</text>
+<line x1="44" x2="332" y1="64.0" y2="64.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="67.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">200K</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">300K</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 265,661 ops/s, range 263,198 ops/s to 269,968 ops/s over 4 valid repetitions</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V32.5 Q68.0 28.5 72.0 28.5 H88.0 Q92.0 28.5 92.0 32.5 V172.0 Z" fill="var(--series-1)"/>
+<path d="M80.0 26.2 V29.9 M76.0 26.2 H84.0 M76.0 29.9 H84.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<text x="80.0" y="21.2" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">266K</text>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 164,437 ops/s, range 138,813 ops/s to 252,108 ops/s over 3 valid repetitions. excluded repetition 3 (139,500 ops/s): case invalid; external cpu activity</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V87.2 Q140.0 83.2 144.0 83.2 H160.0 Q164.0 83.2 164.0 87.2 V172.0 Z" fill="var(--series-2)"/>
+<path d="M152.0 35.9 V97.0 M148.0 35.9 H156.0 M148.0 97.0 H156.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<circle cx="170.0" cy="96.7" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 168,386 ops/s, range 161,816 ops/s to 248,913 ops/s over 3 valid repetitions. excluded repetition 1 (146,176 ops/s): case invalid; external cpu activity</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V85.1 Q212.0 81.1 216.0 81.1 H232.0 Q236.0 81.1 236.0 85.1 V172.0 Z" fill="var(--series-3)"/>
+<path d="M224.0 37.6 V84.6 M220.0 37.6 H228.0 M220.0 84.6 H228.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<circle cx="242.0" cy="93.1" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 114,097 ops/s, range 81,817 ops/s to 148,004 ops/s over 4 valid repetitions</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V114.4 Q284.0 110.4 288.0 110.4 H304.0 Q308.0 110.4 308.0 114.4 V172.0 Z" fill="var(--series-4)"/>
+<path d="M296.0 92.1 V127.8 M292.0 92.1 H300.0 M292.0 127.8 H300.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+</g>
+</svg></div><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="ZSCORE, 16 members, pipeline 1, p99 latency" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">p99 latency</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">milliseconds, lower is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="131.5" y2="131.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="134.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.1</text>
+<line x1="44" x2="332" y1="91.0" y2="91.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="94.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.2</text>
+<line x1="44" x2="332" y1="50.5" y2="50.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="53.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.3</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0.4</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 0.231 ms, range 0.223 ms to 0.231 ms over 4 valid repetitions</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V82.4 Q68.0 78.4 72.0 78.4 H88.0 Q92.0 78.4 92.0 82.4 V172.0 Z" fill="var(--series-1)"/>
+<path d="M80.0 78.4 V81.7 M76.0 78.4 H84.0 M76.0 81.7 H84.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<text x="80.0" y="73.4" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">0.231</text>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 0.231 ms, range 0.231 ms to 0.231 ms over 3 valid repetitions. excluded repetition 3 (0.231 ms): case invalid; external cpu activity</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V82.4 Q140.0 78.4 144.0 78.4 H160.0 Q164.0 78.4 164.0 82.4 V172.0 Z" fill="var(--series-2)"/>
+<circle cx="170.0" cy="78.4" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 0.231 ms, range 0.231 ms to 0.231 ms over 3 valid repetitions. excluded repetition 1 (0.231 ms): case invalid; external cpu activity</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V82.4 Q212.0 78.4 216.0 78.4 H232.0 Q236.0 78.4 236.0 82.4 V172.0 Z" fill="var(--series-3)"/>
+<circle cx="242.0" cy="78.4" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 0.287 ms, range 0.287 ms to 0.295 ms over 4 valid repetitions</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V59.8 Q284.0 55.8 288.0 55.8 H304.0 Q308.0 55.8 308.0 59.8 V172.0 Z" fill="var(--series-4)"/>
+<path d="M296.0 52.5 V55.8 M292.0 52.5 H300.0 M292.0 55.8 H300.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+</g>
+</svg></div><div class="panel"><svg viewBox="0 0 340 214" role="img" aria-label="ZSCORE, 16 members, pipeline 1, Server memory peak" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif">
+<text x="8" y="16" font-size="12.5" font-weight="600" fill="var(--ink-1)">Server memory peak</text>
+<text x="332" y="16" font-size="10.5" text-anchor="end" fill="var(--ink-3)">MiB, lower is better</text>
+<g transform="translate(0.0 18.0)">
+<line x1="44" x2="332" y1="172.0" y2="172.0" stroke="var(--axis)" stroke-width="1"/>
+<text x="39" y="175.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="44" x2="332" y1="131.5" y2="131.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="134.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">20</text>
+<line x1="44" x2="332" y1="91.0" y2="91.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="94.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">40</text>
+<line x1="44" x2="332" y1="50.5" y2="50.5" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="53.7" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">60</text>
+<line x1="44" x2="332" y1="10.0" y2="10.0" stroke="var(--grid)" stroke-width="1"/>
+<text x="39" y="13.2" font-size="9.5" text-anchor="end" fill="var(--ink-3)" style="font-variant-numeric: tabular-nums">80</text>
+<text x="80.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: median 34.9 MiB, range 34.8 MiB to 35.1 MiB over 4 valid repetitions</title>
+<rect x="44.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M68.0 172.0 V105.3 Q68.0 101.3 72.0 101.3 H88.0 Q92.0 101.3 92.0 105.3 V172.0 Z" fill="var(--series-1)"/>
+<path d="M80.0 101.0 V101.6 M76.0 101.0 H84.0 M76.0 101.6 H84.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<text x="80.0" y="96.0" font-size="10" text-anchor="middle" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">34.9</text>
+</g>
+<text x="152.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Redis</text>
+<g class="mark"><title>Redis 7.4.12: median 36.9 MiB, range 36.6 MiB to 36.9 MiB over 3 valid repetitions. excluded repetition 3 (36.9 MiB): case invalid; external cpu activity</title>
+<rect x="116.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M140.0 172.0 V101.4 Q140.0 97.4 144.0 97.4 H160.0 Q164.0 97.4 164.0 101.4 V172.0 Z" fill="var(--series-2)"/>
+<path d="M152.0 97.3 V97.8 M148.0 97.3 H156.0 M148.0 97.8 H156.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<circle cx="170.0" cy="97.2" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="224.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Valkey</text>
+<g class="mark"><title>Valkey 8.1.11: median 34.7 MiB, range 34.6 MiB to 34.8 MiB over 3 valid repetitions. excluded repetition 1 (34.7 MiB): case invalid; external cpu activity</title>
+<rect x="188.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M212.0 172.0 V105.7 Q212.0 101.7 216.0 101.7 H232.0 Q236.0 101.7 236.0 105.7 V172.0 Z" fill="var(--series-3)"/>
+<path d="M224.0 101.4 V101.9 M220.0 101.4 H228.0 M220.0 101.9 H228.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+<circle cx="242.0" cy="101.8" r="4" fill="var(--surface)" stroke="var(--ink-1)" stroke-width="1.5"/>
+</g>
+<text x="296.0" y="186.0" font-size="9.5" text-anchor="middle" fill="var(--ink-2)">Dragonfly</text>
+<g class="mark"><title>Dragonfly 2.0.2: median 58.1 MiB, range 57.6 MiB to 58.8 MiB over 4 valid repetitions</title>
+<rect x="260.0" y="10" width="72.0" height="162" fill="transparent"/>
+<path d="M284.0 172.0 V58.4 Q284.0 54.4 288.0 54.4 H304.0 Q308.0 54.4 308.0 58.4 V172.0 Z" fill="var(--series-4)"/>
+<path d="M296.0 53.0 V55.3 M292.0 53.0 H300.0 M292.0 55.3 H300.0" stroke="var(--ink-1)" stroke-width="1.5" fill="none"/>
+</g>
+</g>
+</svg></div></div></section>
+<section><h2>Memory per key at scale</h2><p class="note">A separate fill of 10,000,000 keys of 64 B at pipeline 32 per engine, with the same server core and memory caps, reports the worst request during the fill and the resident and used bytes per key, read once used memory has been stable for three seconds and the server reports no keyspace rehash in progress, at most sixty seconds after the fill.</p><p class="note">Settle: Eski memory read 3.1 s after the fill; Redis 7.4.12 memory read 60.1 s after the fill; Valkey 8.1.11 memory read 3.1 s after the fill; Dragonfly 2.0.2 memory read 3.1 s after the fill.</p><div class="figure"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 266" width="960" height="266" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif" role="img" aria-labelledby="fill-title">
+<title id="fill-title">Resident bytes per key after a fill of 10,000,000 keys</title>
+<rect width="960" height="266" fill="var(--surface)"/>
+<text x="12" y="24" font-size="16" font-weight="600" fill="var(--ink-1)">Resident bytes per key after filling 10,000,000 keys of 64 B</text>
+<text x="12" y="44" font-size="12" fill="var(--ink-2)">server resident set divided by the key count, lower is better; pipeline 32, same server core and memory cap as the comparison</text>
+<text x="12" y="62" font-size="11" fill="var(--ink-3)">Intel(R) Xeon(R) E-2288G CPU @ 3.70GHz</text>
+<text x="140" y="93.0" font-size="12" text-anchor="end" fill="var(--ink-2)">Eski</text>
+<g class="mark"><title>Eski: 113.4 bytes per key resident, 112.0 bytes per key used, 10,000,001 keys, fill at 560,513 ops/s, worst request 548.863 ms, memory read 3.1 s after the fill</title>
+<path d="M150 80.0 H435.6 Q439.6 80.0 439.6 84.0 V96.0 Q439.6 100.0 435.6 100.0 H150 Z" fill="var(--series-1)"/>
+</g>
+<text x="447.6" y="94.0" font-size="11.5" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">113.4 B per key, worst request 548.9 ms</text>
+<text x="140" y="133.0" font-size="12" text-anchor="end" fill="var(--ink-2)">Redis 7.4.12</text>
+<g class="mark"><title>Redis 7.4.12: 159.8 bytes per key resident, 156.7 bytes per key used, 10,000,001 keys, fill at 1,065,606 ops/s, worst request 2.799 ms, memory read 60.1 s after the fill</title>
+<path d="M150 120.0 H554.0 Q558.0 120.0 558.0 124.0 V136.0 Q558.0 140.0 554.0 140.0 H150 Z" fill="var(--series-2)"/>
+</g>
+<text x="566.0" y="134.0" font-size="11.5" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">159.8 B per key, worst request 2.8 ms</text>
+<text x="140" y="173.0" font-size="12" text-anchor="end" fill="var(--ink-2)">Valkey 8.1.11</text>
+<g class="mark"><title>Valkey 8.1.11: 138.7 bytes per key resident, 134.9 bytes per key used, 10,000,001 keys, fill at 1,059,392 ops/s, worst request 6.271 ms, memory read 3.1 s after the fill</title>
+<path d="M150 160.0 H500.0 Q504.0 160.0 504.0 164.0 V176.0 Q504.0 180.0 500.0 180.0 H150 Z" fill="var(--series-3)"/>
+</g>
+<text x="512.0" y="174.0" font-size="11.5" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">138.7 B per key, worst request 6.3 ms</text>
+<text x="140" y="213.0" font-size="12" text-anchor="end" fill="var(--ink-2)">Dragonfly 2.0.2</text>
+<g class="mark"><title>Dragonfly 2.0.2: 106.2 bytes per key resident, 101.7 bytes per key used, 10,000,001 keys, fill at 388,538 ops/s, worst request 548.863 ms, memory read 3.1 s after the fill</title>
+<path d="M150 200.0 H417.0 Q421.0 200.0 421.0 204.0 V216.0 Q421.0 220.0 417.0 220.0 H150 Z" fill="var(--series-4)"/>
+</g>
+<text x="429.0" y="214.0" font-size="11.5" fill="var(--ink-1)" style="font-variant-numeric: tabular-nums">106.2 B per key, worst request 548.9 ms</text>
+<line x1="150" x2="150" y1="76" y2="224" stroke="var(--axis)" stroke-width="1"/>
+</svg>
+</div></section>
+<section><h2>Excluded measurements</h2><p>14 measurements are excluded from the medians. Their values stay in the table below and as hollow circles in the charts.</p><div class="tablewrap"><table><thead><tr><th class="text">Phase</th><th class="text">Workload</th><th class="text">Engine</th><th>Rep</th><th class="text">State</th><th class="text">Reason</th></tr></thead><tbody><tr><td class="text">benchmark</td><td class="text">mixed64-p1</td><td class="text">Redis 7.4.12</td><td>1</td><td class="text">invalid</td><td class="reason">case invalid; external cpu activity</td></tr><tr><td class="text">benchmark</td><td class="text">zscore16-p1</td><td class="text">Valkey 8.1.11</td><td>1</td><td class="text">invalid</td><td class="reason">case invalid; external cpu activity</td></tr><tr><td class="text">benchmark</td><td class="text">mixed64-p16</td><td class="text">Valkey 8.1.11</td><td>2</td><td class="text">invalid</td><td class="reason">case invalid; external cpu activity</td></tr><tr><td class="text">benchmark</td><td class="text">get64-p1</td><td class="text">Valkey 8.1.11</td><td>3</td><td class="text">invalid</td><td class="reason">case invalid; external cpu activity</td></tr><tr><td class="text">benchmark</td><td class="text">set64-p1</td><td class="text">Valkey 8.1.11</td><td>3</td><td class="text">invalid</td><td class="reason">case invalid; external cpu activity</td></tr><tr><td class="text">benchmark</td><td class="text">mixed64-p16</td><td class="text">Dragonfly 2.0.2</td><td>3</td><td class="text">invalid</td><td class="reason">case invalid; external cpu activity</td></tr><tr><td class="text">benchmark</td><td class="text">get1024-p1</td><td class="text">Eski</td><td>3</td><td class="text">invalid</td><td class="reason">case invalid; external cpu activity</td></tr><tr><td class="text">benchmark</td><td class="text">get1024-p1</td><td class="text">Redis 7.4.12</td><td>3</td><td class="text">invalid</td><td class="reason">case invalid; external cpu activity</td></tr><tr><td class="text">benchmark</td><td class="text">zscore16-p1</td><td class="text">Redis 7.4.12</td><td>3</td><td class="text">invalid</td><td class="reason">case invalid; external cpu activity</td></tr><tr><td class="text">benchmark</td><td class="text">get64-p1</td><td class="text">Valkey 8.1.11</td><td>4</td><td class="text">invalid</td><td class="reason">case invalid; external cpu activity</td></tr><tr><td class="text">benchmark</td><td class="text">mixed64-p16</td><td class="text">Valkey 8.1.11</td><td>4</td><td class="text">invalid</td><td class="reason">case invalid; external cpu activity</td></tr><tr><td class="text">benchmark</td><td class="text">mixed64-p16</td><td class="text">Dragonfly 2.0.2</td><td>4</td><td class="text">invalid</td><td class="reason">case invalid; external cpu activity</td></tr><tr><td class="text">benchmark</td><td class="text">get1024-p1</td><td class="text">Dragonfly 2.0.2</td><td>4</td><td class="text">invalid</td><td class="reason">case invalid; external cpu activity</td></tr><tr><td class="text">benchmark</td><td class="text">hget16-p1</td><td class="text">Dragonfly 2.0.2</td><td>4</td><td class="text">invalid</td><td class="reason">case invalid; external cpu activity</td></tr></tbody></table></div></section>
+<section><h2>Machine and run</h2><div class="facts"><div><b>Machine</b>Supermicro SYS-5039MC-H12TRF Intel(R) Xeon(R) E-2288G CPU @ 3.70GHz</div><div><b>Kernel</b>6.12.115+deb13.1-amd64, x86_64</div><div><b>Memory</b>62.4 GiB</div><div><b>CPU roles</b>server 1, client 2,3,4,5, controller 6; online 0-7</div><div><b>Frequency policy</b>performance governor, intel_pstate driver, performance</div><div><b>Server budget</b>8g container memory and swap, maxmemory 6,442,450,944 bytes, Dragonfly 1 thread</div><div><b>Client</b>memtier_benchmark 2.5.2, 2g container memory</div><div><b>Gates</b>package at or below 55 C before each case and 90 C during it, 95% idle, 10 s stable, 30 s rest; client limited above 85%, latency bound 120 s</div><div><b>Run</b>cloud-v1, workflow DONE WITH EXCLUSIONS</div><div><b>Protocol sha256</b>27366d68d25f3ae7b3564122e71c07997fdede71f9f323797c3443649688f0bc</div><div><b>Identity sha256</b>e1e00ef861abf3bd3d80a37423eb60446749135f778defba86678621a43e0a25</div><div><b>Archive sha256</b>f1b398df6411027076b361752135acd9d748bc6fe2ce3c9747d2590f654469dd</div><div><b>Eski</b>eski:local; observed 0.1.0; image sha256:49afbcaba262d10f0c7152e55ed722a159204d3027b71eec63f4938700d26a15</div><div><b>Redis 7.4.12</b>docker.io/library/redis:7.4.12@sha256:b6b6e3dc0c0952737748e55d5d885272840c7e42ba41ab1d5489f693419882f5; observed 7.4.12; image sha256:9823645c452a9a994f575ed238e1a4f67365acbf8e842db769060820fab06449</div><div><b>Valkey 8.1.11</b>docker.io/valkey/valkey:8.1.11@sha256:8f836008e0986c36adf50da714c7060cf689dbb335f61fe077939d90fa650809; observed 8.1.11; image sha256:ca662989648f173e01fb1a1768e7d84ddcaf8b7de135070b59271b0918104eb3</div><div><b>Dragonfly 2.0.2</b>ghcr.io/dragonflydb/dragonfly:v2.0.2@sha256:061f00b201b58e12f974e4e96c761a881ee1c05e9d8ee967466a604b7299753b; observed df-v2.0.2; image sha256:e2b395498450f370ed6947a33bc3ada7b70f18a39ae6d64da7b67acc8457f2f7</div></div></section>
+<section class="method"><h2>How the numbers were taken</h2><div style="display:grid;gap:10px"><p><b>Dataset.</b> 100,000 keys with numeric ids 1 to 100,000 under one prefix, loaded by one connection at pipeline 32 before every measurement. String workloads hold one value per key; HGET, SISMEMBER and ZSCORE keys hold 16 fields or members and read field or member 8. DBSIZE and sampled replies on keys 1, 50,000 and 99,999 are checked before the warmup.</p><p><b>Engines.</b> Eski, Redis, Valkey and Dragonfly each run in a fresh container per measurement with the same CPU set, an 8 GiB memory and swap cap, 6 GiB maxmemory, persistence off and host loopback networking. Dragonfly runs one proactor thread on its single core.</p><p><b>Fill.</b> A separate fill of 10,000,000 keys of 64 B at pipeline 32 per engine, with the same server core and memory caps, reports the worst request during the fill and the resident and used bytes per key, read once used memory has been stable for three seconds and the server reports no keyspace rehash in progress, at most sixty seconds after the fill.</p><p><b>Gates.</b> Before every case the CPU package must be at or below 55 C, the server and client CPUs at least 95 percent idle, the readings stable for 10 seconds and at least 30 seconds must have passed since the last case; an unmet gate after 600 seconds holds the run. During a case the machine must expose readable telemetry, no thermal throttle counter increments, an unchanged frequency policy, a package at or below 90 C and no competing CPU load. The machine has no battery or ACPI power-supply device; the power gate records that absence instead of an AC online reading.</p><p><b>Power gate.</b> The power gate was no-power-supply-devices: the machine had to expose no power supply device at all, and a battery, mains or other power supply device seen in any sample before or during a case held the run or invalidated that case.</p><p><b>Isolation.</b> Docker CPU sets and memory caps separate the roles but share the kernel, the last level cache, memory bandwidth, power and cooling. Simultaneous multithreading is off, so no role shares a physical core.</p><p><b>Latency.</b> Closed loop client observed latency; p99 is the per run percentile, never pooled across runs.</p><p><b>Memory.</b> The kernel memory.peak of the server container read just before it stops: it covers preload, warmup and the timed run and is not live key memory or process RSS.</p><p><b>Publication.</b> Medians over the valid repetitions with the observed minimum and maximum. Excluded repetitions stay visible with their reason. There is no overall score and no cross workload average.</p><p><b>Quality.</b> A measurement whose raw client output reports a maximum latency beyond 120 seconds is invalid as a histogram range artefact. The timed client&#x27;s CPU share is recorded and a measurement above 85 percent of its four CPU budget is marked client limited, which makes its throughput a lower bound.</p><p><b>Repetitions.</b> Four repetitions per workload and engine. The engine order rotates so that each engine takes every position once per workload. Failed, invalid and skipped cases are never retried silently.</p><p><b>Sample.</b> 10 seconds of warmup on the loaded dataset, excluded from the statistics, then one 60 second timed run with four client threads of 8 connections each (32 connections, as in comparison-v1), uniform random keys and pipeline 1 unless the workload names pipeline 16.</p><p><b>Scope.</b> One physical server core with simultaneous multithreading disabled for every engine, four separate physical cores for the load generator and one physical core for the controller, on a rented single-socket bare-metal machine. This is an end to end single core comparison on one machine; it does not measure multicore scaling or maximum capacity.</p><p><b>Seeds.</b> The pinned memtier_benchmark image with its default seed and distinct client seeds, so every engine and repetition sees the same key sequence policy.</p></div></section>
+<section><details><summary>Every measurement as a table</summary><div class="tablewrap"><table><thead><tr><th class="text">Phase</th><th class="text">Workload</th><th class="text">Engine</th><th class="">Rep</th><th class="text">State</th><th class="text">Included</th><th class="">Ops/s</th><th class="">p50 ms</th><th class="">p99 ms</th><th class="">p99.9 ms</th><th class="">Max ms</th><th class="">Memory MiB</th><th class="">Client cores</th><th class="">Client %</th><th class="text">Notes</th></tr></thead><tbody><tr class=""><td class="text">calibration</td><td class="text">SET and GET 1:1, 64 B, pipeline 16</td><td class="text">Dragonfly 2.0.2</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">800,166</td><td class="">0.631</td><td class="">0.783</td><td class="">1.055</td><td class="">8.575</td><td class="">43.1</td><td class="">0.80</td><td class="">20.3</td><td class="reason"></td></tr><tr class=""><td class="text">calibration</td><td class="text">SET and GET 1:1, 64 B, pipeline 16</td><td class="text">Eski</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">1,834,693</td><td class="">0.175</td><td class="">0.375</td><td class="">1.207</td><td class="">544.767</td><td class="">15.0</td><td class="">1.89</td><td class="">66.8</td><td class="reason"></td></tr><tr class=""><td class="text">calibration</td><td class="text">SET and GET 1:1, 64 B, pipeline 16</td><td class="text">Redis 7.4.12</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">1,462,413</td><td class="">0.359</td><td class="">0.503</td><td class="">0.663</td><td class="">6.719</td><td class="">23.1</td><td class="">1.45</td><td class="">36.4</td><td class="reason"></td></tr><tr class=""><td class="text">calibration</td><td class="text">SET and GET 1:1, 64 B, pipeline 16</td><td class="text">Valkey 8.1.11</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">1,451,419</td><td class="">0.367</td><td class="">0.495</td><td class="">0.631</td><td class="">30.591</td><td class="">21.7</td><td class="">1.44</td><td class="">36.0</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 64 B, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">146,342</td><td class="">0.215</td><td class="">0.287</td><td class="">0.367</td><td class="">6.751</td><td class="">39.4</td><td class="">1.43</td><td class="">35.7</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 64 B, pipeline 1</td><td class="text">Eski</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">209,709</td><td class="">0.103</td><td class="">0.215</td><td class="">0.327</td><td class="">544.767</td><td class="">14.7</td><td class="">1.70</td><td class="">57.5</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 64 B, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">262,881</td><td class="">0.119</td><td class="">0.223</td><td class="">0.271</td><td class="">6.527</td><td class="">23.1</td><td class="">2.21</td><td class="">57.5</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 64 B, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">173,391</td><td class="">0.119</td><td class="">0.223</td><td class="">0.687</td><td class="">544.767</td><td class="">21.1</td><td class="">1.51</td><td class="">56.5</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 64 B, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">101,344</td><td class="">0.215</td><td class="">0.271</td><td class="">1.255</td><td class="">548.863</td><td class="">40.3</td><td class="">1.01</td><td class="">35.4</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 64 B, pipeline 1</td><td class="text">Eski</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">185,318</td><td class="">0.103</td><td class="">0.215</td><td class="">0.663</td><td class="">548.863</td><td class="">14.8</td><td class="">1.51</td><td class="">56.3</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 64 B, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">260,847</td><td class="">0.119</td><td class="">0.223</td><td class="">0.271</td><td class="">1.759</td><td class="">23.2</td><td class="">2.20</td><td class="">57.0</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 64 B, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">179,377</td><td class="">0.119</td><td class="">0.223</td><td class="">0.383</td><td class="">548.863</td><td class="">20.9</td><td class="">1.56</td><td class="">57.0</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 64 B, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">146,692</td><td class="">0.215</td><td class="">0.287</td><td class="">0.375</td><td class="">7.679</td><td class="">40.2</td><td class="">1.46</td><td class="">36.5</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 64 B, pipeline 1</td><td class="text">Eski</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">280,599</td><td class="">0.103</td><td class="">0.215</td><td class="">0.279</td><td class="">9.471</td><td class="">14.8</td><td class="">2.32</td><td class="">57.7</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 64 B, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">259,761</td><td class="">0.119</td><td class="">0.223</td><td class="">0.271</td><td class="">3.263</td><td class="">22.8</td><td class="">2.08</td><td class="">54.0</td><td class="reason"></td></tr><tr class="excluded"><td class="text">benchmark</td><td class="text">GET 64 B, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">3</td><td class="text">invalid</td><td class="text">no</td><td class="">148,495</td><td class="">0.119</td><td class="">0.223</td><td class="">0.831</td><td class="">548.863</td><td class="">20.9</td><td class="">1.30</td><td class="">57.2</td><td class="reason">case invalid; external_cpu_activity</td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 64 B, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">146,846</td><td class="">0.215</td><td class="">0.287</td><td class="">0.359</td><td class="">8.319</td><td class="">40.6</td><td class="">1.46</td><td class="">36.2</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 64 B, pipeline 1</td><td class="text">Eski</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">279,581</td><td class="">0.103</td><td class="">0.215</td><td class="">0.279</td><td class="">2.207</td><td class="">14.7</td><td class="">2.32</td><td class="">57.8</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 64 B, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">260,647</td><td class="">0.119</td><td class="">0.223</td><td class="">0.271</td><td class="">3.055</td><td class="">22.7</td><td class="">2.10</td><td class="">54.3</td><td class="reason"></td></tr><tr class="excluded"><td class="text">benchmark</td><td class="text">GET 64 B, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">4</td><td class="text">invalid</td><td class="text">no</td><td class="">142,299</td><td class="">0.119</td><td class="">0.231</td><td class="">1.143</td><td class="">548.863</td><td class="">21.1</td><td class="">1.25</td><td class="">56.0</td><td class="reason">case invalid; external_cpu_activity</td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET 64 B, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">99,987</td><td class="">0.239</td><td class="">0.287</td><td class="">1.311</td><td class="">557.055</td><td class="">39.6</td><td class="">0.96</td><td class="">32.3</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET 64 B, pipeline 1</td><td class="text">Eski</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">199,502</td><td class="">0.103</td><td class="">0.207</td><td class="">0.359</td><td class="">544.767</td><td class="">14.8</td><td class="">1.61</td><td class="">56.8</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET 64 B, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">175,691</td><td class="">0.119</td><td class="">0.231</td><td class="">0.615</td><td class="">544.767</td><td class="">23.1</td><td class="">1.52</td><td class="">55.5</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET 64 B, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">161,042</td><td class="">0.119</td><td class="">0.231</td><td class="">0.887</td><td class="">544.767</td><td class="">20.9</td><td class="">1.39</td><td class="">54.0</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET 64 B, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">135,459</td><td class="">0.239</td><td class="">0.303</td><td class="">0.383</td><td class="">7.455</td><td class="">39.4</td><td class="">1.29</td><td class="">32.3</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET 64 B, pipeline 1</td><td class="text">Eski</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">156,106</td><td class="">0.103</td><td class="">0.215</td><td class="">1.111</td><td class="">548.863</td><td class="">14.8</td><td class="">1.29</td><td class="">53.1</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET 64 B, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">255,417</td><td class="">0.119</td><td class="">0.223</td><td class="">0.271</td><td class="">4.447</td><td class="">22.8</td><td class="">2.10</td><td class="">54.5</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET 64 B, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">250,636</td><td class="">0.119</td><td class="">0.231</td><td class="">0.271</td><td class="">1.975</td><td class="">21.2</td><td class="">2.11</td><td class="">54.5</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET 64 B, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">137,923</td><td class="">0.231</td><td class="">0.303</td><td class="">0.375</td><td class="">7.711</td><td class="">39.6</td><td class="">1.35</td><td class="">33.8</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET 64 B, pipeline 1</td><td class="text">Eski</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">287,465</td><td class="">0.103</td><td class="">0.215</td><td class="">0.279</td><td class="">4.383</td><td class="">14.8</td><td class="">2.37</td><td class="">59.2</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET 64 B, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">253,014</td><td class="">0.119</td><td class="">0.231</td><td class="">0.279</td><td class="">4.991</td><td class="">22.9</td><td class="">2.02</td><td class="">52.3</td><td class="reason"></td></tr><tr class="excluded"><td class="text">benchmark</td><td class="text">SET 64 B, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">3</td><td class="text">invalid</td><td class="text">no</td><td class="">140,350</td><td class="">0.119</td><td class="">0.231</td><td class="">1.151</td><td class="">548.863</td><td class="">20.9</td><td class="">1.22</td><td class="">52.6</td><td class="reason">case invalid; external_cpu_activity</td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET 64 B, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">88,512</td><td class="">0.239</td><td class="">0.303</td><td class="">1.543</td><td class="">548.863</td><td class="">40.2</td><td class="">0.88</td><td class="">32.9</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET 64 B, pipeline 1</td><td class="text">Eski</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">284,061</td><td class="">0.103</td><td class="">0.215</td><td class="">0.279</td><td class="">6.367</td><td class="">14.7</td><td class="">2.26</td><td class="">56.3</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET 64 B, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">250,885</td><td class="">0.119</td><td class="">0.231</td><td class="">0.287</td><td class="">4.671</td><td class="">23.0</td><td class="">2.03</td><td class="">53.3</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET 64 B, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">247,855</td><td class="">0.119</td><td class="">0.231</td><td class="">0.279</td><td class="">1.727</td><td class="">20.9</td><td class="">2.00</td><td class="">51.8</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">76,007</td><td class="">0.231</td><td class="">0.303</td><td class="">1.895</td><td class="">1,105.919</td><td class="">39.6</td><td class="">0.78</td><td class="">33.9</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 1</td><td class="text">Eski</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">282,531</td><td class="">0.103</td><td class="">0.215</td><td class="">0.271</td><td class="">4.447</td><td class="">14.8</td><td class="">2.36</td><td class="">59.0</td><td class="reason"></td></tr><tr class="excluded"><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">1</td><td class="text">invalid</td><td class="text">no</td><td class="">166,450</td><td class="">0.119</td><td class="">0.231</td><td class="">0.767</td><td class="">557.055</td><td class="">22.9</td><td class="">1.45</td><td class="">55.6</td><td class="reason">case invalid; external_cpu_activity</td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">257,708</td><td class="">0.119</td><td class="">0.223</td><td class="">0.263</td><td class="">4.479</td><td class="">21.2</td><td class="">2.15</td><td class="">55.8</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">96,432</td><td class="">0.231</td><td class="">0.287</td><td class="">1.295</td><td class="">544.767</td><td class="">40.5</td><td class="">0.97</td><td class="">34.5</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 1</td><td class="text">Eski</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">195,450</td><td class="">0.103</td><td class="">0.215</td><td class="">0.639</td><td class="">548.863</td><td class="">14.8</td><td class="">1.59</td><td class="">56.3</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">177,877</td><td class="">0.119</td><td class="">0.231</td><td class="">0.775</td><td class="">548.863</td><td class="">23.1</td><td class="">1.56</td><td class="">56.5</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">166,121</td><td class="">0.119</td><td class="">0.231</td><td class="">0.719</td><td class="">548.863</td><td class="">20.9</td><td class="">1.45</td><td class="">55.5</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">139,518</td><td class="">0.231</td><td class="">0.295</td><td class="">0.367</td><td class="">7.519</td><td class="">40.6</td><td class="">1.40</td><td class="">34.8</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 1</td><td class="text">Eski</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">278,986</td><td class="">0.103</td><td class="">0.215</td><td class="">0.279</td><td class="">6.367</td><td class="">14.6</td><td class="">2.28</td><td class="">56.8</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">167,722</td><td class="">0.119</td><td class="">0.231</td><td class="">0.719</td><td class="">548.863</td><td class="">22.9</td><td class="">1.46</td><td class="">55.5</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">250,146</td><td class="">0.119</td><td class="">0.231</td><td class="">0.279</td><td class="">4.927</td><td class="">20.9</td><td class="">2.03</td><td class="">52.8</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">138,294</td><td class="">0.231</td><td class="">0.295</td><td class="">0.375</td><td class="">7.807</td><td class="">39.6</td><td class="">1.38</td><td class="">34.8</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 1</td><td class="text">Eski</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">188,398</td><td class="">0.103</td><td class="">0.215</td><td class="">0.751</td><td class="">548.863</td><td class="">14.8</td><td class="">1.53</td><td class="">56.8</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">168,230</td><td class="">0.119</td><td class="">0.231</td><td class="">0.775</td><td class="">548.863</td><td class="">23.1</td><td class="">1.47</td><td class="">55.7</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">253,897</td><td class="">0.119</td><td class="">0.223</td><td class="">0.263</td><td class="">6.591</td><td class="">21.2</td><td class="">2.15</td><td class="">55.5</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 16</td><td class="text">Dragonfly 2.0.2</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">465,355</td><td class="">0.631</td><td class="">0.879</td><td class="">17.919</td><td class="">548.863</td><td class="">44.9</td><td class="">0.48</td><td class="">19.8</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 16</td><td class="text">Eski</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">1,785,516</td><td class="">0.175</td><td class="">0.375</td><td class="">1.167</td><td class="">548.863</td><td class="">14.7</td><td class="">1.84</td><td class="">66.2</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 16</td><td class="text">Redis 7.4.12</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">1,001,258</td><td class="">0.359</td><td class="">0.495</td><td class="">2.191</td><td class="">552.959</td><td class="">22.9</td><td class="">1.00</td><td class="">36.4</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 16</td><td class="text">Valkey 8.1.11</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">1,463,341</td><td class="">0.359</td><td class="">0.495</td><td class="">0.639</td><td class="">26.751</td><td class="">21.8</td><td class="">1.45</td><td class="">36.2</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 16</td><td class="text">Dragonfly 2.0.2</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">794,253</td><td class="">0.639</td><td class="">0.791</td><td class="">1.215</td><td class="">6.623</td><td class="">44.9</td><td class="">0.80</td><td class="">20.3</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 16</td><td class="text">Eski</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">1,502,179</td><td class="">0.175</td><td class="">0.375</td><td class="">1.343</td><td class="">548.863</td><td class="">14.9</td><td class="">1.54</td><td class="">65.8</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 16</td><td class="text">Redis 7.4.12</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">976,522</td><td class="">0.367</td><td class="">0.495</td><td class="">2.431</td><td class="">548.863</td><td class="">23.1</td><td class="">0.97</td><td class="">36.5</td><td class="reason"></td></tr><tr class="excluded"><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 16</td><td class="text">Valkey 8.1.11</td><td class="">2</td><td class="text">invalid</td><td class="text">no</td><td class="">809,502</td><td class="">0.367</td><td class="">0.503</td><td class="">3.407</td><td class="">548.863</td><td class="">21.8</td><td class="">0.81</td><td class="">35.9</td><td class="reason">case invalid; external_cpu_activity</td></tr><tr class="excluded"><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 16</td><td class="text">Dragonfly 2.0.2</td><td class="">3</td><td class="text">invalid</td><td class="text">no</td><td class="">796,029</td><td class="">0.631</td><td class="">0.783</td><td class="">1.135</td><td class="">8.575</td><td class="">45.0</td><td class="">0.80</td><td class="">20.3</td><td class="reason">case invalid; external_cpu_activity</td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 16</td><td class="text">Eski</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">2,590,011</td><td class="">0.175</td><td class="">0.375</td><td class="">0.455</td><td class="">4.255</td><td class="">14.6</td><td class="">2.57</td><td class="">65.3</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 16</td><td class="text">Redis 7.4.12</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">1,470,699</td><td class="">0.359</td><td class="">0.495</td><td class="">0.623</td><td class="">15.039</td><td class="">22.9</td><td class="">1.45</td><td class="">36.5</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 16</td><td class="text">Valkey 8.1.11</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">1,434,618</td><td class="">0.367</td><td class="">0.503</td><td class="">0.631</td><td class="">9.919</td><td class="">21.8</td><td class="">1.42</td><td class="">35.7</td><td class="reason"></td></tr><tr class="excluded"><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 16</td><td class="text">Dragonfly 2.0.2</td><td class="">4</td><td class="text">invalid</td><td class="text">no</td><td class="">800,675</td><td class="">0.631</td><td class="">0.783</td><td class="">1.015</td><td class="">8.447</td><td class="">44.9</td><td class="">0.80</td><td class="">20.3</td><td class="reason">case invalid; external_cpu_activity</td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 16</td><td class="text">Eski</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">2,573,559</td><td class="">0.175</td><td class="">0.383</td><td class="">0.447</td><td class="">4.927</td><td class="">14.8</td><td class="">2.58</td><td class="">65.6</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 16</td><td class="text">Redis 7.4.12</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">940,741</td><td class="">0.359</td><td class="">0.495</td><td class="">2.383</td><td class="">548.863</td><td class="">22.9</td><td class="">0.93</td><td class="">36.2</td><td class="reason"></td></tr><tr class="excluded"><td class="text">benchmark</td><td class="text">SET and GET 1:1, 64 B, pipeline 16</td><td class="text">Valkey 8.1.11</td><td class="">4</td><td class="text">invalid</td><td class="text">no</td><td class="">1,449,344</td><td class="">0.359</td><td class="">0.511</td><td class="">0.727</td><td class="">18.303</td><td class="">22.1</td><td class="">1.43</td><td class="">35.9</td><td class="reason">case invalid; external_cpu_activity</td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 1024 B, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">131,445</td><td class="">0.239</td><td class="">0.311</td><td class="">0.383</td><td class="">7.999</td><td class="">123.8</td><td class="">1.33</td><td class="">33.1</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 1024 B, pipeline 1</td><td class="text">Eski</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">178,781</td><td class="">0.111</td><td class="">0.239</td><td class="">0.559</td><td class="">548.863</td><td class="">113.1</td><td class="">1.57</td><td class="">55.8</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 1024 B, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">239,978</td><td class="">0.127</td><td class="">0.239</td><td class="">0.303</td><td class="">6.463</td><td class="">137.6</td><td class="">2.04</td><td class="">52.5</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 1024 B, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">236,405</td><td class="">0.127</td><td class="">0.239</td><td class="">0.295</td><td class="">6.751</td><td class="">135.6</td><td class="">2.03</td><td class="">52.3</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 1024 B, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">133,005</td><td class="">0.239</td><td class="">0.311</td><td class="">0.431</td><td class="">7.615</td><td class="">124.2</td><td class="">1.34</td><td class="">33.5</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 1024 B, pipeline 1</td><td class="text">Eski</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">261,717</td><td class="">0.111</td><td class="">0.231</td><td class="">0.295</td><td class="">6.495</td><td class="">113.3</td><td class="">2.23</td><td class="">55.5</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 1024 B, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">236,773</td><td class="">0.127</td><td class="">0.239</td><td class="">0.303</td><td class="">3.711</td><td class="">137.7</td><td class="">2.05</td><td class="">52.8</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 1024 B, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">157,229</td><td class="">0.127</td><td class="">0.239</td><td class="">0.775</td><td class="">548.863</td><td class="">135.9</td><td class="">1.40</td><td class="">53.5</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 1024 B, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">132,166</td><td class="">0.239</td><td class="">0.311</td><td class="">0.391</td><td class="">7.647</td><td class="">124.2</td><td class="">1.38</td><td class="">34.5</td><td class="reason"></td></tr><tr class="excluded"><td class="text">benchmark</td><td class="text">GET 1024 B, pipeline 1</td><td class="text">Eski</td><td class="">3</td><td class="text">invalid</td><td class="text">no</td><td class="">258,528</td><td class="">0.111</td><td class="">0.239</td><td class="">0.351</td><td class="">3.663</td><td class="">113.2</td><td class="">2.27</td><td class="">56.8</td><td class="reason">case invalid; external_cpu_activity</td></tr><tr class="excluded"><td class="text">benchmark</td><td class="text">GET 1024 B, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">3</td><td class="text">invalid</td><td class="text">no</td><td class="">186,181</td><td class="">0.127</td><td class="">0.239</td><td class="">0.343</td><td class="">548.863</td><td class="">137.9</td><td class="">1.65</td><td class="">52.9</td><td class="reason">case invalid; external_cpu_activity</td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 1024 B, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">137,830</td><td class="">0.127</td><td class="">0.239</td><td class="">1.151</td><td class="">548.863</td><td class="">135.9</td><td class="">1.23</td><td class="">52.8</td><td class="reason"></td></tr><tr class="excluded"><td class="text">benchmark</td><td class="text">GET 1024 B, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">4</td><td class="text">invalid</td><td class="text">no</td><td class="">134,073</td><td class="">0.239</td><td class="">0.311</td><td class="">0.399</td><td class="">9.919</td><td class="">124.3</td><td class="">1.40</td><td class="">35.0</td><td class="reason">case invalid; external_cpu_activity</td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 1024 B, pipeline 1</td><td class="text">Eski</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">259,063</td><td class="">0.111</td><td class="">0.239</td><td class="">0.303</td><td class="">6.783</td><td class="">113.2</td><td class="">2.20</td><td class="">54.8</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 1024 B, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">239,505</td><td class="">0.127</td><td class="">0.239</td><td class="">0.311</td><td class="">6.591</td><td class="">137.6</td><td class="">2.04</td><td class="">52.5</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">GET 1024 B, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">185,562</td><td class="">0.127</td><td class="">0.239</td><td class="">0.407</td><td class="">548.863</td><td class="">135.7</td><td class="">1.67</td><td class="">53.5</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">HGET, 16 fields of 64 B, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">140,136</td><td class="">0.231</td><td class="">0.303</td><td class="">0.479</td><td class="">8.959</td><td class="">232.2</td><td class="">1.44</td><td class="">36.0</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">HGET, 16 fields of 64 B, pipeline 1</td><td class="text">Eski</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">197,928</td><td class="">0.119</td><td class="">0.247</td><td class="">0.391</td><td class="">548.863</td><td class="">133.0</td><td class="">1.67</td><td class="">53.2</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">HGET, 16 fields of 64 B, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">239,269</td><td class="">0.127</td><td class="">0.239</td><td class="">0.295</td><td class="">6.559</td><td class="">138.0</td><td class="">2.06</td><td class="">53.2</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">HGET, 16 fields of 64 B, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">240,693</td><td class="">0.127</td><td class="">0.231</td><td class="">0.287</td><td class="">19.839</td><td class="">135.7</td><td class="">2.03</td><td class="">52.5</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">HGET, 16 fields of 64 B, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">140,202</td><td class="">0.231</td><td class="">0.295</td><td class="">0.375</td><td class="">7.455</td><td class="">232.1</td><td class="">1.43</td><td class="">35.7</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">HGET, 16 fields of 64 B, pipeline 1</td><td class="text">Eski</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">254,295</td><td class="">0.119</td><td class="">0.239</td><td class="">0.303</td><td class="">4.351</td><td class="">132.9</td><td class="">2.13</td><td class="">53.4</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">HGET, 16 fields of 64 B, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">243,689</td><td class="">0.127</td><td class="">0.231</td><td class="">0.295</td><td class="">6.367</td><td class="">137.8</td><td class="">2.07</td><td class="">53.9</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">HGET, 16 fields of 64 B, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">243,681</td><td class="">0.127</td><td class="">0.231</td><td class="">0.279</td><td class="">6.015</td><td class="">135.9</td><td class="">2.02</td><td class="">52.0</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">HGET, 16 fields of 64 B, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">140,246</td><td class="">0.231</td><td class="">0.295</td><td class="">0.391</td><td class="">7.423</td><td class="">232.3</td><td class="">1.44</td><td class="">35.8</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">HGET, 16 fields of 64 B, pipeline 1</td><td class="text">Eski</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">257,848</td><td class="">0.111</td><td class="">0.239</td><td class="">0.303</td><td class="">2.847</td><td class="">132.9</td><td class="">2.21</td><td class="">55.3</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">HGET, 16 fields of 64 B, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">240,819</td><td class="">0.127</td><td class="">0.239</td><td class="">0.295</td><td class="">3.183</td><td class="">137.6</td><td class="">2.01</td><td class="">51.7</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">HGET, 16 fields of 64 B, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">241,118</td><td class="">0.127</td><td class="">0.231</td><td class="">0.279</td><td class="">3.311</td><td class="">135.7</td><td class="">2.04</td><td class="">52.5</td><td class="reason"></td></tr><tr class="excluded"><td class="text">benchmark</td><td class="text">HGET, 16 fields of 64 B, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">4</td><td class="text">invalid</td><td class="text">no</td><td class="">139,994</td><td class="">0.231</td><td class="">0.295</td><td class="">0.391</td><td class="">7.775</td><td class="">232.3</td><td class="">1.43</td><td class="">35.7</td><td class="reason">case invalid; external_cpu_activity</td></tr><tr class=""><td class="text">benchmark</td><td class="text">HGET, 16 fields of 64 B, pipeline 1</td><td class="text">Eski</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">151,960</td><td class="">0.111</td><td class="">0.239</td><td class="">0.791</td><td class="">548.863</td><td class="">132.7</td><td class="">1.29</td><td class="">53.6</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">HGET, 16 fields of 64 B, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">163,282</td><td class="">0.127</td><td class="">0.239</td><td class="">0.743</td><td class="">548.863</td><td class="">138.1</td><td class="">1.40</td><td class="">52.0</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">HGET, 16 fields of 64 B, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">169,192</td><td class="">0.127</td><td class="">0.239</td><td class="">0.431</td><td class="">548.863</td><td class="">135.9</td><td class="">1.50</td><td class="">53.5</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SISMEMBER, 16 members, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">154,423</td><td class="">0.207</td><td class="">0.271</td><td class="">0.383</td><td class="">7.967</td><td class="">85.7</td><td class="">1.50</td><td class="">37.4</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SISMEMBER, 16 members, pipeline 1</td><td class="text">Eski</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">272,604</td><td class="">0.111</td><td class="">0.223</td><td class="">0.287</td><td class="">6.143</td><td class="">31.9</td><td class="">2.27</td><td class="">56.8</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SISMEMBER, 16 members, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">253,706</td><td class="">0.119</td><td class="">0.223</td><td class="">0.279</td><td class="">6.367</td><td class="">33.6</td><td class="">2.09</td><td class="">54.4</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SISMEMBER, 16 members, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">254,165</td><td class="">0.119</td><td class="">0.223</td><td class="">0.263</td><td class="">6.591</td><td class="">31.8</td><td class="">2.15</td><td class="">55.8</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SISMEMBER, 16 members, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">152,243</td><td class="">0.207</td><td class="">0.279</td><td class="">0.391</td><td class="">7.615</td><td class="">86.2</td><td class="">1.53</td><td class="">38.4</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SISMEMBER, 16 members, pipeline 1</td><td class="text">Eski</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">275,631</td><td class="">0.103</td><td class="">0.223</td><td class="">0.279</td><td class="">2.127</td><td class="">31.9</td><td class="">2.34</td><td class="">58.2</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SISMEMBER, 16 members, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">254,737</td><td class="">0.119</td><td class="">0.223</td><td class="">0.279</td><td class="">6.527</td><td class="">33.7</td><td class="">2.09</td><td class="">54.3</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SISMEMBER, 16 members, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">254,670</td><td class="">0.119</td><td class="">0.223</td><td class="">0.271</td><td class="">6.783</td><td class="">31.6</td><td class="">2.11</td><td class="">55.1</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SISMEMBER, 16 members, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">153,474</td><td class="">0.207</td><td class="">0.279</td><td class="">0.399</td><td class="">7.647</td><td class="">85.5</td><td class="">1.52</td><td class="">38.2</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SISMEMBER, 16 members, pipeline 1</td><td class="text">Eski</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">172,964</td><td class="">0.111</td><td class="">0.231</td><td class="">0.679</td><td class="">548.863</td><td class="">31.7</td><td class="">1.49</td><td class="">55.3</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SISMEMBER, 16 members, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">194,461</td><td class="">0.119</td><td class="">0.231</td><td class="">0.639</td><td class="">544.767</td><td class="">33.8</td><td class="">1.66</td><td class="">53.6</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SISMEMBER, 16 members, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">175,183</td><td class="">0.119</td><td class="">0.231</td><td class="">0.767</td><td class="">548.863</td><td class="">31.9</td><td class="">1.51</td><td class="">55.0</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SISMEMBER, 16 members, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">155,918</td><td class="">0.207</td><td class="">0.271</td><td class="">0.471</td><td class="">7.967</td><td class="">85.4</td><td class="">1.55</td><td class="">38.9</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SISMEMBER, 16 members, pipeline 1</td><td class="text">Eski</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">271,146</td><td class="">0.111</td><td class="">0.223</td><td class="">0.287</td><td class="">6.591</td><td class="">31.6</td><td class="">2.22</td><td class="">55.3</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SISMEMBER, 16 members, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">174,384</td><td class="">0.119</td><td class="">0.231</td><td class="">0.503</td><td class="">544.767</td><td class="">33.4</td><td class="">1.53</td><td class="">56.1</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">SISMEMBER, 16 members, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">254,606</td><td class="">0.119</td><td class="">0.223</td><td class="">0.263</td><td class="">5.535</td><td class="">31.8</td><td class="">2.16</td><td class="">56.0</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">ZSCORE, 16 members, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">148,004</td><td class="">0.215</td><td class="">0.287</td><td class="">0.391</td><td class="">7.519</td><td class="">58.5</td><td class="">1.50</td><td class="">37.6</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">ZSCORE, 16 members, pipeline 1</td><td class="text">Eski</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">263,198</td><td class="">0.111</td><td class="">0.231</td><td class="">0.303</td><td class="">8.831</td><td class="">34.8</td><td class="">2.18</td><td class="">54.3</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">ZSCORE, 16 members, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">1</td><td class="text">successful</td><td class="text">yes</td><td class="">164,437</td><td class="">0.119</td><td class="">0.231</td><td class="">0.727</td><td class="">548.863</td><td class="">36.6</td><td class="">1.45</td><td class="">56.2</td><td class="reason"></td></tr><tr class="excluded"><td class="text">benchmark</td><td class="text">ZSCORE, 16 members, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">1</td><td class="text">invalid</td><td class="text">no</td><td class="">146,176</td><td class="">0.119</td><td class="">0.231</td><td class="">0.783</td><td class="">548.863</td><td class="">34.7</td><td class="">1.27</td><td class="">55.2</td><td class="reason">case invalid; external_cpu_activity</td></tr><tr class=""><td class="text">benchmark</td><td class="text">ZSCORE, 16 members, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">145,649</td><td class="">0.223</td><td class="">0.287</td><td class="">0.383</td><td class="">7.487</td><td class="">57.6</td><td class="">1.44</td><td class="">36.0</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">ZSCORE, 16 members, pipeline 1</td><td class="text">Eski</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">269,968</td><td class="">0.111</td><td class="">0.223</td><td class="">0.287</td><td class="">3.375</td><td class="">35.1</td><td class="">2.32</td><td class="">57.5</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">ZSCORE, 16 members, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">252,108</td><td class="">0.119</td><td class="">0.231</td><td class="">0.279</td><td class="">3.359</td><td class="">36.9</td><td class="">2.13</td><td class="">55.3</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">ZSCORE, 16 members, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">2</td><td class="text">successful</td><td class="text">yes</td><td class="">248,913</td><td class="">0.119</td><td class="">0.231</td><td class="">0.279</td><td class="">4.543</td><td class="">34.7</td><td class="">2.05</td><td class="">53.7</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">ZSCORE, 16 members, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">82,545</td><td class="">0.223</td><td class="">0.295</td><td class="">1.655</td><td class="">548.863</td><td class="">57.6</td><td class="">0.84</td><td class="">35.4</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">ZSCORE, 16 members, pipeline 1</td><td class="text">Eski</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">267,663</td><td class="">0.111</td><td class="">0.231</td><td class="">0.287</td><td class="">4.383</td><td class="">34.8</td><td class="">2.29</td><td class="">57.2</td><td class="reason"></td></tr><tr class="excluded"><td class="text">benchmark</td><td class="text">ZSCORE, 16 members, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">3</td><td class="text">invalid</td><td class="text">no</td><td class="">139,500</td><td class="">0.119</td><td class="">0.231</td><td class="">1.159</td><td class="">548.863</td><td class="">36.9</td><td class="">1.23</td><td class="">53.8</td><td class="reason">case invalid; external_cpu_activity</td></tr><tr class=""><td class="text">benchmark</td><td class="text">ZSCORE, 16 members, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">3</td><td class="text">successful</td><td class="text">yes</td><td class="">168,386</td><td class="">0.119</td><td class="">0.231</td><td class="">0.759</td><td class="">548.863</td><td class="">34.8</td><td class="">1.48</td><td class="">55.7</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">ZSCORE, 16 members, pipeline 1</td><td class="text">Dragonfly 2.0.2</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">81,817</td><td class="">0.215</td><td class="">0.287</td><td class="">1.759</td><td class="">548.863</td><td class="">58.8</td><td class="">0.81</td><td class="">34.0</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">ZSCORE, 16 members, pipeline 1</td><td class="text">Eski</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">263,660</td><td class="">0.111</td><td class="">0.231</td><td class="">0.295</td><td class="">22.527</td><td class="">35.0</td><td class="">2.18</td><td class="">54.6</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">ZSCORE, 16 members, pipeline 1</td><td class="text">Redis 7.4.12</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">138,813</td><td class="">0.119</td><td class="">0.231</td><td class="">1.167</td><td class="">548.863</td><td class="">36.9</td><td class="">1.20</td><td class="">49.4</td><td class="reason"></td></tr><tr class=""><td class="text">benchmark</td><td class="text">ZSCORE, 16 members, pipeline 1</td><td class="text">Valkey 8.1.11</td><td class="">4</td><td class="text">successful</td><td class="text">yes</td><td class="">161,816</td><td class="">0.119</td><td class="">0.231</td><td class="">0.791</td><td class="">548.863</td><td class="">34.6</td><td class="">1.41</td><td class="">54.5</td><td class="reason"></td></tr></tbody></table></div></details></section>
+<p class="note">Generated 2026-11-05 02:30 UTC from dataset schema eski-testbed-dataset-v1.</p>
+</main>
+</body>
+</html>
