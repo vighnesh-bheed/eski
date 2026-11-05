@@ -1,0 +1,47 @@
+import Effects.Rollback
+import Effects.Persistence
+import Effects.KeyTTL
+
+#print axioms Effects.relative_set_replays_absolute_deadline
+#print axioms Effects.absolute_set_replays_value_and_deadline
+#print axioms Effects.set_keep_ttl_replays_value_and_deadline
+#print axioms Effects.key_expiry_translation_refines
+#print axioms Effects.key_persist_translation_refines
+#print axioms Effects.key_delete_translation_refines
+#print axioms Effects.key_deadline_equal_now_is_expired
+#print axioms Effects.replay_expire_refines
+#print axioms Effects.consistent_expiry_reply_refines
+#print axioms Effects.future_expiry_reply_ne_delete
+#print axioms Effects.due_expiry_reply_ne_update
+#print axioms Effects.replay_persist_refines
+#print axioms Effects.replay_final_bytes_preserves_deadline
+#print axioms Effects.replay_remove_refines
+#print axioms Effects.lazy_expiry_translation_refines
+#print axioms Effects.translation_refines
+#print axioms Effects.replay_append
+#print axioms Effects.sequences_preserve_values_and_absolute_deadlines
+#print axioms Effects.physical_expiry_preserves_live_view
+#print axioms Effects.cached_minimum_does_not_define_liveness
+#print axioms Effects.expire_then_persist_absolute
+#print axioms Effects.existing_deadline_live_at_exact_now
+#print axioms Effects.new_deadline_at_now_deletes
+#print axioms Effects.existing_deadline_expires_after_now
+#print axioms Effects.active_sweep_removes_at_exact_now
+#print axioms Effects.distinct_membership
+#print axioms Effects.distinct_no_aliases
+#print axioms Effects.restore_captured_lookup
+#print axioms Effects.rollback_restores_distinct
+#print axioms Effects.rollback_preserves_other_records
+#print axioms Effects.restoreOwned_records
+#print axioms Effects.restoreOwned_trace
+#print axioms Effects.failure_restores_record_and_metadata
+#print axioms Effects.failure_restores_authorized_state
+#print axioms Effects.failure_discards_unpublished
+#print axioms Effects.protocol_error_preserves_allowed_effects
+#print axioms Effects.snapshot_token_once
+#print axioms Effects.restoreOwned_candidate_count
+#print axioms Effects.restoreOwned_transfer_count
+#print axioms Effects.candidate_destroy_once
+#print axioms Effects.snapshot_transfer_once
+#print axioms Effects.success_snapshot_destroy_once
+#print axioms Effects.rollback_does_not_destroy_transferred_snapshot

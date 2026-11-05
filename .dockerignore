@@ -1,0 +1,12 @@
+*
+!Dockerfile
+!src
+!LICENSE
+!THIRD_PARTY_NOTICES.md
+!third_party/
+!third_party/lua/
+!third_party/lua/**
+!tools/
+!tools/build_lua.sh
+!tools/build_diagnostics.sh
+!tools/source_digest.sh

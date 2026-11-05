@@ -1,0 +1,1219 @@
+import argparse
+from collections import defaultdict
+from contextlib import contextmanager
+import hashlib
+import html
+import importlib.util
+import json
+import math
+from pathlib import Path
+import re
+import socket
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+
+
+ROOT = Path(__file__).resolve().parents[1]
+BLOCKS = ('CONFORMANCE', 'BENCHMARKS', 'COMMANDS')
+RUNS = 'bench/testbed/runs'
+RUN_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*')
+ENGINE_LABELS = {'eski-docker': 'Eski', 'eski': 'Eski', 'redis': 'Redis', 'valkey': 'Valkey', 'dragonfly': 'Dragonfly'}
+RATIO_IMAGE = 'docs/img/throughput-ratio'
+
+
+def load_charts():
+    spec = importlib.util.spec_from_file_location('testbed_charts', ROOT / 'bench/testbed/charts.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+CHARTS = load_charts()
+
+
+class RespError(ValueError):
+    pass
+
+
+class Connection:
+    def __init__(self, host, port, timeout=5):
+        self.socket = socket.create_connection((host, port), timeout=timeout)
+        self.file = self.socket.makefile('rb')
+
+    def close(self):
+        self.file.close()
+        self.socket.close()
+
+    def line(self):
+        value = self.file.readline(1 << 20)
+        if not value.endswith(b'\r\n'):
+            raise RespError('incomplete RESP line')
+        return value[:-2]
+
+    def reply(self):
+        prefix = self.file.read(1)
+        if prefix == b'+':
+            return self.line().decode('utf-8')
+        if prefix == b'-':
+            raise RespError(self.line().decode('utf-8', errors='replace'))
+        if prefix == b':':
+            return int(self.line())
+        if prefix in (b'$', b'*', b'~', b'%'):
+            count = int(self.line())
+            if count == -1:
+                return None
+            if count < 0 or count > (16 << 20 if prefix == b'$' else 100000):
+                raise RespError('invalid RESP length')
+            if prefix == b'$':
+                data = self.file.read(count)
+                if len(data) != count or self.file.read(2) != b'\r\n':
+                    raise RespError('incomplete RESP bulk string')
+                return data.decode('utf-8')
+            if prefix == b'%':
+                return {self.reply(): self.reply() for _ in range(count)}
+            return [self.reply() for _ in range(count)]
+        raise RespError('unsupported or missing RESP reply type')
+
+    def call(self, *arguments):
+        values = [str(value).encode('utf-8') for value in arguments]
+        wire = b'*%d\r\n' % len(values)
+        wire += b''.join(b'$%d\r\n' % len(value) + value + b'\r\n' for value in values)
+        self.socket.sendall(wire)
+        return self.reply()
+
+
+@contextmanager
+def server_connection(binary, address=None):
+    if address:
+        host, separator, port = address.rpartition(':')
+        if not separator or not host:
+            raise ValueError('--server must be HOST:PORT')
+        connection = Connection(host, int(port))
+        try:
+            yield connection
+        finally:
+            connection.close()
+        return
+    binary = Path(binary).resolve()
+    if not binary.is_file():
+        raise ValueError('server binary is missing; run ./build.sh or pass --server-binary')
+    with tempfile.TemporaryDirectory(prefix='eski-docs-') as directory:
+        with socket.socket() as probe:
+            probe.bind(('127.0.0.1', 0))
+            port = probe.getsockname()[1]
+        log_path = Path(directory) / 'server.log'
+        with log_path.open('wb') as log:
+            process = subprocess.Popen([str(binary), '--bind', '127.0.0.1', '--port', str(port), '--dir', directory,
+                                        '--save', '', '--appendonly', 'no', '--loglevel', 'warning'],
+                                       stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, cwd=directory)
+            connection = None
+            try:
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    if process.poll() is not None:
+                        raise ValueError('temporary server exited: ' + log_path.read_text(errors='replace').strip())
+                    candidate = None
+                    try:
+                        candidate = Connection('127.0.0.1', port, timeout=0.3)
+                        if candidate.call('PING') != 'PONG':
+                            candidate.close()
+                            raise ValueError('temporary server returned an unexpected PING reply')
+                        candidate.socket.settimeout(10)
+                        connection = candidate
+                        break
+                    except OSError:
+                        if candidate is not None:
+                            candidate.close()
+                        time.sleep(0.05)
+                    except Exception:
+                        if candidate is not None:
+                            candidate.close()
+                        raise
+                if connection is None:
+                    raise ValueError('temporary server did not become ready')
+                yield connection
+            finally:
+                if connection is not None:
+                    connection.close()
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+
+
+def mapping(value, label):
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, list) or len(value) % 2:
+        raise ValueError(label + ' must contain key/value pairs')
+    result = {}
+    for position in range(0, len(value), 2):
+        key = value[position]
+        if not isinstance(key, str) or key in result:
+            raise ValueError(label + ' has an invalid or duplicate key')
+        result[key] = value[position + 1]
+    return result
+
+
+def command_inventory(connection):
+    result = {}
+
+    def visit(value):
+        for name, metadata in mapping(value, 'COMMAND DOCS').items():
+            fields = mapping(metadata, 'command metadata')
+            key = name.lower()
+            if key in result:
+                raise ValueError('COMMAND DOCS contains duplicate command ' + key)
+            if not isinstance(fields.get('group'), str) or not isinstance(fields.get('summary', ''), str):
+                raise ValueError('command metadata lacks a group or summary')
+            result[key] = fields
+            if fields.get('subcommands'):
+                visit(fields['subcommands'])
+
+    visit(connection.call('COMMAND', 'DOCS'))
+    registered = connection.call('COMMAND', 'LIST')
+    if not isinstance(registered, list) or any(not isinstance(x, str) for x in registered):
+        raise ValueError('COMMAND LIST returned invalid command names')
+    registered = {name.lower() for name in registered}
+    if set(result) != registered:
+        missing = ', '.join(sorted(registered - set(result)))
+        extra = ', '.join(sorted(set(result) - registered))
+        raise ValueError('command inventory differs from registration; missing: %s; extra: %s' % (missing, extra))
+    top = {name for name in result if '|' not in name}
+    count = connection.call('COMMAND', 'COUNT')
+    if count != len(top):
+        raise ValueError('COMMAND COUNT disagrees with top-level command metadata')
+    return dict(sorted(result.items()))
+
+
+def argument_text(value):
+    arg = mapping(value, 'command argument')
+    kind = arg.get('type')
+    children = arg.get('arguments') or []
+    token = arg.get('token')
+    name = str(arg.get('display_text') or arg.get('name') or 'value')
+    if kind == 'oneof':
+        text = '(' + ' | '.join(argument_text(child) for child in children) + ')'
+    elif kind == 'block':
+        text = ' '.join(argument_text(child) for child in children)
+    elif kind == 'pure-token':
+        text = str(token or name).upper()
+    else:
+        text = '<' + name + '>'
+    if token and kind != 'pure-token':
+        text = str(token).upper() + ' ' + text
+    flags = arg.get('flags') or []
+    if 'multiple' in flags:
+        text += ' ...'
+    if 'optional' in flags:
+        text = '[' + text + ']'
+    return text
+
+
+def md(value):
+    return str(value).replace('\r', ' ').replace('\n', ' ').replace('|', '\\|').replace('<', '&lt;').replace('>', '&gt;')
+
+
+def table_code(value):
+    text = str(value).replace('\r', ' ').replace('\n', ' ')
+    fence = '`' * (max((len(match.group()) for match in re.finditer(r'`+', text)), default=0) + 1)
+    if text.startswith('`') or text.endswith('`') or (text.startswith(' ') and text.endswith(' ') and text.strip()):
+        text = ' ' + text + ' '
+    return fence + text.replace('|', '\\|') + fence
+
+
+def command_table(commands, compact=False):
+    groups = defaultdict(list)
+    for name, fields in commands.items():
+        groups[fields['group']].append((name, fields))
+    if compact:
+        lines = ['| Group | Registered commands and subcommands |', '| --- | --- |']
+        for group, items in sorted(groups.items()):
+            names = ', '.join(table_code(name.upper().replace('|', ' ')) for name, _ in items)
+            lines.append('| %s | %s |' % (md(group), names))
+        return '\n'.join(lines)
+    lines = []
+    for group, items in sorted(groups.items()):
+        lines.extend(['## ' + group.replace('_', ' ').title(), '', '| Command | Arguments | Metadata summary |', '| --- | --- | --- |'])
+        for name, fields in items:
+            arguments = ' '.join(argument_text(arg) for arg in fields.get('arguments') or [])
+            summary = fields.get('summary', '')
+            if name.split('|')[0] in ('cluster', 'sentinel'):
+                summary = 'Compatibility entry; excluded execution features remain unavailable. ' + summary
+            lines.append('| %s | %s | %s |' % (table_code(name.upper().replace('|', ' ')), table_code(arguments) if arguments else '—', md(summary)))
+        lines.append('')
+    return '\n'.join(lines).rstrip()
+
+
+def read_json(path):
+    try:
+        value = json.loads(Path(path).read_text())
+    except (OSError, ValueError) as error:
+        raise ValueError('cannot read JSON input %s: %s' % (path, error)) from error
+    if not isinstance(value, dict):
+        raise ValueError(str(path) + ' must contain a JSON object')
+    return value
+
+
+def count(value, label):
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(label + ' must be a non-negative integer')
+    return value
+
+
+def validate_conformance(value, label):
+    compact = value.get('schema') == 'eski-docs-conformance-v1'
+    if value.get('schema') not in (2, 'eski-docs-conformance-v1') or not isinstance(value.get('units'), dict) or not isinstance(value.get('totals'), dict):
+        raise ValueError(label + ' requires a supported conformance summary with units and totals')
+    suite = value.get('suite')
+    if not isinstance(suite, dict) or suite.get('name') != 'redis' or not isinstance(suite.get('tag'), str) or not suite['tag']:
+        raise ValueError(label + ' must identify the Redis test suite')
+    if not all(isinstance(name, str) and isinstance(unit, dict) for name, unit in value['units'].items()):
+        raise ValueError(label + ' has an invalid unit record')
+    if count(value['totals'].get('units_run'), label + ' units run') != len(value['units']):
+        raise ValueError(label + ' unit count disagrees with its units')
+    for metric in ('passed', 'failed', 'skipped', 'errored'):
+        total = count(value['totals'].get(metric), label + ' total ' + metric)
+        actual = sum(count(unit.get(metric, 0), label + ' unit ' + metric) for unit in value['units'].values())
+        if total != actual:
+            raise ValueError(label + ' totals disagree with its units for ' + metric)
+    for name, unit in value['units'].items():
+        if (not compact and not isinstance(unit.get('tests'), dict)) or not isinstance(unit.get('failures'), list):
+            raise ValueError(label + ' unit ' + name + ' lacks test outcomes')
+        if any(not isinstance(failure, dict) or not isinstance(failure.get('test'), str) for failure in unit['failures']):
+            raise ValueError(label + ' unit ' + name + ' has an invalid failure identity')
+        if not compact:
+            if not all(isinstance(test, str) and isinstance(outcome, dict) for test, outcome in unit['tests'].items()):
+                raise ValueError(label + ' unit ' + name + ' has invalid test outcomes')
+        if compact:
+            if set(unit) != {'passed', 'failed', 'skipped', 'errored', 'failures'} or len(unit['failures']) != unit['failed']:
+                raise ValueError(label + ' compact unit has unexpected fields or failure counts')
+            for failure in unit['failures']:
+                if set(failure) != {'test', 'category', 'reason'} or not all(isinstance(v, str) for v in failure.values()):
+                    raise ValueError(label + ' compact failure must contain an identity, category and authored reason')
+    if compact:
+        comparison = value.get('baseline')
+        if not isinstance(comparison, dict) or not isinstance(comparison.get('regressions'), list) or not re.fullmatch(r'[0-9a-f]{64}', comparison.get('sha256', '')):
+            raise ValueError(label + ' lacks a valid recorded baseline comparison')
+        recorded = sorted(unit_name + '::' + failure['test'] for unit_name, unit in value['units'].items() for failure in unit['failures'])
+        identities = value.get('failing_tests')
+        if not isinstance(identities, list) or not all(isinstance(identity, str) for identity in identities) or sorted(identities) != recorded:
+            raise ValueError(label + ' failing test identities disagree with its units')
+    return value
+
+
+def json_digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def compact_summary(value, baseline):
+    if value.get('schema') != 2:
+        raise ValueError('--record-conformance requires a raw schema-2 runner result')
+    expected, preserved, regressions = preserved_tests(baseline, value)
+    units = {}
+    for name, unit in sorted(value['units'].items()):
+        record = {key: unit[key] for key in ('passed', 'failed', 'skipped', 'errored')}
+        record['failures'] = []
+        for failure in unit['failures']:
+            title = failure['test']
+            text = failure_explanation(name, title, str(failure.get('reason', '')))
+            category = 'excluded feature' if any(token in text for token in ('excluded', 'outside the single-node scope')) else 'compatibility gap'
+            record['failures'].append({'test': title, 'category': category, 'reason': text})
+        units[name] = record
+    return {'schema': 'eski-docs-conformance-v1', 'generated_at': value.get('generated_at'),
+            'source_summary_sha256': json_digest(value), 'source_mode': value.get('mode'),
+            'suite': {key: value['suite'][key] for key in ('name', 'tag', 'sha256', 'url', 'tags', 'external_skip_lifted') if key in value['suite']},
+            'units': units, 'totals': {key: value['totals'][key] for key in ('units_run', 'passed', 'failed', 'skipped', 'errored')},
+            'failing_tests': sorted(name + '::' + failure['test'] for name, unit in units.items() for failure in unit['failures']),
+            'baseline': {'sha256': json_digest(baseline), 'units_compared': sorted(baseline['units']), 'baseline_passed': expected,
+                         'current_passed': preserved, 'regressions': regressions}}
+
+
+def preserved_tests(baseline, observed):
+    if baseline['suite']['tag'] != observed['suite']['tag'] or baseline['suite'].get('sha256') != observed['suite'].get('sha256'):
+        raise ValueError('baseline and observed conformance identify different suites')
+    if baseline['suite'].get('tags') != observed['suite'].get('tags'):
+        raise ValueError('baseline and observed conformance use different tag filters')
+    if baseline.get('schema') != 2:
+        raise ValueError('the baseline must be a raw schema-2 runner result')
+    if observed.get('schema') == 'eski-docs-conformance-v1':
+        comparison = observed['baseline']
+        if comparison['sha256'] != json_digest(baseline) or comparison['units_compared'] != sorted(baseline['units']):
+            raise ValueError('recorded comparison belongs to another baseline; refresh from a real run')
+        expected = count(comparison.get('baseline_passed'), 'recorded baseline passes')
+        preserved = count(comparison.get('current_passed'), 'recorded preserved passes')
+        if expected != baseline['totals']['passed'] or preserved > expected:
+            raise ValueError('recorded baseline comparison has impossible passing counts')
+        if not all(isinstance(name, str) for name in comparison['regressions']):
+            raise ValueError('recorded regressions must be test identities')
+        if bool(expected - preserved) != bool(comparison['regressions']):
+            raise ValueError('recorded preserved passes disagree with regressions')
+        return expected, preserved, comparison['regressions']
+    expected = 0
+    preserved = 0
+    regressions = []
+    for unit_name, unit in baseline['units'].items():
+        current = observed['units'].get(unit_name, {}).get('tests', {})
+        for name, outcome in unit['tests'].items():
+            passed = count(outcome.get('passed', 0), 'baseline test passes')
+            expected += passed
+            now = count(current.get(name, {}).get('passed', 0), 'observed test passes')
+            preserved += min(now, passed)
+            if now < passed:
+                regressions.append(unit_name + '::' + name)
+    if expected != baseline['totals']['passed']:
+        raise ValueError('baseline passing test counts disagree with its total')
+    return expected, preserved, regressions
+
+
+def conformance_table(summary):
+    lines = ['| Unit | Passed | Failed | Skipped | Unit errors |', '| --- | ---: | ---: | ---: | ---: |']
+    for name, unit in sorted(summary['units'].items()):
+        lines.append('| %s | %d | %d | %d | %d |' % (md(name), unit['passed'], unit['failed'], unit['skipped'], unit['errored']))
+    totals = summary['totals']
+    lines.append('| **Total** | **%d** | **%d** | **%d** | **%d** |' % tuple(totals[key] for key in ('passed', 'failed', 'skipped', 'errored')))
+    return '\n'.join(lines)
+
+
+def failure_explanation(unit, name, reason):
+    text = (name + ' ' + reason).lower()
+    if 'sync' in text or 'replication_stream' in text:
+        return 'The test observes a replication stream; replication is outside the single-node scope.'
+    if any(token in text for token in ('fcall', 'function load', 'function list', 'function dump',
+                                       'function restore', 'function flush', 'function library',
+                                       'function libraries', 'library metadata')):
+        return 'The recorded snapshot predates executable Function libraries; their current qualification is described in the scripting guide.'
+    if any(token in text for token in ('eval', 'script')):
+        return 'The test exercises Lua scripting; this recorded assertion remains a compatibility gap.'
+    if unit == 'introspection-2':
+        return 'The recorded command inventory differs; inspect the named assertion and the excluded cluster commands.'
+    if unit == 'querybuf':
+        return 'The test assumes reference query-buffer allocation and resize behavior; Eski uses its own buffer policy.'
+    if unit == 'info':
+        return 'The test assumes reference hash-table allocation sizes; Eski uses a different keyspace representation.'
+    if unit == 'other' and 'help' in text:
+        return 'The test asks for HELP on an excluded module command.'
+    if unit == 'type/list':
+        return 'The blocking list operation increased the dirty counter by 3 instead of the expected 2; this remains a compatibility gap.'
+    if unit == 'pause':
+        return 'The recorded pause/expiry behavior differs; this remains a compatibility gap.'
+    return 'A recorded assertion differs; rerun the named unit to inspect its current failure.'
+
+
+def failure_table(summary):
+    if not any(unit['failures'] for unit in summary['units'].values()):
+        note = 'No test failures were recorded.'
+        if summary['totals']['errored']:
+            note += ' Unit errors remain visible in the expanded snapshot table.'
+        return note
+    lines = ['| Unit and test | Category | Explanation |', '| --- | --- | --- |']
+    for unit_name, unit in sorted(summary['units'].items()):
+        for failure in unit['failures']:
+            name = str(failure.get('test', ''))
+            reason = str(failure.get('reason', ''))
+            explanation = reason if summary.get('schema') == 'eski-docs-conformance-v1' else failure_explanation(unit_name, name, reason)
+            category = failure.get('category', 'recorded difference')
+            lines.append('| %s | %s | %s |' % (md(unit_name + '::' + name), md(category), md(explanation)))
+    return '\n'.join(lines)
+
+
+def finite_number(value, label):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise ValueError(label + ' must be a finite non-negative number')
+    return float(value)
+
+
+def benchmark_cells(dataset):
+    if dataset.get('schema') != 'eski-testbed-dataset-v1':
+        raise ValueError('benchmark data requires eski-testbed-dataset-v1')
+    if not isinstance(dataset.get('engines'), list) or not isinstance(dataset.get('workloads'), list) or not isinstance(dataset.get('rows'), list):
+        raise ValueError('benchmark data lacks engines, workloads or rows')
+    if any(not isinstance(row, dict) for row in dataset['engines'] + dataset['workloads'] + dataset['rows']):
+        raise ValueError('benchmark records must be objects')
+    if not isinstance(dataset.get('design'), dict) or not all(isinstance(row.get('name'), str) for row in dataset['workloads']):
+        raise ValueError('benchmark design and workload names are required')
+    method = dataset['design'].get('methodology', {})
+    if not isinstance(method, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in method.items()):
+        raise ValueError('benchmark methodology must contain named text descriptions')
+    engines = [row.get('target') for row in dataset['engines']]
+    workloads = [row.get('key') for row in dataset['workloads']]
+    if not all(isinstance(name, str) and name for name in engines + workloads) or len(set(engines)) != len(engines) or len(set(workloads)) != len(workloads) or not engines or not workloads:
+        raise ValueError('benchmark engines and workloads must be nonempty and unique')
+    repetitions = count(dataset.get('design', {}).get('repetitions'), 'benchmark repetitions')
+    if not repetitions:
+        raise ValueError('benchmark repetitions must be positive')
+    cells = {(w, e): {'included': [], 'excluded': [], 'client_limited': 0} for w in workloads for e in engines}
+    seen = set()
+    for row in dataset['rows']:
+        if row.get('phase') != 'benchmark':
+            continue
+        key = row.get('workload'), row.get('engine')
+        repetition = count(row.get('repetition'), 'benchmark repetition')
+        identity = key + (repetition,)
+        if key not in cells or not 1 <= repetition <= repetitions or identity in seen:
+            raise ValueError('benchmark row has unknown or repeated engine/workload/repetition')
+        seen.add(identity)
+        if not isinstance(row.get('included'), bool):
+            raise ValueError('benchmark row lacks an inclusion decision')
+        if row['included']:
+            if row.get('state') != 'successful' or row.get('integrity') != 'verified':
+                raise ValueError('included benchmark rows must be successful and integrity verified')
+            if not isinstance(row.get('client_limited'), bool):
+                raise ValueError('included benchmark rows require a boolean client_limited annotation')
+            for metric in ('ops', 'p99', 'mem'):
+                finite_number(row.get(metric), 'benchmark ' + metric)
+            cells[key]['included'].append(row)
+            cells[key]['client_limited'] += int(bool(row.get('client_limited')))
+        else:
+            if not isinstance(row.get('reasons'), list) or not row['reasons'] or not all(isinstance(reason, str) and reason for reason in row['reasons']):
+                raise ValueError('excluded benchmark row lacks its reasons')
+            cells[key]['excluded'].append(row)
+    planned = len(engines) * len(workloads) * repetitions
+    if len(seen) != planned:
+        raise ValueError('benchmark dataset does not contain every planned repetition')
+    actual = {'planned': planned, 'valid': sum(len(c['included']) for c in cells.values()), 'excluded': sum(len(c['excluded']) for c in cells.values()), 'client_limited': sum(c['client_limited'] for c in cells.values())}
+    if dataset.get('counts') != actual:
+        raise ValueError('benchmark counts disagree with row inclusion decisions')
+    for cell in cells.values():
+        cell['included'].sort(key=lambda row: row['repetition'])
+        cell['excluded'].sort(key=lambda row: row['repetition'])
+        for metric in ('ops', 'p99', 'mem'):
+            values = [float(row[metric]) for row in cell['included']]
+            cell[metric] = {'median': statistics.median(values), 'min': min(values), 'max': max(values)} if values else None
+    return cells
+
+
+def engine_label(dataset, engine, versions=False):
+    if not versions:
+        return ENGINE_LABELS.get(engine['target'], engine['target'])
+    return str(engine.get('label') or ENGINE_LABELS.get(engine['target'], engine['target']))
+
+
+def settle_cell(engine):
+    if type(engine.get('settle_s')) not in (int, float):
+        return '—'
+    return '%.1f' % engine['settle_s'] + ('' if engine.get('settled') is True else ', not settled')
+
+
+def numeric(value, metric):
+    if value is None:
+        return '—'
+    if metric == 'ops':
+        return '{:,.0f}'.format(value)
+    if metric == 'mem':
+        return '{:.2f}'.format(value / (1024 ** 2))
+    return '{:.3f}'.format(value)
+
+
+def benchmark_table(dataset, cells, brief=False):
+    if brief:
+        engines = dataset['engines']
+        lines = ['| Workload | ' + ' | '.join(engine_label(dataset, engine) + ' ops/s' for engine in engines) + ' |', '| --- | ' + ' | '.join('---:' for _ in engines) + ' |']
+        for workload in dataset['workloads']:
+            values = []
+            for engine in engines:
+                cell = cells[(workload['key'], engine['target'])]
+                if not cell['ops']:
+                    values.append('excluded (%d)' % len(cell['excluded']))
+                else:
+                    values.append(numeric(cell['ops']['median'], 'ops') + (' †' if cell['client_limited'] else ''))
+            lines.append('| %s | %s |' % (md(workload['name']), ' | '.join(values)))
+        return '\n'.join(lines)
+    lines = ['| Workload | Engine | Valid / planned | Throughput median [min, max], ops/s | p99 median [min, max], ms | Container memory peak median, MiB | Client-limited valid runs |', '| --- | --- | ---: | ---: | ---: | ---: | ---: |']
+    planned = dataset['design']['repetitions']
+    for workload in dataset['workloads']:
+        for engine in dataset['engines']:
+            cell = cells[(workload['key'], engine['target'])]
+            values = []
+            for metric in ('ops', 'p99'):
+                stats = cell[metric]
+                values.append('%s [%s, %s]' % tuple(numeric(stats[key], metric) for key in ('median', 'min', 'max')) if stats else 'excluded')
+            lines.append('| %s | %s | %d / %d | %s | %s | %s | %d |' % (md(workload['name']), md(engine_label(dataset, engine, versions=True)), len(cell['included']), planned, values[0], values[1], numeric(cell['mem']['median'], 'mem') if cell['mem'] else '—', cell['client_limited']))
+    return '\n'.join(lines)
+
+
+def benchmark_ratio(cells):
+    subject = cells.get(('get64-p1', 'eski-docker')) or cells.get(('get64-p1', 'eski'))
+    reference = cells.get(('get64-p1', 'redis'))
+    if not subject or not reference or not subject['ops'] or not reference['ops'] or reference['ops']['median'] <= 0:
+        raise ValueError('GET 64 B pipeline 1 ratio needs valid Eski and Redis repetitions')
+    return subject['ops']['median'] / reference['ops']['median'], bool(subject['client_limited'] or reference['client_limited'])
+
+
+def ratio_rows(dataset, cells):
+    engines = dataset['engines']
+    subject = next((engine for engine in engines if engine['target'] in CHARTS.SUBJECT), None)
+    reference = next((engine for engine in engines if engine['target'] == 'redis'), None)
+    if subject is None or reference is None:
+        raise ValueError('throughput ratio chart needs Eski and Redis engines')
+    others = [engine for engine in engines if engine is not subject and engine is not reference]
+    planned = dataset['design']['repetitions']
+    rows = []
+    for workload in dataset['workloads']:
+        eski = cells[(workload['key'], subject['target'])]
+        redis = cells[(workload['key'], reference['target'])]
+        row = dict(name=workload['name'], ratio=None, low=None, high=None, limited=False, others=[], excluded=None)
+        if not eski['ops']:
+            row['excluded'] = 'excluded: Eski %d of %d repetitions valid' % (len(eski['included']), planned)
+        elif not redis['ops'] or redis['ops']['median'] <= 0:
+            row['excluded'] = 'excluded: Redis %d of %d repetitions valid' % (len(redis['included']), planned)
+        else:
+            base = redis['ops']['median']
+            row.update(ratio=eski['ops']['median'] / base, low=eski['ops']['min'] / base, high=eski['ops']['max'] / base,
+                       limited=bool(eski['client_limited'] or redis['client_limited']))
+            for engine in others:
+                cell = cells[(workload['key'], engine['target'])]
+                if cell['ops']:
+                    row['others'].append((engine, cell['ops']['median'] / base))
+        rows.append(row)
+    return subject, reference, others, rows
+
+
+def ratio_ticks(top):
+    step = next(candidate for candidate in (0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10, 20, 50, 100, 1000, 10000) if top / candidate <= 7)
+    ticks, value = [], 0.0
+    while value < top - 1e-9:
+        ticks.append(value)
+        value += step
+    ticks.append(value)
+    return ticks
+
+
+def ratio_text(row):
+    return ('%.2fx' % row['ratio'] + (' †' if row['limited'] else '')) if row['ratio'] is not None else row['excluded']
+
+
+def ratio_context(dataset):
+    machine, design = dataset.get('machine') or {}, dataset.get('design') or {}
+    client, data = design.get('client') or {}, design.get('dataset') or {}
+    parts = [machine.get('cpu_model') or 'machine not recorded', 'run ' + dataset['run']['root'], 'one server core per engine']
+    if data.get('keys'):
+        parts.append('{:,} keys'.format(data['keys']))
+    if client.get('threads') and client.get('connections_per_thread'):
+        parts.append('%d connections' % (client['threads'] * client['connections_per_thread']))
+    if client.get('test_seconds'):
+        parts.append('%d s timed runs' % client['test_seconds'])
+    return ', '.join(parts)
+
+
+def ratio_figure(dataset, cells, theme):
+    colors = CHARTS.paint(theme)
+    esc = CHARTS.esc
+    subject, reference, others, rows = ratio_rows(dataset, cells)
+    series = {engine['target']: CHARTS.color(engine['target'], dataset['engines'], colors) for engine in dataset['engines']}
+    width, right, header, row_h, footer = 960, 30, 86, 28, 70
+    left = int(max(200, min(420, 24 + 6.5 * max(len(row['name']) for row in rows))))
+    height = header + row_h * len(rows) + footer
+    plot_w = width - left - right
+    values = [1.0] + [value for row in rows if row['ratio'] is not None for value in (row['high'], *(ratio for _, ratio in row['others']))]
+    ticks = ratio_ticks(max(values) * 1.12)
+    scale = ticks[-1]
+
+    def xv(value):
+        return left + plot_w * min(value, scale) / scale
+
+    out = ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" width="%d" height="%d" font-family="%s" role="img" aria-labelledby="ratio-title ratio-desc">' % (
+        width, height, width, height, esc(CHARTS.FONT))]
+    out.append('<title id="ratio-title">Eski throughput relative to Redis per workload, with Valkey and Dragonfly</title>')
+    out.append('<desc id="ratio-desc">%s</desc>' % esc('Horizontal bars give the Eski median throughput of each workload divided by the Redis median of the same workload on the same server core; '
+                                                        'the reference line marks 1.0x, thin whiskers span the Eski minimum to maximum over valid repetitions, and smaller markers place the '
+                                                        'Valkey and Dragonfly medians on the same scale. ' + '; '.join('%s %s' % (row['name'], ratio_text(row)) for row in rows) + '.'))
+    out.append('<rect width="%d" height="%d" fill="%s"/>' % (width, height, colors['surface']))
+    out.append('<text x="12" y="24" font-size="16" font-weight="600" fill="%s">Throughput relative to Redis on the same server core</text>' % colors['primary'])
+    out.append('<text x="12" y="44" font-size="12" fill="%s">Eski median of valid repetitions divided by the Redis median of the same workload; higher is better, 1.0x is Redis</text>' % colors['secondary'])
+    legend_y = 66
+    out.append('<rect x="12" y="%d" width="12" height="12" rx="3" fill="%s"/>' % (legend_y - 10, series[subject['target']]))
+    out.append('<text x="29" y="%d" font-size="11.5" fill="%s">Eski median</text>' % (legend_y, colors['secondary']))
+    out.append('<path d="M112 %d H128 M112 %d V%d M128 %d V%d" stroke="%s" stroke-width="1.5" fill="none"/>' % (legend_y - 4, legend_y - 7, legend_y - 1, legend_y - 7, legend_y - 1, colors['primary']))
+    out.append('<text x="134" y="%d" font-size="11.5" fill="%s">Eski min to max</text>' % (legend_y, colors['secondary']))
+    out.append('<line x1="240" x2="256" y1="%d" y2="%d" stroke="%s" stroke-width="2"/>' % (legend_y - 4, legend_y - 4, series[reference['target']]))
+    out.append('<text x="262" y="%d" font-size="11.5" fill="%s">Redis median, 1.0x</text>' % (legend_y, colors['secondary']))
+    position = 392
+    for engine in others:
+        label = engine_label(dataset, engine)
+        out.append('<circle cx="%d" cy="%d" r="4.5" fill="%s" stroke="%s" stroke-width="2"/>' % (position + 6, legend_y - 4, series[engine['target']], colors['surface']))
+        out.append('<text x="%d" y="%d" font-size="11.5" fill="%s">%s median</text>' % (position + 17, legend_y, colors['secondary'], esc(label)))
+        position += 17 + 6.6 * (len(label) + 7) + 22
+    top, bottom = header, header + row_h * len(rows)
+    for tick in ticks:
+        x = xv(tick)
+        reference_tick = abs(tick - 1.0) < 1e-9
+        out.append('<line x1="%.1f" x2="%.1f" y1="%d" y2="%d" stroke="%s" stroke-width="%s"/>' % (
+            x, x, top - 4, bottom, series[reference['target']] if reference_tick else (colors['axis'] if tick == 0 else colors['grid']), '1.5' if reference_tick else '1'))
+        out.append('<text x="%.1f" y="%d" font-size="10" text-anchor="middle" fill="%s" style="font-variant-numeric: tabular-nums">%s</text>' % (
+            x, bottom + 14, colors['muted'], ('%g' % tick) + 'x'))
+    for index, row in enumerate(rows):
+        y = top + index * row_h
+        cy = y + row_h / 2
+        out.append('<text x="%d" y="%.1f" font-size="12" text-anchor="end" fill="%s">%s</text>' % (left - 12, cy + 4, colors['secondary'], esc(row['name'])))
+        if row['ratio'] is None:
+            out.append('<text x="%d" y="%.1f" font-size="11" fill="%s">%s</text>' % (left + 8, cy + 4, colors['muted'], esc(row['excluded'])))
+            continue
+        bar_x = xv(row['ratio'])
+        out.append('<g><title>%s</title>' % esc('%s: Eski %s of the Redis median, range %.2fx to %.2fx' % (row['name'], ratio_text(row), row['low'], row['high'])))
+        out.append('<path d="M%d %.1f H%.1f Q%.1f %.1f %.1f %.1f V%.1f Q%.1f %.1f %.1f %.1f H%d Z" fill="%s"/>' % (
+            left, cy - 6, bar_x - 4, bar_x, cy - 6, bar_x, cy - 2, cy + 2, bar_x, cy + 6, bar_x - 4, cy + 6, left, series[subject['target']]))
+        out.append('</g>')
+        if row['high'] > row['low']:
+            out.append('<path d="M%.1f %.1f H%.1f M%.1f %.1f V%.1f M%.1f %.1f V%.1f" stroke="%s" stroke-width="1.5" fill="none"/>' % (
+                xv(row['low']), cy, xv(row['high']), xv(row['low']), cy - 4, cy + 4, xv(row['high']), cy - 4, cy + 4, colors['primary']))
+        for engine, ratio in row['others']:
+            out.append('<circle cx="%.1f" cy="%.1f" r="4.5" fill="%s" stroke="%s" stroke-width="2"><title>%s</title></circle>' % (
+                xv(ratio), cy, series[engine['target']], colors['surface'], esc('%s: %s %.2fx of the Redis median' % (row['name'], engine_label(dataset, engine), ratio))))
+        out.append('<text x="%.1f" y="%.1f" font-size="11" font-weight="600" fill="%s" style="font-variant-numeric: tabular-nums">%s</text>' % (
+            max(bar_x, xv(row['high'])) + 9, cy + 4, colors['primary'], esc(ratio_text(row))))
+    out.append('<text x="12" y="%d" font-size="11" fill="%s">%s</text>' % (bottom + 36, colors['muted'], esc(ratio_context(dataset))))
+    if any(row['limited'] for row in rows):
+        out.append('<text x="12" y="%d" font-size="11" fill="%s">%s</text>' % (
+            bottom + 52, colors['muted'], esc('† the load generator limited Eski or Redis in at least one valid repetition, so that ratio is bounded by the client, not by the engines. Excluded cells have no inferred score.')))
+    out.append('</svg>')
+    return '\n'.join(out) + '\n'
+
+
+def ratio_picture(dataset, cells):
+    rows = ratio_rows(dataset, cells)[3]
+    alt = 'Eski median throughput relative to the Redis median per workload on %s: %s.' % (
+        (dataset.get('machine') or {}).get('cpu_model') or 'the recorded machine', '; '.join('%s %s' % (row['name'], ratio_text(row)) for row in rows))
+    return ('<picture>\n<source media="(prefers-color-scheme: dark)" srcset="%s-dark.svg">\n<img alt="%s" src="%s.svg" width="960">\n</picture>' % (
+        RATIO_IMAGE, html.escape(alt, quote=True), RATIO_IMAGE))
+
+
+def badge(label, value, color):
+    left = max(80, len(label) * 6.8 + 16)
+    right = max(52, len(value) * 6.8 + 16)
+    title = html.escape(label + ': ' + value, quote=True)
+    return ('<svg xmlns="http://www.w3.org/2000/svg" width="%.0f" height="22" role="img" aria-label="%s">\n'
+            '<title>%s</title><rect width="%.0f" height="22" rx="3" fill="#4b5563"/>'
+            '<path d="M%.0f 0h%.0fv22H%.0fz" fill="%s"/>'
+            '<g fill="white" text-anchor="middle" font-family="Verdana,Arial,sans-serif" font-size="11">'
+            '<text x="%.1f" y="15">%s</text><text x="%.1f" y="15">%s</text></g>\n</svg>\n') % (
+                left+right, title, title, left+right, left, right, left, color, left/2, html.escape(label), left+right/2, html.escape(value))
+
+
+def replace_blocks(readme, blocks):
+    result = readme
+    for name in BLOCKS:
+        start = '<!-- BEGIN GENERATED ' + name + ' -->'
+        end = '<!-- END GENERATED ' + name + ' -->'
+        if result.count(start) != 1 or result.count(end) != 1 or result.index(start) >= result.index(end):
+            raise ValueError('README requires one ordered marker pair for ' + name)
+        first = result.index(start) + len(start)
+        last = result.index(end)
+        result = result[:first] + '\n\n' + blocks[name].strip() + '\n\n' + result[last:]
+    return result
+
+
+def run_directory(dataset):
+    name = (dataset.get('run') or {}).get('root')
+    if not isinstance(name, str) or not RUN_NAME.fullmatch(name):
+        raise ValueError('benchmark dataset must name its run in run.root')
+    return RUNS + '/' + name
+
+
+def published_run(root):
+    runs = []
+    for path in sorted((Path(root)/RUNS).glob('*/dataset.json')):
+        finished = (read_json(path).get('run') or {}).get('finished_at')
+        if isinstance(finished, (int, float)) and not isinstance(finished, bool) and math.isfinite(finished):
+            runs.append((finished, path.resolve()))
+    if not runs or sum(finished == max(runs)[0] for finished, _ in runs) != 1:
+        raise ValueError('no single latest finished run under ' + RUNS + '; pass --benchmark-results')
+    return max(runs)[1]
+
+
+AB_FLOOR = 'bench/ab_floor.json'
+AB_FLOOR_SCHEMA = 'eski-local-ab-floor-v1'
+
+
+def validate_ab_floor(value):
+    if value is None:
+        return None
+    if not isinstance(value, dict) or value.get('schema') != AB_FLOOR_SCHEMA or not isinstance(value.get('workloads'), dict) or not value['workloads']:
+        raise ValueError(AB_FLOOR + ' is not a local measurement floor record')
+    for key, workload in value['workloads'].items():
+        if not isinstance(workload, dict):
+            raise ValueError(AB_FLOOR + ' has an invalid workload ' + str(key))
+        count(workload.get('clean_pairs'), AB_FLOOR + ' clean_pairs')
+        for field in ('median', 'min', 'max', 'floor'):
+            if workload.get(field) is not None:
+                finite_number(workload[field], AB_FLOOR + ' ' + field)
+    for field in ('session', 'date', 'binary_sha256', 'rounds', 'seconds', 'warmup', 'cpus'):
+        if field not in value:
+            raise ValueError(AB_FLOOR + ' lacks ' + field)
+    if not isinstance(value['cpus'], dict) or (value.get('load') is not None and (not isinstance(value['load'], list) or len(value['load']) != 2)):
+        raise ValueError(AB_FLOOR + ' has invalid cpus or load fields')
+    for field in ('rounds', 'seconds', 'warmup'):
+        count(value[field], AB_FLOOR + ' ' + field)
+    return value
+
+
+def local_section(floor):
+    lines = ['## Local relative measurement', '',
+             'The recorded comparison above needs a dedicated machine and compares engines. A change to Eski itself is measured on the shared development machine with '
+             '`bench/ab.py`, which reports the cost of a candidate build relative to its parent instead of absolute numbers. It reuses the pinned memtier image, the dataset '
+             'of 100,000 keys of 64 B under one prefix and the server options of the test bed, and it complements the recorded comparison rather than replacing it.', '',
+             '### Method', '',
+             'Two lanes run at the same time on symmetric cores. Lane 1 places the server on CPU 1 and memtier on CPUs 10 and 11, lane 2 places the server on CPU 2 and memtier '
+             'on CPUs 12 and 13, and the controller runs on CPU 14; each memtier instance uses two threads of 16 connections. Every round starts both servers fresh, preloads '
+             'them, and for each workload runs a 5 second warmup and a 20 second measured run on both lanes together. Odd rounds put build A in lane 1 and even rounds swap the lanes.', '',
+             'The primary metric is server CPU time per command: the task time of every server thread plus the irq and softirq time of the server CPU, divided by the commands '
+             'processed in the measured window. Softirq time is included because loopback receive work triggered by the server lands there. A swap pair is an odd round and '
+             'the following even round; its ratio is the geometric mean of the two B/A ratios, which cancels a constant difference between the lanes. A session reports the '
+             'median and range of the clean swap-pair ratios per workload, with task time only, throughput, system calls and event-loop cycles per command as secondary '
+             'figures. A workload with fewer than three clean pairs is insufficient and the session is repeated later instead of being topped up with extra rounds.', '',
+             'The workloads are GET and SET of 64 B at pipeline 1 and 96,000 operations per second per lane, GET and SET at pipeline 16 and 640,000 operations per second, '
+             'PING at pipeline 16 and 640,000 operations per second, GET at pipeline 1 and 32,000 operations per second, and unthrottled GET at pipeline 16. The fixed rates '
+             'make both builds process the same offered load. Unthrottled GET at pipeline 1 and unthrottled SET at pipelines 1 and 16 can be selected with `--workloads` '
+             'when one build cannot reach a fixed rate and its runs would be excluded under the rules below. The lanes share the last level cache and memory bandwidth, '
+             'so ratios are slightly compressed toward 1, and throughput on this machine is limited by the load generator, so it is not claimed.', '',
+             '### Noise rules', '',
+             'A measured run is excluded when its lane delivers less than 98 percent of a fixed offered rate, when the server CPU carries more than 30 percent of foreign '
+             'task time, when the machine runs on battery, or when the server core\'s own thermal throttle counter rises by more than 100 events per second of the window. '
+             'Package throttle events are recorded but never exclude a run: under the performance governor the package counter of every CPU rises continuously, and '
+             'swap-pair ratios stayed consistent through sustained core throttling of both lanes. A round is excluded when the two lanes differ by more than 5 points of '
+             'server CPU foreign time or by more than 10 points of client CPU foreign time.', '',
+             'Frequency is judged per swap pair, not per run. The B/A ratio of mean server core frequency is formed like the CPU ratio, which cancels the lane frequency '
+             'difference, and the pair is excluded when that ratio differs from the median over the session\'s pairs for the workload by more than 20 percent. At a fixed '
+             'rate the two cores settle on different clocks from round to round without changing the CPU ratio, and a cheaper candidate lets its own core clock down in '
+             'both lanes; because the lanes swap every round, a frequency shift shared by every pair comes from the build and is not treated as noise. Every exclusion '
+             'keeps its reasons in `summary.json` and the report.', '']
+    lines += ['### Reference floor', '']
+    if floor is None:
+        lines += ['No reference floor is recorded. Record one with an A/A session as described below before citing a ratio.', '']
+    else:
+        load = floor.get('load')
+        lines += ['The floor comes from A/A session `%s` of one release build against itself (sha256 `%s`) on %s: %s, kernel %s, governor %s with energy preference %s, '
+                  'servers on CPUs %s and %s, %d rounds of %d seconds after %d seconds of warmup%s. The floor of a workload is the half-width around 1 of its clean '
+                  'swap-pair range, rounded up to half a percent. A candidate median inside the floor is no measurable change. The floor applies to sessions on the '
+                  'same cores under the same governor; a change of machine, kernel, governor or compiler needs a new A/A session.' % (
+                      md(floor['session']), floor['binary_sha256'][:12], md(floor['date']), md(floor.get('cpu_model') or 'CPU not recorded'), md(floor.get('kernel') or 'not recorded'),
+                      md(floor.get('governor') or 'not recorded'), md(floor.get('epp') or 'not recorded'), md(floor['cpus'].get('server')), md(floor['cpus'].get('server_b')),
+                      floor['rounds'], floor['seconds'], floor['warmup'], ', with a 1-minute load of %.2f to %.2f' % tuple(load) if load else ''), '',
+                  '| Workload | Clean swap pairs | A/A swap-pair median [min, max] | Floor |', '| --- | ---: | ---: | ---: |']
+        for key, workload in floor['workloads'].items():
+            if workload.get('floor') is None:
+                lines.append('| %s | %d | insufficient | — |' % (md(key), workload['clean_pairs']))
+            else:
+                lines.append('| %s | %d | %.3f [%.3f, %.3f] | %.1f%% |' % (md(key), workload['clean_pairs'], workload['median'], workload['min'], workload['max'], 100 * workload['floor']))
+        lines.append('')
+    lines += ['### Commands', '',
+              'Build the parent and the candidate with `./build.sh release` from paths of identical length, because the compiler embeds source paths, and copy each binary '
+              'out with its sha256. Check that the 1-minute load is low and that no build or test run is active, then run '
+              '`python3 -I bench/ab.py --a <parent> --b <candidate> --label <label> --out <results> --workloads <list> --max-load 3`; the defaults are concurrent mode, '
+              'eight rounds, the lanes above and ports 39400 and 39401. Report with `python3 -I bench/ab_report.py <results>/<label>`, which reads `' + AB_FLOOR + '` and '
+              'states for every workload whether the median lies within, below or above the floor; `--recompute` applies the current rules to an older session. Record a '
+              'new floor with an A/A session of one build against itself and `python3 -I bench/ab_report.py <results>/<label> --write-floor ' + AB_FLOOR + '`. '
+              '`--keys <n>` replaces the 100,000 keys with n keys, preloaded the same way and drawn from the same uniform range, for changes whose effect depends on a key '
+              'space larger than the last level cache; the floor records its key count, and the report marks a reading against a floor from another key count as '
+              'indicative only. The unit tests run with `python3 -I -B bench/test_ab.py`.', '']
+    return '\n'.join(lines)
+
+
+def run_timing(dataset):
+    rows = sorted((row for row in dataset['rows'] if all(type(row.get(name)) in (int, float) for name in ('started_at', 'finished_at'))), key=lambda row: row['started_at'])
+    run = dataset.get('run') or {}
+    if len(rows) < 2 or not all(type(run.get(name)) in (int, float) for name in ('started_at', 'finished_at')):
+        return None
+    cases = [row['finished_at'] - row['started_at'] for row in rows]
+    gaps = [after['started_at'] - before['finished_at'] for before, after in zip(rows, rows[1:])]
+    return (run['finished_at'] - run['started_at']) / 3600, len(rows), statistics.median(cases), statistics.median(gaps)
+
+
+def new_machine_section(dataset):
+    timing = run_timing(dataset)
+    counts = dataset['counts']
+    if timing:
+        recorded = ('The recorded run above took %.2f hours for %d cases, with a median case of %.0f seconds and a median gap of %.0f seconds between cases, '
+                    'which the gates spend on rest, stability and cooling. ' % timing)
+    else:
+        recorded = ''
+    lines = ['## Run the comparison on a new machine', '',
+             'The comparison can be measured again from a clone of this repository. A workstation with docker, python3 and ssh builds the Eski image and drives a '
+             'separate test machine; the machine runs the exam unattended, and the workstation collects the archives, builds the dataset and regenerates this page. '
+             'The engine images, the load generator and the jq packages are pinned by digest or sha256 in the design, so two runs of one design differ only in the '
+             'machine and the Eski revision.', '',
+             'Three designs are tracked, with the same engines, workloads, dataset, repetitions and gates. `bench/testbed/design.json` is the laptop design: server CPU 1, '
+             'client CPUs 3 and 4, controller CPUs 5 and 11, two client threads of 16 connections and the `mains` power gate. '
+             '`bench/testbed/designs/cloud-two-client-cores.json` keeps that client for a server: server CPU 2, client CPUs 4 and 5, controller CPU 10 and the '
+             '`no-power-supply-devices` power gate. `bench/testbed/designs/cloud-four-client-cores.json` spreads the same 32 connections over four client threads of 8 '
+             'connections on client CPUs 4 to 7, so that the load generator limits fewer measurements; %d of the %d valid measurements above are client limited.' % (
+                 counts['client_limited'], counts['valid']), '',
+             '### Machine requirements', '',
+             '- One processor socket, or every role on one socket and memory node, on bare metal. A virtual machine usually exposes no CPU frequency policy and no '
+             'package temperature, and `exam.sh inspect` rejects a role CPU without a readable frequency policy. Prefer a processor without separate performance and '
+             'efficiency cores; otherwise put every role on one kind of core.',
+             '- The thermal and throttle telemetry the gates read. The package temperature comes from hwmon with the chip and label in `gates.sensor_chip` and '
+             '`gates.sensor_label`, `coretemp` and `Package id 0` on Intel; the reader also accepts `k10temp` or `zenpower` with `Tctl` or `Tdie`. Every sample also '
+             'needs the per-CPU counters under `/sys/devices/system/cpu/cpu*/thermal_throttle`, which Linux exposes on Intel processors; without them every case holds '
+             'with `throttle_telemetry_unavailable`. Check `grep . /sys/class/hwmon/hwmon*/name` and `ls /sys/devices/system/cpu/cpu1/thermal_throttle` first.',
+             '- Simultaneous multithreading off with the `nosmt` kernel parameter, so that one CPU number is one physical core, and the graphics driver blacklisted '
+             'with `modprobe.blacklist=i915`: add `nosmt modprobe.blacklist=i915` to `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub`, run `update-grub` and '
+             'reboot. `/sys/devices/system/cpu/smt/control` then reads `off`, `lscpu` reports one thread per core and `ls /sys/class/drm` lists no `card*` entry. '
+             'A server with another display driver, for example `ast` on a board with a BMC console or `amdgpu` or `nouveau` with a discrete card, blacklists that '
+             'module instead. The installer reads `/proc/modules` and `/sys/class/drm` and refuses to install while a display driver is loaded; '
+             '`--accept-display-driver` installs anyway on a machine that needs its display, and the dataset then records the accepted driver.',
+             '- No kernel work bound to a role CPU. The recorded run `cloud-v1` on a rented Supermicro E-2288G showed two throughput modes with the same engines and '
+             'workloads: the Debian kernel had loaded the `i915` driver on a machine with nothing attached to its display outputs, and its delayed work ran as '
+             'per-CPU bound kernel workers (`kworker/1:0+events`, `kworker/1:2+i915-unordered`) at a full core on the server CPU for 12 to 15 seconds at a time, '
+             'recurring every 35 to 37 seconds for the whole six hours. While the worker ran, the server process fell to a few percent of its core, the first '
+             'request on every connection waited about 545 ms and the case lost a fifth to almost half of its throughput; on a client CPU the same worker cost '
+             'nothing measurable. Loopback has no interrupt, so interrupt affinity, `irqbalance`, `isolcpus` and receive packet steering play no part in it. '
+             'The sampler had recorded the worker in every affected sample, but the validity rule exempted every kernel worker. The exam now records the kernel '
+             'command line, the loaded modules, the DRM devices and `kernel.timer_migration` in the machine section of the dataset, keeps the eight CPU time '
+             'fields, the softirq counters and the interrupt totals of every CPU in every sample, notes the last CPU of every sampled process, and keeps the '
+             'per-second request counts of the timed client in the dataset row as `per_second_ops`, `steady_ops`, `stall_seconds` and `stall_windows`, so a '
+             'collapse is visible in the report. Before the calibration the controller watches the idle machine for `gates.idle_watch_seconds` (600 in both cloud '
+             'designs; the laptop design and local quick runs omit the key or set 0) and holds the run when any process outside the run, kernel threads '
+             'included, uses a tenth of a core on a server or client CPU in any sample, naming the process and the CPU; the bursts recur every 35 to 37 seconds, so '
+             'ten minutes catches them with certainty. `exam.sh status` pins itself to the controller CPU, so polling never disturbs the watch or a case.',
+             '- Debian 13. The installer fetches the jq packages pinned in the design\'s `tools.jq` (jq and libjq1 1.7.1-6+deb13u4, libonig5 6.9.9-1+b1) with '
+             '`apt-get download`, checks their sha256 and unpacks them with `dpkg-deb` into the run root without root privileges. If the configured archive no longer '
+             'offers these versions, add a snapshot.debian.org source dated while it did.',
+             '- docker with the ssh user in the `docker` group and access to the registries, because the installer pulls every pinned engine, load generator and CLI '
+             'image that is missing and checks its digest; tmux, in which the exam runs detached; python3, `ss`, `taskset` and `timeout`. As root: '
+             '`apt-get install docker.io tmux python3 iproute2 util-linux linux-cpupower` and `usermod -aG docker <user>`.',
+             '- Key-based ssh from the workstation: `ssh -o BatchMode=yes user@HOST true` must succeed, because the installer and the collector call ssh in batch mode.',
+             '- The power gate named by `gates.power_source`. `mains`, the laptop setting, requires an online Mains device under `/sys/class/power_supply` in every '
+             'sample, so a laptop stays plugged in for the whole run; on battery the first case holds. `no-power-supply-devices`, the setting of both cloud designs, '
+             'requires a machine that exposes no power supply device at all, so `ls /sys/class/power_supply` prints nothing; a server that lists an online Mains '
+             'device uses `mains`.',
+             '- A quiet machine. Before every case the whole machine and each server and client CPU must be at least `gates.min_idle` (95) percent idle, no process '
+             'outside the run may use a tenth of a core, the package must be at or below `gates.cool_temp_c` (55 C), `gates.min_rest` (30) seconds must have passed and '
+             '`gates.min_free_bytes` (10 GiB) must be free under the run root, all for `gates.stable_seconds` (10) seconds; a gate unmet for `gates.max_wait` (600) '
+             'seconds holds the run. Disable unattended upgrades and periodic timers, for example with `systemctl disable --now unattended-upgrades apt-daily.timer '
+             'apt-daily-upgrade.timer`, and poll the status sparingly. If the idle package sits above about 45 C, raise `cool_temp_c` in a copy of the design and in '
+             'its `methodology.gates` sentence.',
+             '- During a case the scheduler reads every machine sample and the raw timed client output. A process outside the run that uses a tenth of a core or more '
+             'in any sample, or a known load generator or compiler at any share, invalidates the case with external_cpu_activity. Outside the run means not an owned '
+             'process, not in the cgroup of a container the run started, not docker or systemd infrastructure (dockerd, containerd, containerd-shim, systemd, '
+             'systemd-journal) and not a kernel thread, recognised by a parent PID of 2 (kthreadd) or a comm starting with kworker/, rcu_, rcuc/, rcub/, jbd2/, '
+             'ksoftirqd/, migration/, kswapd, kcompactd or khugepaged. A process seen in a single sample below two percent of a core, one or two scheduler ticks, is '
+             'ignored; this is the harness\'s own load generator version probe, which runs before any ownership record exists. Kernel threads bound to one CPU '
+             '(kworker/N:, ksoftirqd/N, migration/N, rcuc/N, placed by the recorded processor when the sample has one and by the N in the name otherwise) are judged '
+             'by that CPU: at or above a tenth of a core on a server CPU they invalidate the case with kernel_thread_on_reserved_cpu, on a client CPU they annotate it '
+             'with kernel_thread_on_client_cpu, and unbound workers and kernel threads on other CPUs are exempt. Independently of any named cause, the per-second '
+             'request counts of the timed client, without the trailing partial second, must all stay at or above half of the run\'s median or the case is invalid '
+             'with throughput_collapse, and a run whose maximum latency exceeds 100 ms while its p99 is under 1 ms carries the tail_stall annotation. In the run '
+             '`cloud-v1` the kernel thread rule and the collapse check mark the same 52 of 132 timed runs and no clean one; three further cases carry '
+             'external_cpu_activity for genuine outside work, an apt-listchanges python3 and the systemd-logind, dbus and sshd work of ssh status checks.',
+             '- One frequency policy for the whole run. Set the governor once before the installation, for example with `cpupower frequency-set -g performance`, and '
+             'leave it; the preflight records the policy of every role CPU, and a change holds the run or invalidates the case.',
+             '- Free ports 6379 for Redis, 6380 for Valkey, 6381 for Dragonfly and 6400 for Eski. The engines use host networking on these fixed ports, and the harness '
+             'fails a case whose port is taken.',
+             '- CPU 0 outside every role, since the kernel places housekeeping work and many interrupts there. Choose the roles from `lscpu '
+             '--extended=CPU,CORE,SOCKET,NODE,ONLINE`: with SMT off every CPU has its own core. Take one CPU for the server, as many CPUs as `client.threads` for the '
+             'load generator and one for the controller, distinct, online and on one socket and node, and write them into `resources.server_cpus`, '
+             '`resources.client_cpus` and `resources.control_cpus`. The cloud designs use server CPU 2, client CPUs 4 and 5 or 4 to 7 and controller CPU 10, which '
+             'fit any machine with at least 11 cores. The scheduler refuses overlapping roles, roles that share a physical core and a client pool smaller than the '
+             'client threads. When the core count of a role changes, change the matching sentence of the design\'s `methodology` too, because this page publishes it.',
+             '- Memory for the server and client container caps, `resources.server_memory` (8 GiB) and `resources.client_memory` (2 GiB). The fill of 10,000,000 keys '
+             'needs about 1.7 GB in the largest engine, so 16 GiB of RAM is enough.', '',
+             '### Time', '',
+             recorded + 'On a server about 125 seconds per case is a fair planning figure: the 132 cases of four engines, eight workloads, four repetitions and the '
+             'calibration take about 4.6 hours. The installation takes about 20 minutes and the fill a few minutes, so plan about 6 hours of machine time.', '',
+             '### Steps', '',
+             'The commands use `<revision>` for the Eski revision, `<name>` for the run name, `user@HOST` for the test machine and `<base>` for a directory on it, '
+             'for example `/home/user/eski-exam`. The run name is a new plain directory name such as `cloud-v1`; it becomes the run root `<base>/<name>`, the '
+             '`run.root` of the dataset and the directory under `bench/testbed/runs/`, whose name the table generator checks.', '',
+             '1. On the workstation, build and export the Eski image from a clean checkout of the revision. `image.sh` builds the Dockerfile at the repository root, '
+             'which fetches its pinned build inputs from Docker Hub, snapshot.ubuntu.com and GitHub, checks the binary, version, licence and source tree inside the '
+             'image, saves the image to `bench/results/image/eski-<id>.tar` with a `.sha256` file and records the image ID, binary sha256, source sha256, revision '
+             'and archive in `bench/image.json`, which the installer reads.', '',
+             '   ```sh', '   git checkout <revision>', '   bash bench/image.sh --revision "$(git rev-parse HEAD)" --export bench/results/image', '   ```', '',
+             '2. Copy a design, set its CPU roles and gates for the machine, and render its plans; the plan writer validates the design and stops on an error.', '',
+             '   ```sh', '   cp bench/testbed/designs/cloud-four-client-cores.json bench/results/<name>-design.json',
+             '   python3 -I bench/testbed/plans.py --design bench/results/<name>-design.json --out bench/results/<name>-plans', '   ```', '',
+             '3. Install the run root. The installer packs the runner, the plans, the design, the fill script, the image archive and itself into an overlay, streams '
+             'it over ssh into `<base>/.overlays` and checks its sha256 on arrival. On the machine it refuses an existing root, verifies every file, fetches jq, '
+             'loads the Eski image and checks the binary and source sha256 inside it, pulls the missing pinned images and checks their digests, runs the preflight '
+             '`exam.sh inspect` and freezes `protocol.json` with the kernel command line, the loaded modules and the DRM devices in its machine section. It starts '
+             'nothing. A loaded display driver stops the installation before anything is downloaded, with the module to blacklist in the message. '
+             'A rejected preflight prints the reason and moves the root aside to '
+             '`<base>/.failed-<name>-<time>`, so the same name can be installed again. The receipt, also kept as `<base>/<name>/install.json`, records the protocol '
+             'sha256, the phase identities, every image ID and the planned measurement counts.', '',
+             '   ```sh', '   python3 -I -B bench/testbed/install.py install --host user@HOST --root <name> --base <base> \\',
+             '     --design bench/results/<name>-design.json --receipt bench/results/<name>-install.json', '   ```', '',
+             '4. Check the installation, then start the exam. Before the start the status reads `Workflow: NOT STARTED` and shows the kernel command line, the '
+             'display drivers, the package temperature, the power gate and the power supply devices, the CPU roles, the memory limits, every engine image ID and the '
+             'Eski source revision. The first invocation without arguments starts the idle watch, the calibration phase and then the benchmark phase once, in a '
+             'detached tmux session; every later invocation without arguments only prints the status. While the watch runs, the Reason line says so; a failed watch '
+             'holds the run with the offending process and CPU on the Reason line and in `control/idle-watch.json`, and `exam.sh resume` repeats the watch after the '
+             'fix.', '',
+             '   ```sh', '   ssh user@HOST <base>/<name>/exam.sh status', '   ssh user@HOST <base>/<name>/exam.sh', '   ```', '',
+             '   Check progress with `exam.sh status` every few minutes at most. The calibration runs its workload once per engine and admits the benchmark only when '
+             'every engine is valid. `DONE` and `DONE WITH EXCLUSIONS` continue below; an excluded repetition keeps its reason and is never retried. `HELD` and '
+             '`INTERRUPTED` continue with `<base>/<name>/exam.sh resume` once the cause is gone. A gate hold during the calibration also reads "calibration did not '
+             'pass for every engine" on the Reason line while the phase progress still shows cases remaining; its unmet gates are listed under '
+             '`phase_status.pause_reasons` of `exam.sh status --json`, and it can be resumed. A calibration whose cases all finished with an invalid engine cannot '
+             'be resumed; install a new root after the fix. Whenever the controller stops it writes `exports/results.tar.gz`, `exports/inventory.json` and `exports/receipt.json`; an export after a '
+             'resume is `results-2.tar.gz`, and the collector takes the archive the receipt names.', '',
+             '5. After `DONE` or `DONE WITH EXCLUSIONS`, run the fill. It refuses while the controller is active, waits for each engine\'s cooling gate from the '
+             'design\'s `fill` block, stores 10,000,000 keys of 64 B per engine with the server core and memory caps of the design, reads the memory once used '
+             'memory has been stable for three seconds and the server reports no keyspace rehash in progress, polling once a second for at most sixty seconds '
+             'after the fill, and writes '
+             '`exports/fill-<stamp>.tar.gz` and `exports/fill-receipt.json`. It exits with status 1 when an engine\'s fill is not valid; that engine keeps its reason.', '',
+             '   ```sh', '   ssh user@HOST <base>/<name>/fill.sh', '   ```', '',
+             '6. Fetch both archives. Each fetch reads the receipt on the machine, copies the archive it names into `bench/results/<name>/`, checks its sha256 and size '
+             'against the receipt, extracts it after refusing unsafe paths, verifies every file against the archive\'s inventory and writes `<stem>.receipt.json` and '
+             '`<stem>.collected.json` beside it. The results land in `bench/results/<name>/results/` and the fill in `bench/results/<name>/fill-<stamp>/`; an '
+             'archive that was already collected is never overwritten. After a resume the results stem is `results-2` or later, which then replaces `results` '
+             'in the paths below.', '',
+             '   ```sh', '   python3 -I -B bench/testbed/collect.py fetch --host user@HOST --root <name> --base <base> --kind results',
+             '   python3 -I -B bench/testbed/collect.py fetch --host user@HOST --root <name> --base <base> --kind fill', '   ```', '',
+             '7. Combine them into the run directory. A measurement enters the dataset only when its case succeeded with an artifact inventory matching the checkpoint '
+             'and finite throughput, p99 and memory.', '',
+             '   ```sh', '   python3 -I -B bench/testbed/combine.py --results bench/results/<name>/results --fill bench/results/<name>/fill-<stamp> \\',
+             '     --collected bench/results/<name>/results.collected.json --out bench/testbed/runs/<name>/dataset.json', '   ```', '',
+             '8. Copy the receipts.', '',
+             '   ```sh', '   cp bench/results/<name>/results.receipt.json bench/results/<name>/results.collected.json bench/testbed/runs/<name>/',
+             '   cp bench/results/<name>/fill-<stamp>.receipt.json bench/testbed/runs/<name>/fill.receipt.json',
+             '   cp bench/results/<name>-install.json bench/testbed/runs/<name>/install.receipt.json', '   ```', '',
+             '9. Render the charts and the report.', '',
+             '   ```sh', '   python3 -I bench/testbed/charts.py --dataset bench/testbed/runs/<name>/dataset.json --out bench/testbed/runs/<name>/charts',
+             '   python3 -I bench/testbed/page.py --dataset bench/testbed/runs/<name>/dataset.json --out bench/testbed/runs/<name>/report.html', '   ```', '',
+             '10. Build the server as [build, run and test](build-run-test.md) describes and regenerate the tables. The generator starts `bin/eski` on a free local port to read the command inventory and rewrites the '
+             'README tables, this page and the badges from the dataset; the ratio badge needs valid Eski and Redis repetitions of `get64-p1`. Without '
+             '`--benchmark-results` it reads the recorded run with the latest finish time, so the check confirms that the new run is the published one. Commit the '
+             'run directory and the regenerated files together.', '',
+             '    ```sh', '    ./build.sh release', '    python3 -I test/readme_tables.py --benchmark-results bench/testbed/runs/<name>',
+             '    python3 -I test/readme_tables.py --check', '    ```', '',
+             '### Checking a run', '',
+             'The run directory lets a reader check the run. `dataset.json` holds every planned repetition of both phases with its state, reasons, client-limited '
+             'annotation, attempt directory and values, the per-second request counts of its timed client with the steady rate and the stall seconds and windows '
+             'derived from them, and the median CPU time shares of the server and client CPUs during the timed run, together with the machine with its kernel '
+             'command line, loaded modules, DRM devices and `kernel.timer_migration` at installation and at launch, the result of the idle watch, the CPU roles, the '
+             'frequency policy, the sensor, the power gate, the design with its methodology, the protocol sha256, the phase identity and the receipt of the results '
+             'archive. `results.receipt.json` and `results.collected.json` '
+             'give the sha256, size and file count of the results archive as the machine exported it and as the workstation verified it, `fill.receipt.json` does '
+             'the same for the fill archive, and `install.receipt.json` ties the protocol sha256 and the image IDs to the installation.', '',
+             'The raw evidence stays in the archives, which are published with the run. Each case keeps its resolved plan, harness log, machine samples, ownership '
+             'events and the raw memtier output under `<phase>/results/cases/<case>/attempt-<n>/`, every gate sample is in `<phase>/results/gates.jsonl`, '
+             'where the phase is `calibration` or `benchmark`, and the idle watch samples are in `control/idle-watch-<launch>.jsonl`. Every machine sample carries '
+             'the eight `/proc/stat` fields of every CPU with their shares since the previous sample, the `/proc/softirqs` counters and the `/proc/interrupts` '
+             'totals per CPU with their deltas, and the last CPU and kernel-thread flag of every sampled process. '
+             'A reader verifies a downloaded archive with `python3 -I bench/testbed/collect.py verify results.tar.gz --receipt '
+             'bench/testbed/runs/<name>/results.receipt.json --extract <directory>` and rebuilds the dataset from it with `combine.py` to compare with the committed '
+             '`dataset.json`.', '']
+    return '\n'.join(lines)
+
+
+def render_outputs(commands, baseline, observed, dataset, readme, ab_floor=None):
+    expected, preserved, regressions = preserved_tests(baseline, observed)
+    run = run_directory(dataset)
+    cells = benchmark_cells(dataset)
+    ratio, limited = benchmark_ratio(cells)
+    command_count = len(commands)
+    top_count = sum('|' not in name for name in commands)
+    digest = hashlib.sha256(json.dumps(commands, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    has_issues = observed['totals']['failed'] != 0 or observed['totals']['errored'] != 0
+    if has_issues:
+        result_note = 'Recorded failures and unit errors are described in the [conformance record](docs/conformance.md).'
+        scope_note = 'Some upstream tests require excluded features, and this snapshot records the failures or unit errors shown below. '
+    else:
+        result_note = 'No test failures or unit errors were recorded; skipped tests do not establish coverage. See the [conformance record](docs/conformance.md).'
+        scope_note = 'No test failures or unit errors were recorded in the expanded snapshot. Skipped tests and omitted fixtures do not establish coverage. '
+    compared_passes = sum(observed['units'].get(name, {}).get('passed', 0) for name in baseline['units'])
+    compared_note = 'The observed run records **%d passes in the %d compared units**' % (compared_passes, len(baseline['units']))
+    if not regressions and compared_passes > expected:
+        compared_note += ', including **%d additional passes** beyond the protected baseline' % (compared_passes - expected)
+    compared_note += '.'
+    conformance_block = ('The recorded gate preserves **%d / %d baseline passes** across %d compared units, with **%d regressions**. '
+                         'The expanded recorded run has **%d passes, %d failures and %d skips** across %d units, with **%d unit errors**. '
+                         '%s %s\n\n%s') % (
+                             preserved, expected, len(baseline['units']), len(regressions), observed['totals']['passed'], observed['totals']['failed'], observed['totals']['skipped'], len(observed['units']), observed['totals']['errored'], compared_note, result_note, conformance_table(observed))
+    benchmark_block = ('These results come from the committed [' + dataset['run']['root'] + ' dataset](' + run + '/dataset.json). Every engine uses the same '
+                       'server CPU assignment and memory caps, separate client cores, a fresh dataset and a warmup before timing. The run records power, '
+                       'temperature, CPU-idle and load-generator limits. Invalid repetitions retain their reason, and client-limited measurements remain '
+                       'annotated. These measurements describe the recorded machine and workload; they establish no multicore scaling or universal '
+                       'throughput claim.\n\n' + ratio_picture(dataset, cells) + '\n\n'
+                       'Recorded medians from `' + run + '`, using valid repetitions only. '
+                       'These are measurements from one machine, not a claim about every workload or deployment.\n\n%s\n\n'
+                       '%s The observed GET 64 B pipeline 1 median throughput ratio is **%.2fx Eski / Redis**%s. %s'
+                       'Excluded repetitions receive no inferred score. [Method, ranges, images and exclusions](docs/benchmarks.md).\n\n'
+                       'Read the [benchmark method and tables](docs/benchmarks.md), the [self-contained report](' + run + '/report.html) and the '
+                       '[recorded charts](' + run + '/charts/throughput.svg).') % (
+                           benchmark_table(dataset, cells, brief=True),
+                           '† At least one included repetition was client limited.' if dataset['counts']['client_limited'] else 'No included repetition was client limited.',
+                           ratio, ' (client limited)' if limited else '',
+                           'Client limits affect both measurements, so that ratio is not a guaranteed engine-speed ratio. ' if dataset['counts']['client_limited'] else '')
+    commands_block = ('The running executable registers **%d top-level commands** and **%d commands including subcommands**. '
+                      'Compatibility stubs remain subject to the exclusions above. '
+                      '[Arguments and metadata summaries](docs/commands.md) come from `COMMAND DOCS`; every name below is cross-checked against `COMMAND LIST`.\n\n%s') % (
+                          top_count, command_count, command_table(commands, compact=True))
+    commands_page = ('# Command inventory\n\nGenerated from a temporary instance of the built executable using `COMMAND DOCS`, `COMMAND LIST` and `COMMAND COUNT`. '
+                     'The inventory contains %d top-level commands and %d names including subcommands. Metadata describes the protocol surface; '
+                     'the [command-group pages](README.md) and [conformance record](conformance.md) define implemented behavior and remaining gaps. '
+                     'Lua scripts, Function libraries and debugging have the scope documented in [scripting](scripting.md). Replication and clustering remain outside the node scope.\n\n'
+                     'Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test/readme_tables.py --check`. '
+                     'Use `--server HOST:PORT` to inspect an existing instance without starting one. The canonical command-metadata SHA256 is `%s`.\n\n%s\n') % (
+                         top_count, command_count, digest, command_table(commands))
+    conformance_page = ('# Conformance records\n\nGenerated from `test/conformance/baseline-redis.json` and `docs/data/conformance-redis.json`. '
+                        'Both identify the Redis %s test suite, archive SHA256 `%s`, with tag filter `%s`. '
+                        'The baseline records %d passes and %d failures in %d units. The expanded snapshot records %d passes, %d failures and %d skips in %d units. '
+                        'The baseline gate preserves %d of %d baseline passes, with %d regressions.\n\n'
+                        'A baseline PASS checks the preserved passing tests in its compared units. It does not claim that every selected upstream test passes. '
+                        '%s'
+                        'A unit with zero passing tests does not establish coverage; external-server mode can omit blocks that require suite-managed servers. '
+                        'Managed fixtures and resource limits are described in [build, run and test](build-run-test.md#verification) and [scripting](scripting.md#verification).\n\n'
+                        '## Reproduce and refresh\n\n'
+                        'Build with `./build.sh`, then run `./test/conformance/run.sh --suite redis --tags "-needs:repl" --baseline test/conformance/baseline-redis.json`. '
+                        'Run `./test/conformance/run.sh --suite redis --tags "-needs:repl"` without the baseline to apply the strict failure rule. '
+                        'Refresh the public snapshot from an actual run with '
+                        '`python3 -I test/readme_tables.py --record-conformance test/conformance/results/latest-redis.json`, '
+                        'then run `python3 -I test/readme_tables.py --check`. The refresh keeps aggregate counts, exact failing test identities, '
+                        'authored reasons and the baseline comparison, while omitting local paths, raw assertion code and stack traces. '
+                        'The preserved snapshot was generated at `%s`; reruns can change timings and expose different outcomes.\n\n'
+                        '## Protected historical baseline\n\n%s\n\n## Expanded recorded snapshot\n\n%s\n\n## Recorded failures\n\n%s\n') % (
+                            baseline['suite']['tag'], baseline['suite']['sha256'], baseline['suite'].get('tags', ''), baseline['totals']['passed'], baseline['totals']['failed'], len(baseline['units']), observed['totals']['passed'], observed['totals']['failed'], observed['totals']['skipped'], len(observed['units']), preserved, expected, len(regressions), scope_note, observed.get('generated_at', 'not recorded'), conformance_table(baseline), conformance_table(observed), failure_table(observed))
+    method = dataset.get('design', {}).get('methodology', {})
+    method_text = '\n\n'.join(str(method[key]) for key in sorted(method))
+    identities = ['| Engine | Image reference | Measured image ID | Recorded version |', '| --- | --- | --- | --- |']
+    for engine in dataset['engines']:
+        identities.append('| %s | %s | %s | %s |' % (md(engine_label(dataset, engine, versions=True)), table_code(engine.get('reference', '')), table_code(engine.get('image_id', '')), md(engine.get('version', ''))))
+    exclusions = ['| Workload | Engine | Repetition | Reason |', '| --- | --- | ---: | --- |']
+    for workload in dataset['workloads']:
+        for engine in dataset['engines']:
+            for row in cells[(workload['key'], engine['target'])]['excluded']:
+                exclusions.append('| %s | %s | %d | %s |' % (md(workload['name']), md(engine_label(dataset, engine)), row['repetition'], md('; '.join(row['reasons']))))
+    fill_engines = (dataset.get('fill') or {}).get('engines', [])
+    settle = any('settled' in engine for engine in fill_engines)
+    fill_rows = ['| Engine | Stored keys | RSS bytes/key | Used bytes/key | Container peak bytes/key | Fill ops/s | p99 ms | Worst request ms |' + (' Memory read after s |' if settle else ''),
+                 '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |' + (' ---: |' if settle else '')]
+    for engine in fill_engines:
+        if engine.get('status') != 'valid':
+            fill_rows.append('| %s | excluded | — | — | — | — | — | — |' % md(ENGINE_LABELS.get(engine.get('target'), engine.get('label', 'unknown'))) + (' — |' if settle else ''))
+        else:
+            fill_rows.append('| %s | %s | %.2f | %.2f | %.2f | %s | %.3f | %.3f |' % (md(ENGINE_LABELS.get(engine['target'], engine['label'])), '{:,}'.format(engine['dbsize']), engine['bytes_per_key_rss'], engine['bytes_per_key_used'], engine['bytes_per_key_cgroup_peak'], numeric(engine['ops_per_sec'], 'ops'), engine['p99_ms'], engine['max_ms'])
+                             + (' %s |' % settle_cell(engine) if settle else ''))
+    if settle:
+        settle_text = ('Memory is read once used memory has been stable for three seconds and the server reports no keyspace rehash in progress, polled once a '
+                       'second for at most sixty seconds after the fill; the last column gives the seconds from the end of the fill to that reading, and an engine '
+                       'that did not settle keeps its last reading.')
+    else:
+        settle_text = ('This recorded fill predates the settle step and read memory as soon as the load generator returned; a fill now reads it once used '
+                       'memory has been stable for three seconds and the server reports no keyspace rehash in progress, at most sixty seconds after the fill.')
+    benchmark_page = ('# Recorded benchmark comparison\n\nGenerated from `' + run + '/dataset.json`, schema `%s`. '
+                      'The benchmark phase contains %d planned repetitions, %d valid, %d excluded and %d included client-limited measurements. '
+                      'The medians and ranges below are recomputed from included benchmark rows; calibration and excluded rows do not enter them.\n\n'
+                      '## Reproduce the tables\n\nRun `python3 -I test/readme_tables.py --benchmark-results ' + run + '` '
+                      'and verify with `python3 -I test/readme_tables.py --check`. To render the recorded charts and report, run '
+                      '`python3 -I bench/testbed/charts.py --dataset ' + run + '/dataset.json --out ' + run + '/charts` '
+                      'and `python3 -I bench/testbed/page.py --dataset ' + run + '/dataset.json --out ' + run + '/report.html`. '
+                      'A new physical experiment follows [run the comparison on a new machine](#run-the-comparison-on-a-new-machine) below; '
+                      'generating tables does not launch it. '
+                      'The [recorded report](../' + run + '/report.html), [dataset](../' + run + '/dataset.json) '
+                      'and collection receipts are committed together.\n\n'
+                      '## Method and machine\n\nMachine: %s; %s RAM; server CPUs `%s`, client CPUs `%s`, controller CPUs `%s`.\n\n%s\n\n'
+                      '## Engine identities\n\n%s\n\n## Valid benchmark measurements\n\n%s\n\n'
+                      'Each p99 is a per-run percentile; the table takes the median of those percentiles and does not pool requests. '
+                      'Container memory peak covers preload, warmup and timing, so it is not process RSS or live key memory. '
+                      'Client-limited measurements remain included and annotated. Their observed throughput is limited by the load generator; '
+                      'a ratio between two such observations is not a lower bound on the true ratio between the engines. '
+                      'The badge reports only GET 64 B at pipeline 1: %.2fx observed Eski/Redis median throughput%s. '
+                      'There is no overall cross-workload score.\n\n'
+                      '## Excluded repetitions\n\n%s\n\nExcluded values have no median or badge score. '
+                      'Each exclusion retains its recorded reason; client_limited, kernel_thread_on_client_cpu and tail_stall are separate annotations on included measurements. '
+                      'The reason external_cpu_activity names a process outside the run, kernel_thread_on_reserved_cpu a per-CPU kernel thread busy on the server CPU and '
+                      'throughput_collapse a second of the timed run below half of the run\'s median per-second rate; the machine requirements state the rules.\n\n'
+                      '## Fill measurement\n\nThe separate fill workload uses %s generated keys of %s bytes at pipeline %s. '
+                      'The stored-key count in the receipt is retained as measured. %s\n\n%s\n') % (
+                          dataset['schema'], dataset['counts']['planned'], dataset['counts']['valid'], dataset['counts']['excluded'], dataset['counts']['client_limited'],
+                          dataset.get('machine', {}).get('cpu_model', 'not recorded'), numeric(dataset.get('machine', {}).get('mem_total_bytes', 0), 'mem')+' MiB',
+                          ','.join(map(str, dataset.get('machine', {}).get('cpus', {}).get('server', []))), ','.join(map(str, dataset.get('machine', {}).get('cpus', {}).get('client', []))), ','.join(map(str, dataset.get('machine', {}).get('cpus', {}).get('control', []))),
+                          method_text, '\n'.join(identities), benchmark_table(dataset, cells), ratio, ' (client limited)' if limited else '', '\n'.join(exclusions),
+                          '{:,}'.format((dataset.get('fill') or {}).get('design', {}).get('keys', 0)), (dataset.get('fill') or {}).get('design', {}).get('data_size', 'not recorded'), (dataset.get('fill') or {}).get('design', {}).get('pipeline', 'not recorded'), settle_text, '\n'.join(fill_rows))
+    benchmark_page += '\n' + new_machine_section(dataset) + '\n' + local_section(validate_ab_floor(ab_floor))
+    blocks = {'CONFORMANCE': conformance_block, 'BENCHMARKS': benchmark_block, 'COMMANDS': commands_block}
+    updated_readme = replace_blocks(readme, blocks)
+    if re.search(r'\b(?:Redis|Valkey|Dragonfly)\s+(?:v?\d|version)', updated_readme, re.I):
+        raise ValueError('README must not name competitor server versions')
+    return {'README.md': updated_readme, 'docs/commands.md': commands_page, 'docs/conformance.md': conformance_page,
+            'docs/benchmarks.md': benchmark_page, 'docs/img/conformance.svg': badge('baseline passes', '%d/%d preserved' % (preserved, expected), '#2f855a' if not regressions else '#b45309'),
+            'docs/img/benchmark-ratio.svg': badge('GET 64 B P1 Eski/Redis', '%.2fx observed%s' % (ratio, ', client limited' if limited else ''), '#2563a6'),
+            RATIO_IMAGE + '.svg': ratio_figure(dataset, cells, 'light'), RATIO_IMAGE + '-dark.svg': ratio_figure(dataset, cells, 'dark')}
+
+
+def update_outputs(root, outputs, check=False):
+    changed = []
+    for name, text in outputs.items():
+        path = Path(root) / name
+        if not path.is_file() or path.read_text() != text:
+            changed.append(name)
+    if check:
+        for name in changed:
+            print('stale: ' + name, file=sys.stderr)
+        return 1 if changed else 0
+    for name in changed:
+        path = Path(root) / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(outputs[name])
+        print('wrote ' + name)
+    return 0
+
+
+def parser():
+    result = argparse.ArgumentParser(description='Generate checked documentation from the live command inventory and recorded measurements.')
+    result.add_argument('--root', type=Path, default=ROOT, help='checkout root; input/output paths are relative to it')
+    result.add_argument('--server-binary', type=Path, default=Path('bin/eski'))
+    result.add_argument('--server', metavar='HOST:PORT', help='inspect an existing server instead of starting a temporary one')
+    result.add_argument('--baseline', type=Path, default=Path('test/conformance/baseline-redis.json'))
+    result.add_argument('--observed-conformance', type=Path, default=Path('docs/data/conformance-redis.json'))
+    result.add_argument('--record-conformance', type=Path, help='sanitize an actual run into the observed snapshot before generation')
+    result.add_argument('--benchmark-results', type=Path, help='recorded run directory or its dataset.json; defaults to the run under ' + RUNS + ' with the latest finish time')
+    result.add_argument('--ab-floor', type=Path, default=Path(AB_FLOOR), help='floor record of the local relative measurement; the section omits the floor table when it is missing')
+    result.add_argument('--check', action='store_true', help='exit 1 on drift without rewriting any output')
+    return result
+
+
+def main(argv=None):
+    argument_parser = parser()
+    args = argument_parser.parse_args(argv)
+    if args.check and args.record_conformance:
+        argument_parser.error('--check cannot be combined with --record-conformance')
+    root = args.root.resolve()
+    def resolve(path):
+        return path.resolve() if path.is_absolute() else (root/path).resolve()
+    try:
+        baseline = validate_conformance(read_json(resolve(args.baseline)), 'baseline')
+        observed_path = resolve(args.observed_conformance)
+        observed = validate_conformance(read_json(resolve(args.record_conformance) if args.record_conformance else observed_path), 'observed conformance')
+        if args.record_conformance:
+            observed = validate_conformance(compact_summary(observed, baseline), 'observed conformance')
+        benchmark_path = resolve(args.benchmark_results) if args.benchmark_results else published_run(root)
+        if benchmark_path.is_dir():
+            benchmark_path /= 'dataset.json'
+        dataset = read_json(benchmark_path)
+        benchmark_cells(dataset)
+        run = run_directory(dataset)
+        if benchmark_path.resolve() != (root/run/'dataset.json').resolve():
+            raise ValueError('the pages link to %s, so its dataset must be read from %s/dataset.json' % (run, run))
+        preserved_tests(baseline, observed)
+        readme = (root/'README.md').read_text()
+        with server_connection(resolve(args.server_binary), args.server) as connection:
+            commands = command_inventory(connection)
+        floor_path = resolve(args.ab_floor)
+        ab_floor = read_json(floor_path) if floor_path.is_file() else None
+        outputs = render_outputs(commands, baseline, observed, dataset, readme, ab_floor)
+        if args.record_conformance:
+            try:
+                relative = observed_path.relative_to(root)
+            except ValueError as error:
+                raise ValueError('observed snapshot output must be inside --root') from error
+            outputs[str(relative)] = json.dumps(observed, indent=2, sort_keys=True)+'\n'
+        code = update_outputs(root, outputs, args.check)
+        if not code:
+            print('documentation %s: %d registered command names' % ('is current' if args.check else 'generated', len(commands)))
+        return code
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        print('readme_tables.py: ' + str(error), file=sys.stderr)
+        return 2
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

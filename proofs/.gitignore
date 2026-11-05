@@ -1,0 +1,3 @@
+.build/
+.lake/
+__pycache__/

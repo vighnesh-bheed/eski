@@ -1,0 +1,11 @@
+{
+ "archive": "fill-20261029-062749.tar.gz",
+ "bytes": 44659,
+ "created_at": 1793251836.2134788,
+ "files": 62,
+ "inventory": "fill/20261029-062749/inventory.json",
+ "kind": "fill",
+ "root": "comparison-v1",
+ "schema": "eski-exam-export-v1",
+ "sha256": "98d46b7fc1090122ead93cb4a205838d8ecbf5a10761d672787fd6e0475fbef7"
+}

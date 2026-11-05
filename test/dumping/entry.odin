@@ -1,0 +1,4 @@
+package dumping
+
+main :: proc() {
+}
