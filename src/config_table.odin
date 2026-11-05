@@ -285,7 +285,7 @@ config_table_init :: proc() {
 		{name = "cluster-config-file", type = .Str, flags = {.Immutable}, sdef = "nodes.conf", store = &cfg.cluster_config_file},
 		{name = "cluster-announce-hostname", type = .Str, flags = {.Null_Empty}, store = &cfg.cluster_announce_hostname, check = config_check_hostname},
 		{name = "cluster-announce-human-nodename", type = .Str, flags = {.Null_Empty}, store = &cfg.cluster_announce_human_nodename, check = config_check_nodename},
-		{name = "syslog-ident", type = .Str, flags = {.Immutable}, sdef = "redis", store = &cfg.syslog_ident},
+		{name = "syslog-ident", type = .Str, flags = {.Immutable}, sdef = "eski", store = &cfg.syslog_ident},
 		{name = "dbfilename", type = .Str, flags = {.Protected}, sdef = "dump.rdb", store = &cfg.dbfilename, check = config_check_dbfilename},
 		{name = "appendfilename", type = .Str, flags = {.Immutable}, sdef = "appendonly.aof", store = &aof.filename, check = config_check_appendfilename},
 		{name = "appenddirname", type = .Str, flags = {.Immutable}, sdef = "appendonlydir", store = &aof.dirname, check = config_check_appenddirname},

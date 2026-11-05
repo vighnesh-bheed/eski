@@ -2,7 +2,7 @@
 
 Generated from a temporary instance of the built executable using `COMMAND DOCS`, `COMMAND LIST` and `COMMAND COUNT`. The inventory contains 237 top-level commands and 333 names including subcommands. Metadata describes the protocol surface; the [command-group pages](README.md) and [conformance record](conformance.md) define implemented behavior and remaining gaps. Lua scripts, Function libraries and debugging have the scope documented in [scripting](scripting.md). Replication and clustering remain outside the node scope.
 
-Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test/readme_tables.py --check`. Use `--server HOST:PORT` to inspect an existing instance without starting one. The canonical command-metadata SHA256 is `82d43d79c123ef5517a3f04e75a7971d8583ce7a551b29e34ac926764d24c2cf`.
+Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test/readme_tables.py --check`. Use `--server HOST:PORT` to inspect an existing instance without starting one. The canonical command-metadata SHA256 is `59394b4b9174331baa6663ff0177594986147848923e37b9a4f14b9f368638b3`.
 
 ## Bitmap
 
@@ -41,7 +41,7 @@ Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test
 | `CLIENT UNBLOCK` | `<client-id> [(TIMEOUT \| ERROR)]` | Unblocks a client blocked by a blocking command from a different connection. |
 | `CLIENT UNPAUSE` | — | Resumes processing commands from paused clients. |
 | `ECHO` | `<message>` | Returns the given string. |
-| `HELLO` | `[<protover> [AUTH <username> <password>] [SETNAME <clientname>]]` | Handshakes with the Redis server. |
+| `HELLO` | `[<protover> [AUTH <username> <password>] [SETNAME <clientname>]]` | Handshakes with the server. |
 | `PING` | `[<message>]` | Returns the server's liveliness response. |
 | `QUIT` | — | Closes the connection. |
 | `RESET` | — | Resets the connection. |
@@ -59,13 +59,13 @@ Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test
 | `EXPIREAT` | `<key> <unix-time-seconds> [(NX \| XX \| GT \| LT)]` | Sets the expiration time of a key to a Unix timestamp. |
 | `EXPIRETIME` | `<key>` | Returns the expiration time of a key as a Unix timestamp. |
 | `KEYS` | `<pattern>` | Returns all key names that match a pattern. |
-| `MIGRATE` | `<host> <port> (<key> \| EMPTY-STRING) <destination-db> <timeout> [COPY] [REPLACE] [(AUTH <password> \| AUTH2 <username> <password>)] [KEYS <key> ...]` | Atomically transfers a key from one Redis instance to another. |
+| `MIGRATE` | `<host> <port> (<key> \| EMPTY-STRING) <destination-db> <timeout> [COPY] [REPLACE] [(AUTH <password> \| AUTH2 <username> <password>)] [KEYS <key> ...]` | Atomically transfers a key from one server instance to another. |
 | `MOVE` | `<key> <db>` | Moves a key to another database. |
 | `OBJECT` | — | A container for object introspection commands. |
-| `OBJECT ENCODING` | `<key>` | Returns the internal encoding of a Redis object. |
-| `OBJECT FREQ` | `<key>` | Returns the logarithmic access frequency counter of a Redis object. |
+| `OBJECT ENCODING` | `<key>` | Returns the internal encoding of an object. |
+| `OBJECT FREQ` | `<key>` | Returns the logarithmic access frequency counter of an object. |
 | `OBJECT HELP` | — | Returns helpful text about the different subcommands. |
-| `OBJECT IDLETIME` | `<key>` | Returns the time since the last access to a Redis object. |
+| `OBJECT IDLETIME` | `<key>` | Returns the time since the last access to an object. |
 | `OBJECT REFCOUNT` | `<key>` | Returns the reference count of a value of a key. |
 | `PERSIST` | `<key>` | Removes the expiration time of a key. |
 | `PEXPIRE` | `<key> <milliseconds> [(NX \| XX \| GT \| LT)]` | Sets the expiration time of a key in milliseconds. |
@@ -264,7 +264,7 @@ Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test
 | `LATENCY HISTORY` | `<event>` | Returns timestamp-latency samples for an event. |
 | `LATENCY LATEST` | — | Returns the latest latency samples for all events. |
 | `LATENCY RESET` | `[<event> ...]` | Resets the latency data for one or more events. |
-| `LOLWUT` | `[VERSION <version>]` | Displays computer art and the Redis version |
+| `LOLWUT` | `[VERSION <version>]` | Displays computer art and the server version |
 | `MEMORY` | — | A container for memory diagnostics commands. |
 | `MEMORY DOCTOR` | — | Outputs a memory problems report. |
 | `MEMORY HELP` | — | Returns helpful text about the different subcommands. |
@@ -274,13 +274,13 @@ Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test
 | `MEMORY USAGE` | `<key> [SAMPLES <count>]` | Estimates the memory usage of a key. |
 | `MONITOR` | — | Listens for all requests received by the server in real-time. |
 | `SAVE` | — | Synchronously saves the database(s) to disk. |
-| `SHUTDOWN` | `[(NOSAVE \| SAVE)] [NOW] [FORCE] [ABORT]` | Synchronously saves the database(s) to disk and shuts down the Redis server. |
+| `SHUTDOWN` | `[(NOSAVE \| SAVE)] [NOW] [FORCE] [ABORT]` | Synchronously saves the database(s) to disk and shuts down the server. |
 | `SLOWLOG` | — | A container for slow log commands. |
 | `SLOWLOG GET` | `[<count>]` | Returns the slow log's entries. |
 | `SLOWLOG HELP` | — | Show helpful text about the different subcommands |
 | `SLOWLOG LEN` | — | Returns the number of entries in the slow log. |
 | `SLOWLOG RESET` | — | Clears all entries from the slow log. |
-| `SWAPDB` | `<index1> <index2>` | Swaps two Redis databases. |
+| `SWAPDB` | `<index1> <index2>` | Swaps two databases. |
 | `TIME` | — | Returns the server time. |
 
 ## Set

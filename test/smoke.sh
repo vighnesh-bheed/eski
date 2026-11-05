@@ -853,9 +853,9 @@ expect_same() {
 }
 
 expect_same_pipe_proto() {
-	local name="$1" feed="$2" proto="$3" got want line
-	got="$(printf '%s\n' "$feed" | docker exec -i "$CLI_CONTAINER" redis-cli "$(proto_flags "$proto")" --no-raw -p "$PORT" 2>&1 | mask_tree_nodes)"
-	want="$(printf '%s\n' "$feed" | docker exec -i "$CLI_CONTAINER" redis-cli "$(proto_flags "$proto")" --no-raw -p "$REF_PORT" 2>&1 | mask_tree_nodes)"
+	local name="$1" feed="$2" proto="$3" filter="${4:-cat}" got want line
+	got="$(printf '%s\n' "$feed" | docker exec -i "$CLI_CONTAINER" redis-cli "$(proto_flags "$proto")" --no-raw -p "$PORT" 2>&1 | mask_tree_nodes | "$filter")"
+	want="$(printf '%s\n' "$feed" | docker exec -i "$CLI_CONTAINER" redis-cli "$(proto_flags "$proto")" --no-raw -p "$REF_PORT" 2>&1 | mask_tree_nodes | "$filter")"
 	if [ -n "$want" ] && [ "$got" == "$want" ]; then
 		pass
 		return
@@ -947,6 +947,63 @@ expect_same_raw() {
 expect_same_raw_shape() {
 	expect_same_raw_proto "$1" 2 resp_shape "${@:2}"
 	expect_same_raw_proto "$1" 3 resp_shape "${@:2}"
+}
+
+SELF_NAME_RULE="reference self-name read as Eski: Redis becomes Eski, the MALLOC=libc advice is dropped, help and summary phrases naming Redis compare without the name, bulk lengths follow"
+
+self_name_norm() {
+	python3 -I -c '
+import sys
+PHRASES = [
+    ("\n  5) Check if the problem is allocator-related by recompiling Redis with MALLOC=libc, if you are using Jemalloc. However this may create fragmentation problems.", ""),
+    ("Redis community", "the community"),
+    ("Redis Cluster large keys migrations", "large key migrations between nodes"),
+    ("all Redis commands", "all commands"),
+    ("this Redis server", "this server"),
+    ("multiple Redis commands", "multiple commands"),
+    ("a full Redis command", "a full command"),
+    ("a Redis protocol error", "a protocol error"),
+    ("simulate Redis errors", "simulate server errors"),
+    ("specified Redis database", "specified database"),
+    ("the Redis behavior", "the default behavior"),
+    ("one Redis instance to another", "one server instance to another"),
+    ("Redis", "Eski"),
+]
+
+
+def rename(text):
+    for a, b in PHRASES:
+        text = text.replace(a.encode(), b.encode())
+    return text
+
+
+data = sys.stdin.buffer.read()
+out = bytearray()
+i = 0
+while i < len(data):
+    j = data.find(b"\n", i)
+    if j < 0:
+        out += rename(data[i:])
+        break
+    line = data[i:j]
+    if line[:1] in (b"$", b"=") and line[1:].isdigit():
+        k = int(line[1:])
+        start = j + 1
+        segment = data[start:start + k]
+        if data[start + k:start + k + 1] in (b"\n", b""):
+            payload = rename(segment)
+            out += line[:1] + str(k + len(payload) - len(segment)).encode() + b"\n" + payload + data[start + k:start + k + 1]
+            i = start + k + 1
+            continue
+    out += rename(line) + b"\n"
+    i = j + 1
+sys.stdout.buffer.write(out)
+'
+}
+
+expect_same_raw_self_named() {
+	expect_same_raw_proto "$1 ($SELF_NAME_RULE)" 2 self_name_norm "${@:2}"
+	expect_same_raw_proto "$1 ($SELF_NAME_RULE)" 3 self_name_norm "${@:2}"
 }
 
 string_float_values() {
@@ -3960,6 +4017,8 @@ import sys
 ESKI = int(sys.argv[1])
 REF = int(sys.argv[2])
 MASKED = {"port", "dir", "bind"}
+OWN_DEFAULTS = {"syslog-ident": (b"eski", b"redis")}
+assert sorted(OWN_DEFAULTS) == ["syslog-ident"], "only syslog-ident carries Eski's own default; every other parameter must match the reference byte for byte"
 COMPUTE_DEFAULTS = {"compute-threads": b"0", "compute-max-memory": b"134217728"}
 COMPUTE_INFO = ("compute_threads_configured", "compute_threads_active", "compute_jobs_pending", "compute_memory_reserved",
                 "compute_jobs_submitted", "compute_jobs_completed", "compute_jobs_cancelled", "compute_sync_fallbacks", "compute_worker_nanoseconds")
@@ -4025,13 +4084,18 @@ class Conn:
         return self.read()
 
 
+def own_value(name, value):
+    expected = OWN_DEFAULTS.get(name.lower())
+    return expected[0] if expected is not None and value == expected[1] else value
+
+
 def as_dict(reply):
     if not isinstance(reply, list):
         return reply
     d = {}
     for i in range(0, len(reply), 2):
         k = reply[i].decode()
-        d[k] = "<masked>" if k.lower() in MASKED else reply[i + 1]
+        d[k] = "<masked>" if k.lower() in MASKED else own_value(k, reply[i + 1])
     return (len(reply), d)
 
 
@@ -4074,6 +4138,11 @@ for name in COMPUTE_INFO + KEYSPACE_INFO:
         failures.append("Eski INFO compute_threads_configured disagrees with CONFIG GET compute-threads")
     elif name == "keyspace_threads_configured" and int(values[0]) != compute_config.get("keyspace-threads"):
         failures.append("Eski INFO keyspace_threads_configured disagrees with CONFIG GET keyspace-threads")
+for name, (own, ref) in OWN_DEFAULTS.items():
+    checks += 1
+    a, b = j.cmd("config", "get", name), r.cmd("config", "get", name)
+    if a != [name.encode(), own] or b != [name.encode(), ref]:
+        failures.append("CONFIG GET %s own default: expected eski %r redis %r observed %r %r" % (name, own, ref, a, b))
 names = sorted(as_dict(r.cmd("config", "get", "*"))[1].keys())
 for pat in PATTERNS + [[n] for n in names] + [[n.upper()] for n in names[:20]] + [[h] for h in HIDDEN]:
     checks += 1
@@ -4085,7 +4154,7 @@ for n in names:
         continue
     cur_j = j.cmd("config", "get", n)[1]
     cur_r = r.cmd("config", "get", n)[1]
-    if cur_j != cur_r:
+    if cur_j != own_value(n, cur_r):
         failures.append("CONFIG GET %s before probing: eski %r redis %r" % (n, cur_j, cur_r))
         continue
     for v in [cur_r] + PROBES:
@@ -4102,7 +4171,7 @@ for n in names:
             else:
                 if a != b:
                     failures.append("CONFIG SET %s %r: eski %r redis %r" % (n, v, a, b))
-                if ga != gb:
+                if as_dict(ga) != as_dict(gb):
                     failures.append("CONFIG GET %s after SET %r: eski %r redis %r" % (n, v, ga, gb))
         finally:
             try:
@@ -4130,7 +4199,7 @@ expect_config_parity() {
 }
 
 config_conf_value() {
-	docker exec "$CLI_CONTAINER" redis-cli -p "$1" config get '*' 2>&1 | paste - - | awk -F '\t' '$1 != "port" && $1 != "dir" && $1 != "bind"' | LC_ALL=C sort
+	docker exec "$CLI_CONTAINER" redis-cli -p "$1" config get '*' 2>&1 | paste - - | awk -F '\t' -v OFS='\t' '$1 == "syslog-ident" && $2 == "redis" { $2 = "eski" } $1 != "port" && $1 != "dir" && $1 != "bind"' | LC_ALL=C sort
 }
 
 expect_config_files() {
@@ -4162,7 +4231,7 @@ expect_config_files() {
 			sleep 0.1
 		done
 		got="$(config_conf_value "$rport")"
-		if [ "$got" == "$jconf" ]; then pass; else fail "a configuration file written by eski loads in redis with the same CONFIG GET" "$jconf" "$(diff <(printf '%s\n' "$jconf") <(printf '%s\n' "$got") | head -n 8)"; fi
+		if [ "$got" == "$jconf" ]; then pass; else fail "a configuration file written by eski loads in redis with the same CONFIG GET (reference syslog-ident redis read as eski)" "$jconf" "$(diff <(printf '%s\n' "$jconf") <(printf '%s\n' "$got") | head -n 8)"; fi
 		printf 'CONFIG SET maxmemory 300mb tracking-table-max-keys 7 list-max-listpack-size -3\nCONFIG SET client-output-buffer-limit "pubsub 2mb 1mb 30"\nCONFIG SET save ""\nCONFIG SET appendfsync no\nCONFIG REWRITE\n' | docker exec -i "$CLI_CONTAINER" redis-cli -p "$rport" >/dev/null 2>&1
 		want="$(config_conf_value "$rport")"
 		docker rm -f "$name" >/dev/null 2>&1
@@ -4174,7 +4243,7 @@ expect_config_files() {
 			sleep 0.1
 		done
 		got="$(config_conf_value "$cport")"
-		if [ "$got" == "$want" ]; then pass; else fail "a configuration file written by redis loads in eski with the same CONFIG GET" "$want" "$(diff <(printf '%s\n' "$want") <(printf '%s\n' "$got") | head -n 8)"; fi
+		if [ "$got" == "$want" ]; then pass; else fail "a configuration file written by redis loads in eski with the same CONFIG GET (reference syslog-ident redis read as eski)" "$want" "$(diff <(printf '%s\n' "$want") <(printf '%s\n' "$got") | head -n 8)"; fi
 		kill "$cpid" 2>/dev/null
 		wait "$cpid" 2>/dev/null
 	else
@@ -4283,16 +4352,23 @@ def from_pairs(kind, pairs):
 
 OWN_WORDED_DOCS = {"hexpire", "hexpireat", "hexpiretime", "hpersist", "hpexpire", "hpexpireat", "hpexpiretime", "hpttl", "httl", "client|kill"}
 OWN_WORDED_FIELDS = (b"summary", b"complexity", b"history")
+SELF_NAMED_DOCS = {"append", "cluster", "command", "command|list", "dump", "hello", "lolwut", "migrate", "object|encoding", "object|freq", "object|idletime", "readonly", "restore", "restore-asking", "shutdown", "slaveof", "swapdb"}
+SELF_NAMED_FIELDS = (b"summary", b"complexity")
 assert len(OWN_WORDED_DOCS) == 10, "only the nine hash field expiry commands and CLIENT KILL carry Eski's own summary, complexity and history wording; every other COMMAND DOCS entry must match the reference byte for byte"
+assert len(SELF_NAMED_DOCS) == 17 and not SELF_NAMED_DOCS & OWN_WORDED_DOCS, "only these seventeen entries reword a summary or complexity whose reference text names Redis; their other fields and every other entry must match the reference byte for byte"
 
 
 def canon_docs(t, name=b""):
     if t[0] not in "%*":
         return t
-    own = name.decode().lower() in OWN_WORDED_DOCS
+    lower = name.decode().lower()
+    own = lower in OWN_WORDED_DOCS
+    self_named = lower in SELF_NAMED_DOCS
     out = []
     for a, b in pairs_of(t):
         if own and a[1] in OWN_WORDED_FIELDS:
+            continue
+        if self_named and a[1] in SELF_NAMED_FIELDS:
             continue
         if a[1] == b"subcommands":
             b = from_pairs(b[0], sorted([(x, canon_docs(y, x[1])) for x, y in pairs_of(b)], key=lambda p: p[0][1]))
@@ -7170,7 +7246,7 @@ CMDS
 		expect_config_files
 		expect_command_parity
 		expect_same_raw "command info and docs bytes" "COMMAND INFO set" "COMMAND DOCS set" "COMMAND INFO nosuch get|key" "COMMAND DOCS nosuch" "COMMAND GETKEYSANDFLAGS set k v get" "COMMAND LIST FILTERBY pattern hexpire?t"
-		expect_same_pipe "command family" "$(cat <<'CMDS'
+		command_family_feed="$(cat <<'CMDS'
 COMMAND HELP
 command help
 COMMAND HELP extra
@@ -7258,6 +7334,8 @@ COMMAND HELP x
 EXEC
 CMDS
 )"
+		expect_same_pipe_proto "command family ($SELF_NAME_RULE)" "$command_family_feed" 2 self_name_norm
+		expect_same_pipe_proto "command family ($SELF_NAME_RULE)" "$command_family_feed" 3 self_name_norm
 		MONITOR_CASES_PY="$(cat <<'PY'
 import re
 import socket
@@ -7574,7 +7652,7 @@ FLUSHALL
 CMDS
 )"
 		dbg_help="$(cli debug help)"
-		dbg_ref_help="$(ref_cli debug help)"
+		dbg_ref_help="$(ref_cli debug help | self_name_norm)"
 		if python3 -I -c '
 import sys
 mine = sys.argv[1].split("\n")
@@ -7587,7 +7665,7 @@ for line in mine:
         sys.exit(1)
     i += 1
 sys.exit(0 if mine[0] == theirs[0] and mine[-2:] == theirs[-2:] and len(mine) > 60 else 1)
-' "$dbg_help" "$dbg_ref_help"; then pass; else fail "debug help lines are the reference lines of the implemented subcommands" "${dbg_ref_help:0:160}" "${dbg_help:0:160}"; fi
+' "$dbg_help" "$dbg_ref_help"; then pass; else fail "debug help lines are the reference lines of the implemented subcommands ($SELF_NAME_RULE)" "${dbg_ref_help:0:160}" "${dbg_help:0:160}"; fi
 		cli config set maxmemory-clients 1g >/dev/null
 		ref_cli config set maxmemory-clients 1g >/dev/null
 		dbg_got="$(cli debug client-eviction | sed -E 's/tot-mem: +[0-9]+, clients: [0-9]+/tot-mem: N, clients: N/')"
@@ -7762,6 +7840,9 @@ CMDS
 		digits_norm() {
 			sed 's/[0-9][0-9]*/N/g'
 		}
+		self_name_digits_norm() {
+			self_name_norm | digits_norm
+		}
 		stats_reset_both
 		expect_same_info_layout "info everything layout" everything
 		expect_same_info_layout "info debug layout" debug
@@ -7827,11 +7908,11 @@ CMDS
 		sadd_args="$(seq -s ' ' 1 35)"
 		expect_same_raw_shape "slowlog entries" "CONFIG SET slowlog-log-slower-than 0" "SLOWLOG RESET" "CLIENT SETNAME smokeslow" "SET sl:k v" "SADD sl:set $sadd_args" "SET sl:long $long_arg" "MULTI" "PING" "EXEC" "AUTH x" "CONFIG SET requirepass \"\"" "CONFIG SET slowlog-log-slower-than -1" "SLOWLOG LEN" "SLOWLOG GET 3" "SLOWLOG GET -1" "SLOWLOG RESET"
 		expect_same_raw_shape "slowlog max len" "CONFIG SET slowlog-max-len 2" "CONFIG SET slowlog-log-slower-than 0" "SLOWLOG RESET" "PING" "PING" "PING" "CONFIG SET slowlog-log-slower-than -1" "SLOWLOG LEN" "SLOWLOG GET" "CONFIG SET slowlog-max-len 128" "SLOWLOG RESET"
-		expect_same_raw "latency errors" "LATENCY" "LATENCY FOO" "LATENCY HELP" "LATENCY HELP X" "LATENCY LATEST X" "LATENCY DOCTOR X" "LATENCY GRAPH nope" "LATENCY HISTORY nope" "LATENCY HISTORY" "LATENCY RESET nope" "LATENCY HISTOGRAM nope" "LATENCY DOCTOR"
-		expect_same_raw_proto "latency doctor with monitoring on and no events" 2 digits_norm "CONFIG SET latency-monitor-threshold 30" "LATENCY RESET" "LATENCY DOCTOR"
+		expect_same_raw_self_named "latency errors" "LATENCY" "LATENCY FOO" "LATENCY HELP" "LATENCY HELP X" "LATENCY LATEST X" "LATENCY DOCTOR X" "LATENCY GRAPH nope" "LATENCY HISTORY nope" "LATENCY HISTORY" "LATENCY RESET nope" "LATENCY HISTOGRAM nope" "LATENCY DOCTOR"
+		expect_same_raw_proto "latency doctor with monitoring on and no events ($SELF_NAME_RULE)" 2 self_name_digits_norm "CONFIG SET latency-monitor-threshold 30" "LATENCY RESET" "LATENCY DOCTOR"
 		expect_same_raw_shape "latency events" "CONFIG SET latency-monitor-threshold 30" "LATENCY RESET" "CONFIG RESETSTAT" "DEBUG SLEEP 0.04" "LATENCY LATEST" "LATENCY HISTORY command" "LATENCY RESET command fast-command"
 		expect_same_raw "latency histogram of one command" "CONFIG RESETSTAT" "DEBUG SLEEP 0.04" "LATENCY HISTOGRAM debug nope"
-		expect_same_raw_proto "latency doctor and graph" 2 digits_norm "CONFIG SET latency-monitor-threshold 30" "LATENCY RESET" "DEBUG SLEEP 0.04" "LATENCY GRAPH command" "LATENCY DOCTOR" "CONFIG SET slowlog-log-slower-than -1" "LATENCY DOCTOR" "CONFIG SET slowlog-log-slower-than 10000" "LATENCY RESET" "CONFIG SET latency-monitor-threshold 0" "LATENCY DOCTOR"
+		expect_same_raw_proto "latency doctor and graph ($SELF_NAME_RULE)" 2 self_name_digits_norm "CONFIG SET latency-monitor-threshold 30" "LATENCY RESET" "DEBUG SLEEP 0.04" "LATENCY GRAPH command" "LATENCY DOCTOR" "CONFIG SET slowlog-log-slower-than -1" "LATENCY DOCTOR" "CONFIG SET slowlog-log-slower-than 10000" "LATENCY RESET" "CONFIG SET latency-monitor-threshold 0" "LATENCY DOCTOR"
 		stats_reset_both
 		expect_same_acl
 		expect_acl_files
