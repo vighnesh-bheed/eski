@@ -153,12 +153,13 @@ def facts(dataset):
 
 def measurement_table(dataset):
     labels = {engine['target']: engine['label'] for engine in dataset['engines']}
-    head = ('Phase', 'Workload', 'Engine', 'Rep', 'State', 'Included', 'Ops/s', 'p50 ms', 'p99 ms', 'p99.9 ms', 'Max ms', 'Memory MiB', 'Client cores', 'Client %', 'Notes')
-    lines = ['<table><thead><tr>%s</tr></thead><tbody>' % ''.join('<th class="%s">%s</th>' % ('text' if index in (0, 1, 2, 4, 5, 14) else '', esc(name)) for index, name in enumerate(head))]
+    head = ('Phase', 'Workload', 'Engine', 'Rep', 'State', 'Included', 'Ops/s', 'Steady ops/s', 'Stall s', 'p50 ms', 'p99 ms', 'p99.9 ms', 'Max ms', 'Memory MiB', 'Client cores', 'Client %', 'Notes')
+    lines = ['<table><thead><tr>%s</tr></thead><tbody>' % ''.join('<th class="%s">%s</th>' % ('text' if index in (0, 1, 2, 4, 5, 16) else '', esc(name)) for index, name in enumerate(head))]
     for row in sorted(dataset['rows'], key=lambda item: (item['phase'] != 'calibration', item['index'], item['repetition'], item['engine'])):
         notes = '; '.join(row['reasons'] + (['client limited'] if row['client_limited'] else []))
         cells = [('text', row['phase']), ('text', row['name']), ('text', labels.get(row['engine'], row['engine'])), ('', row['repetition']),
-                 ('text', row['state']), ('text', 'yes' if row['included'] else 'no'), ('', number(row['ops'], 0)), ('', number(row['p50'])),
+                 ('text', row['state']), ('text', 'yes' if row['included'] else 'no'), ('', number(row['ops'], 0)),
+                 ('', number(row.get('steady_ops'), 0)), ('', '' if row.get('stall_seconds') is None else row['stall_seconds']), ('', number(row['p50'])),
                  ('', number(row['p99'])), ('', number(row['p999'])), ('', number(row['max_ms'])),
                  ('', number(row['mem'] / 1024 ** 2, 1) if row['mem'] else ''), ('', number(row['client_cores'], 2)),
                  ('', number(row['client_utilization_pct'], 1)), ('reason', notes)]

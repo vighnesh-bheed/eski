@@ -1,5 +1,6 @@
 import argparse
 import hashlib
+import importlib.util
 import json
 import math
 from pathlib import Path, PurePosixPath
@@ -19,6 +20,16 @@ class CombineError(ValueError):
 
 def load(path):
     return json.loads(Path(path).read_text())
+
+
+def metrics_module():
+    spec = importlib.util.spec_from_file_location('eski_exam_metrics', Path(__file__).resolve().parents[1] / 'exam_metrics.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+METRICS_MODULE = metrics_module()
 
 
 def sha(path):
@@ -88,9 +99,14 @@ def measurement(results, phase, row):
              if PurePosixPath(str(peak.get('artifact_dir') or '')).parts[-2:] == ('run', row['target'])]
     peaks = [value for value in peaks if finite(value, True) is not None]
     annotations = sorted(details.get('annotations') or [])
+    series = series_of(results, attempt, record, telemetry)
+    shares = ((telemetry.get('role_cpu_share_pct') or {}).get('roles') or {})
     values = dict(ops=finite(record.get('ops_per_sec'), True), p50=finite(record.get('p50_ms')), p99=finite(record.get('p99_ms')),
                   p999=finite(record.get('p999_ms')), max_ms=finite(record.get('max_ms')), mem=peaks[-1] if peaks else None,
-                  client_cores=finite(record.get('client_cpu_cores')), client_utilization_pct=finite(details.get('client_utilization_pct')))
+                  client_cores=finite(record.get('client_cpu_cores')), client_utilization_pct=finite(details.get('client_utilization_pct')),
+                  steady_ops=finite(series.get('steady_ops_per_sec'), True), stall_seconds=series.get('stall_seconds'), stall_windows=series.get('stall_windows'),
+                  min_second_ratio=finite(series.get('min_second_ratio')), per_second_ops=series.get('per_second_ops'),
+                  cpu_shares={role: shares.get(role) for role in ('server', 'client')} if shares else None)
     missing = [name for name in METRICS if values[name] is None]
     if state == 'successful' and missing:
         reasons.append('missing measurement: ' + ', '.join(missing))
@@ -100,6 +116,22 @@ def measurement(results, phase, row):
                 client_limited='client_limited' in annotations, integrity=checked, attempts=len(row.get('attempts') or []),
                 version=(details.get('target') or {}).get('version'), started_at=attempt.get('started_at'), finished_at=attempt.get('finished_at'),
                 directory=attempt.get('directory'), **values)
+
+
+def series_of(results, attempt, record, telemetry):
+    series = (telemetry.get('measurement_quality') or {}).get('throughput_series')
+    if isinstance(series, dict) and series.get('available'):
+        return series
+    raw = record.get('raw')
+    if not attempt.get('directory') or not isinstance(raw, str) or not raw:
+        return {}
+    try:
+        path = inside(inside(results, attempt['directory']) / 'run', raw)
+        if not path.is_file():
+            return {}
+        return METRICS_MODULE.memtier_series(load(path))
+    except (OSError, ValueError, CombineError):
+        return {}
 
 
 def stats(values):
@@ -120,11 +152,13 @@ def summarize(rows, workloads, engines, repetitions):
                                    for row in cell if not row['included']])
             for metric in METRICS:
                 entry[metric] = stats([row[metric] for row in valid])
+            entry['steady_ops'] = stats([row['steady_ops'] for row in valid if row.get('steady_ops') is not None])
+            entry['stall_windows'] = sum(row['stall_windows'] or 0 for row in valid)
             summary.append(entry)
     return summary
 
 
-def machine_context(protocol, identity):
+def machine_context(protocol, identity, launch=None):
     host = protocol.get('machine') or identity.get('host') or {}
     config = protocol.get('resources') or identity.get('config') or {}
     topology = host.get('topology') or {}
@@ -136,7 +170,9 @@ def machine_context(protocol, identity):
                 product=' '.join(value for value in (hardware.get('sys_vendor'), hardware.get('product_name')) if value) or None,
                 cpus=config.get('cpus'), topology=topology, server_memory=config.get('server_memory'), client_memory=config.get('client_memory'),
                 maxmemory=config.get('maxmemory'), dragonfly_threads=config.get('dragonfly_threads'),
-                frequency_policy=host.get('frequency_policy'), sensor=config.get('sensor'), power_source=config.get('power_source', 'mains'))
+                frequency_policy=host.get('frequency_policy'), sensor=config.get('sensor'), power_source=config.get('power_source', 'mains'),
+                cmdline=host.get('cmdline'), modules=host.get('modules'), drm=host.get('drm'), timer_migration=host.get('timer_migration'),
+                display_drivers=host.get('display_drivers'), display_driver_accepted=host.get('display_driver_accepted'), launch_inventory=launch)
 
 
 def fill_result(path):
@@ -188,15 +224,20 @@ def combine(results, fill=None, collected=None):
         engine['observed_versions'] = seen
     workflow_path = results / 'control' / 'workflow.json'
     workflow = load(workflow_path) if workflow_path.is_file() else {}
+    watch_path = results / 'control' / 'idle-watch.json'
+    watch = load(watch_path) if watch_path.is_file() else None
+    launch_path = results / 'control' / 'machine.json'
+    launch = load(launch_path) if launch_path.is_file() else None
     run = dict(root=protocol.get('root'), protocol_sha256=sha(protocol_path), workflow_status=workflow.get('status'), workflow_reason=workflow.get('reason'),
                started_at=workflow.get('started_at'), finished_at=workflow.get('finished_at'), identity=identity.get('sha256'),
-               archive=dict((load(collected) if collected else {}).get('receipt') or {}) or None)
+               archive=dict((load(collected) if collected else {}).get('receipt') or {}) or None,
+               idle_watch={key: watch.get(key) for key in ('seconds', 'samples', 'passed', 'offenders', 'reason', 'launch', 'started_at', 'finished_at')} if watch else None)
     exclusions = [dict(workload=row['workload'], engine=row['engine'], repetition=row['repetition'], phase=row['phase'], state=row['state'], reasons=row['reasons'])
                   for row in rows if not row['included']]
     return dict(schema=SCHEMA, title=design.get('title'), run=run, design=dict(repetitions=design.get('repetitions'), dataset=design.get('dataset'),
                 client=design.get('client'), gates=design.get('gates'), methodology=design.get('methodology'), calibration=design.get('calibration'),
                 load_generator=design.get('load_generator'), source=protocol.get('source')),
-                machine=machine_context(protocol, identity), engines=engines, workloads=workloads, phases=phases, rows=rows,
+                machine=machine_context(protocol, identity, launch), engines=engines, workloads=workloads, phases=phases, rows=rows,
                 summary=summarize(benchmark, workloads, engines, design.get('repetitions') or 0), exclusions=exclusions, fill=fill_result(fill),
                 counts=dict(planned=len(benchmark), valid=sum(row['included'] for row in benchmark), excluded=sum(not row['included'] for row in benchmark),
                             client_limited=sum(row['client_limited'] for row in benchmark if row['included'])))

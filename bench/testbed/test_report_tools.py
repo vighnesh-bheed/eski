@@ -30,7 +30,7 @@ ENGINES = [dict(target='eski-docker', label='Eski', reference='eski:local', imag
 WORKLOADS = [dict(key='get64-p1', name='GET 64 B, pipeline 1'), dict(key='mixed64-p16', name='SET and GET 1:1, 64 B, pipeline 16')]
 BASE = {'eski-docker': 200000.0, 'redis': 160000.0, 'valkey': 150000.0, 'dragonfly': 100000.0}
 SPECIAL = {('benchmark', 'mixed64-p16', 'valkey', 2): 'thermal', ('benchmark', 'get64-p1', 'dragonfly', 3): 'failed',
-           ('benchmark', 'get64-p1', 'eski-docker', 1): 'limited'}
+           ('benchmark', 'get64-p1', 'eski-docker', 1): 'limited', ('benchmark', 'get64-p1', 'redis', 2): 'stall', ('benchmark', 'get64-p1', 'valkey', 4): 'raw-only'}
 
 
 def sha(path):
@@ -57,10 +57,15 @@ def make_results(root):
                                 gates=dict(cool_temp_c=55, max_temp_c=90, min_idle=95, stable_seconds=10, min_rest=30, max_client_utilization_pct=85, max_latency_seconds=120),
                                 methodology=dict(scope='Fixture scope text.', fill='Fixture fill text.'), load_generator=dict(label='memtier_benchmark 2.5.2')),
                     machine=dict(cpu_model='Fixture CPU @ 2.20GHz', kernel='6.12.0', machine='x86_64', online_cpus='0-11', mem_total='MemTotal:       16000000 kB',
-                                 hardware=dict(sys_vendor='Fixture', product_name='Laptop'), frequency_policy={'1': dict(scaling_governor='powersave', scaling_driver='intel_pstate', energy_performance_preference='balance_performance')}),
+                                 hardware=dict(sys_vendor='Fixture', product_name='Laptop'), frequency_policy={'1': dict(scaling_governor='powersave', scaling_driver='intel_pstate', energy_performance_preference='balance_performance')},
+                                 cmdline='BOOT_IMAGE=/vmlinuz nosmt modprobe.blacklist=i915', modules=['overlay', 'xfs'], drm=dict(available=True, entries=[], cards={}),
+                                 timer_migration=1, display_drivers=[], display_driver_accepted=False),
                     resources=dict(cpus=dict(server=[1], client=[3, 4], control=[5, 11]), server_memory='8g', client_memory='2g', maxmemory=6442450944, dragonfly_threads=1))
     dump(root / 'protocol.json', protocol)
     dump(root / 'control' / 'workflow.json', dict(status='DONE WITH EXCLUSIONS', reason='fixture', started_at=1.0, finished_at=2.0))
+    dump(root / 'control' / 'idle-watch.json', dict(seconds=600, interval=1, samples=600, passed=True, offenders=[], reason=None, launch=1, started_at=0.5, finished_at=1.0, cpus=[1, 3, 4]))
+    dump(root / 'control' / 'machine.json', dict(cmdline='BOOT_IMAGE=/vmlinuz nosmt modprobe.blacklist=i915', modules=['br_netfilter', 'overlay', 'xfs'], drm=dict(available=True, entries=[], cards={}),
+                                                 timer_migration=1, display_drivers=[], launch=1, captured_at=1.0))
     expected = {}
     for phase, workloads, repetitions in (('calibration', WORKLOADS[1:], 1), ('benchmark', WORKLOADS, 4)):
         cases = []
@@ -83,11 +88,27 @@ def make_results(root):
                         record = dict(target=engine, scenario=workload['name'], suite='testbed', error='memtier failed', ops_per_sec=None)
                     if kind == 'limited':
                         annotations = ['client_limited']
+                    counts = [int(record['ops_per_sec'])] * 60 if record.get('ops_per_sec') else []
+                    if kind == 'stall':
+                        counts = counts[:20] + [int(record['ops_per_sec'] / 3)] * 14 + counts[34:]
+                    quality = {}
+                    if kind != 'raw-only' and counts:
+                        quality['throughput_series'] = dict(available=True, seconds=60, per_second_ops=counts, steady_ops_per_sec=float(counts[0]),
+                                                            stall_seconds=sum(c < counts[0] / 2 for c in counts), stall_windows=1 if kind == 'stall' else 0,
+                                                            min_second_ratio=min(counts) / counts[0], path=engine + '/' + workload['key'] + '.json')
                     attempt = dict(directory=directory, state=state, started_at=10.0, finished_at=80.0, returncode=0, cleanup=dict(ok=True),
                                    details=dict(record=record, target=dict(status='ok', version='fixture-' + engine), reasons=reasons, annotations=annotations,
                                                 client_utilization_pct=90.0 if kind == 'limited' else 60.0),
                                    telemetry=dict(server_pre_stop_cgroup_peaks=[dict(artifact_dir='/x/probe-cache/probe', memory_peak_bytes=999 * 1024 ** 3),
-                                                                                dict(artifact_dir='/x/' + directory + '/run/' + engine, memory_peak_bytes=peak)]))
+                                                                                dict(artifact_dir='/x/' + directory + '/run/' + engine, memory_peak_bytes=peak)],
+                                                  measurement_quality=quality,
+                                                  role_cpu_share_pct=dict(window='timed client lifetime', samples=58, roles=dict(
+                                                      server=dict(user=30.0, nice=0.0, system=45.0, idle=1.0, iowait=0.0, irq=4.0, softirq=20.0, steal=0.0),
+                                                      client=dict(user=20.0, nice=0.0, system=30.0, idle=40.0, iowait=0.0, irq=2.0, softirq=8.0, steal=0.0),
+                                                      control=dict(user=1.0, nice=0.0, system=1.0, idle=98.0, iowait=0.0, irq=0.0, softirq=0.0, steal=0.0)))))
+                    if kind == 'raw-only' and counts:
+                        record['raw'] = engine + '/' + workload['key'] + '.json'
+                        dump(base / 'run' / engine / (workload['key'] + '.json'), {'ALL STATS': {'Totals': {'Time-Serie': {str(i): {'Count': c} for i, c in enumerate(counts + [7])}}}})
                     dump(base / 'result.json', attempt)
                     dump(base / 'run' / 'records.jsonl', record)
                     inventory = {str(path.relative_to(base)): dict(sha256=sha(path), bytes=path.stat().st_size) for path in sorted(base.rglob('*')) if path.is_file()}
@@ -159,6 +180,25 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(dataset['run']['workflow_status'], 'DONE WITH EXCLUSIONS')
         self.assertTrue(all(row['mem'] < 100 * 1024 ** 2 for row in dataset['rows'] if row['mem']))
         json.dumps(dataset, allow_nan=False)
+        self.assertEqual(dataset['machine']['cmdline'], 'BOOT_IMAGE=/vmlinuz nosmt modprobe.blacklist=i915')
+        self.assertEqual((dataset['machine']['modules'], dataset['machine']['display_drivers'], dataset['machine']['timer_migration']), (['overlay', 'xfs'], [], 1))
+        self.assertEqual(dataset['machine']['launch_inventory']['modules'], ['br_netfilter', 'overlay', 'xfs'])
+        self.assertEqual(dataset['run']['idle_watch'], dict(seconds=600, samples=600, passed=True, offenders=[], reason=None, launch=1, started_at=0.5, finished_at=1.0))
+        rows = {(row['workload'], row['engine'], row['repetition']): row for row in dataset['rows'] if row['phase'] == 'benchmark'}
+        stall = rows[('get64-p1', 'redis', 2)]
+        self.assertEqual((stall['stall_seconds'], stall['stall_windows'], len(stall['per_second_ops'])), (14, 1, 60))
+        self.assertAlmostEqual(stall['steady_ops'], stall['ops'] // 1)
+        self.assertAlmostEqual(stall['min_second_ratio'], (stall['ops'] // 3) / (stall['ops'] // 1), places=3)
+        raw_only = rows[('get64-p1', 'valkey', 4)]
+        self.assertEqual((raw_only['stall_seconds'], raw_only['stall_windows'], raw_only['steady_ops']), (0, 0, float(int(raw_only['ops']))))
+        self.assertEqual(len(raw_only['per_second_ops']), 60)
+        failed = rows[('get64-p1', 'dragonfly', 3)]
+        self.assertEqual((failed['steady_ops'], failed['stall_seconds'], failed['per_second_ops']), (None, None, None))
+        self.assertEqual(stall['cpu_shares']['server']['softirq'], 20.0)
+        self.assertEqual(sorted(stall['cpu_shares']), ['client', 'server'])
+        self.assertEqual(cells[('get64-p1', 'redis')]['stall_windows'], 1)
+        self.assertEqual(cells[('get64-p1', 'valkey')]['stall_windows'], 0)
+        self.assertEqual(cells[('get64-p1', 'redis')]['steady_ops']['median'], statistics.median(rows[('get64-p1', 'redis', r)]['steady_ops'] for r in range(1, 5)))
 
     def test_combine_rejects_tampered_artifacts(self):
         target = next((self.root / 'benchmark' / 'results' / 'cases').glob('000000-r001-redis/attempt-001'))
@@ -230,6 +270,8 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(set(re.findall(r'https?://[^"\s]+', text)), {'http://www.w3.org/2000/svg'})
         self.assertEqual(text.count('<svg'), len(WORKLOADS) * 3 + 1)
         self.assertEqual(text.count('<tr class='), len(self.dataset['rows']))
+        self.assertIn('<th class="">Steady ops/s</th><th class="">Stall s</th>', text)
+        self.assertIn('<td class="">14</td>', text)
         self.assertIn('thermal throttling', text)
         self.assertIn('memtier failed', text)
         self.assertIn('Fixture CPU @ 2.20GHz', text)

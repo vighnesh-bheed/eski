@@ -131,6 +131,29 @@ class PlanTests(unittest.TestCase):
                 self.assertLessEqual({'eski-docker', 'redis'}, set(experiment['targets']))
                 self.assertIn('get64-p1', [workload['key'] for workload in design['workloads']])
 
+    def test_idle_watch_is_optional_and_set_for_the_cloud_designs(self):
+        self.assertNotIn('idle_watch_seconds', DESIGN['gates'])
+        for phase in plans.PHASES:
+            self.assertNotIn('idle_watch_seconds', plans.experiment(DESIGN, phase))
+        for path in sorted((HERE / 'designs').glob('cloud-*.json')):
+            design = json.loads(path.read_text())
+            with self.subTest(design=path.name):
+                self.assertEqual(design['gates']['idle_watch_seconds'], 600)
+                self.assertIn('watched idle for 600 seconds', design['methodology']['gates'])
+                for phase in plans.PHASES:
+                    experiment = plans.experiment(design, phase)
+                    self.assertEqual(experiment['idle_watch_seconds'], 600)
+                    self.assertIn('idle_watch_seconds', workflow.WORKFLOW_FIELDS)
+                    self.assertNotIn('idle_watch_seconds', workflow.EXPERIMENT_FIELDS + workflow.OPTIONAL_FIELDS)
+        quick = copy.deepcopy(DESIGN)
+        quick['gates']['idle_watch_seconds'] = 0
+        self.assertEqual(plans.experiment(quick, 'calibration')['idle_watch_seconds'], 0)
+        for value in (-1, 1.5, '600', None):
+            broken = copy.deepcopy(DESIGN)
+            broken['gates']['idle_watch_seconds'] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'gates.idle_watch_seconds must be a non-negative integer'):
+                plans.validate(broken)
+
     def test_invalid_designs_are_rejected(self):
         cases = []
         unpinned = copy.deepcopy(DESIGN)
