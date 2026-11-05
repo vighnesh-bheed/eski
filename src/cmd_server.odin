@@ -215,9 +215,6 @@ debug_serialized_length :: proc(e: ^Entry, key: []u8) -> int {
 	persist_write_value(&w, key, persist_slot_value(e.db, e.kp, e.vp), false)
 	out := rdb.writer_bytes(&w)
 	n := len(out) - 1
-	if len(out) > 0 && (out[0] == rdb.TYPE_HASH_LISTPACK_EX || out[0] == rdb.TYPE_HASH_TABLE_EX) {
-		n -= 8
-	}
 	rdb.writer_destroy(&w)
 	return n
 }

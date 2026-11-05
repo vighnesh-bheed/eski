@@ -13,7 +13,7 @@ mkdir -p /tmp/eski-data
 
 From another terminal, write a value, request `BGSAVE`, wait for `INFO persistence` to show completion and then verify a controlled restart. Background work still has fork, copy-on-write, memory and I/O costs. Keep backups separately from a working directory that an operator can overwrite.
 
-Snapshots and `DUMP` payloads store hashes with field deadlines as RDB types 24 and 25. Loading and `RESTORE` also accept types 22 and 23, the field-expiry encodings written by the 7.4 release candidates, because the released 7.4 server accepts them too; Eski never writes those two types.
+Snapshots and `DUMP` payloads store hashes with field deadlines as RDB types 24 and 25. Loading and `RESTORE` also accept types 22 and 23, the field-expiry encodings written by the 7.4 release candidates, because the released 7.4 server accepts them too; Eski never writes those two types. That acceptance, and the skipping of the slot-info opcode 244 in snapshot files, was confirmed against the reference server with `test/persistence/reference_probe.py`, whose recorded output is `test/persistence/reference_probe.txt`.
 
 ## Append-only files
 

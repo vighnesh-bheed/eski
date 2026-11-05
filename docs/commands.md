@@ -2,7 +2,7 @@
 
 Generated from a temporary instance of the built executable using `COMMAND DOCS`, `COMMAND LIST` and `COMMAND COUNT`. The inventory contains 237 top-level commands and 333 names including subcommands. Metadata describes the protocol surface; the [command-group pages](README.md) and [conformance record](conformance.md) define implemented behavior and remaining gaps. Lua scripts, Function libraries and debugging have the scope documented in [scripting](scripting.md). Replication and clustering remain outside the node scope.
 
-Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test/readme_tables.py --check`. Use `--server HOST:PORT` to inspect an existing instance without starting one. The canonical command-metadata SHA256 is `f4e2e81a055482b30c6ee835368415755f1bb8f868943d9767b88bf7f467de82`.
+Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test/readme_tables.py --check`. Use `--server HOST:PORT` to inspect an existing instance without starting one. The canonical command-metadata SHA256 is `82d43d79c123ef5517a3f04e75a7971d8583ce7a551b29e34ac926764d24c2cf`.
 
 ## Bitmap
 
@@ -107,9 +107,9 @@ Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test
 | --- | --- | --- |
 | `HDEL` | `<key> <field> ...` | Deletes one or more fields and their values from a hash. Deletes the hash if no fields remain. |
 | `HEXISTS` | `<key> <field>` | Determines whether a field exists in a hash. |
-| `HEXPIRE` | `<key> <seconds> [(NX \| XX \| GT \| LT)] FIELDS <numfields> <field> ...` | Set expiry for hash field using relative time to expire (seconds) |
-| `HEXPIREAT` | `<key> <unix-time-seconds> [(NX \| XX \| GT \| LT)] FIELDS <numfields> <field> ...` | Set expiry for hash field using an absolute Unix timestamp (seconds) |
-| `HEXPIRETIME` | `<key> FIELDS <numfields> <field> ...` | Returns the expiration time of a hash field as a Unix timestamp, in seconds. |
+| `HEXPIRE` | `<key> <seconds> [(NX \| XX \| GT \| LT)] FIELDS <numfields> <field> ...` | Sets a relative expiry in seconds on one or more fields of a hash. |
+| `HEXPIREAT` | `<key> <unix-time-seconds> [(NX \| XX \| GT \| LT)] FIELDS <numfields> <field> ...` | Sets an absolute expiry, given as a Unix timestamp in seconds, on one or more fields of a hash. |
+| `HEXPIRETIME` | `<key> FIELDS <numfields> <field> ...` | Returns the Unix timestamp in seconds at which each named hash field expires. |
 | `HGET` | `<key> <field>` | Returns the value of a field in a hash. |
 | `HGETALL` | `<key>` | Returns all fields and values in a hash. |
 | `HINCRBY` | `<key> <field> <increment>` | Increments the integer value of a field in a hash by a number. Uses 0 as initial value if the field doesn't exist. |
@@ -118,17 +118,17 @@ Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test
 | `HLEN` | `<key>` | Returns the number of fields in a hash. |
 | `HMGET` | `<key> <field> ...` | Returns the values of all fields in a hash. |
 | `HMSET` | `<key> <field> <value> ...` | Sets the values of multiple fields. |
-| `HPERSIST` | `<key> FIELDS <numfields> <field> ...` | Removes the expiration time for each specified field |
-| `HPEXPIRE` | `<key> <milliseconds> [(NX \| XX \| GT \| LT)] FIELDS <numfields> <field> ...` | Set expiry for hash field using relative time to expire (milliseconds) |
-| `HPEXPIREAT` | `<key> <unix-time-milliseconds> [(NX \| XX \| GT \| LT)] FIELDS <numfields> <field> ...` | Set expiry for hash field using an absolute Unix timestamp (milliseconds) |
-| `HPEXPIRETIME` | `<key> FIELDS <numfields> <field> ...` | Returns the expiration time of a hash field as a Unix timestamp, in msec. |
-| `HPTTL` | `<key> FIELDS <numfields> <field> ...` | Returns the TTL in milliseconds of a hash field. |
+| `HPERSIST` | `<key> FIELDS <numfields> <field> ...` | Removes the expiry from one or more fields of a hash so they persist with the key. |
+| `HPEXPIRE` | `<key> <milliseconds> [(NX \| XX \| GT \| LT)] FIELDS <numfields> <field> ...` | Sets a relative expiry in milliseconds on one or more fields of a hash. |
+| `HPEXPIREAT` | `<key> <unix-time-milliseconds> [(NX \| XX \| GT \| LT)] FIELDS <numfields> <field> ...` | Sets an absolute expiry, given as a Unix timestamp in milliseconds, on one or more fields of a hash. |
+| `HPEXPIRETIME` | `<key> FIELDS <numfields> <field> ...` | Returns the Unix timestamp in milliseconds at which each named hash field expires. |
+| `HPTTL` | `<key> FIELDS <numfields> <field> ...` | Returns the remaining milliseconds before each named hash field expires. |
 | `HRANDFIELD` | `<key> [<count> [WITHVALUES]]` | Returns one or more random fields from a hash. |
 | `HSCAN` | `<key> <cursor> [MATCH <pattern>] [COUNT <count>] [NOVALUES]` | Iterates over fields and values of a hash. |
 | `HSET` | `<key> <field> <value> ...` | Creates or modifies the value of a field in a hash. |
 | `HSETNX` | `<key> <field> <value>` | Sets the value of a field in a hash only when the field doesn't exist. |
 | `HSTRLEN` | `<key> <field>` | Returns the length of the value of a field. |
-| `HTTL` | `<key> FIELDS <numfields> <field> ...` | Returns the TTL in seconds of a hash field. |
+| `HTTL` | `<key> FIELDS <numfields> <field> ...` | Returns the remaining seconds before each named hash field expires. |
 | `HVALS` | `<key>` | Returns all values in a hash. |
 
 ## Hyperloglog
