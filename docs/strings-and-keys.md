@@ -18,3 +18,5 @@ redis-cli -p 6399 MGET demo:first demo:last
 `INCR`, `DECR`, `INCRBY` and `DECRBY` parse signed integers and reject invalid values or overflow. `INCRBYFLOAT` performs decimal numeric updates and rejects invalid/non-finite results. `LCS` finds the longest common subsequence of two strings; `LEN`, `IDX`, `MINMATCHLEN` and `WITHMATCHLEN` select length or matching-range output. Large range writes and LCS requests can consume substantial foreground time and memory.
 
 See [keyspace](keyspace.md) for deletion, expiry, copying and scans, and the generated [command reference](commands.md) for arities and option metadata. Verify with `bash test/run_packages.sh`, then select the `type/string` and `type/incr` units using `./test/conformance/run.sh --suite redis --units type/string,type/incr`. The [conformance report](conformance.md) describes the distinction between recorded compatibility and full parity.
+
+Eski is an independent project, not affiliated with, endorsed or certified by Redis Ltd. Redis is a registered trademark of Redis Ltd.; any rights therein are reserved to Redis Ltd.

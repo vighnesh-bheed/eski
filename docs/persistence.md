@@ -37,3 +37,5 @@ Function library definitions are saved in RDB snapshots and AOF base files. Thei
 `SHUTDOWN` supports save/no-save and related shutdown controls. A deliberate `NOSAVE` can discard changes not present in durable files. Never use shutdown or restore as an unreviewed probe against an existing instance.
 
 Verify with `bash test/rdb/roundtrip.sh`, `bash test/aof/roundtrip.sh`, `bash test/run_packages.sh`, `bash test/smoke.sh` and `./test/conformance/run.sh --suite redis --units dump`. These include codec, ownership, restart and corruption cases. The [build/test guide](build-run-test.md) explains how smoke obtains corrupt-payload comparison fixtures.
+
+Eski is an independent project, not affiliated with, endorsed or certified by Redis Ltd. Redis is a registered trademark of Redis Ltd.; any rights therein are reserved to Redis Ltd.

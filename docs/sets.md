@@ -19,3 +19,5 @@ redis-cli -p 6399 SUNIONSTORE demo:everyone demo:team demo:oncall
 Storage can switch between compact and indexed representations as values change. The key remains a set across those transitions; internal encoding names and member iteration order are not application contracts.
 
 Verify with `bash test/settype/compare.sh`, `python3 -I test/settype/run.py`, `bash test/run_packages.sh` and `./test/conformance/run.sh --suite redis --units type/set`. The [command reference](commands.md) lists supported forms and [conformance](conformance.md) qualifies compatibility claims.
+
+Eski is an independent project, not affiliated with, endorsed or certified by Redis Ltd. Redis is a registered trademark of Redis Ltd.; any rights therein are reserved to Redis Ltd.

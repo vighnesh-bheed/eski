@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/img/wordmark-dark.svg">
-    <img src="docs/img/wordmark.svg" alt="Eski: single-node, Redis-compatible, written in Odin" width="560">
+    <img src="docs/img/wordmark.svg" alt="Eski: single-node, RESP-compatible, written in Odin" width="560">
   </picture>
 </p>
 
@@ -10,16 +10,16 @@
   <img src="docs/img/benchmark-ratio.svg" alt="Recorded benchmark ratio">
 </p>
 
-Eski is an in-memory data store for one machine. It speaks the Redis protocol, so existing clients, tools and scripts connect to it unchanged, and it implements the single-node command surface: strings, hashes with field expiry, lists, sets, sorted sets, geospatial search, bitmaps, HyperLogLog, streams, pub/sub, transactions, ACLs, RDB and append-only persistence, Lua 5.1.5 scripting with Function libraries and an interactive debugger, plus an optional memcached text endpoint over the same keys. It is written in Odin with a pinned C Lua runtime, licensed under Apache-2.0, and verified against the upstream Redis test suite on every change.
+Eski is an in-memory data store for one machine. It speaks RESP, so existing clients, tools and scripts connect to it unchanged, and it implements the single-node command surface: strings, hashes with field expiry, lists, sets, sorted sets, geospatial search, bitmaps, HyperLogLog, streams, pub/sub, transactions, ACLs, RDB and append-only persistence, Lua 5.1.5 scripting with Function libraries and an interactive debugger, plus an optional memcached text endpoint over the same keys. It is written in Odin with a pinned C Lua runtime, licensed under Apache-2.0, and verified against the upstream conformance suite on every change.
 
 Modules, replication, Sentinel and Cluster are outside this repository. Eski is the node; coordination between nodes belongs to a separate layer.
 
 ## Why Eski
 
-- **It is fast where it counts.** On the recorded run below, one server core, Eski serves more requests per second than Redis and Valkey in every workload, with a p99 latency below theirs in six workloads and equal in the other two. At pipeline 16, where the kernel's share of each request shrinks, the gap widens sharply.
-- **It is lean.** After filling 10,000,000 keys of 64 bytes, Eski holds each key in fewer resident bytes than Redis or Valkey; the fill table below records the numbers.
+- **It is fast where it counts.** On the recorded run below, one server core, Eski serves more requests per second than each of the other three engines in every workload, and its p99 latency is never above theirs. At pipeline 16, where the kernel's share of each request shrinks, the gap widens sharply.
+- **It is lean.** After filling 10,000,000 keys of 64 bytes, Eski holds each key in 113 resident bytes; the fill table below records the numbers for all four engines.
 - **It is honest about measurement.** Every number on this page comes from a committed dataset with its raw per-second series, machine samples and exclusion reasons, generated into this README by a script that refuses to run when the tables are stale. The method is described below and can be repeated on a rented server in an afternoon.
-- **It is compatible by evidence, not by claim.** The upstream Redis test suite runs against Eski with a protected baseline; the conformance table below is regenerated from that run, and skipped tests are listed rather than counted.
+- **It is compatible by evidence, not by claim.** The reference server's test suite runs against Eski with a protected baseline; the conformance table below is regenerated from that run, and skipped tests are listed rather than counted.
 - **It is one binary with no runtime.** No garbage collector, no virtual machine for the engine itself, no worker threads unless you turn them on. The event loop, the keyspace and the reply path are written in Odin and read top to bottom.
 
 ## Recorded measurements
@@ -71,7 +71,7 @@ Build on Linux with Odin, clang, OpenSSL 3 and libunwind development libraries, 
 ./bin/eski --bind 127.0.0.1 --port 6399
 ```
 
-In another terminal, use any Redis protocol client:
+In another terminal, use any RESP client:
 
 ```sh
 redis-cli -p 6399 SET demo:message hello
@@ -116,13 +116,13 @@ Eski is about 110,000 lines of Odin in one `src` tree, built by one shell script
 - **C is a foreign import away.** The Lua 5.1.5 runtime, OpenSSL 3 for TLS and libunwind for native diagnostics are bound with a handful of foreign import blocks and no glue generator. The C library's vDSO clock is one of them.
 - **The compiler is the linter.** The check step runs `odin check` with `-vet` and `-strict-style` before every build, locally and in the container, so unused values, shadowing and style drift fail the build rather than a review. The Dockerfile pins the compiler release by sha256 and the image build checks the binary, the version, the licence and the source tree it contains.
 
-The trade-off is a smaller ecosystem. Everything in the engine was written for Eski, and the third-party pieces it does use, the Lua runtime, a handful of BSD-licensed helpers and the transport libraries, are listed with their licences in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The trade-off is a smaller ecosystem. The engine was written for Eski; the functions ported from Valkey and from BSD-licensed upstream files, the Lua runtime and the transport libraries are listed with their notices in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## How we measure
 
 The numbers on this page are produced by a test bed that treats a benchmark as an experiment with a protocol, not as a script that prints a number. The [benchmark page](docs/benchmarks.md) has the full method; this is the shape of it.
 
-- **Four engines, one core.** Eski, Redis, Valkey and Dragonfly run one at a time in fresh containers pinned by image digest, with the same server CPU, the same 8 GiB memory cap and the same 6 GiB maxmemory, persistence off, host loopback networking. Dragonfly runs one proactor thread on that core. The load generator runs on separate physical cores, the controller on another, and CPU 0 belongs to the kernel. Simultaneous multithreading is off, so a CPU number is a physical core.
+- **Four engines, one core.** Eski and the three engines named in the tables run one at a time in fresh containers pinned by image digest, with the same server CPU, the same 8 GiB memory cap and the same 6 GiB maxmemory, persistence off, host loopback networking. Dragonfly runs one proactor thread on that core. The load generator runs on separate physical cores, the controller on another, and CPU 0 belongs to the kernel. Simultaneous multithreading is off, so a CPU number is a physical core.
 - **Eight workloads, four repetitions.** GET, SET and a 1:1 mix at 64 bytes and pipeline 1; the mix at pipeline 16; GET at 1024 bytes; HGET, SISMEMBER and ZSCORE over 16-element values. Each case preloads 100,000 keys, warms up for 10 seconds and times 60 seconds over 32 connections. Engine order rotates so every engine takes every position once per workload.
 - **Gates before, rules during.** A case starts only when the package is at or below 55 C, the role CPUs are at least 95 percent idle, 30 seconds have passed since the last case and the readings have been stable for 10 seconds. During the case, a process from outside the run on any core, a thermal throttle count, a frequency policy change, a kernel thread bound to the server core, or a single second below half the run's median rate invalidates the case with a named reason. Invalid cases are published with that reason and never averaged in.
 - **The raw evidence is kept.** Every case keeps its resolved plan, the raw memtier output with its per-second series, machine samples with the eight CPU time fields and softirq counters of every core, and the ownership events of every process the run started. The dataset, receipts, charts and report are committed together, and the README tables are generated from the dataset by a script whose check mode fails when they drift.
@@ -133,7 +133,7 @@ What these numbers are not: a multicore scaling result, a claim about your workl
 
 ## Compatibility and verification
 
-The upstream Redis test suite is downloaded with a checksum, run against Eski, and compared with a protected baseline of recorded passes. The gate fails on any regression. The expanded run below counts every unit's passes, failures and skips; a skipped test establishes nothing and is listed so that it cannot be mistaken for coverage. Separate managed fixtures exercise server restarts, Lua and Functions, networking and persistence, and the smoke test diffs replies and persistence behaviour against reference containers. The [verification record](docs/build-run-test.md#verification) describes every check, the allocator and storage-representation differences, and the unqualified resource cases.
+The reference server's test suite is downloaded with a checksum, run against Eski, and compared with a protected baseline of recorded passes. The gate fails on any regression. The expanded run below counts every unit's passes, failures and skips; a skipped test establishes nothing and is listed so that it cannot be mistaken for coverage. Separate managed fixtures exercise server restarts, Lua and Functions, networking and persistence, and the smoke test diffs replies and persistence behaviour against reference containers. The [verification record](docs/build-run-test.md#verification) describes every check, the allocator and storage-representation differences, and the unqualified resource cases.
 
 <!-- BEGIN GENERATED CONFORMANCE -->
 
@@ -230,3 +230,5 @@ The running executable registers **237 top-level commands** and **333 commands i
 Every command group of a single node is implemented and verified as described above; the work now is efficiency, measured one change at a time against the recorded run, and the ongoing qualification of the optional workers and the Lua implementation. [ROADMAP.md](ROADMAP.md) lists the milestones, their verification conditions and the measurement process. Distributed management is outside this node and belongs to a separate layer.
 
 Eski is licensed under [Apache-2.0](LICENSE). Third-party components retain their own terms, recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Eski is an independent project, not affiliated with, endorsed or certified by Redis Ltd. Redis is a registered trademark of Redis Ltd.; any rights therein are reserved to Redis Ltd.

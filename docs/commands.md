@@ -411,3 +411,5 @@ Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test
 | `MULTI` | — | Starts a transaction. |
 | `UNWATCH` | — | Forgets about watched keys of a transaction. |
 | `WATCH` | `<key> ...` | Monitors changes to keys to determine the execution of a transaction. |
+
+Eski is an independent project, not affiliated with, endorsed or certified by Redis Ltd. Redis is a registered trademark of Redis Ltd.; any rights therein are reserved to Redis Ltd.

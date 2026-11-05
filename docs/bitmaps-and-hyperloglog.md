@@ -31,3 +31,5 @@ HLL values use an encoded string with sparse/dense representations and cached ca
 Verify with `bash test/bitmap/compare.sh`, `bash test/hll/compare.sh`, `bash test/run_packages.sh` and `./test/conformance/run.sh --suite redis --units bitops,bitfield,hyperloglog`. The [command reference](commands.md) lists accepted forms; the [conformance report](conformance.md) qualifies the tested scope.
 
 The optional [bitfield proof pilot](../proofs/bitfield/README.md) checks wrapping, saturation, overflow rejection and mutation counting in an executable Lean model, then compares that model with the actual Odin bitmap functions and an independent reference. Its documented domains and limits apply separately from command conformance and HyperLogLog coverage.
+
+Eski is an independent project, not affiliated with, endorsed or certified by Redis Ltd. Redis is a registered trademark of Redis Ltd.; any rights therein are reserved to Redis Ltd.
