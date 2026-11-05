@@ -1,0 +1,11 @@
+{
+ "archive": "fill-20261105-142129.tar.gz",
+ "bytes": 46676,
+ "created_at": 1793888700.9320576,
+ "files": 66,
+ "inventory": "fill/20261105-142129/inventory.json",
+ "kind": "fill",
+ "root": "cloud-v2",
+ "schema": "eski-exam-export-v1",
+ "sha256": "f4fc66eb19b83f83def4e0e0b37bf9dd46f8979cd247877e8440df4cf9cace08"
+}

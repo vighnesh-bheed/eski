@@ -884,12 +884,14 @@ def render_outputs(commands, baseline, observed, dataset, readme, ab_floor=None)
                        'throughput claim.\n\n'
                        'Recorded medians from `' + run + '`, using valid repetitions only. '
                        'These are measurements from one machine, not a claim about every workload or deployment.\n\n%s\n\n'
-                       '† At least one included repetition was client limited. The observed GET 64 B pipeline 1 median throughput ratio '
-                       'is **%.2fx Eski / Redis**%s. Client limits affect both measurements, so that ratio is not a guaranteed engine-speed ratio. '
+                       '%s The observed GET 64 B pipeline 1 median throughput ratio is **%.2fx Eski / Redis**%s. %s'
                        'Excluded repetitions receive no inferred score. [Method, ranges, images and exclusions](docs/benchmarks.md).\n\n'
                        'Read the [benchmark method and tables](docs/benchmarks.md), the [self-contained report](' + run + '/report.html) and the '
                        '[recorded charts](' + run + '/charts/throughput.svg).') % (
-                           benchmark_table(dataset, cells, brief=True), ratio, ' (client limited)' if limited else '')
+                           benchmark_table(dataset, cells, brief=True),
+                           '† At least one included repetition was client limited.' if dataset['counts']['client_limited'] else 'No included repetition was client limited.',
+                           ratio, ' (client limited)' if limited else '',
+                           'Client limits affect both measurements, so that ratio is not a guaranteed engine-speed ratio. ' if dataset['counts']['client_limited'] else '')
     commands_block = ('The running executable registers **%d top-level commands** and **%d commands including subcommands**. '
                       'Compatibility stubs remain subject to the exclusions above. '
                       '[Arguments and metadata summaries](docs/commands.md) come from `COMMAND DOCS`; every name below is cross-checked against `COMMAND LIST`.\n\n%s') % (
