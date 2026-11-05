@@ -1,0 +1,11 @@
+name = "eski-storage"
+version = "0.1.0"
+defaultTargets = ["Storage", "storage_model"]
+moreLeanArgs = ["-j1"]
+
+[[lean_lib]]
+name = "Storage"
+
+[[lean_exe]]
+name = "storage_model"
+root = "Main"

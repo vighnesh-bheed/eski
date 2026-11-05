@@ -1,0 +1,97 @@
+cluster/*
+moduleapi/*
+wait
+integration/replication*
+integration/block-repl
+integration/failover
+integration/psync2*
+integration/shutdown
+redis:integration/dismiss-mem::dismiss replication backlog
+redis:networking::CONFIG SET bind-source-addr
+redis:tls::TLS: Verify tls-cert-file is also used as a client cert if none specified
+redis:expire::Redis should not propagate the read command on lazy expire
+redis:expire::SCAN: Lazy-expire should not be wrapped in MULTI/EXEC
+redis:expire::RANDOMKEY: Lazy-expire should not be wrapped in MULTI/EXEC
+redis:type/set::SRANDMEMBER with a dict containing long chain
+redis:type/list::SWAPDB wants to wake blocked client, but the key already expired
+redis:type/list::MULTI + LPUSH + EXPIRE + DEBUG SLEEP on blocked client, key already expired
+redis:type/stream-cgroups::Consumer group last ID propagation to slave (NOACK=0)
+redis:type/stream-cgroups::Consumer group last ID propagation to slave (NOACK=1)
+redis:type/stream-cgroups::Replication tests of XCLAIM with deleted entries (autoclaim=0)
+redis:type/stream-cgroups::Replication tests of XCLAIM with deleted entries (autoclaim=1)
+redis:type/stream-cgroups::XREADGROUP ACK would propagate entries-read
+redis:bitfield::BITFIELD: setup slave
+redis:bitfield::BITFIELD: write on master, read on slave
+redis:pubsubshard::setup replication for following tests
+redis:auth::MASTERAUTH test with binary password
+redis:acl::First server should have role slave after SLAVEOF
+redis:maxmemory::slave buffer are counted correctly
+redis:maxmemory::replica buffer don't induce eviction
+redis:maxmemory::propagation with eviction
+redis:maxmemory::propagation with eviction in MULTI
+redis:lazyfree::Unblocks client blocked on lazyfree via REPLICAOF command
+redis:oom-score-adj::CONFIG SET oom-score-adj works as expected
+redis:scripting::CLUSTER RESET can not be invoke from within a script
+redis:scripting::Connect a replica to the master instance
+redis:scripting::Replication of script multiple pushes to list with BLPOP
+redis:scripting::Lua scripts using SELECT are replicated correctly
+redis:scripting::Test selective replication of certain Redis commands from Lua
+redis:scripting::Using side effects is not a problem with command replication
+redis:scripting::'x' should be '4' for EVALSHA being replicated by effects
+redis:scripting::EVALSHA replication when first call is readonly
+redis:scripting::no-writes shebang flag on replica
+redis:scripting::not enough good replicas
+redis:scripting::allow-stale shebang flag
+redis:functions::Connect a replica to the master instance
+redis:functions::FUNCTION - creation is replicated to replica
+redis:functions::FUNCTION - call on replica
+redis:functions::FUNCTION - restore is replicated to replica
+redis:functions::FUNCTION - delete is replicated to replica
+redis:functions::FUNCTION - flush is replicated to replica
+redis:functions::Disconnecting the replica from master instance
+redis:functions::FUNCTION - test replication to replica on rdb phase
+redis:functions::FUNCTION - test replication to replica on rdb phase info command
+redis:functions::FUNCTION - create on read only replica
+redis:functions::FUNCTION - delete on read only replica
+redis:functions::FUNCTION - function effect is replicated to replica
+redis:functions::FUNCTION - modify key space of read only replica
+redis:functions::FUNCTION can processes create, delete and flush commands in AOF when doing "debug loadaof" in read-only slaves
+redis:functions::FUNCTION - allow stale
+redis:info::memory: database and pubsub overhead and rehashing dict count
+redis:introspection-2::COMMAND LIST FILTERBY PATTERN - list all commands/subcommands
+redis:other::Coverage: HELP commands
+redis:other::Don't rehash if redis has child process
+redis:other::Redis can resize empty dict
+valkey:scripting
+valkey:functions
+valkey:aofrw
+valkey:integration/*
+valkey:info::errorstats: failed call within LUA
+valkey:info::errorstats: failed call NOSCRIPT error
+valkey:info::errorstats: limit errors will not increase indefinitely
+valkey:introspection::MONITOR can log commands issued by the scripting engine
+valkey:introspection::MONITOR can log commands issued by functions
+valkey:introspection-2::command stats for scripts
+valkey:introspection-2::COMMAND GETKEYS EVAL with keys
+valkey:introspection-2::COMMAND GETKEYS EVAL without keys
+valkey:introspection-2::EVAL command is marked with movablekeys
+valkey:introspection-2::TOUCH alters the last access time of a key
+valkey:latency-monitor::LATENCY of expire events are correctly collected
+valkey:multi::MULTI and script timeout
+valkey:multi::EXEC and script timeout
+valkey:multi::MULTI-EXEC body and script timeout
+valkey:multi::just EXEC and script timeout
+valkey:pubsub::publish to self inside script
+valkey:tracking::Invalid keys should not be tracked for scripts in NOLOOP mode
+valkey:tracking::Tracking only occurs for scripts when a command calls a read-only command
+valkey:expire::Server should not propagate the read command on lazy expire
+valkey:introspection-2::TOUCH alters the last access time of a key in no-touch mode
+valkey:slowlog::SLOWLOG - the commands in script are recorded normally - is_eval: 0
+valkey:slowlog::SLOWLOG - the commands in script are recorded normally - is_eval: 1
+valkey:hyperloglog::PFMERGE results with simd
+valkey:bitops::BITCOUNT with just start
+valkey:protocol::Check CRLF when parsing the querybuf
+valkey:expire::EXPIRE / EXPIREAT / PEXPIREAT Expiration time is already expired
+valkey:scan::{standalone} SCAN unknown type
+valkey:scan::{standalone} SCAN with expired keys with TYPE filter
+valkey:pubsub::Keyspace notification: expired event (Expiration time is already expired)

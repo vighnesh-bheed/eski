@@ -1,0 +1,29 @@
+{
+ "archive": "bench/results/cloud-v2/cloud-v2/results.tar.gz",
+ "bytes": 16859311,
+ "destination": "bench/results/cloud-v2/cloud-v2/results",
+ "files": 3552,
+ "host": "debian@125.253.67.137",
+ "kind": "results",
+ "receipt": {
+  "archive": "results.tar.gz",
+  "bytes": 16859311,
+  "created_at": 1793888115.0672302,
+  "exporter": {
+   "matches": true,
+   "path": "workspace/bench/exam_workflow.py",
+   "recorded_sha256": "bb84333bdd38af2b0c555edbbb18be3274c9667f55dbbaa904c7058c93bdae85",
+   "sha256": "bb84333bdd38af2b0c555edbbb18be3274c9667f55dbbaa904c7058c93bdae85"
+  },
+  "files": 3552,
+  "inventory": "exports/inventory.json",
+  "root": "cloud-v2",
+  "schema": "eski-exam-export-v1",
+  "sha256": "1d1ea2df7f09bc38ce41bbfc6f811c04d43b6035446d50d92b2577720c9139b1",
+  "tools_verified_not_archived": 20,
+  "workflow_status": "DONE"
+ },
+ "root": "cloud-v2",
+ "sha256": "1d1ea2df7f09bc38ce41bbfc6f811c04d43b6035446d50d92b2577720c9139b1",
+ "verified_at": 1793888623.5914214
+}

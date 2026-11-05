@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 266" width="960" height="266" font-family="system-ui, -apple-system, &#x27;Segoe UI&#x27;, Helvetica, Arial, sans-serif" role="img" aria-labelledby="fill-title">
+<title id="fill-title">Resident bytes per key after a fill of 10,000,000 keys</title>
+<rect width="960" height="266" fill="#1a1a19"/>
+<text x="12" y="24" font-size="16" font-weight="600" fill="#f0efec">Resident bytes per key after filling 10,000,000 keys of 64 B</text>
+<text x="12" y="44" font-size="12" fill="#c3c2b7">server resident set divided by the key count, lower is better; pipeline 32, same server core and memory cap as the comparison</text>
+<text x="12" y="62" font-size="11" fill="#898781">Intel(R) Core(TM) i7-8750H CPU @ 2.20GHz</text>
+<text x="140" y="93.0" font-size="12" text-anchor="end" fill="#c3c2b7">Eski</text>
+<g class="mark"><title>Eski: 123.0 bytes per key resident, 122.0 bytes per key used, 10,000,001 keys, fill at 1,689,637 ops/s, worst request 31.231 ms</title>
+<path d="M150 80.0 H447.4 Q451.4 80.0 451.4 84.0 V96.0 Q451.4 100.0 447.4 100.0 H150 Z" fill="#3987e5"/>
+</g>
+<text x="459.4" y="94.0" font-size="11.5" fill="#f0efec" style="font-variant-numeric: tabular-nums">123.0 B per key, worst request 31.2 ms</text>
+<text x="140" y="133.0" font-size="12" text-anchor="end" fill="#c3c2b7">Redis 7.4.12</text>
+<g class="mark"><title>Redis 7.4.12: 166.5 bytes per key resident, 163.4 bytes per key used, 10,000,001 keys, fill at 919,163 ops/s, worst request 3.535 ms</title>
+<path d="M150 120.0 H554.0 Q558.0 120.0 558.0 124.0 V136.0 Q558.0 140.0 554.0 140.0 H150 Z" fill="#d95926"/>
+</g>
+<text x="566.0" y="134.0" font-size="11.5" fill="#f0efec" style="font-variant-numeric: tabular-nums">166.5 B per key, worst request 3.5 ms</text>
+<text x="140" y="173.0" font-size="12" text-anchor="end" fill="#c3c2b7">Valkey 8.1.11</text>
+<g class="mark"><title>Valkey 8.1.11: 138.7 bytes per key resident, 134.9 bytes per key used, 10,000,001 keys, fill at 877,642 ops/s, worst request 4.927 ms</title>
+<path d="M150 160.0 H485.8 Q489.8 160.0 489.8 164.0 V176.0 Q489.8 180.0 485.8 180.0 H150 Z" fill="#199e70"/>
+</g>
+<text x="497.8" y="174.0" font-size="11.5" fill="#f0efec" style="font-variant-numeric: tabular-nums">138.7 B per key, worst request 4.9 ms</text>
+<text x="140" y="213.0" font-size="12" text-anchor="end" fill="#c3c2b7">Dragonfly 2.0.2</text>
+<g class="mark"><title>Dragonfly 2.0.2: 106.8 bytes per key resident, 101.7 bytes per key used, 10,000,001 keys, fill at 716,687 ops/s, worst request 2.335 ms</title>
+<path d="M150 200.0 H407.8 Q411.8 200.0 411.8 204.0 V216.0 Q411.8 220.0 407.8 220.0 H150 Z" fill="#c98500"/>
+</g>
+<text x="419.8" y="214.0" font-size="11.5" fill="#f0efec" style="font-variant-numeric: tabular-nums">106.8 B per key, worst request 2.3 ms</text>
+<line x1="150" x2="150" y1="76" y2="224" stroke="#383835" stroke-width="1"/>
+</svg>

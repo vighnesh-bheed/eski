@@ -7,3 +7,5 @@ __pycache__/
 temp-*.rdb
 /appendonlydir/
 temp-*.aof
+/bench/image.json
+/.build/

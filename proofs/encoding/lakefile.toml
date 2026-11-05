@@ -1,0 +1,11 @@
+name = "eski-encoding"
+version = "0.1.0"
+defaultTargets = ["Encoding", "encoding_model"]
+moreLeanArgs = ["-j1"]
+
+[[lean_lib]]
+name = "Encoding"
+
+[[lean_exe]]
+name = "encoding_model"
+root = "Main"
