@@ -25,3 +25,5 @@ RESP arrays of bulk strings are the binary-safe command form. The parser also ac
 `maxclients`, `timeout`, `tcp-keepalive`, `client-query-buffer-limit`, `client-output-buffer-limit` and `maxmemory-clients` bound different resources. Input/output buffers and subscription traffic count toward client memory work; a slow consumer can be disconnected. Large pipelines still require buffering and can delay other foreground work.
 
 Verify with `python3 -I test/request_parser/run.py`, `python3 -I test/compatibility/transport.py --server /path/to/eski`, `bash test/run_packages.sh`, `bash test/smoke.sh` and `./test/conformance/run.sh --suite redis --units protocol,querybuf,networking,pause,quit`. The transport driver covers IPv4/IPv6, Unix sockets, TLS certificate policy, ACLs and connection lifecycle; the [verification record](build-run-test.md#verification) states the upstream fixture coverage and limits.
+
+Eski is an independent project, not affiliated with, endorsed or certified by Redis Ltd. Redis is a registered trademark of Redis Ltd.; any rights therein are reserved to Redis Ltd.

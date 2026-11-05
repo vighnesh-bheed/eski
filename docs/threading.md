@@ -32,7 +32,7 @@ Workers use independently owned values and datatype clones, not mutable legacy t
 | --- | --- |
 | AOF, WATCH, tracking including NOLOOP, notifications and MONITOR | Eligible commands remain worker candidates; the coordinator publishes ordered effects and persistence records. |
 | Other connections blocked on keys | Unrelated keys remain worker candidates. A command touching a registered blocked key reconciles and uses existing coordinator wakeup behavior. Blocking commands themselves stay on the coordinator. |
-| Memcached endpoint enabled | Ordinary Redis keys remain candidates. Keys carrying Memcached item metadata use the coordinator; Memcached input retains its coordinator barrier. |
+| Memcached endpoint enabled | Ordinary keys remain candidates. Keys carrying Memcached item metadata use the coordinator; Memcached input retains its coordinator barrier. |
 | Maxmemory, client limits or LFU configured | Configuration alone does not disable workers. Actual pressure or ongoing eviction takes coordinator execution; LFU access uses captured policy/time and private worker random state. |
 | CLIENT PAUSE | Commands already permitted by pause admission can use workers. Expired keys and hashes use the coordinator during the pause to preserve frozen physical expiry. |
 | SCAN, KEYS, RANDOMKEY, global operations, EXEC and Lua/functions | Coordinator barriers provide a consistent database view. Transactions and scripts execute atomically with respect to worker commands. |
@@ -76,7 +76,7 @@ Successful deferred command latency includes queueing and coordinator completion
 
 ## Keyspace correctness checks
 
-The current whole-node datatype driver has 26 cases. The feature driver has 16 cases, with only independent Redis replay skipped unless an explicit reference port is supplied. Because a lone constant-time command no longer reaches the workers, the worker-mode drivers queue a PING behind each single string, key or hash command they send, which keeps that command on the worker path, and the keyspace driver checks the coordinator path, execution against owned records and the `keyspace_inline` counter directly. Four memory/frontend cases cover configured limits, actual pressure, LFU and Memcached interactions. Dedicated whole-node address/thread sanitizer runs cover these integrations. Native ownership tests additionally exercise FIFO histories, multi-owner scheduling, deferred owner signals, immutable references, capacity, cancellation, restart and allocation reclamation.
+The current whole-node datatype driver has 26 cases. The feature driver has 16 cases, with only independent reference-server replay skipped unless an explicit reference port is supplied. Because a lone constant-time command no longer reaches the workers, the worker-mode drivers queue a PING behind each single string, key or hash command they send, which keeps that command on the worker path, and the keyspace driver checks the coordinator path, execution against owned records and the `keyspace_inline` counter directly. Four memory/frontend cases cover configured limits, actual pressure, LFU and Memcached interactions. Dedicated whole-node address/thread sanitizer runs cover these integrations. Native ownership tests additionally exercise FIFO histories, multi-owner scheduling, deferred owner signals, immutable references, capacity, cancellation, restart and allocation reclamation.
 
 | Check | Coverage |
 | --- | --- |
@@ -96,7 +96,7 @@ python3 -I test/threading/features.py --server /path/to/eski
 python3 -I test/compatibility/memory_threading.py --server /path/to/eski
 ```
 
-The drivers own isolated localhost servers and temporary data directories. `--case 'test_*pattern*'` selects a method glob in the datatype/feature drivers. For independent AOF interoperability, provide an explicitly disposable, empty local Redis 7.4 instance:
+The drivers own isolated localhost servers and temporary data directories. `--case 'test_*pattern*'` selects a method glob in the datatype/feature drivers. For independent AOF interoperability, provide an explicitly disposable, empty local reference-server instance:
 
 ```sh
 python3 -I test/threading/features.py --server /path/to/eski \
@@ -226,3 +226,5 @@ Clients are independent Python processes with explicit affinities; this tool mea
 `--require-parallel` requires a valid multi-worker LCS case with positive CPU time in at least two compute thread IDs and summed compute CPU above one core. A multi-worker timed case using synchronous fallback is excluded. Ratios compare matching workloads with the baseline; client limits can distort either measurement, so the ratio is an observed value rather than a lower bound on engine scaling. Summaries keep per-workload medians/ranges and exclusions separate. There is no overall score. The historical [benchmark tables](benchmarks.md) remain a separate experiment.
 
 The LCS comparison measures snapshot computation and supplies no performance result for the expanded keyspace worker implementation. No distributed control plane is implemented here. See the [roadmap](../ROADMAP.md).
+
+Eski is an independent project, not affiliated with, endorsed or certified by Redis Ltd. Redis is a registered trademark of Redis Ltd.; any rights therein are reserved to Redis Ltd.

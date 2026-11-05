@@ -27,3 +27,5 @@ redis-cli -p 6399 GEOSEARCH demo:places FROMMEMBER Berlin BYRADIUS 50 km WITHDIS
 ```
 
 Verify with `bash test/zsettype/compare.sh`, `bash test/geo/compare.sh`, `bash test/run_packages.sh` and `./test/conformance/run.sh --suite redis --units type/zset,geo`. See the [command reference](commands.md) for complete option metadata and [conformance](conformance.md) for measured coverage.
+
+Eski is an independent project, not affiliated with, endorsed or certified by Redis Ltd. Redis is a registered trademark of Redis Ltd.; any rights therein are reserved to Redis Ltd.

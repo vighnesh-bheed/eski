@@ -34,3 +34,5 @@ The endpoint shares string values in logical database zero with RESP clients. A 
 `memcached-max-item-size` controls item-size accounting, including the key and item metadata, and defaults to one mebibyte. Both endpoint options are startup-only. Request parsing validates key length, item lengths, numeric fields and CRLF boundaries. Pipeline text commands only with a client that can associate each reply correctly, especially when using `noreply` or CAS errors.
 
 Verify with `bash test/run_packages.sh` and `bash test/smoke.sh`. Smoke compares the text listener with a reference container, exercises cross-protocol string access and checks persistence. `ESKI_SMOKE_MC_PORT` and `ESKI_SMOKE_MC_REF_PORT` select its ports. See [connections](connections-and-protocol.md) for the RESP listener and [persistence](persistence.md) for local durability choices.
+
+Eski is an independent project, not affiliated with, endorsed or certified by Redis Ltd. Redis is a registered trademark of Redis Ltd.; any rights therein are reserved to Redis Ltd.

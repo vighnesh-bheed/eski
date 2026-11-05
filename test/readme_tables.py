@@ -21,6 +21,8 @@ BLOCKS = ('CONFORMANCE', 'BENCHMARKS', 'COMMANDS')
 RUNS = 'bench/testbed/runs'
 RUN_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*')
 ENGINE_LABELS = {'eski-docker': 'Eski', 'eski': 'Eski', 'redis': 'Redis', 'valkey': 'Valkey', 'dragonfly': 'Dragonfly'}
+TRADEMARK_LINE = ('Eski is an independent project, not affiliated with, endorsed or certified by Redis Ltd. '
+                  'Redis is a registered trademark of Redis Ltd.; any rights therein are reserved to Redis Ltd.')
 RATIO_IMAGE = 'docs/img/throughput-ratio'
 
 
@@ -1053,6 +1055,7 @@ def render_outputs(commands, baseline, observed, dataset, readme, ab_floor=None)
                      'Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test/readme_tables.py --check`. '
                      'Use `--server HOST:PORT` to inspect an existing instance without starting one. The canonical command-metadata SHA256 is `%s`.\n\n%s\n') % (
                          top_count, command_count, digest, command_table(commands))
+    commands_page += '\n' + TRADEMARK_LINE + '\n'
     conformance_page = ('# Conformance records\n\nGenerated from `test/conformance/baseline-redis.json` and `docs/data/conformance-redis.json`. '
                         'Both identify the Redis %s test suite, archive SHA256 `%s`, with tag filter `%s`. '
                         'The baseline records %d passes and %d failures in %d units. The expanded snapshot records %d passes, %d failures and %d skips in %d units. '
@@ -1071,6 +1074,7 @@ def render_outputs(commands, baseline, observed, dataset, readme, ab_floor=None)
                         'The preserved snapshot was generated at `%s`; reruns can change timings and expose different outcomes.\n\n'
                         '## Protected historical baseline\n\n%s\n\n## Expanded recorded snapshot\n\n%s\n\n## Recorded failures\n\n%s\n') % (
                             baseline['suite']['tag'], baseline['suite']['sha256'], baseline['suite'].get('tags', ''), baseline['totals']['passed'], baseline['totals']['failed'], len(baseline['units']), observed['totals']['passed'], observed['totals']['failed'], observed['totals']['skipped'], len(observed['units']), preserved, expected, len(regressions), scope_note, observed.get('generated_at', 'not recorded'), conformance_table(baseline), conformance_table(observed), failure_table(observed))
+    conformance_page += '\n' + TRADEMARK_LINE + '\n'
     method = dataset.get('design', {}).get('methodology', {})
     method_text = '\n\n'.join(str(method[key]) for key in sorted(method))
     identities = ['| Engine | Image reference | Measured image ID | Recorded version |', '| --- | --- | --- | --- |']
@@ -1128,7 +1132,7 @@ def render_outputs(commands, baseline, observed, dataset, readme, ab_floor=None)
                           ','.join(map(str, dataset.get('machine', {}).get('cpus', {}).get('server', []))), ','.join(map(str, dataset.get('machine', {}).get('cpus', {}).get('client', []))), ','.join(map(str, dataset.get('machine', {}).get('cpus', {}).get('control', []))),
                           method_text, '\n'.join(identities), benchmark_table(dataset, cells), ratio, ' (client limited)' if limited else '', '\n'.join(exclusions),
                           '{:,}'.format((dataset.get('fill') or {}).get('design', {}).get('keys', 0)), (dataset.get('fill') or {}).get('design', {}).get('data_size', 'not recorded'), (dataset.get('fill') or {}).get('design', {}).get('pipeline', 'not recorded'), settle_text, '\n'.join(fill_rows))
-    benchmark_page += '\n' + new_machine_section(dataset) + '\n' + local_section(validate_ab_floor(ab_floor))
+    benchmark_page += '\n' + new_machine_section(dataset) + '\n' + local_section(validate_ab_floor(ab_floor)) + '\n' + TRADEMARK_LINE + '\n'
     blocks = {'CONFORMANCE': conformance_block, 'BENCHMARKS': benchmark_block, 'COMMANDS': commands_block}
     updated_readme = replace_blocks(readme, blocks)
     if re.search(r'\b(?:Redis|Valkey|Dragonfly)\s+(?:v?\d|version)', updated_readme, re.I):
