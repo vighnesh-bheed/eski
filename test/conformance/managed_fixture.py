@@ -6,11 +6,11 @@ import shutil
 import tarfile
 
 READINESS = r'''
-proc wait_server_started {config_file stdout pid} {
+proc wait_server_started {config_path log_path pid} {
     set early 0
     if {[uplevel 1 {info exists wait_ready}]} {set early [expr {![uplevel 1 {set wait_ready}]}]}
     if {[uplevel 1 {info exists code}] && [uplevel 1 {set code}] eq "undefined"} {set early 1}
-    set descriptor [open $config_file r]
+    set descriptor [open $config_path r]
     set port 0
     set unixsocket ""
     set bound 1
@@ -23,9 +23,10 @@ proc wait_server_started {config_file stdout pid} {
     }
     close $descriptor
     for {set attempt 0} {$attempt < 300} {incr attempt} {
-        if {[catch {exec kill -0 $pid}]} {
+        set gone [catch {exec kill -0 $pid}]
+        if {$gone} {
             if {$early} {return 0}
-            start_server_error $config_file "Managed server exited before readiness: [exec cat $stdout]"
+            start_server_error $config_path "Managed server exited before readiness: [exec cat $log_path]"
             return 0
         }
         foreach address $addresses {
@@ -45,10 +46,22 @@ proc wait_server_started {config_file stdout pid} {
         if {($port == 0 || !$bound) && $unixsocket ne "" && [file exists $unixsocket] && [file type $unixsocket] eq "socket"} {return 0}
         after 100
     }
-    start_server_error $config_file "Managed server did not answer on configured TCP port $port: [exec cat $stdout]"
+    start_server_error $config_path "Managed server did not answer on configured TCP port $port: [exec cat $log_path]"
     return 0
 }
 '''
+
+TOPOLOGY_OPTIONS = ('tls-cluster', 'tls-replication')
+READY_COUNTERS = ('previous_ready_count', 'prev_ready_count')
+READINESS_DECLARATION = 'proc wait_server_started {config_file stdout pid} {'
+
+
+def topology_line(option):
+    return '        dict set config "' + option + '" "yes"\n'
+
+
+def ready_gate(counter):
+    return 'if {[count_message_lines $stdout "Ready to accept"] > $' + counter + '} {'
 
 
 def digest(data):
@@ -77,17 +90,16 @@ def prepare(archive, destination, prefix, server, expected, client, aof_checker=
             originals[str(relative)] = digest(data)
     support = destination / 'tests/support/server.tcl'
     data = support.read_text()
-    for option in ('tls-cluster', 'tls-replication'):
-        topology = '        dict set config "' + option + '" "yes"\n'
+    for option in TOPOLOGY_OPTIONS:
+        topology = topology_line(option)
         if data.count(topology) != 1:
             raise ValueError('unexpected unconditional distributed TLS fixture option')
         data = data.replace(topology, '', 1)
-    declaration = 'proc wait_server_started {config_file stdout pid} {'
-    if data.count(declaration) != 1:
+    if data.count(READINESS_DECLARATION) != 1:
         raise ValueError('unexpected upstream readiness procedure')
-    data = data.replace(declaration, 'proc upstream_wait_server_started {config_file stdout pid} {', 1)
-    for counter in ('previous_ready_count', 'prev_ready_count'):
-        original = 'if {[count_message_lines $stdout "Ready to accept"] > $' + counter + '} {'
+    data = data.replace(READINESS_DECLARATION, READINESS_DECLARATION.replace('proc wait_', 'proc upstream_wait_', 1), 1)
+    for counter in READY_COUNTERS:
+        original = ready_gate(counter)
         if data.count(original) != 1:
             raise ValueError('unexpected upstream readiness log gate')
         replacement = 'if {[server_is_up $host $port 2]} {' if counter == 'previous_ready_count' else 'if {[server_is_up [dict get $srv host] [dict get $srv port] 2]} {'
