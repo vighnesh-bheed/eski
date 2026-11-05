@@ -292,7 +292,7 @@ run_model_stress :: proc(accurate: bool) {
 				}
 				after := lp.lp_rand() % 2 == 0
 				newp: [^]u8
-				l = lp.lp_batch_insert(l, p, lp.Placement.After if after else lp.Placement.Before, ents, &newp)
+				l = lp.lp_splice_entries(l, ents, p, lp.Placement.After if after else lp.Placement.Before, &newp)
 				base := idx + 1 if after else idx
 				for e in 0 ..< k {
 					model_insert(&model, base + e, store[e])
@@ -314,7 +314,7 @@ run_model_stress :: proc(accurate: bool) {
 					append(&store, c)
 					ents[e] = lp.entry_from_bytes(c)
 				}
-				l = lp.lp_batch_append(l, ents)
+				l = lp.lp_append_entries(l, ents)
 				for e in 0 ..< k {
 					model_insert(&model, len(model), store[e])
 				}

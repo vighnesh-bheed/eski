@@ -70,7 +70,7 @@ bulk_mutation_preserves_borrowed_payloads_across_tail_moves_and_growth :: proc(t
 	lp = lp_append(lp, payload)
 	borrowed := lp_get_entry(lp_first(lp))
 	entries := [4]Element{borrowed, entry_from_int(min(i64)), borrowed, entry_from_bytes(nil)}
-	lp = lp_batch_insert(lp, lp_first(lp), Placement.Before, entries[:], nil)
+	lp = lp_splice_entries(lp, entries[:], lp_first(lp), Placement.Before, nil)
 	expect_values(t, lp, []string{string(payload), "-9223372036854775808", string(payload), "", string(payload)})
 	p := lp_first(lp)
 	borrowed = lp_get_entry(lp_last(lp))
@@ -90,7 +90,7 @@ mutation_count_saturates_and_unknown_count_remains_unknown :: proc(t: ^testing.T
 	}
 	lp := lp_new(0)
 	defer lp_free(lp)
-	lp = lp_batch_append(lp, entries)
+	lp = lp_append_entries(lp, entries)
 	testing.expect(t, lp_get_num_elements(lp) == 65534)
 	lp = lp_append_integer(lp, 1)
 	testing.expect(t, lp_get_num_elements(lp) == COUNT_UNTRACKED && lp_length(lp) == 65535)
@@ -150,7 +150,7 @@ mutation_sequence_matches_independent_dense_value_model :: proc(t: ^testing.T) {
 			if index < count {
 				cursor = lp_seek(lp, i64(index))
 			}
-			lp = lp_batch_insert(lp, cursor, Placement.Before, batch[:], &cursor)
+			lp = lp_splice_entries(lp, batch[:], cursor, Placement.Before, &cursor)
 			copy(model[index + 3:count + 3], model[index:count])
 			model[index], model[index + 1], model[index + 2] = value, "-1", ""
 			count += 3

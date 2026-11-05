@@ -35,13 +35,13 @@ observed_getters_preserve_unselected_outputs_and_trailing_buffer_bytes :: proc(t
 		s = lp_get_value(p, &slen, &lval)
 		testing.expect(t, (s == nil) == is_integer)
 		testing.expect(t, slen == 8888 && lval == integers[index] if is_integer else slen == u32(len(value)) && lval == 9999)
-		lval = 9999
-		testing.expect(t, lp_get_integer_value(p, &lval) == is_integer)
-		testing.expect(t, lval == integers[index] if is_integer else lval == 9999)
+		integer, is_number := lp_integer_at(p)
+		testing.expect(t, is_number == is_integer)
+		testing.expect(t, integer == integers[index] if is_integer else integer == 0)
 	}
 	wire := [10]u8{10, 0, 0, 0, 1, 0, 129, '1', 2, 255}
-	value := i64(9999)
-	testing.expect(t, !lp_get_integer_value(lp_first(raw_data(wire[:])), &value) && value == 9999)
+	value, is_number := lp_integer_at(lp_first(raw_data(wire[:])))
+	testing.expect(t, !is_number && value == 0)
 	testing.expect(t, lp_compare(lp_first(raw_data(wire[:])), transmute([]u8)string("1")))
 }
 
@@ -124,46 +124,6 @@ observed_binary_representation_matches_normalized_literal :: proc(t: ^testing.T)
 	testing.expect(t, normalized == expected)
 }
 
-Observed_Callback_State :: struct {
-	visits: int,
-	result: int,
-	match: int,
-	valid: bool,
-}
-
-observed_find_callback :: proc(lp: [^]u8, p: [^]u8, user: rawptr, s: [^]u8, slen: i64) -> int {
-	state := cast(^Observed_Callback_State)user
-	offsets := [6]int{6, 9, 11, 13, 16, 20}
-	counts := [6]i64{1, 0, 0, -7, 2, 3}
-	values := [6]string{"a", "", "", "", "01", "a\x00b"}
-	visit := state.visits
-	state.visits += 1
-	if visit >= len(offsets) {
-		state.valid = false
-		return 1
-	}
-	state.valid = state.valid && p == padd(lp, offsets[visit]) && slen == counts[visit]
-	state.valid = state.valid && (s == nil) == (visit == 2 || visit == 3)
-	if s != nil {
-		state.valid = state.valid && string(s[:int(slen)]) == values[visit]
-	}
-	return 0 if visit == state.match else state.result
-}
-
-@(test)
-observed_find_callback_stops_only_on_zero_and_preserves_stored_selector :: proc(t: ^testing.T) {
-	lp := api_observed_pack()
-	defer lp_free(lp)
-	for result in ([]int{-1, 1}) {
-		state := Observed_Callback_State{result = result, match = -1, valid = true}
-		found := lp_find_cb(lp, lp_first(lp), &state, observed_find_callback, 0)
-		testing.expect(t, found == nil && state.valid && state.visits == 6)
-	}
-	state := Observed_Callback_State{result = -1, match = 1, valid = true}
-	found := lp_find_cb(lp, lp_first(lp), &state, observed_find_callback, 0)
-	testing.expect(t, found == padd(lp, 9) && state.valid && state.visits == 2)
-}
-
 @(test)
 empty_batch_extension_preserves_pack_capacity_and_output_cursor :: proc(t: ^testing.T) {
 	lp := api_observed_pack()
@@ -173,10 +133,10 @@ empty_batch_extension_preserves_pack_capacity_and_output_cursor :: proc(t: ^test
 	capacity := lp_malloc_size(lp)
 	cursor := lp_seek(lp, 2)
 	old_cursor := cursor
-	result := lp_batch_insert(lp, lp_first(lp), Placement.Before, nil, &cursor)
+	result := lp_splice_entries(lp, nil, lp_first(lp), Placement.Before, &cursor)
 	testing.expect(t, result == lp && cursor == old_cursor && lp_malloc_size(lp) == capacity)
 	testing.expect(t, string(lp_view(lp)) == string(lp_view(before)))
-	result = lp_batch_append(lp, nil)
+	result = lp_append_entries(lp, nil)
 	testing.expect(t, result == lp && lp_malloc_size(lp) == capacity && string(lp_view(lp)) == string(lp_view(before)))
 	result = lp_batch_delete(lp, nil)
 	testing.expect(t, result == lp && lp_malloc_size(lp) == capacity && string(lp_view(lp)) == string(lp_view(before)))
@@ -195,11 +155,9 @@ empty_repr_and_zero_range_preserve_exact_observed_behavior :: proc(t: ^testing.T
 }
 
 @(test)
-find_callback_nil_start_uses_first_entry :: proc(t: ^testing.T) {
+find_nil_start_uses_first_entry :: proc(t: ^testing.T) {
 	lp := api_observed_pack()
 	defer lp_free(lp)
-	state := Observed_Callback_State{result = -1, match = 1, valid = true}
-	found := lp_find_cb(lp, nil, &state, observed_find_callback, 0)
-	testing.expect(t, found == padd(lp, 9) && state.valid && state.visits == 2)
+	testing.expect(t, lp_find(lp, nil, transmute([]u8)string(""), 0) == padd(lp, 9))
 	testing.expect(t, lp_find(lp, nil, transmute([]u8)string("01"), 0) == lp_seek(lp, 4))
 }

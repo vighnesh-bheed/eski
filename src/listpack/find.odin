@@ -32,23 +32,3 @@ lp_find :: proc(lp: [^]u8, p: [^]u8, s: []u8, skip: u32) -> [^]u8 {
 	}
 	return nil
 }
-
-lp_estimate_bytes_repeated_integer :: proc "contextless" (lval: i64, rep: u64) -> int {
-	entry_size := u64(lp_entry_size_integer(lval))
-	if rep > (u64(max(int)) - PACK_HEADER_BYTES - 1) / entry_size {
-		return max(int)
-	}
-	return PACK_HEADER_BYTES + 1 + int(rep * entry_size)
-}
-
-lp_find_cb :: proc(lp: [^]u8, p: [^]u8, user: rawptr, cmp: Element_Matcher, skip: u32) -> [^]u8 {
-	at := stride_origin(lp, p) if cmp != nil else nil
-	for ; at != nil; at = stride_hop(lp, at, skip) {
-		measure := i64(0)
-		text := lp_get(at, &measure, nil)
-		if cmp(lp, at, user, text, measure) == 0 {
-			break
-		}
-	}
-	return at
-}

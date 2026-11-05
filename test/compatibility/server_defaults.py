@@ -70,7 +70,7 @@ class ServerDefaults(unittest.TestCase):
                  timeout=3, label='actual detached error map cleanup')
         logs = (server.directory / 'server.log').read_text()
         self.assertEqual(logs.count('Errorstats stopped adding new errors'), 1)
-        self.assertEqual(logs.count('Current errors code list'), 1)
+        self.assertEqual(logs.count('Error codes recorded before errorstats stopped'), 1)
         client.call('CONFIG', 'RESETSTAT')
         self.assertEqual(info(client, 'errorstats'), {})
         with self.assertRaises(ServerError):

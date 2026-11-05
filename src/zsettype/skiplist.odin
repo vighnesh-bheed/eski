@@ -6,8 +6,6 @@ import "core:hash/xxhash"
 
 MAX_LEVEL :: 32
 
-MAX_SEARCH :: 10
-
 DICT_MIN_CAP :: 4
 
 DICT_SPARSE_RATIO :: 8

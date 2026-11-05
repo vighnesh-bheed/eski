@@ -206,9 +206,9 @@ zzl_insert_at :: proc(zl: [^]u8, eptr: [^]u8, member: []u8, score: f64) -> [^]u8
 	}
 	entries := [2]lp.Element{lp.entry_from_bytes(member), value}
 	if eptr == nil {
-		return lp.lp_batch_append(zl, entries[:])
+		return lp.lp_append_entries(zl, entries[:])
 	}
-	return lp.lp_batch_insert(zl, eptr, lp.Placement.Before, entries[:], nil)
+	return lp.lp_splice_entries(zl, entries[:], eptr, lp.Placement.Before, nil)
 }
 
 zzl_insert :: proc(zl: [^]u8, member: []u8, score: f64) -> [^]u8 {
