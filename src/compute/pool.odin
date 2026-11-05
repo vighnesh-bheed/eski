@@ -5,6 +5,7 @@ import "base:runtime"
 import "core:sync"
 import "core:sys/linux"
 import "core:thread"
+import "../sysclock"
 
 CAPACITY :: 64
 MAX_WORKERS :: 64
@@ -50,7 +51,7 @@ Pool :: struct {
 
 @(private = "file")
 clock_ns :: proc "contextless" () -> i64 {
-	ts, _ := linux.clock_gettime(.MONOTONIC)
+	ts, _ := sysclock.monotonic()
 	return i64(ts.time_sec) * 1_000_000_000 + i64(ts.time_nsec)
 }
 

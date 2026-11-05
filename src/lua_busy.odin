@@ -6,6 +6,7 @@ import "core:mem"
 import "core:sys/linux"
 import lr "lua_runtime"
 import rp "request_parser"
+import "sysclock"
 
 LUA_BUSY_BUFFER :: 64 * 1024
 LUA_BUSY_TEMP :: 1024 * 1024
@@ -21,7 +22,7 @@ Lua_Busy_State :: struct {
 }
 
 lua_wallclock_ms :: proc "contextless" () -> i64 {
-	time, err := linux.clock_gettime(.REALTIME)
+	time, err := sysclock.realtime()
 	if err != .NONE {
 		return srv.now_ms
 	}

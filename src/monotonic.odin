@@ -2,6 +2,7 @@ package main
 
 import "base:intrinsics"
 import "core:sys/linux"
+import "sysclock"
 
 mono_ticks_per_us: u64 = 1000
 mono_mul: u64 = ((u64(1) << 32) + 999) / 1000
@@ -157,7 +158,7 @@ mono_calibrate :: proc() -> u64 {
 
 @(cold)
 mono_posix_ns :: #force_no_inline proc "contextless" () -> u64 {
-	ts, _ := linux.clock_gettime(.MONOTONIC)
+	ts, _ := sysclock.monotonic()
 	return u64(ts.time_sec) * 1_000_000_000 + u64(ts.time_nsec)
 }
 
