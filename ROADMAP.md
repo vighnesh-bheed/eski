@@ -1,8 +1,25 @@
 # Roadmap
 
-Eski implements a single-node command surface and verifies it through package tests, differential harnesses, smoke comparisons and an upstream-suite baseline gate. The generated [conformance report](docs/conformance.md) records the expanded suite and the preserved historical baseline. An implemented group remains subject to that evidence; it does not imply that every selected upstream test passes.
+Eski is becoming a single-node memory engine for AI applications: one binary that holds an application's state, queues, cache, vectors and documents, retrieves from them, and backs each claim with evidence a reader can rerun. The command surface underneath is complete and verified, as the delivered groups below record. The milestones that follow add vector search, the search interface that AI frameworks already use, full-text and hybrid retrieval, and simulation testing of durability. The order below is the plan; the roadmap promises no dates.
 
-## Command-group milestones
+## Where Eski is going
+
+Work proceeds bottom-up. The foundations come first as self-contained packages, each proven in isolation before any command uses it, so the command groups above them are mostly wiring.
+
+| Milestone | What it adds | Done when |
+| --- | --- | --- |
+| Foundations | Vector storage in full precision, signed 8-bit and binary forms with SIMD distance kernels and random projection; a hierarchical navigable small world index; the filter expression language; text analysis with Unicode word segmentation, case folding and stemming; posting lists with compressed bitmaps, BM25 scoring and rank fusion; a deterministic simulation harness with a virtual clock and fault-injecting disk and network models; a tailable change log with checksummed records. | Every package passes its tests in debug, under the address sanitizer and at speed against scalar references, recorded reference bytes and published conformance data such as Unicode's word-break test file and the Snowball stemmer vocabulary, with [Lean models](proofs/README.md) where an invariant can be stated. |
+| Vector sets | The thirteen commands of the reference server's vector set type, VADD, VSIM, VREM, VCARD, VDIM, VEMB, VLINKS, VINFO, VSETATTR, VGETATTR, VRANDMEMBER, VISMEMBER and VRANGE, with quantisation, filtered similarity search, persistence of the index and threaded queries. | Every captured reply case matches the reference byte for byte in both protocol versions, the reference's own vector set tests run against Eski at run time with their exclusions listed, snapshot and append-only round trips pass, and a committed dataset records recall against throughput and bytes per vector on one server core. |
+| Search interface | The subset of FT.CREATE, FT.SEARCH, FT.INFO, FT.DROPINDEX and FT._LIST that the LangChain and LlamaIndex vector store integrations send: vector, tag and numeric fields over hashes, nearest-neighbour and range queries combined with filters, and indexes that follow writes, expiry and deletion. | Every captured case matches the reference, and the integrations' own tests pass against Eski unchanged. |
+| Full-text and hybrid retrieval | Text fields with BM25 scoring, and the reference's hybrid search command, which fuses keyword and vector rankings. | Captured scores and fused rankings match the reference, and a committed comparison records query throughput on one server core. |
+| Simulation testing | The whole server runs inside a deterministic simulator whose disk crashes, tears writes and acknowledges unsynced data, and whose network splits writes and resets connections. | For each fsync policy no acknowledged write is lost across every crash the simulator explores, each failure replays from its seed, and the harness runs in the verification record. |
+| Built-in embedding, exploratory | A small open embedding model run in Odin on the foundation kernels, so text can be stored and searched without an external embedding service. | Embeddings match the model's reference outputs within a stated tolerance. |
+
+Every milestone follows the method of the delivered groups. Its contract comes from the reference's documentation and from black-box comparison against its container; the reference's source for these groups is not permissively licensed and is never consulted. Algorithms come from published papers, cited in the documentation of each group, and permissively licensed references carry their notices in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Measurements come from the [test bed](docs/benchmarks.md), with the same gates and receipts as the recorded command comparison.
+
+## Delivered command groups
+
+Eski implements a single-node command surface and verifies it through package tests, differential harnesses, smoke comparisons and an upstream-suite baseline gate. The generated [conformance report](docs/conformance.md) records the expanded suite and the preserved historical baseline. An implemented group remains subject to that evidence; it does not imply that every selected upstream test passes.
 
 | Group | Delivered scope and verification condition |
 | --- | --- |
@@ -24,16 +41,6 @@ Eski implements a single-node command surface and verifies it through package te
 
 The current implementation resolves the earlier expanded-suite differences in list mutation counters, query-buffer resizing/accounting, pause/expiry interactions and introspection. The [verification record](docs/build-run-test.md#verification) describes the executed gates and remaining exclusions. Changes must retain supported reply and persistence behaviour and preserve the existing baseline pass set.
 
-## Next milestone: vector sets
-
-The reference server's version 8 added vector sets as a core data type: elements carry a vector instead of a score, a hierarchical navigable small world index answers similarity queries, three quantisation modes trade memory for recall, a filter expression over per-element JSON attributes narrows results, and similarity queries run on threads. The group is thirteen commands: VADD, VSIM, VREM, VCARD, VDIM, VEMB, VLINKS, VINFO, VSETATTR, VGETATTR, VRANDMEMBER, VISMEMBER and VRANGE.
-
-Eski implements the group from the reference's documentation and from black-box comparison against its container only; the reference's source for this type is not permissively licensed and is never consulted. Permissively licensed libraries used as references are recorded with their notices. The work proceeds in this order: the contract capture, then the vector storage and distance kernels, the index, the filter language, the keyspace type, the commands, persistence with the graph and threaded queries, and finally a recorded recall against throughput comparison on one server core with the same gates and receipts as the command comparison.
-
-| Group | Delivered scope and verification condition |
-| --- | --- |
-| Vector sets | Planned. Completion requires every captured reply case to match the reference byte for byte in both protocol versions, the reference's vector set test unit to run at run time through the conformance runner with its exclusions listed, package tests under the sanitizer for the kernels, the index and the filter language, snapshot and append-only round trips, and a committed dataset with the recall against throughput curves and bytes per vector. |
-
 ## Efficiency work
 
 The first compute-worker stage offloads eligible large LCS calculations over coordinator-owned snapshots. It has bounded jobs/reservations, per-connection order, synchronous transaction/loading/tracked-source fallback and explicit cancellation/fork/shutdown ownership. That stage was qualified separately at `83024e3`; its [threading checks](docs/threading.md#correctness-checks) include deterministic kernel overlap, independent LCS expectations, external-client lifetime/order regressions, sanitizer coverage and a recorded bounded scaling comparison. Workers are opt-in. The existing benchmark tables describe their historical run.
@@ -48,6 +55,6 @@ The dedicated-machine container exam follows measured improvements. Its frozen d
 
 ## Scope boundary
 
-Eski remains a single-node engine. Lua 5.1 scripts, executable Function libraries and interactive debugging are included through an embedded C runtime. Modules, network replication, Sentinel and Cluster remain excluded. WAIT-related replies do not create replica durability. Local transactions, blocking operations and persistence remain part of the engine.
+Eski remains a single-node engine. Lua 5.1 scripts, executable Function libraries and interactive debugging are included through an embedded C runtime. The vector set and search command groups are implemented natively in the engine; the module loading interface, network replication, Sentinel and Cluster remain excluded. WAIT-related replies do not create replica durability. Local transactions, blocking operations and persistence remain part of the engine.
 
-Distributed placement, routing, failover and managed operation belong to a separate coordination layer, planned in Rust. That layer is not implemented in this repository. Keeping this boundary explicit lets the engine's tests and measurements describe one node's actual guarantees.
+Distributed placement, routing, failover and managed operation belong to a separate coordination layer, planned in Rust. That layer is not implemented in this repository; the change log in Eski's own format is the node-side base it will build on. Keeping this boundary explicit lets the engine's tests and measurements describe one node's actual guarantees.

@@ -227,7 +227,7 @@ The running executable registers **237 top-level commands** and **333 commands i
 
 ## Direction and licence
 
-Every command group of a single node is implemented and verified as described above; the work now is efficiency, measured one change at a time against the recorded run, and the ongoing qualification of the optional workers and the Lua implementation. [ROADMAP.md](ROADMAP.md) lists the milestones, their verification conditions and the measurement process. Distributed management is outside this node and belongs to a separate layer.
+Every command group of a single node is implemented and verified as described above. Eski is now growing into a single-node memory engine for AI applications: vector sets, the search interface that the LangChain and LlamaIndex integrations use, full-text and hybrid retrieval, and simulation testing of durability, each built on foundations proven in isolation first. [ROADMAP.md](ROADMAP.md) gives the order, what each milestone adds and the evidence that closes it. Distributed management is outside this node and belongs to a separate layer.
 
 Eski is licensed under [Apache-2.0](LICENSE). Third-party components retain their own terms, recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
