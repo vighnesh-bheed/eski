@@ -24,6 +24,16 @@ Eski implements a single-node command surface and verifies it through package te
 
 The current implementation resolves the earlier expanded-suite differences in list mutation counters, query-buffer resizing/accounting, pause/expiry interactions and introspection. The [verification record](docs/build-run-test.md#verification) describes the executed gates and remaining exclusions. Changes must retain supported reply and persistence behaviour and preserve the existing baseline pass set.
 
+## Next milestone: vector sets
+
+The reference server's version 8 added vector sets as a core data type: elements carry a vector instead of a score, a hierarchical navigable small world index answers similarity queries, three quantisation modes trade memory for recall, a filter expression over per-element JSON attributes narrows results, and similarity queries run on threads. The group is thirteen commands: VADD, VSIM, VREM, VCARD, VDIM, VEMB, VLINKS, VINFO, VSETATTR, VGETATTR, VRANDMEMBER, VISMEMBER and VRANGE.
+
+Eski implements the group from the reference's documentation and from black-box comparison against its container only; the reference's source for this type is not permissively licensed and is never consulted. Permissively licensed libraries used as references are recorded with their notices. The work proceeds in this order: the contract capture, then the vector storage and distance kernels, the index, the filter language, the keyspace type, the commands, persistence with the graph and threaded queries, and finally a recorded recall against throughput comparison on one server core with the same gates and receipts as the command comparison.
+
+| Group | Delivered scope and verification condition |
+| --- | --- |
+| Vector sets | Planned. Completion requires every captured reply case to match the reference byte for byte in both protocol versions, the reference's vector set test unit to run at run time through the conformance runner with its exclusions listed, package tests under the sanitizer for the kernels, the index and the filter language, snapshot and append-only round trips, and a committed dataset with the recall against throughput curves and bytes per vector. |
+
 ## Efficiency work
 
 The first compute-worker stage offloads eligible large LCS calculations over coordinator-owned snapshots. It has bounded jobs/reservations, per-connection order, synchronous transaction/loading/tracked-source fallback and explicit cancellation/fork/shutdown ownership. That stage was qualified separately at `83024e3`; its [threading checks](docs/threading.md#correctness-checks) include deterministic kernel overlap, independent LCS expectations, external-client lifetime/order regressions, sanitizer coverage and a recorded bounded scaling comparison. Workers are opt-in. The existing benchmark tables describe their historical run.
