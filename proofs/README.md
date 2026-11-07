@@ -13,19 +13,19 @@ Areas 7 and 8, worker scheduling and fork/shutdown, have separate [bounded concu
 
 ## Recorded coverage
 
-The first phase contains 276 named contract theorems. The complete kernel inventory additionally checks generated declarations. The comparison counts below use different units and should be read by row.
+The first phase contains 278 named contract theorems. The complete kernel inventory additionally checks generated declarations. The comparison counts below use different units and should be read by row.
 
 | Area | Named theorems | Actual Odin comparison evidence |
 | --- | --- | --- |
 | 1. Hash-table resizing | 132 | 12,275 table operations and 2,254 SCAN rounds, including non-power-of-two capacities, growth and shrink rules, timed keys, partial migration, collisions, deletions and swaps |
 | 2. Worker rollback | 18 | Five internal-failure, success and ordinary command-error fixtures |
-| 3. Expiry and persistence | 25 | 7,958 hash-operation steps, ten ordinary-key translation fixtures and two exact-deadline fixtures |
+| 3. Expiry and persistence | 27 | 7,958 hash-operation steps, ten ordinary-key translation fixtures and two exact-deadline fixtures |
 | 4. Request parsing | 16 | 1,629 arithmetic guards and 4,042 fragmented-input prefix checks |
 | 5. Packed codecs | 26 | 11,376 codec, decode, validation and traversal rows |
 | 6. Memory accounting | 24 | 1,527 pool accounting operations and rollback/ownership checks, plus table-byte, timed-key and key-cell counters on each of the 12,275 table rows |
 | 9. Bit and integer operations | 35 | 49,629 programs containing 100,155 operations |
 
-These checks passed in a fresh aggregate rebuild of development commit 8ac08a9 on 4 November 2026 with Lean 4.35.0 and the repository's Odin toolchain. Each project records its own source, artifact and corpus identities. Validation/traversal rows, whole-parser fast/slow comparisons, ordinary-key translator fixtures and actual Odin correspondence remain tests where the individual documentation says so; their presence does not extend the formal proof claims.
+These checks passed in a fresh aggregate rebuild over the source tree of development commit 21ca928 on 7 November 2026 with Lean 4.35.0 and the repository's Odin toolchain. Each project records its own source, artifact and corpus identities. Validation/traversal rows, whole-parser fast/slow comparisons, ordinary-key translator fixtures and actual Odin correspondence remain tests where the individual documentation says so; their presence does not extend the formal proof claims.
 
 ## Run the first phase
 

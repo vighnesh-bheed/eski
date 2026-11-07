@@ -27,6 +27,8 @@ import Effects.KeyTTL
 #print axioms Effects.new_deadline_at_now_deletes
 #print axioms Effects.existing_deadline_expires_after_now
 #print axioms Effects.active_sweep_removes_at_exact_now
+#print axioms Effects.pttl_missing_reply_matches_live_view
+#print axioms Effects.existing_deadline_pttl_zero_at_exact_now
 #print axioms Effects.distinct_membership
 #print axioms Effects.distinct_no_aliases
 #print axioms Effects.restore_captured_lookup
