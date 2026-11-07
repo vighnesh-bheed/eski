@@ -272,4 +272,29 @@ theorem active_sweep_removes_at_exact_now (now f : Nat) (s : Hash) (v : String) 
     activeSweep now (update s f (some ⟨v, some now⟩)) f = none := by
   simp [activeSweep, update]
 
+def pttlReply (now : Nat) (s : Hash) (f : Nat) : Int :=
+  match s f with
+  | none => -2
+  | some entry =>
+    match entry.deadline with
+    | none => -1
+    | some deadline => if deadline < now then -2 else (deadline : Int) - now
+
+theorem pttl_missing_reply_matches_live_view (now f : Nat) (s : Hash) :
+    pttlReply now s f = -2 ↔ logicalLive now s f = none := by
+  cases h : s f with
+  | none => simp [pttlReply, logicalLive, h]
+  | some entry =>
+    cases hd : entry.deadline with
+    | none => simp [pttlReply, logicalLive, h, hd]
+    | some deadline =>
+      by_cases ht : deadline < now
+      · simp [pttlReply, logicalLive, h, hd, ht, Option.filter, Nat.not_le_of_lt ht]
+      · simp [pttlReply, logicalLive, h, hd, ht, Option.filter, Nat.le_of_not_lt ht]
+        omega
+
+theorem existing_deadline_pttl_zero_at_exact_now (now f : Nat) (s : Hash) (v : String) :
+    pttlReply now (update s f (some ⟨v, some now⟩)) f = 0 := by
+  simp [pttlReply, update]
+
 end Effects

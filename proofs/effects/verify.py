@@ -405,7 +405,7 @@ def run():
     trace, expected, steps, stats = corpus()
     path = output / 'traces.txt'
     path.write_text(trace)
-    boundary_fixtures = ['BOUNDARY0|live|persist|stale-min|active-removed|ttl:-2', 'BOUNDARY1|live|persist|stale-min|active-removed|ttl:0']
+    boundary_fixtures = ['BOUNDARY0|live|persist|stale-min|active-removed|ttl:0', 'BOUNDARY1|live|persist|stale-min|active-removed|ttl:0']
     normal_error = ['COMMAND_ERROR|ERR|value-preserved|deadline-preserved|dirty:0']
     wanted = rollback_expected() + key_expected() + normal_error + boundary_fixtures + expected
     results = {}

@@ -177,7 +177,7 @@ proof_exact_now_fixtures :: proc() {
 		clear(&out)
 		ht.ttl_fields(h, [][]u8{proof_bytes("0")}, .Pttl, 100, &out)
 		ttl := out[0]
-		assert(ttl == (0 if table == 1 else -2))
+		assert(ttl == 0)
 		clear(&out)
 		assert(ht.persist_fields(h, [][]u8{proof_bytes("0")}, 100, &out))
 		assert(out[0] == 1 && ht.registered_expire(h) == 100)

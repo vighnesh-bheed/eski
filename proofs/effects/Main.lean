@@ -114,7 +114,7 @@ def exactNowFixtures : IO Unit := do
   if kept.isNone ∨ persisted != some ⟨"value", none⟩ ∨ removed.isSome then
     throw (IO.userError "exact-now model boundary failure")
   for table in List.range 2 do
-    IO.println s!"BOUNDARY{table}|live|persist|stale-min|active-removed|ttl:{if table = 0 then (-2 : Int) else 0}"
+    IO.println s!"BOUNDARY{table}|live|persist|stale-min|active-removed|ttl:{pttlReply 100 existing 0}"
 
 def main (args : List String) : IO Unit := do
   let [path] := args | throw (IO.userError "expected trace path")
