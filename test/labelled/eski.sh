@@ -6,9 +6,33 @@ extra=()
 if [ -n "${ESKI_LABELLED_KEYSPACE_THREADS:-}" ]; then
 	extra=(--keyspace-threads "$ESKI_LABELLED_KEYSPACE_THREADS")
 fi
-if [ "${ESKI_LABELLED_MODE:-on}" = off ]; then
-	exec "$binary" "$@" "${extra[@]}"
-fi
+scheme=(--label-levels "UNCLASSIFIED,CONFIDENTIAL,SECRET" --label-compartments "A,B" --label-trust-levels "WEB,VETTED")
+owners=()
+case "${ESKI_LABELLED_MODE:-on}" in
+	off)
+		exec "$binary" "$@" "${extra[@]}"
+		;;
+	on|labelled)
+		login=("clearance:*")
+		;;
+	owners-shared)
+		owners=(--owners yes)
+		login=("clearance:*" owner-operator)
+		;;
+	owners-user)
+		owners=(--owners yes)
+		login=(owner:suite-user owner-operator "clearance:*")
+		;;
+	owners-only-user)
+		scheme=()
+		owners=(--owners yes)
+		login=(owner:suite-user owner-operator)
+		;;
+	*)
+		echo "labelled: unknown ESKI_LABELLED_MODE ${ESKI_LABELLED_MODE}" >&2
+		exit 2
+		;;
+esac
 if [ -n "${ESKI_LABELLED_DIR:-}" ] && { [ $# -eq 0 ] || [ "${1#--}" != "$1" ]; }; then
 	own_dir=1
 	for a in "$@"; do
@@ -23,5 +47,5 @@ if [ -n "${ESKI_LABELLED_DIR:-}" ] && { [ $# -eq 0 ] || [ "${1#--}" != "$1" ]; }
 fi
 exec "$binary" "$@" "${extra[@]}" \
 	--save "" --appendonly no --shutdown-on-sigterm default --shutdown-on-sigint default --memcached-port 0 \
-	--label-levels "UNCLASSIFIED,CONFIDENTIAL,SECRET" --label-compartments "A,B" --label-trust-levels "WEB,VETTED" \
-	--user default on nopass sanitize-payload "~*" "&*" "+@all" "clearance:*"
+	"${owners[@]}" "${scheme[@]}" \
+	--user default on nopass sanitize-payload "~*" "&*" "+@all" "${login[@]}"

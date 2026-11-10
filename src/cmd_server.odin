@@ -134,7 +134,10 @@ cmd_debug :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	if eq_nocase(argv[1], "object") && len(argv) == 3 {
-		e := db_find_notouch(argv[2]) if labels_on else db_find_raw_in(c.db, argv[2])
+		e := db_find_raw_in(db_cur if labels_on else c.db, argv[2])
+		if e == nil && labels_on {
+			e = db_find_notouch(argv[2])
+		}
 		if e == nil {
 			reply_error(c, ERR_NO_KEY)
 			return

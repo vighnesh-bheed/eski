@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+MODES = ('labelled', 'owners-shared', 'owners-user', 'owners-only-user')
+SUITES = ('conformance', 'scripting', 'vectorset')
 
 
 def suite_differences(reference, result):
@@ -46,6 +48,25 @@ def smoke_differences(log):
     return differences, None
 
 
+def anchors(doc):
+    found = set()
+    for line in doc.read_text().splitlines():
+        if line.startswith('#'):
+            title = line.lstrip('#').strip().lower()
+            slug = ''.join(c for c in title if c.isalnum() or c in ' -_').replace(' ', '-')
+            found.add(slug)
+    return found
+
+
+def check_doc(path, link):
+    name, _, anchor = link.partition('#')
+    doc = ROOT / name
+    if not name.startswith('docs/') or not doc.is_file():
+        raise SystemExit('%s: documentation %s does not exist' % (path, link))
+    if anchor and anchor not in anchors(doc):
+        raise SystemExit('%s: %s has no section #%s' % (path, name, anchor))
+
+
 def load_expected(path):
     data = json.loads(Path(path).read_text())
     entries = []
@@ -53,6 +74,7 @@ def load_expected(path):
         for reason in ('id', 'reason', 'doc'):
             if not category.get(reason):
                 raise SystemExit('%s: category without %s' % (path, reason))
+        check_doc(path, category['doc'])
         for entry in category.get('entries', []):
             entries.append(((entry, False), category['id']))
         for pattern in category.get('patterns', []):
@@ -69,16 +91,23 @@ def matches(entry, name):
 
 def main():
     parser = argparse.ArgumentParser(description='Compare a labelled-mode run with labels-off and its expected differences.')
-    parser.add_argument('runner', choices=('conformance', 'vectorset', 'compare', 'smoke'))
-    parser.add_argument('--result', required=True, help='the labelled run: a summary JSON, or the smoke log')
-    parser.add_argument('--reference', help='labels-off summary for conformance and vectorset')
-    parser.add_argument('--expected', help='expected differences (default: test/labelled/expected/RUNNER.json)')
+    parser.add_argument('runner', choices=SUITES + ('compare', 'smoke'))
+    parser.add_argument('--mode', choices=MODES, default='labelled')
+    parser.add_argument('--result', required=True, help='the run under test: a summary JSON, or the smoke log')
+    parser.add_argument('--reference', help='labels-off summary for the suite, its scripting unit and the vector set unit')
+    parser.add_argument('--expected', help='expected differences (default: test/labelled/expected/RUNNER.json in labelled mode, '
+                        'test/labelled/expected/MODE/RUNNER.json otherwise)')
     args = parser.parse_args()
-    expected_path = args.expected or ROOT / 'test/labelled/expected' / ('%s.json' % args.runner)
+    folder = ROOT / 'test/labelled/expected'
+    if args.mode != 'labelled':
+        folder = folder / args.mode
+    expected_path = args.expected or folder / ('%s.json' % args.runner)
     data, entries = load_expected(expected_path)
     if data.get('runner') != args.runner:
         raise SystemExit('%s describes runner %r, not %s' % (expected_path, data.get('runner'), args.runner))
-    if args.runner in ('conformance', 'vectorset'):
+    if data.get('mode', 'labelled') != args.mode:
+        raise SystemExit('%s describes mode %r, not %s' % (expected_path, data.get('mode', 'labelled'), args.mode))
+    if args.runner in SUITES:
         if not args.reference:
             raise SystemExit('--reference is required for ' + args.runner)
         differences, passing = suite_differences(json.loads(Path(args.reference).read_text()), json.loads(Path(args.result).read_text()))
@@ -102,8 +131,8 @@ def main():
     for entry, category in stale:
         print('expected difference no longer seen (%s): %s' % (category, entry[0]))
     summary = ', '.join('%s %d' % (c['id'], counts.get(c['id'], 0)) for c in data['categories'])
-    print('labelled %s: %d differences, %d unexpected, %d stale; by category: %s' % (
-        args.runner, len(differences), len(unexpected), len(stale), summary))
+    print('%s %s: %d differences, %d unexpected, %d stale; by category: %s' % (
+        args.mode, args.runner, len(differences), len(unexpected), len(stale), summary))
     return 1 if unexpected or stale else 0
 
 

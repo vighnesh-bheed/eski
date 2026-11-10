@@ -1,0 +1,20 @@
+{
+ "runner": "compare",
+ "mode": "owners-only-user",
+ "description": "Steps of the vector set reply comparison that fail in owners-only-user mode; labels-off has none.",
+ "categories": [
+  {
+   "id": "persistence",
+   "reason": "DUMP and RESTORE are refused while owner mode is on, so the set dmp2 the case restores never exists and the steps that read it, list it or sort it differ too.",
+   "doc": "docs/owners.md#owner-mode",
+   "entries": [
+    "semantics case RESP2 #1398 RESTORE dmp2 0 <stored dump>",
+    "semantics case RESP2 #1399 VCARD dmp2",
+    "semantics case RESP2 #1400 VEMB dmp2 a",
+    "semantics case RESP2 #1411 SORT dmp2 ALPHA",
+    "semantics case RESP2 #1413 SCAN 0 TYPE vectorset COUNT 1000",
+    "semantics setup RESP2 #1394 DUMP dmp"
+   ]
+  }
+ ]
+}

@@ -481,6 +481,26 @@ class Labelled(unittest.TestCase):
         self.c.call('VSETATTR', 'vs', 'a', '{"c":2}')
         self.assertNotEqual(self.c.call('DEBUG', 'DIGEST-VALUE', 'vs'), before)
 
+    def test_debug_object_shows_an_expired_key_without_removing_it(self):
+        plain = Server(BINARY, workers=0, arguments=('--keyspace-threads', str(KEYSPACE_THREADS)))
+        self.addCleanup(plain.close)
+        plain.start()
+        off = Client(plain.port)
+        self.addCleanup(off.close)
+        for client in (off, self.c):
+            client.call('DEBUG', 'SET-ACTIVE-EXPIRE', 0)
+            client.call('SET', 'gone', 'v', 'PX', 1)
+        time.sleep(0.05)
+        for client in (off, self.c):
+            self.assertIn('encoding:embstr', client.call('DEBUG', 'OBJECT', 'gone'))
+            self.assertEqual(client.call('DBSIZE'), 1)
+            self.assertEqual(client.call('EXISTS', 'gone'), 0)
+            self.assertEqual(client.call('DBSIZE'), 0)
+            self.assertEqual(error_of(client, 'DEBUG', 'OBJECT', 'gone'), 'ERR no such key')
+            client.call('DEBUG', 'SET-ACTIVE-EXPIRE', 1)
+        self.at('U', 'SET', 'low', 'v')
+        self.assertIn('encoding:embstr', self.c.call('DEBUG', 'OBJECT', 'low'))
+
     def test_watch_ignores_stale_keys_on_flush_and_swap(self):
         c = self.c
 

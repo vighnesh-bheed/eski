@@ -31,5 +31,5 @@
   "src/keyspace_owners_forget.odin": "948bdf4bf42c6750c25813d3339bf30e6548b88cdfffb628740ab21a8ec0788a",
   "src/keyspace_owners_quota.odin": "3c3d08d12846d5334d7ed95f842acea08830c0ed122cdb95e996afc8e50fbe34",
   "src/owner_commands.odin": "9fe54073b842490b9498f89e647d51a3336142fb3a5ede1b1fa9c21522fd62d8",
-  "src/cmd_server.odin": "96ad9f1bba4ef2b36f77c73df5c3865082515d004cc343bab1fc8f92a926f6cb"
+  "src/cmd_server.odin": "2372ba2aaac83eae543736440a20c0f229be5b93dfc5c780386c82adff4ceb3e"
 }

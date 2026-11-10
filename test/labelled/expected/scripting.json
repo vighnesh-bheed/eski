@@ -1,0 +1,35 @@
+{
+ "runner": "scripting",
+ "description": "Tests of the 7.4.11 suite's scripting unit that pass labels-off and do not pass on the labelled server, the same in both worker modes.",
+ "categories": [
+  {
+   "id": "persistence",
+   "reason": "A labelled scheme keeps persistence off, so the DUMP and RESTORE that the test of restoring an expired key calls from its script answer the persistence error, in the EVAL and in the function variant of the unit.",
+   "doc": "docs/labels.md#the-scheme",
+   "entries": [
+    "scripting::RESTORE expired keys with expiration time"
+   ]
+  },
+  {
+   "id": "logins",
+   "reason": "The unit's Script ACL check authenticates its connection as bob, a login created without a clearance rule, which runs at the lowest label (owner item A1), and the connection stays authenticated as bob for the rest of its server block. The unit runs every test once through FUNCTION LOAD and FCALL and once through EVAL; FUNCTION LOAD changes stored functions and needs a top label (see docs/labels.md#transactions-and-scripts), so from the Script ACL check on, the function variant's scripts are refused with the top-only error, while the EVAL variant runs at bob's label and passes.",
+   "doc": "docs/labels.md#logins",
+   "entries": [
+    "scripting::Binary code loading failed",
+    "scripting::Script ACL check",
+    "scripting::Test dofile are not available",
+    "scripting::Test loadfile are not available",
+    "scripting::Test print are not available",
+    "scripting::Try trick global protection 1",
+    "scripting::Try trick global protection 2",
+    "scripting::Try trick global protection 3",
+    "scripting::Try trick global protection 4",
+    "scripting::Try trick readonly table on basic types metatable",
+    "scripting::Try trick readonly table on bit table",
+    "scripting::Try trick readonly table on cmsgpack table",
+    "scripting::Try trick readonly table on json table",
+    "scripting::Try trick readonly table on redis table"
+   ]
+  }
+ ]
+}

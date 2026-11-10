@@ -39,7 +39,7 @@
   "src/cmd_lua.odin": "cf397f6809c5d09bb5647a01858588ec8b59911b5020b00cade496adb1ba1738",
   "src/cmd_persist.odin": "e3885e408854de02bef9c7518f79708ae8523fb9e0d2cf663134a6bd40306662",
   "src/cmd_pubsub.odin": "d99adf2860a8e169f7110c954a1590ea8b2555352fa4f556e5578ad8db19c2b1",
-  "src/cmd_server.odin": "96ad9f1bba4ef2b36f77c73df5c3865082515d004cc343bab1fc8f92a926f6cb",
+  "src/cmd_server.odin": "2372ba2aaac83eae543736440a20c0f229be5b93dfc5c780386c82adff4ceb3e",
   "src/cmd_set.odin": "44675e1b9d5da60c5edf32af63ce3b489da84dde49c87ffdcfa8fec7b948e096",
   "src/cmd_set_test.odin": "3439a9a1e7f6431988a47a6de759ec0ed2ba8fcf0969847316f79b795db83f9f",
   "src/cmd_sort.odin": "8bd07e26345640e369981ec5b931f645d9fe3c17066586fa5b0a5716bef56351",

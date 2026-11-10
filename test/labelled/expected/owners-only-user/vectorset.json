@@ -1,0 +1,16 @@
+{
+ "runner": "vectorset",
+ "mode": "owners-only-user",
+ "description": "Tests of the vector set unit that pass labels-off and do not pass in owners-only-user mode.",
+ "categories": [
+  {
+   "id": "persistence",
+   "reason": "DEBUG RELOAD and the append-only file are refused while owner mode is on, so the tests that reload a set differ.",
+   "doc": "docs/owners.md#owner-mode",
+   "entries": [
+    "modules/vector-sets::HNSW Persistence",
+    "modules/vector-sets::[regression] VADD CAS SETATTR keeps attribute accounting"
+   ]
+  }
+ ]
+}

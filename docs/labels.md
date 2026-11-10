@@ -158,7 +158,7 @@ A quota bounds the keys, values and dictionary memory at exactly one label; in o
 
 ## What the labelled gate records
 
-The [labelled-mode gate](build-run-test.md#labelled-mode-gate) runs the 7.4.11 suite, the vector set unit, the vector set reply comparison and smoke against a server with three levels, two compartments and two trust levels whose default login is top, in both worker modes, and accepts only the differences from labels-off that `test/labelled/expected` lists by name, each with its cause:
+The [labelled-mode gate](build-run-test.md#labelled-mode-gate) runs the 7.4.11 suite, its scripting unit, the vector set unit, the vector set reply comparison and smoke against a server with three levels, two compartments and two trust levels whose default login is top, in both worker modes, and accepts only the differences from labels-off that `test/labelled/expected` lists by name, each with its cause:
 
 | Category | Cause |
 | --- | --- |
@@ -171,11 +171,27 @@ The [labelled-mode gate](build-run-test.md#labelled-mode-gate) runs the 7.4.11 s
 | pause-scripts | during `CLIENT PAUSE WRITE` a labelled server holds every `EVALSHA`, because whether a cached script is read-only cannot be looked up before the command's label is known (see [Scripts](scripting.md#labels-and-owners)); the pause unit's read-only `EVALSHA` test waits until the suite gives up, which ends the unit before its later tests |
 | wrapper | the gate declares the default login and the scheme on the command line, which conflicts with ACL files and configuration files that declare users and which `CONFIG REWRITE` then writes |
 
-The suite differs in 154 tests: 76 for persistence, 68 for logins, most of them later tests of the acl unit, which waits for a push that a lower login's blocking pop never sees, and 10 for pause-scripts, the read-only script test of the pause unit and the 9 tests after it. The vector set unit differs in 2 tests and the reply comparison in 6 steps, all for persistence; smoke differs in the corrupt-payload and dump families and 100 named checks for persistence and in 31 checks for the other categories, 2 of them for watches and 8 for the function scenario that runs after the reset. Subscriptions and tracking pin the session on their own and are not among the differences, and since the ACL check runs before the top-only refusal a lower login without a right gets the same `NOPERM` as without labels.
+The suite differs in 154 tests: 76 for persistence, 68 for logins, most of them later tests of the acl unit, which waits for a push that a lower login's blocking pop never sees, and 10 for pause-scripts, the read-only script test of the pause unit and the 9 tests after it. The vector set unit differs in 2 tests and the reply comparison in 6 steps, all for persistence; smoke differs in the corrupt-payload and dump families and 100 named checks for persistence and in 31 checks for the other categories, 2 of them for watches and 8 for the function scenario that runs after the reset. Subscriptions and tracking pin the session on their own and are not among the differences, and since the ACL check runs before the top-only refusal a lower login without a right gets the same `NOPERM` as without labels. The scripting unit differs in 15 tests: 14 for logins, because the unit's Script ACL check leaves its connection authenticated as a login without a clearance rule, so the function variant of each later test in that server block gets the top-only refusal for `FUNCTION LOAD`, and 1 for persistence, the test that restores an expired key with `DUMP` and `RESTORE` from a script.
+
+The gate's three owner modes run the same runners with [owner mode](owners.md#owner-mode) on: `owners-shared`, whose default login has the operator scope and no owner rule, so the suite's data is shared; `owners-user`, whose default login is the one user `suite-user` with the operator scope; and `owners-only-user`, the same login without a label scheme. Their files under `test/labelled/expected/MODE/` keep the categories above, with reasons that add the owner rules: a login without an owner rule acts as `SHARED` without the operator scope, `reset` also clears the owner rules and the operator scope, `ACL GETUSER` and `ACL LIST` also carry the owner rules, the top-only commands need the operator, and persistence and the memcached endpoint stay off in owner mode with or without a scheme. Two categories are new:
+
+| Category | Cause |
+| --- | --- |
+| info-owners | `INFO` gives the operator an `# Owners` section (see [Owners](owners.md#server-wide-channels)), which the default, all and everything selections include, so smoke's checks of the sections and layouts `INFO` returns differ from the 7.4 server |
+| maintenance-pace | type maintenance of a user's partitions takes at most 16 steps a partition in each tick (see [Owners](owners.md#keys)), so in smoke's idle sorted set check the two 12,288-member sorted sets of a user finish migrating after the check's two-second window |
+
+In all three owner modes the suite, the scripting unit, the vector set unit and the reply comparison differ in exactly the tests and steps that differ in labelled mode, with the same counts; the suite's logins that have no owner rule act as `SHARED` without the operator scope, and that reaches the same tests as the lowest label does. Smoke differs in the checks it differs in labelled mode and in 12 more for info-owners, and in `owners-user` and `owners-only-user` in 1 more for maintenance-pace, because their sorted sets belong to the user.
 
 ## What comes next
 
-Later stages carry labels into snapshots and the append-only file, add the search commands and ship the SDK helpers. The owner id per command, which adds per-user privacy beside the label, is described in [Owners](owners.md), with its keyspace and vector set sides; a more compact per-user partition comes next.
+The owner id per command, which adds per-user privacy beside the label, is built: [Owners](owners.md) describes it with its keyspace and vector set sides, its compact per-user partitions and the limits of its guarantees. The stages after it, in order:
+
+- persistence that carries labels and owners: snapshots, the append-only file, `DUMP` and `RESTORE`, the persistence of vector graphs, and labelled and owner commands on the keyspace workers;
+- the search commands, with their statistics kept per user;
+- simulation testing of durability and a change log;
+- the SDK helpers that send the label and the owner with each request and stamp them on ingested data.
+
+Until persistence carries them, a server with a label scheme or owner mode keeps persistence off, as [the scheme](#the-scheme) describes.
 
 Some things remain observable across labels:
 
