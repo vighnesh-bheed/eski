@@ -21,5 +21,15 @@
   "src/vfilter/evaluate.odin": "7b98d9309022dde6000e7b1f6bc9015cd4d570a358ae0e59d3ec45ae55541b85",
   "src/vfilter/compile.odin": "87ff037bffee43b656ecf86989f8d431721b1c582a8a04340e637a59afe5c12f",
   "src/vfilter/value.odin": "cf44c8582407ddeadfa30d15ea0d5bd1030ebf827cce6a891bc5f90148e68094",
-  "src/vfilter/attribute.odin": "8589f9ed5e673a825a4ac865acd805ff643a425d671456d6f124fae38e6d2280"
+  "src/vfilter/attribute.odin": "8589f9ed5e673a825a4ac865acd805ff643a425d671456d6f124fae38e6d2280",
+  "src/vsettype/labelled.odin": "023d937332b9ed6e5beb39d03152fdcf47171c1ab12cfa95f204cd2bd68c3225",
+  "src/vsettype/view.odin": "a91105cdb8ce586c3183bd4edc2469445691cad8b55c528871cc5d1ee31f106f",
+  "src/vsettype/write.odin": "ae734afc865937a001172e463fa259fd528e4b7bac401daa8d761c36e5f97954",
+  "src/vsettype/grow.odin": "917f6b909a9a71a860e5cc7779e9c94876cda67a5c17c9c757588090b4f9f996",
+  "src/vsettype/add.odin": "bb7d9a412dc464ff51f871c4fb60427b5b3370c6d76a2af94fd6b31dd11e8380",
+  "src/vsettype/vset.odin": "33b14669d129b1e58edc698dc9e19ad734d9163e7d97a968c994a6aa97acfe8d",
+  "src/vsettype/random.odin": "3fa016b49bd2cf5c362856641c1313de23e0e33cdf5a7dc21f310747e75118fe",
+  "src/vsettype/search.odin": "599679376e497030067a728b3f64abb5295d432d489f03bd4317a26b71e11c23",
+  "src/vsettype/views.odin": "636f391f72766e1841d1975824b26f4333e2010ebf877b19eb76d5bd3f30ef9a",
+  "src/vsettype/alloc.odin": "7688b5480fd0725c51157fa673da8557c0336971f4ca2ab78d68e23ea0b7821e"
 }

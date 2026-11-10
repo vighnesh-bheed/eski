@@ -135,3 +135,83 @@ ledger_allocator_proc :: proc(
 ledger_allocator :: proc "contextless" (l: ^Ledger) -> runtime.Allocator {
 	return runtime.Allocator{procedure = ledger_allocator_proc, data = l}
 }
+
+Charge :: struct {
+	bytes: int,
+	root:  ^Ledger,
+}
+
+charge_alloc :: proc "contextless" (c: ^Charge, size: int, alignment: int, zero: bool) -> rawptr {
+	before := c.root.bytes
+	p := block_alloc(c.root, size, alignment, zero)
+	c.bytes += c.root.bytes - before
+	return p
+}
+
+charge_free :: proc "contextless" (c: ^Charge, p: rawptr) {
+	before := c.root.bytes
+	block_free(c.root, p)
+	c.bytes += c.root.bytes - before
+}
+
+charge_resize :: proc "contextless" (c: ^Charge, p: rawptr, old_size: int, size: int, alignment: int, zero: bool) -> rawptr {
+	before := c.root.bytes
+	q := block_resize(c.root, p, old_size, size, alignment, zero)
+	c.bytes += c.root.bytes - before
+	return q
+}
+
+charge_allocator_proc :: proc(
+	allocator_data: rawptr,
+	mode: runtime.Allocator_Mode,
+	size, alignment: int,
+	old_memory: rawptr,
+	old_size: int,
+	loc := #caller_location,
+) -> ([]byte, runtime.Allocator_Error) {
+	c := (^Charge)(allocator_data)
+	before := c.root.bytes
+	out, err := ledger_allocator_proc(c.root, mode, size, alignment, old_memory, old_size, loc)
+	c.bytes += c.root.bytes - before
+	return out, err
+}
+
+charge_allocator :: proc "contextless" (c: ^Charge) -> runtime.Allocator {
+	return runtime.Allocator{procedure = charge_allocator_proc, data = c}
+}
+
+part_charge :: #force_inline proc "contextless" (s: Vset, p: ^Partition) -> ^Charge {
+	if s.lab == nil || p == &s.core {
+		return nil
+	}
+	return &(^Part_Block)(p).charge
+}
+
+part_alloc :: proc "contextless" (s: Vset, p: ^Partition, size: int, alignment: int, zero: bool) -> rawptr {
+	if c := part_charge(s, p); c != nil {
+		return charge_alloc(c, size, alignment, zero)
+	}
+	return block_alloc(&s.ledger, size, alignment, zero)
+}
+
+part_free :: proc "contextless" (s: Vset, p: ^Partition, ptr: rawptr) {
+	if c := part_charge(s, p); c != nil {
+		charge_free(c, ptr)
+		return
+	}
+	block_free(&s.ledger, ptr)
+}
+
+part_resize :: proc "contextless" (s: Vset, p: ^Partition, ptr: rawptr, old_size: int, size: int, alignment: int, zero: bool) -> rawptr {
+	if c := part_charge(s, p); c != nil {
+		return charge_resize(c, ptr, old_size, size, alignment, zero)
+	}
+	return block_resize(&s.ledger, ptr, old_size, size, alignment, zero)
+}
+
+part_allocator :: proc "contextless" (s: Vset, p: ^Partition) -> runtime.Allocator {
+	if c := part_charge(s, p); c != nil {
+		return charge_allocator(c)
+	}
+	return ledger_allocator(&s.ledger)
+}

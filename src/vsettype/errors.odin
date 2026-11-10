@@ -2,6 +2,7 @@ package vsettype
 
 import "base:runtime"
 import "core:strconv"
+import lbl "../label"
 import "../vfilter"
 
 Error :: enum u8 {
@@ -15,6 +16,7 @@ Error :: enum u8 {
 	Filter_Syntax,
 	Invalid_Parameter,
 	Out_Of_Memory,
+	Name_In_Use,
 }
 
 Failure :: struct {
@@ -22,6 +24,7 @@ Failure :: struct {
 	got:      int,
 	expected: int,
 	near:     string,
+	label:    lbl.Id,
 }
 
 ERR_QUANTIZATION_MISMATCH :: "ERR asked quantization mismatch with existing vector set"
@@ -30,6 +33,8 @@ ERR_PROJECTION_NOT_ALLOWED :: "ERR cannot add projection to existing set without
 ERR_ELEMENT_NOT_FOUND :: "ERR element not found in set"
 ERR_INVALID_PARAMETER :: "ERR invalid vector specification"
 ERR_OUT_OF_MEMORY :: "ERR out of memory"
+ERR_NAME_IN_USE :: "ERR name in use"
+ERR_NAME_IN_USE_AT :: "ERR name in use at "
 
 failure :: #force_inline proc "contextless" (err: Error, got := 0, expected := 0) -> Failure {
 	return Failure{err = err, got = got, expected = expected}
@@ -51,6 +56,8 @@ failure_text :: proc(f: Failure, allocator := context.allocator) -> (text: strin
 		return ERR_INVALID_PARAMETER, nil
 	case .Out_Of_Memory:
 		return ERR_OUT_OF_MEMORY, nil
+	case .Name_In_Use:
+		return ERR_NAME_IN_USE, nil
 	case .Filter_Syntax:
 		return vfilter.error_text(f.near, allocator)
 	case .Dimension_Mismatch:

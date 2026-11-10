@@ -103,7 +103,11 @@ stored_vector :: proc(s: Vset, vector: []f32, sc: ^Scratch) -> ([]f32, bool) {
 }
 
 insert_node :: proc(s: Vset, slot: u32, ef: int, sc: ^Scratch, cache: ^Distance_Cache = nil) -> Error {
-	probe := Cache_Probe{aq = vmath.Arena_Query{arena = &s.arena, query = vmath.query_slot(&s.arena, slot)}, cache = cache}
+	return part_insert_node(&s.core, slot, ef, sc, cache)
+}
+
+part_insert_node :: proc(p: ^Partition, slot: u32, ef: int, sc: ^Scratch, cache: ^Distance_Cache = nil) -> Error {
+	probe := Cache_Probe{aq = vmath.Arena_Query{arena = &p.arena, query = vmath.query_slot(&p.arena, slot)}, cache = cache}
 	query: hnsw.Query_Proc = vmath.arena_query_hook
 	batch: hnsw.Batch_Query_Proc = vmath.arena_batch_hook
 	ctx: rawptr = &probe.aq
@@ -112,19 +116,23 @@ insert_node :: proc(s: Vset, slot: u32, ef: int, sc: ^Scratch, cache: ^Distance_
 		batch = cached_batch
 		ctx = &probe
 	}
-	err := hnsw.insert(&s.graph, &sc.graph, slot, ef, query, ctx, batch)
-	if err != .None && !hnsw.is_live(&s.graph, slot) {
-		hnsw.release(&s.graph, slot)
+	err := hnsw.insert(&p.graph, &sc.graph, slot, ef, query, ctx, batch)
+	if err != .None && !hnsw.is_live(&p.graph, slot) {
+		hnsw.release(&p.graph, slot)
 		return .Out_Of_Memory
 	}
 	return .None
 }
 
 copy_name :: proc(s: Vset, name: []u8) -> (p: [^]u8, ok: bool) {
+	return part_copy_name(s, &s.core, name)
+}
+
+part_copy_name :: proc(s: Vset, p: ^Partition, name: []u8) -> (out: [^]u8, ok: bool) {
 	if len(name) == 0 {
 		return nil, true
 	}
-	q := block_alloc(&s.ledger, len(name), 1, false)
+	q := part_alloc(s, p, len(name), 1, false)
 	if q == nil {
 		return nil, false
 	}
@@ -133,10 +141,14 @@ copy_name :: proc(s: Vset, name: []u8) -> (p: [^]u8, ok: bool) {
 }
 
 make_attribute :: proc(s: Vset, text: []u8, keep_empty := false) -> (a: vfilter.Attribute, ok: bool) {
+	return part_make_attribute(s, &s.core, text, keep_empty)
+}
+
+part_make_attribute :: proc(s: Vset, p: ^Partition, text: []u8, keep_empty := false) -> (a: vfilter.Attribute, ok: bool) {
 	if len(text) == 0 && !keep_empty {
 		return {}, true
 	}
-	attr, err := vfilter.attribute_make(string(text), allocator_of(s))
+	attr, err := vfilter.attribute_make(string(text), part_allocator(s, p))
 	if err != nil {
 		return {}, false
 	}
@@ -144,92 +156,137 @@ make_attribute :: proc(s: Vset, text: []u8, keep_empty := false) -> (a: vfilter.
 }
 
 replace_attribute :: proc(s: Vset, e: ^Element, a: vfilter.Attribute) {
+	part_replace_attribute(s, &s.core, e, a)
+}
+
+part_replace_attribute :: proc(s: Vset, p: ^Partition, e: ^Element, a: vfilter.Attribute) {
 	if e.attr.blob != nil {
-		vfilter.attribute_destroy(&e.attr, allocator_of(s))
-		s.attributes -= 1
+		vfilter.attribute_destroy(&e.attr, part_allocator(s, p))
+		p.attributes -= 1
 	}
 	e.attr = a
 	if a.blob != nil {
-		s.attributes += 1
+		p.attributes += 1
+	}
+}
+
+part_discard_attribute :: proc(s: Vset, p: ^Partition, a: ^vfilter.Attribute) {
+	if a.blob != nil {
+		vfilter.attribute_destroy(a, part_allocator(s, p))
 	}
 }
 
 insert_element :: proc(s: Vset, name: []u8, vector: []f32, attr: vfilter.Attribute, ef: int, sc: ^Scratch, cache: ^Distance_Cache = nil) -> (slot: u32, f: Failure) {
-	if err := ensure_slot(s); err != .None {
+	slot, f = part_insert(s, &s.core, name, vector, attr, ef, sc, cache)
+	if f.err == .None {
+		rax.insert(s.names, name, rawptr(uintptr(slot) + 1))
+	}
+	return
+}
+
+part_insert :: proc(s: Vset, p: ^Partition, name: []u8, vector: []f32, attr: vfilter.Attribute, ef: int, sc: ^Scratch, cache: ^Distance_Cache = nil) -> (slot: u32, f: Failure) {
+	if err := part_ensure_slot(s, p); err != .None {
 		return NIL_SLOT, failure(err)
 	}
-	name_copy, named := copy_name(s, name)
+	name_copy, named := part_copy_name(s, p, name)
 	if !named {
 		return NIL_SLOT, failure(.Out_Of_Memory)
 	}
-	aslot, aerr := vmath.arena_alloc(&s.arena)
+	aslot, aerr := vmath.arena_alloc(&p.arena)
 	if aerr != nil {
-		block_free(&s.ledger, name_copy)
+		part_free(s, p, name_copy)
 		return NIL_SLOT, failure(.Out_Of_Memory)
 	}
-	gslot, gerr := hnsw.reserve(&s.graph)
-	if gerr != .None || gslot != aslot {
-		if gerr == .None {
-			hnsw.release(&s.graph, gslot)
+	if p.mode != .Flat {
+		gslot, gerr := hnsw.reserve(&p.graph)
+		if gerr != .None || gslot != aslot {
+			if gerr == .None {
+				hnsw.release(&p.graph, gslot)
+			}
+			vmath.arena_free(&p.arena, aslot)
+			part_free(s, p, name_copy)
+			return NIL_SLOT, failure(.Out_Of_Memory)
 		}
-		vmath.arena_free(&s.arena, aslot)
-		block_free(&s.ledger, name_copy)
-		return NIL_SLOT, failure(.Out_Of_Memory)
 	}
 	slot = aslot
-	vmath.arena_set(&s.arena, slot, vector)
-	if err := insert_node(s, slot, ef, sc, cache); err != .None {
-		vmath.arena_free(&s.arena, slot)
-		block_free(&s.ledger, name_copy)
-		return NIL_SLOT, failure(err)
+	vmath.arena_set(&p.arena, slot, vector)
+	if p.mode != .Flat {
+		if err := part_insert_node(p, slot, ef, sc, cache); err != .None {
+			vmath.arena_free(&p.arena, slot)
+			part_free(s, p, name_copy)
+			return NIL_SLOT, failure(err)
+		}
+	} else {
+		p.graph.node_uid += 1
 	}
-	e := &s.elements[slot]
-	e^ = Element{name = name_copy, len = u32(len(name)), seq = s.graph.node_uid}
-	replace_attribute(s, e, attr)
-	rax.insert(s.names, name, rawptr(uintptr(slot) + 1))
-	order_append(s, slot)
+	e := &p.elements[slot]
+	e^ = Element{name = name_copy, len = u32(len(name)), seq = p.graph.node_uid}
+	part_replace_attribute(s, p, e, attr)
+	order_append(p, slot)
 	s.version += 1
-	refresh_prefetch(s)
+	part_refresh_prefetch(p)
 	return slot, {}
 }
 
 drop_element :: proc(s: Vset, slot: u32) {
-	vmath.arena_free(&s.arena, slot)
 	e := &s.elements[slot]
 	rax.remove(s.names, e.name[:e.len])
-	order_remove(s, slot)
-	element_release(s, e)
+	part_drop(s, &s.core, slot)
+}
+
+part_drop :: proc(s: Vset, p: ^Partition, slot: u32) {
+	vmath.arena_free(&p.arena, slot)
+	order_remove(p, slot)
+	part_element_release(s, p, &p.elements[slot])
 	s.version += 1
 }
 
 graph_remove :: proc(s: Vset, slot: u32, sc: ^Scratch) -> Error {
-	hnsw.remove(&s.graph, &sc.graph, slot)
-	if hnsw.is_live(&s.graph, slot) {
+	return part_graph_remove(&s.core, slot, sc)
+}
+
+part_graph_remove :: proc(p: ^Partition, slot: u32, sc: ^Scratch) -> Error {
+	if p.mode == .Flat {
+		return .None
+	}
+	hnsw.remove(&p.graph, &sc.graph, slot)
+	if hnsw.is_live(&p.graph, slot) {
 		return .Out_Of_Memory
 	}
 	return .None
 }
 
 update_element :: proc(s: Vset, slot: u32, vector: []f32, ef: int, sc: ^Scratch, cache: ^Distance_Cache = nil) -> Failure {
-	if err := graph_remove(s, slot, sc); err != .None {
-		return failure(err)
+	f, dropped := part_update(s, &s.core, slot, vector, ef, sc, cache)
+	if dropped {
+		drop_element(s, slot)
+	}
+	return f
+}
+
+part_update :: proc(s: Vset, p: ^Partition, slot: u32, vector: []f32, ef: int, sc: ^Scratch, cache: ^Distance_Cache = nil) -> (f: Failure, dropped: bool) {
+	if err := part_graph_remove(p, slot, sc); err != .None {
+		return failure(err), false
 	}
 	s.version += 1
-	vmath.arena_set(&s.arena, slot, vector)
-	gslot, gerr := hnsw.reserve(&s.graph)
+	vmath.arena_set(&p.arena, slot, vector)
+	if p.mode == .Flat {
+		p.graph.node_uid += 1
+		p.elements[slot].seq = p.graph.node_uid
+		return {}, false
+	}
+	gslot, gerr := hnsw.reserve(&p.graph)
 	if gerr != .None || gslot != slot {
 		if gerr == .None {
-			hnsw.release(&s.graph, gslot)
+			hnsw.release(&p.graph, gslot)
 		}
-		drop_element(s, slot)
-		return failure(.Out_Of_Memory)
+		return failure(.Out_Of_Memory), true
 	}
-	if err := insert_node(s, slot, ef, sc, cache); err != .None {
-		drop_element(s, slot)
-		return failure(err)
+	if err := part_insert_node(p, slot, ef, sc, cache); err != .None {
+		return failure(err), true
 	}
-	s.elements[slot].seq = s.graph.node_uid
-	return {}
+	p.elements[slot].seq = p.graph.node_uid
+	return {}, false
 }
 
 Scratch_Guard :: struct {
@@ -254,6 +311,9 @@ guard_end :: proc(g: ^Scratch_Guard) {
 }
 
 add :: proc(s: Vset, req: ^Add_Request, scratch: ^Scratch = nil) -> (added: bool, f: Failure) {
+	if s.lab != nil {
+		return false, failure(.Invalid_Parameter)
+	}
 	if f = check_add(s, req); f.err != .None {
 		return
 	}

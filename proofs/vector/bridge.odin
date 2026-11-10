@@ -6,7 +6,9 @@ import "core:os"
 import "core:strconv"
 import "core:strings"
 import hn "../../src/hnsw"
+import lbl "../../src/label"
 import vm "../../src/vmath"
+import vt "../../src/vsettype"
 
 nat :: proc(s: string) -> int {
 	v, ok := strconv.parse_i64(s, 10)
@@ -348,6 +350,452 @@ force_level :: proc(ix: ^hn.Index, level: int) {
 	ix.level_log = lu / (f64(level) + 0.5)
 }
 
+Z_State :: struct {
+	table:   lbl.Table,
+	views:   [dynamic]lbl.Visibility,
+	streams: [dynamic]u64,
+	set:     vt.Vset,
+	sc:      vt.Scratch,
+	hits:    [dynamic]vt.Hit,
+	refs:    [dynamic]vt.Ref,
+	slots:   [dynamic]u32,
+	links:   vt.Links,
+	ready:   bool,
+}
+
+z_reset_set :: proc(z: ^Z_State) {
+	if z.set != nil {
+		vt.destroy(z.set)
+		z.set = nil
+	}
+}
+
+z_reset :: proc(z: ^Z_State) {
+	z_reset_set(z)
+	if z.ready {
+		for &v in z.views {
+			lbl.visibility_destroy(&v)
+		}
+		delete(z.views)
+		delete(z.streams)
+		lbl.table_destroy(&z.table)
+		vt.scratch_destroy(&z.sc)
+		delete(z.hits)
+		delete(z.refs)
+		delete(z.slots)
+		vt.links_destroy(&z.links)
+	}
+	z^ = {}
+}
+
+z_access :: proc(z: ^Z_State, i: int) -> vt.Access {
+	return vt.Access{label = lbl.Id(i), visibility = &z.views[i], table = &z.table, stream = &z.streams[i]}
+}
+
+z_name :: proc(s: string) -> []u8 {
+	if s == "~" {
+		return nil
+	}
+	return transmute([]u8)s
+}
+
+z_write_name :: proc(b: ^strings.Builder, n: []u8) {
+	if len(n) == 0 {
+		strings.write_byte(b, '~')
+	} else {
+		strings.write_string(b, string(n))
+	}
+}
+
+z_vector :: proc(mask: u64, out: []f32) {
+	for i in 0 ..< 64 {
+		out[i] = 1 if mask >> uint(i) & 1 == 1 else -1
+	}
+}
+
+z_attr_text :: proc(spec: string) -> (text: string, set: bool) {
+	switch {
+	case spec == "-":
+		return "", false
+	case spec == "e":
+		return "", true
+	case spec[0] == 'a':
+		return fmt.tprintf(`{{"a":%s}}`, spec[1:]), true
+	}
+	panic("invalid attribute spec")
+}
+
+z_write_attr :: proc(b: ^strings.Builder, text: string, has: bool) {
+	if !has {
+		strings.write_byte(b, '-')
+	} else if len(text) == 0 {
+		strings.write_byte(b, 'e')
+	} else {
+		assert(strings.has_prefix(text, `{"a":`) && strings.has_suffix(text, "}"))
+		fmt.sbprintf(b, "a%s", text[5:len(text) - 1])
+	}
+}
+
+z_mask_of :: proc(raw: vt.Raw_Embedding) -> u64 {
+	assert(len(raw.data) == 8)
+	m: u64
+	for i in 0 ..< 8 {
+		m |= u64(raw.data[i]) << uint(8 * i)
+	}
+	return m
+}
+
+z_score :: proc(score: f64) -> int {
+	v := score * 64
+	assert(v == f64(int(v)))
+	return int(v)
+}
+
+z_bit :: proc(b: ^strings.Builder, v: bool) {
+	strings.write_byte(b, '1' if v else '0')
+}
+
+z_err :: proc(b: ^strings.Builder, f: vt.Failure) {
+	#partial switch f.err {
+	case .None:
+		strings.write_string(b, "none|-")
+	case .Name_In_Use:
+		fmt.sbprintf(b, "inuse|%d", int(f.label))
+	case:
+		panic("unexpected failure")
+	}
+}
+
+z_bound :: proc(s: string) -> vt.Lex_Bound {
+	switch {
+	case s == "-":
+		return {kind = .Min}
+	case s == "+":
+		return {kind = .Max}
+	case s[0] == '[':
+		return {kind = .Inclusive, value = z_name(s[1:])}
+	case s[0] == '(':
+		return {kind = .Exclusive, value = z_name(s[1:])}
+	}
+	panic("invalid bound")
+}
+
+z_hits :: proc(b: ^strings.Builder, s: vt.Vset, hits: []vt.Hit) {
+	if len(hits) == 0 {
+		strings.write_byte(b, '-')
+		return
+	}
+	for h, i in hits {
+		if i > 0 {
+			strings.write_byte(b, ',')
+		}
+		z_write_name(b, vt.hit_name(s, h))
+		fmt.sbprintf(b, ":%d", z_score(h.score))
+	}
+}
+
+z_refs :: proc(b: ^strings.Builder, s: vt.Vset, refs: []vt.Ref) {
+	if len(refs) == 0 {
+		strings.write_byte(b, '-')
+		return
+	}
+	for r, i in refs {
+		if i > 0 {
+			strings.write_byte(b, ',')
+		}
+		z_write_name(b, vt.ref_name(s, r))
+	}
+}
+
+z_mode :: proc(m: vt.Part_Mode) -> string {
+	switch m {
+	case .Pinned:
+		return "pinned"
+	case .Flat:
+		return "flat"
+	case .Graph:
+		return "graph"
+	}
+	return "?"
+}
+
+z_step :: proc(z: ^Z_State, fields: []string, b: ^strings.Builder) {
+	x: [64]f32
+	switch fields[0] {
+	case "ZT":
+		z_reset(z)
+		lbl.table_init(&z.table)
+		vt.scratch_init(&z.sc)
+		z.ready = true
+		for tok, i in fields[1:] {
+			parts := strings.split(tok, ":")
+			defer delete(parts)
+			assert(len(parts) == 3 && nat(parts[2]) == 0)
+			l := lbl.Label{level = u8(nat(parts[0]))}
+			l.compartments[0] = word(parts[1])
+			id, err := lbl.table_intern(&z.table, l)
+			assert(err == .None && int(id) == i)
+		}
+		for i in 0 ..< len(fields) - 1 {
+			l, _ := lbl.table_label(&z.table, lbl.Id(i))
+			v: lbl.Visibility
+			assert(lbl.visibility_build(&v, &z.table, l) == .None)
+			append(&z.views, v)
+			append(&z.streams, vt.stream_seed(lbl.Id(i)))
+		}
+		fmt.sbprintf(b, "ZT|%d", len(fields) - 1)
+	case "ZN":
+		z_reset_set(z)
+		for i in 0 ..< len(z.streams) {
+			z.streams[i] = vt.stream_seed(lbl.Id(i))
+		}
+		vt.flat_limit = nat(fields[1])
+		vt.shrink_limit = nat(fields[2])
+		req := vt.Add_Request{vector = x[:], quant = .BIN}
+		if fields[3] == "plain" {
+			s, f := vt.create_for(&req)
+			assert(f.err == .None)
+			z.set = s
+		} else {
+			a := z_access(z, nat(fields[4]))
+			s, f := vt.create_at(&req, &a)
+			assert(f.err == .None)
+			z.set = s
+		}
+		strings.write_string(b, "ZN|ok")
+	case "ZA":
+		a := z_access(z, nat(fields[1]))
+		z_vector(word(fields[3]), x[:])
+		text, set := z_attr_text(fields[4])
+		req := vt.Add_Request{name = z_name(fields[2]), vector = x[:], quant = .BIN, attr = transmute([]u8)text, set_attr = set}
+		ch, f := vt.add_at(z.set, &a, &req, &z.sc)
+		strings.write_string(b, "ZA|")
+		z_bit(b, ch.added)
+		strings.write_byte(b, '|')
+		z_bit(b, ch.label_new)
+		strings.write_byte(b, '|')
+		z_bit(b, ch.label_gone)
+		strings.write_byte(b, '|')
+		z_bit(b, ch.emptied)
+		strings.write_byte(b, '|')
+		z_err(b, f)
+	case "ZR":
+		a := z_access(z, nat(fields[1]))
+		ch, f := vt.remove_at(z.set, &a, z_name(fields[2]), &z.sc)
+		strings.write_string(b, "ZR|")
+		z_bit(b, ch.found)
+		strings.write_byte(b, '|')
+		z_bit(b, ch.label_gone)
+		strings.write_byte(b, '|')
+		z_bit(b, ch.emptied)
+		strings.write_byte(b, '|')
+		z_err(b, f)
+	case "ZE":
+		a := z_access(z, nat(fields[1]))
+		text, _ := z_attr_text(fields[3])
+		ch, f := vt.set_attribute_at(z.set, &a, z_name(fields[2]), transmute([]u8)text)
+		strings.write_string(b, "ZE|")
+		z_bit(b, ch.found)
+		strings.write_byte(b, '|')
+		z_err(b, f)
+	case "ZL":
+		removed, ch := vt.remove_label(z.set, lbl.Id(nat(fields[1])))
+		fmt.sbprintf(b, "ZL|%d|", removed)
+		z_bit(b, ch.found)
+		strings.write_byte(b, '|')
+		z_bit(b, ch.label_gone)
+		strings.write_byte(b, '|')
+		z_bit(b, ch.emptied)
+	case "ZC":
+		a := z_access(z, nat(fields[1]))
+		v, err := vt.view_open(z.set, &a, &z.sc)
+		assert(err == .None)
+		info := vt.view_info(&v)
+		fmt.sbprintf(b, "ZC|%d|%d|%d|", info.size, info.attributes_count, info.max_node_uid)
+		if len(v.parts) == 0 {
+			strings.write_byte(b, '-')
+		}
+		for vp, i in v.parts {
+			if i > 0 {
+				strings.write_byte(b, ',')
+			}
+			p := vp.part
+			fmt.sbprintf(b, "%d:%s:%d:%d", int(p.label), z_mode(p.mode), p.count, p.graph.node_uid)
+		}
+	case "ZF":
+		a := z_access(z, nat(fields[1]))
+		v, _ := vt.view_open(z.set, &a, &z.sc)
+		r, ok := vt.view_find(&v, z_name(fields[2]))
+		if !ok {
+			strings.write_string(b, "ZF|-")
+		} else {
+			fmt.sbprintf(b, "ZF|%d|", int(vt.ref_label(z.set, r)))
+			text, has := vt.ref_attribute(z.set, r)
+			z_write_attr(b, text, has)
+			fmt.sbprintf(b, "|%d", z_mask_of(vt.ref_raw_embedding(z.set, r)))
+		}
+	case "ZG":
+		a := z_access(z, nat(fields[1]))
+		v, _ := vt.view_open(z.set, &a, &z.sc)
+		clear(&z.refs)
+		vt.view_range(&v, z_bound(fields[2]), z_bound(fields[3]), int(integer(fields[4])), &z.refs)
+		strings.write_string(b, "ZG|")
+		z_refs(b, z.set, z.refs[:])
+	case "ZQ":
+		a := z_access(z, nat(fields[1]))
+		v, _ := vt.view_open(z.set, &a, &z.sc)
+		req := vt.Search_Request{count = nat(fields[4]), ef = 1000, truth = fields[5] == "1"}
+		if fields[2] == "v" {
+			z_vector(word(fields[3]), x[:])
+			req.kind = .Vector
+			req.vector = x[:]
+		} else {
+			req.kind = .Element
+			req.element = z_name(fields[3])
+		}
+		if fields[6] != "-" {
+			req.filter = fmt.tprintf(".a >= %s", fields[6][1:])
+			req.use_filter = true
+		}
+		if fields[7] != "-" {
+			req.filter_ef = nat(fields[7][1:])
+		}
+		if fields[8] != "-" {
+			req.epsilon = f64(nat(fields[8][1:])) / 64
+			req.use_epsilon = true
+		}
+		clear(&z.hits)
+		f := vt.view_search(&v, &req, &z.sc, &z.hits)
+		if f.err == .Element_Not_Found {
+			strings.write_string(b, "ZQ|notfound")
+		} else {
+			assert(f.err == .None)
+			strings.write_string(b, "ZQ|ok|")
+			z_hits(b, z.set, z.hits[:])
+		}
+	case "ZM":
+		a := z_access(z, nat(fields[1]))
+		v, _ := vt.view_open(z.set, &a, &z.sc)
+		clear(&z.refs)
+		switch fields[2] {
+		case "m":
+			if r, ok := vt.view_random_member(&v); ok {
+				append(&z.refs, r)
+			}
+		case "d":
+			vt.view_random_distinct(&v, nat(fields[3]), &z.refs)
+		case:
+			vt.view_random_repeats(&v, nat(fields[3]), &z.refs)
+		}
+		strings.write_string(b, "ZM|")
+		z_refs(b, z.set, z.refs[:])
+	case "ZK":
+		a := z_access(z, nat(fields[1]))
+		v, _ := vt.view_open(z.set, &a, &z.sc)
+		name := z_name(fields[2])
+		if !vt.view_links(&v, name, &z.sc, &z.links) {
+			strings.write_string(b, "ZK|-")
+		} else {
+			self, _ := vt.view_find(&v, name)
+			if vt.ref_part(z.set, self).mode != .Flat {
+				strings.write_string(b, "ZK|graph")
+			} else {
+				assert(len(z.links.ends) == 1)
+				strings.write_string(b, "ZK|")
+				if len(z.links.refs) == 0 {
+					strings.write_byte(b, '-')
+				}
+				for r, i in z.links.refs {
+					if i > 0 {
+						strings.write_byte(b, ',')
+					}
+					z_write_name(b, vt.ref_name(z.set, r))
+					fmt.sbprintf(b, ":%d", z_score(f64(vt.ref_link_score(z.set, self, r))))
+				}
+			}
+		}
+	case "ZO":
+		s := z.set
+		switch fields[1] {
+		case "add":
+			z_vector(word(fields[3]), x[:])
+			text, set := z_attr_text(fields[4])
+			req := vt.Add_Request{name = z_name(fields[2]), vector = x[:], quant = .BIN, attr = transmute([]u8)text, set_attr = set}
+			added, f := vt.add(s, &req, &z.sc)
+			assert(f.err == .None)
+			strings.write_string(b, "ZO|add|")
+			z_bit(b, added)
+		case "rem":
+			removed, emptied, f := vt.remove(s, z_name(fields[2]), &z.sc)
+			assert(f.err == .None)
+			strings.write_string(b, "ZO|rem|")
+			z_bit(b, removed)
+			strings.write_byte(b, '|')
+			z_bit(b, emptied)
+		case "set":
+			text, _ := z_attr_text(fields[3])
+			found, err := vt.set_attribute(s, z_name(fields[2]), transmute([]u8)text)
+			assert(err == .None)
+			strings.write_string(b, "ZO|set|")
+			z_bit(b, found)
+		case "card":
+			fmt.sbprintf(b, "ZO|card|%d", vt.card(s))
+		case "info":
+			info := vt.info(s)
+			fmt.sbprintf(b, "ZO|info|%d|%d|%d", info.size, info.attributes_count, info.max_node_uid)
+		case "find":
+			slot, ok := vt.find(s, z_name(fields[2]))
+			if !ok {
+				strings.write_string(b, "ZO|find|0")
+			} else {
+				strings.write_string(b, "ZO|find|1|")
+				text, has := vt.element_attribute(s, slot)
+				z_write_attr(b, text, has)
+				fmt.sbprintf(b, "|%d", z_mask_of(vt.raw_embedding(s, slot)))
+			}
+		case "range":
+			clear(&z.slots)
+			vt.lex_range(s, {kind = .Min}, {kind = .Max}, -1, &z.slots)
+			strings.write_string(b, "ZO|range|")
+			if len(z.slots) == 0 {
+				strings.write_byte(b, '-')
+			}
+			for slot, i in z.slots {
+				if i > 0 {
+					strings.write_byte(b, ',')
+				}
+				z_write_name(b, vt.element_name(s, slot))
+			}
+		case "sim":
+			z_vector(word(fields[2]), x[:])
+			req := vt.Search_Request{kind = .Vector, vector = x[:], count = nat(fields[3]), truth = true}
+			if fields[4] != "-" {
+				req.filter = fmt.tprintf(".a >= %s", fields[4][1:])
+				req.use_filter = true
+			}
+			clear(&z.hits)
+			f := vt.search(s, &req, &z.sc, &z.hits)
+			assert(f.err == .None)
+			strings.write_string(b, "ZO|sim|")
+			if len(z.hits) == 0 {
+				strings.write_byte(b, '-')
+			}
+			for h, i in z.hits {
+				if i > 0 {
+					strings.write_byte(b, ',')
+				}
+				z_write_name(b, vt.element_name(s, h.slot))
+				fmt.sbprintf(b, ":%d", z_score(h.score))
+			}
+		case:
+			panic("invalid ZO line")
+		}
+	case:
+		panic("invalid case line")
+	}
+	free_all(context.temp_allocator)
+}
+
 main :: proc() {
 	assert(len(os.args) == 2)
 	input, err := os.read_entire_file(os.args[1], context.allocator)
@@ -381,6 +829,8 @@ main :: proc() {
 	}
 	idbuf := make([]u32, 1 << 16)
 	defer delete(idbuf)
+	zs: Z_State
+	defer z_reset(&zs)
 	b := strings.builder_make()
 	defer strings.builder_destroy(&b)
 	for line in lines {
@@ -737,7 +1187,7 @@ main :: proc() {
 			strings.write_string(&b, "XS|")
 			write_heap(&b, out[:n])
 		case:
-			panic("invalid case line")
+			z_step(&zs, fields, &b)
 		}
 		if emit {
 			fmt.println(strings.to_string(b))

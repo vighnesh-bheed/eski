@@ -29,6 +29,7 @@ Hit :: struct {
 	score: f64,
 	seq:   u64,
 	slot:  u32,
+	part:  u32,
 }
 
 Filter :: struct {
@@ -40,8 +41,9 @@ Filter :: struct {
 }
 
 Accept_Context :: struct {
-	s:      Vset,
+	part:   ^Partition,
 	filter: ^Filter,
+	shadow: []u32,
 }
 
 hit_better :: proc(a, b: Hit) -> bool {
@@ -59,8 +61,8 @@ hit_better :: proc(a, b: Hit) -> bool {
 	return a.slot < b.slot
 }
 
-make_hit :: #force_inline proc "contextless" (s: Vset, q: vmath.Query, slot: u32) -> Hit {
-	return Hit{score = vmath.arena_query_score(&s.arena, q, slot), seq = s.elements[slot].seq, slot = slot}
+make_hit :: #force_inline proc "contextless" (p: ^Partition, q: vmath.Query, slot: u32) -> Hit {
+	return Hit{score = vmath.arena_query_score(&p.arena, q, slot), seq = p.elements[slot].seq, slot = slot, part = p.id}
 }
 
 build_query :: proc(s: Vset, req: ^Search_Request, sc: ^Scratch) -> (q: vmath.Query, f: Failure) {
@@ -160,7 +162,7 @@ filter_accept :: proc(f: ^Filter, attr: ^vfilter.Attribute) -> bool {
 
 accept_hook :: proc(ctx: rawptr, slot: u32) -> bool {
 	c := (^Accept_Context)(ctx)
-	return filter_accept(c.filter, &c.s.elements[slot].attr)
+	return filter_accept(c.filter, &c.part.elements[slot].attr)
 }
 
 hit_worse :: #force_inline proc(a, b: Hit) -> bool {
@@ -205,17 +207,21 @@ heap_push_bounded :: proc(h: ^[dynamic]Hit, x: Hit, k: int) {
 }
 
 exact_scan :: proc(s: Vset, q: vmath.Query, k: int, accept: ^Accept_Context, sc: ^Scratch, out: ^[dynamic]Hit) -> Failure {
+	return part_exact_scan(&s.core, q, k, accept, sc, out)
+}
+
+part_exact_scan :: proc(p: ^Partition, q: vmath.Query, k: int, accept: ^Accept_Context, sc: ^Scratch, out: ^[dynamic]Hit) -> Failure {
 	heap := &sc.hits
 	clear(heap)
 	if reserve(heap, k) != nil {
 		return failure(.Out_Of_Memory)
 	}
-	for i in 0 ..< s.count {
-		slot := s.order[i]
-		if accept != nil && !filter_accept(accept.filter, &s.elements[slot].attr) {
+	for i in 0 ..< p.count {
+		slot := p.order[i]
+		if accept != nil && !filter_accept(accept.filter, &p.elements[slot].attr) {
 			continue
 		}
-		heap_push_bounded(heap, make_hit(s, q, slot), k)
+		heap_push_bounded(heap, make_hit(p, q, slot), k)
 	}
 	start := len(out)
 	if reserve(out, start + len(heap)) != nil {
@@ -244,7 +250,7 @@ search :: proc(s: Vset, req: ^Search_Request, scratch: ^Scratch, out: ^[dynamic]
 	}
 	filter: Filter
 	defer filter_destroy(&filter, sc)
-	actx := Accept_Context{s = s, filter = &filter}
+	actx := Accept_Context{part = &s.core, filter = &filter}
 	accept: ^Accept_Context
 	if req.use_filter {
 		if f = filter_compile(&filter, req.filter, sc); f.err != .None {
@@ -285,27 +291,34 @@ search :: proc(s: Vset, req: ^Search_Request, scratch: ^Scratch, out: ^[dynamic]
 }
 
 graph_search :: proc(s: Vset, q: vmath.Query, k: int, search_ef: int, accept: ^Accept_Context, budget: int, sc: ^Scratch, out: ^[dynamic]Hit) -> Failure {
-	cands, ok := scratch_candidates(sc, k)
-	if !ok {
-		return failure(.Out_Of_Memory)
-	}
-	ef := search_ef if search_ef > 0 else SEARCH_EF_DEFAULT
-	aq := vmath.Arena_Query{arena = &s.arena, query = q}
-	n: int
-	err: hnsw.Error
-	if accept != nil {
-		n, _, err = hnsw.search_filtered(&s.graph, &sc.graph, vmath.arena_query_hook, &aq, k, ef, accept_hook, accept, budget, cands, vmath.arena_batch_hook)
-	} else {
-		n, err = hnsw.search(&s.graph, &sc.graph, vmath.arena_query_hook, &aq, k, ef, cands, vmath.arena_batch_hook)
-	}
-	if err != .None {
-		return failure(.Out_Of_Memory)
+	n, f := part_graph_candidates(&s.core, q, k, search_ef, accept, accept_hook, budget, sc)
+	if f.err != .None {
+		return f
 	}
 	start := len(out)
 	reserve(out, start + n)
-	for c in cands[:n] {
-		append(out, make_hit(s, q, c.id))
+	for c in sc.candidates[:n] {
+		append(out, make_hit(&s.core, q, c.id))
 	}
 	slice.sort_by(out[start:], hit_better)
 	return {}
+}
+
+part_graph_candidates :: proc(p: ^Partition, q: vmath.Query, k: int, search_ef: int, actx: rawptr, accept: hnsw.Accept_Proc, budget: int, sc: ^Scratch) -> (n: int, f: Failure) {
+	cands, ok := scratch_candidates(sc, k)
+	if !ok {
+		return 0, failure(.Out_Of_Memory)
+	}
+	ef := search_ef if search_ef > 0 else SEARCH_EF_DEFAULT
+	aq := vmath.Arena_Query{arena = &p.arena, query = q}
+	err: hnsw.Error
+	if actx != nil {
+		n, _, err = hnsw.search_filtered(&p.graph, &sc.graph, vmath.arena_query_hook, &aq, k, ef, accept, actx, budget, cands, vmath.arena_batch_hook)
+	} else {
+		n, err = hnsw.search(&p.graph, &sc.graph, vmath.arena_query_hook, &aq, k, ef, cands, vmath.arena_batch_hook)
+	}
+	if err != .None {
+		return 0, failure(.Out_Of_Memory)
+	}
+	return n, {}
 }

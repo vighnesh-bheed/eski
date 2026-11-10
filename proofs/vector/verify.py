@@ -15,7 +15,9 @@ from fractions import Fraction
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from kernel_audit import audit as audit_kernel
+from labelled import labelled_corpus
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = Path(__file__).resolve().parent
@@ -31,6 +33,10 @@ AREAS = {
     'graph': ['Graph', 'Width', 'Twin'],
     'arena': ['Arena'],
     'filter': ['Filter'],
+    'merge': ['Merge'],
+    'resolution': ['Resolve'],
+    'independence': ['Partition'],
+    'compatibility': ['Plain'],
 }
 PROOF_ONLY = ('filter',)
 
@@ -1124,6 +1130,9 @@ def corpus():
             pool = [(2 ** i, 0) for i in range(12)] + [(-(2 ** i), 0) for i in range(12)]
         index_session((2, 3)[session % 2], (1, 1, 1, 2)[(session // 2) % 4], pool, rng.randrange(60, 90), 50)
 
+    labelled_corpus(rng, emit, stats)
+    assert stats['refusals'] > 0 and stats['forced_copies'] > 0 and stats['hidden_bursts'] > 0
+    assert stats['conversions'] > 0 and stats['graph_searches'] > 0 and stats['tied_results'] > 0
     stats['rows'] = len(expected)
     assert stats['non_orthogonal_shapes'] > 0 and stats['epoch_wraps'] > 0 and stats['dirty_padding_pairs'] > 0
     assert stats['half_way_components'] > 0 and stats['heap_replacements'] > 0 and stats['visited_natural_wraps'] > 0
@@ -1194,6 +1203,24 @@ def build(output, lean_bin, odin_path):
     return PACKAGE / '.lake/build/bin/vector_model', output / 'odin_bridge', axioms, kernel, versions, tools
 
 
+def tied_pair(row):
+    body = row.split('|')[-1]
+    items = body.split(',')
+    for i in range(len(items) - 1):
+        a, b = items[i].rsplit(':', 1), items[i + 1].rsplit(':', 1)
+        if len(a) == 2 and len(b) == 2 and a[1] == b[1] and a[0] != b[0]:
+            return i
+    return None
+
+
+def swap_tied(row):
+    head, _, body = row.rpartition('|')
+    items = body.split(',')
+    i = tied_pair(row)
+    items[i], items[i + 1] = items[i + 1], items[i]
+    return (head + '|' if head else '') + ','.join(items)
+
+
 def negative_controls(expected):
     cases = {'empty': '', 'truncated': '\n'.join(expected[:-1]) + '\n',
              'extra': '\n'.join(expected + [expected[0]]) + '\n'}
@@ -1225,6 +1252,15 @@ def negative_controls(expected):
         'overflow_codes': ('Q|', lambda r: r.split('|')[1] != '0/1' and set(r.split('|')[2].split(',')) == {'0'},
                            lambda r: '|'.join(r.split('|')[:2] + ['127' + r.split('|')[2][1:]] + r.split('|')[3:])),
         'special_round': ('R|0', lambda r: True, lambda r: 'R|127'),
+        'merge_name_order': ('ZQ|ok|', lambda r: tied_pair(r) is not None, swap_tied),
+        'merge_truncation': ('ZQ|ok|', lambda r: r.count(',') > 0, lambda r: r.rsplit(',', 1)[0]),
+        'refusal_label': ('ZA|0|0|0|0|inuse|', lambda r: True, lambda r: r[:-1] + str((int(r[-1]) + 1) % 10)),
+        'view_size': ('ZC|', lambda r: True, lambda r: 'ZC|' + str(int(r.split('|')[1]) + 1) + r[len('ZC|' + r.split('|')[1]):]),
+        'pinned_mode': ('ZC|', lambda r: ':pinned:' in r, lambda r: r.replace(':pinned:', ':flat:', 1)),
+        'graph_mode': ('ZC|', lambda r: ':graph:' in r, lambda r: r.replace(':graph:', ':flat:', 1)),
+        'resolved_label': ('ZF|', lambda r: r != 'ZF|-', lambda r: 'ZF|-'),
+        'sample_order': ('ZM|', lambda r: r.count(',') > 0, lambda r: 'ZM|' + ','.join(reversed(r[3:].split(',')))),
+        'plain_seq_order': ('ZO|sim|', lambda r: tied_pair(r[7:]) is not None, lambda r: 'ZO|sim|' + swap_tied(r[7:])),
     }
     for name, (prefix, accept, mutate) in semantic.items():
         index = next((i for i, row in enumerate(expected) if row.startswith(prefix) and (accept(row) or
@@ -1281,7 +1317,9 @@ def run():
                    stats['binary_vectors'] + stats['hamming_pairs'] + stats['raw_word_pairs'],
                    'heaps': stats['heap_operations'], 'visited': stats['visited_operations'],
                    'graph': stats['sort_rows'] + stats['width_rows'] + stats['index_sessions'] + stats['index_operations'],
-                   'arena': stats['live_norm_rows'] + stats['arena_sessions'] + stats['arena_operations'], 'filter': 0}
+                   'arena': stats['live_norm_rows'] + stats['arena_sessions'] + stats['arena_operations'], 'filter': 0,
+                   'merge': stats['merge_rows'], 'resolution': stats['resolution_rows'],
+                   'independence': stats['independence_rows'], 'compatibility': stats['compatibility_rows']}
     if any(comparisons[area] for area in PROOF_ONLY) or any(not comparisons[area] for area in AREAS if area not in PROOF_ONLY):
         raise AssertionError('comparison evidence does not match the proof-only areas')
     area_evidence = {area: {'theorems': sorted(name for name in axioms

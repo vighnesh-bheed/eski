@@ -2,14 +2,59 @@ package vsettype
 
 import "base:intrinsics"
 import "base:runtime"
+import lbl "../label"
 
 GOLDEN_GAMMA :: u64(0x9E3779B97F4A7C15)
+STREAM_BASE :: u64(0xBB67AE8584CAA73B)
 
 vset_uid_next: u64
 random_state: u64 = 0x6A09E667F3BCC909
+STREAM_CHUNK :: 256
+stream_chunks: [(lbl.LABEL_LIMIT + STREAM_CHUNK) / STREAM_CHUNK][^]u64
 
 next_uid :: proc "contextless" () -> u64 {
 	return intrinsics.atomic_add_explicit(&vset_uid_next, 1, .Relaxed)
+}
+
+stream_seed :: #force_inline proc "contextless" (id: lbl.Id) -> u64 {
+	return mix64(STREAM_BASE + u64(id) * GOLDEN_GAMMA) | 1
+}
+
+label_stream :: proc(id: lbl.Id) -> ^u64 {
+	c := int(id) / STREAM_CHUNK
+	if c >= len(stream_chunks) {
+		return nil
+	}
+	if stream_chunks[c] == nil {
+		p := runtime.heap_alloc(STREAM_CHUNK * size_of(u64), false)
+		if p == nil {
+			return nil
+		}
+		chunk := ([^]u64)(p)
+		for i in 0 ..< STREAM_CHUNK {
+			chunk[i] = stream_seed(lbl.Id(c * STREAM_CHUNK + i))
+		}
+		stream_chunks[c] = chunk
+	}
+	return &stream_chunks[c][int(id) % STREAM_CHUNK]
+}
+
+stream_next :: #force_inline proc "contextless" (state: ^u64) -> u64 {
+	state^ += GOLDEN_GAMMA
+	return mix64(state^)
+}
+
+stream_below :: proc "contextless" (state: ^u64, n: u64) -> u64 {
+	if n <= 1 {
+		return 0
+	}
+	floor := (u64(0) - n) % n
+	for {
+		v := stream_next(state)
+		if v >= floor {
+			return v % n
+		}
+	}
 }
 
 

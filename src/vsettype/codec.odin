@@ -104,7 +104,14 @@ header_size :: proc "contextless" (s: Vset) -> int {
 	return 3 + 1 + 1 + varint_size(u64(s.dim)) + varint_size(u64(s.input_dim)) + varint_size(u64(s.graph.m)) + varint_size(u64(s.count)) + varint_size(s.graph.node_uid)
 }
 
+codec_refuses :: #force_inline proc "contextless" (s: Vset) -> bool {
+	return s.lab != nil
+}
+
 serialized_size :: proc "contextless" (s: Vset) -> int {
+	if codec_refuses(s) {
+		return 0
+	}
 	n := header_size(s)
 	for i in 0 ..< s.count {
 		n += element_encoded_size(s, s.order[i])
@@ -113,6 +120,9 @@ serialized_size :: proc "contextless" (s: Vset) -> int {
 }
 
 serialize :: proc(s: Vset, sink: Sink) -> int {
+	if codec_refuses(s) {
+		return 0
+	}
 	enc := Encoder{sink = sink}
 	e := &enc
 	magic := CODEC_MAGIC
@@ -159,6 +169,9 @@ byte_sink_write :: proc(ctx: rawptr, data: []u8) {
 }
 
 serialize_bytes :: proc(s: Vset, allocator := context.allocator) -> (out: []u8, err: runtime.Allocator_Error) {
+	if codec_refuses(s) {
+		return nil, .Mode_Not_Implemented
+	}
 	out = make([]u8, serialized_size(s), allocator) or_return
 	b := Byte_Sink{out = out}
 	serialize(s, Sink{ctx = &b, write = byte_sink_write})
@@ -295,18 +308,18 @@ reserve_elements :: proc(s: Vset, count: int) -> bool {
 	if vmath.arena_reserve(&s.arena, count) != nil {
 		return false
 	}
-	p := block_resize(&s.ledger, s.elements, s.element_cap * size_of(Element), count * size_of(Element), align_of(Element), true)
+	p := block_resize(&s.ledger, s.elements, int(s.element_cap) * size_of(Element), count * size_of(Element), align_of(Element), true)
 	if p == nil {
 		return false
 	}
 	s.elements = ([^]Element)(p)
-	s.element_cap = count
-	q := block_resize(&s.ledger, s.order, s.order_cap * size_of(u32), count * size_of(u32), align_of(u32), false)
+	s.element_cap = u32(count)
+	q := block_resize(&s.ledger, s.order, int(s.order_cap) * size_of(u32), count * size_of(u32), align_of(u32), false)
 	if q == nil {
 		return false
 	}
 	s.order = ([^]u32)(q)
-	s.order_cap = count
+	s.order_cap = u32(count)
 	return true
 }
 
@@ -428,7 +441,7 @@ decode_one :: proc(s: Vset, name: []u8, vector: []u8, norm: f32, range: f32, tex
 	e^ = Element{name = name_copy, len = u32(len(name)), seq = seq}
 	replace_attribute(s, e, attr)
 	rax.insert(s.names, name, rawptr(uintptr(slot) + 1))
-	order_append(s, slot)
+	order_append(&s.core, slot)
 	refresh_prefetch(s)
 	return .None
 }

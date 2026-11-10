@@ -96,7 +96,7 @@ check_invariants :: proc(t: ^testing.T, s: Vset) -> bool {
 			attrs += 1
 		}
 	}
-	if attrs != s.attributes {
+	if attrs != int(s.attributes) {
 		testing.expectf(t, false, "attributes %d counted %d", s.attributes, attrs)
 		ok = false
 	}

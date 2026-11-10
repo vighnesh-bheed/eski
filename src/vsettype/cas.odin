@@ -2,6 +2,7 @@ package vsettype
 
 import "base:runtime"
 import "../hnsw"
+import lbl "../label"
 import "../vmath"
 
 CACHE_EMPTY :: max(u32)
@@ -206,6 +207,8 @@ Cas_Plan :: struct {
 	stored:    []f32,
 	cache:     Distance_Cache,
 	allocator: runtime.Allocator,
+	label:     lbl.Id,
+	part:      u32,
 	ready:     bool,
 }
 
@@ -258,26 +261,34 @@ cas_prepare :: proc(s: Vset, req: ^Add_Request, plan: ^Cas_Plan, scratch: ^Scrat
 		return failure(.Out_Of_Memory)
 	}
 	copy(stored, projected)
-	if s.count == 0 {
+	plan.part = PART_NONE
+	if s.lab != nil {
 		return {}
 	}
-	buf, got := scratch_query(sc, vmath.query_bytes(&s.arena))
+	plan.part = 0
+	cas_record(&s.core, plan, stored, request_ef(req), sc)
+	return {}
+}
+
+cas_record :: proc(p: ^Partition, plan: ^Cas_Plan, stored: []f32, ef: int, sc: ^Scratch) {
+	if p.count == 0 {
+		return
+	}
+	buf, got := scratch_query(sc, vmath.query_bytes(&p.arena))
 	if !got {
-		return {}
+		return
 	}
-	q, encoded := vmath.query_encode(&s.arena, stored, buf)
+	q, encoded := vmath.query_encode(&p.arena, stored, buf)
 	if !encoded {
-		return {}
+		return
 	}
-	ef := request_ef(req)
 	cands, room := scratch_candidates(sc, ef)
 	if !room {
-		return {}
+		return
 	}
-	cache_reserve(&plan.cache, min(ef * s.graph.m, 4 * s.count))
-	probe := Cache_Probe{aq = vmath.Arena_Query{arena = &s.arena, query = q}, cache = &plan.cache}
-	hnsw.search(&s.graph, &sc.graph, recording_query, &probe, ef, ef, cands, recording_batch)
-	return {}
+	cache_reserve(&plan.cache, min(ef * p.graph.m, 4 * p.count))
+	probe := Cache_Probe{aq = vmath.Arena_Query{arena = &p.arena, query = q}, cache = &plan.cache}
+	hnsw.search(&p.graph, &sc.graph, recording_query, &probe, ef, ef, cands, recording_batch)
 }
 
 cas_commit :: proc(s: Vset, plan: ^Cas_Plan, scratch: ^Scratch = nil) -> (added: bool, f: Failure) {
@@ -305,4 +316,57 @@ cas_commit :: proc(s: Vset, plan: ^Cas_Plan, scratch: ^Scratch = nil) -> (added:
 		stored = projected
 	}
 	return apply_add(s, req, stored, sc, &plan.cache)
+}
+
+cas_prepare_at :: proc(s: Vset, a: ^Access, req: ^Add_Request, plan: ^Cas_Plan, scratch: ^Scratch = nil, allocator := context.allocator) -> Failure {
+	if f := cas_prepare(s, req, plan, scratch, allocator); f.err != .None || !plan.ready {
+		return f
+	}
+	plan.label = a.label
+	plan.part = PART_NONE
+	if s.lab == nil && a.label != lbl.BOTTOM_ID {
+		return {}
+	}
+	if s.lab == nil {
+		plan.part = 0
+		return {}
+	}
+	p := part_at_label(s, a.label)
+	if p == nil || p.mode == .Flat {
+		return {}
+	}
+	plan.part = p.id
+	guard: Scratch_Guard
+	sc := guard_begin(&guard, scratch)
+	defer guard_end(&guard)
+	cas_record(p, plan, plan.stored, request_ef(req), sc)
+	return {}
+}
+
+cas_commit_at :: proc(s: Vset, a: ^Access, plan: ^Cas_Plan, scratch: ^Scratch = nil) -> (ch: Change, f: Failure) {
+	if !plan.ready {
+		return ch, failure(.Invalid_Parameter)
+	}
+	req := &plan.request
+	if plan.set != s || plan.uid != s.uid {
+		if f = check_add(s, req); f.err != .None {
+			return ch, f
+		}
+		cache_clear(&plan.cache)
+	} else if plan.version != s.version {
+		cache_clear(&plan.cache)
+	}
+	guard: Scratch_Guard
+	sc := guard_begin(&guard, scratch)
+	defer guard_end(&guard)
+	stored := plan.stored
+	if plan.set != s {
+		projected, ok := stored_vector(s, req.vector, sc)
+		if !ok {
+			return ch, failure(.Out_Of_Memory)
+		}
+		stored = projected
+	}
+	part := plan.part if plan.set == s && plan.label == a.label else PART_NONE
+	return apply_add_at(s, a, req, stored, sc, &plan.cache, part)
 }

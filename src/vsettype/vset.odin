@@ -2,6 +2,7 @@ package vsettype
 
 import "base:runtime"
 import "../hnsw"
+import lbl "../label"
 import "../rax"
 import "../vfilter"
 import "../vmath"
@@ -28,23 +29,37 @@ Element :: struct {
 	seq:  u64,
 }
 
-Vset_Object :: struct {
-	ledger:      Ledger,
+Part_Mode :: enum u8 {
+	Pinned,
+	Flat,
+	Graph,
+}
+
+Partition :: struct {
 	arena:       vmath.Arena,
 	graph:       hnsw.Index,
-	names:       ^rax.Rax,
 	elements:    [^]Element,
-	element_cap: int,
 	order:       [^]u32,
-	order_cap:   int,
+	element_cap: u32,
+	order_cap:   u32,
 	count:       int,
-	attributes:  int,
-	uid:         u64,
-	version:     u64,
-	dim:         int,
-	input_dim:   int,
+	attributes:  u32,
+	id:          u32,
+	label:       lbl.Id,
 	quant:       vmath.Elem,
 	prefetch:    bool,
+	mode:        Part_Mode,
+}
+
+Vset_Object :: struct {
+	ledger:     Ledger,
+	using core: Partition,
+	names:      ^rax.Rax,
+	uid:        u64,
+	version:    u64,
+	dim:        int,
+	input_dim:  int,
+	lab:        ^Labelled,
 }
 
 Vset :: ^Vset_Object
@@ -111,8 +126,28 @@ allocator_of :: #force_inline proc "contextless" (s: Vset) -> runtime.Allocator 
 }
 
 graph_distance :: proc(ctx: rawptr, a, b: u32) -> f32 {
-	s := (^Vset_Object)(ctx)
-	return vmath.arena_distance(&s.arena, a, b)
+	p := (^Partition)(ctx)
+	return vmath.arena_distance(&p.arena, a, b)
+}
+
+graph_params :: proc "contextless" (m: int, seed: u64) -> hnsw.Params {
+	gp := hnsw.params_default()
+	gp.m = m
+	gp.ef_construction = EF_DEFAULT
+	gp.seed = seed
+	return gp
+}
+
+part_init :: proc(p: ^Partition, quant: vmath.Elem, dim: int, m: int, seed: u64, alloc: runtime.Allocator) -> Error {
+	p.quant = quant
+	if vmath.arena_init(&p.arena, quant, .Cosine, dim, alloc) != nil {
+		return .Out_Of_Memory
+	}
+	if hnsw.init(&p.graph, graph_params(m, seed), graph_distance, p, alloc) != .None {
+		vmath.arena_destroy(&p.arena)
+		return .Invalid_Parameter
+	}
+	return .None
 }
 
 create :: proc(p: Params) -> (s: Vset, err: Error) {
@@ -126,20 +161,9 @@ create :: proc(p: Params) -> (s: Vset, err: Error) {
 	s.ledger.bytes = usable_size(s)
 	s.dim = p.dim
 	s.input_dim = p.input_dim
-	s.quant = quant_elem(p.quant)
-	alloc := allocator_of(s)
-	if vmath.arena_init(&s.arena, s.quant, .Cosine, p.dim, alloc) != nil {
+	if err = part_init(&s.core, quant_elem(p.quant), p.dim, p.m, p.seed if p.seed != 0 else rand64(), allocator_of(s)); err != .None {
 		runtime.heap_free(s)
-		return nil, .Out_Of_Memory
-	}
-	gp := hnsw.params_default()
-	gp.m = p.m
-	gp.ef_construction = EF_DEFAULT
-	gp.seed = p.seed if p.seed != 0 else rand64()
-	if hnsw.init(&s.graph, gp, graph_distance, s, alloc) != .None {
-		vmath.arena_destroy(&s.arena)
-		runtime.heap_free(s)
-		return nil, .Invalid_Parameter
+		return nil, err
 	}
 	s.names = rax.create()
 	s.uid = next_uid()
@@ -147,28 +171,43 @@ create :: proc(p: Params) -> (s: Vset, err: Error) {
 }
 
 element_release :: proc(s: Vset, e: ^Element) {
-	alloc := allocator_of(s)
+	part_element_release(s, &s.core, e)
+}
+
+part_element_release :: proc(s: Vset, p: ^Partition, e: ^Element) {
 	if e.name != nil {
-		block_free(&s.ledger, e.name)
+		part_free(s, p, e.name)
 	}
 	if e.attr.blob != nil {
-		vfilter.attribute_destroy(&e.attr, alloc)
-		s.attributes -= 1
+		vfilter.attribute_destroy(&e.attr, part_allocator(s, p))
+		p.attributes -= 1
 	}
 	e^ = {}
+}
+
+part_release_all :: proc(s: Vset, p: ^Partition) {
+	for i in 0 ..< p.count {
+		part_element_release(s, p, &p.elements[p.order[i]])
+	}
+	part_free(s, p, p.elements)
+	part_free(s, p, p.order)
+	p.elements = nil
+	p.order = nil
+	p.element_cap = 0
+	p.order_cap = 0
+	p.count = 0
+	hnsw.destroy(&p.graph)
+	vmath.arena_destroy(&p.arena)
 }
 
 destroy :: proc(s: Vset) {
 	if s == nil {
 		return
 	}
-	for i in 0 ..< s.count {
-		element_release(s, &s.elements[s.order[i]])
+	if s.lab != nil {
+		labelled_destroy(s)
 	}
-	block_free(&s.ledger, s.elements)
-	block_free(&s.ledger, s.order)
-	hnsw.destroy(&s.graph)
-	vmath.arena_destroy(&s.arena)
+	part_release_all(s, &s.core)
 	rax.destroy(s.names)
 	runtime.heap_free(s)
 }
@@ -180,13 +219,21 @@ ledger_balance :: proc "contextless" (s: Vset) -> int {
 	return s.ledger.bytes - usable_size(s) - block_bytes(s)
 }
 
-block_bytes :: proc "contextless" (s: Vset) -> int {
-	n := usable_size(s.elements) + usable_size(s.order) + usable_size(s.arena.block)
-	n += usable_size(s.graph.links0) + usable_size(s.graph.degree0) + usable_size(s.graph.levels) + usable_size(s.graph.upper_at)
-	n += usable_size(s.graph.upper) + usable_size(s.graph.twin_link)
-	for i in 0 ..< s.count {
-		e := &s.elements[s.order[i]]
+part_block_bytes :: proc "contextless" (p: ^Partition) -> int {
+	n := usable_size(p.elements) + usable_size(p.order) + usable_size(p.arena.block)
+	n += usable_size(p.graph.links0) + usable_size(p.graph.degree0) + usable_size(p.graph.levels) + usable_size(p.graph.upper_at)
+	n += usable_size(p.graph.upper) + usable_size(p.graph.twin_link)
+	for i in 0 ..< p.count {
+		e := &p.elements[p.order[i]]
 		n += usable_size(e.name) + usable_size(raw_data(e.attr.blob))
+	}
+	return n
+}
+
+block_bytes :: proc "contextless" (s: Vset) -> int {
+	n := part_block_bytes(&s.core)
+	if s.lab != nil {
+		n += labelled_block_bytes(s)
 	}
 	return n
 }
@@ -199,7 +246,13 @@ memory_usage :: proc "contextless" (s: Vset) -> int {
 }
 
 card :: #force_inline proc "contextless" (s: Vset) -> int {
-	return 0 if s == nil else s.count
+	if s == nil {
+		return 0
+	}
+	if s.lab != nil {
+		return s.lab.total
+	}
+	return s.count
 }
 
 dim :: #force_inline proc "contextless" (s: Vset) -> int {
@@ -226,7 +279,7 @@ info :: proc "contextless" (s: Vset) -> Info {
 		projection_input_dim = s.input_dim,
 		size = s.count,
 		max_level = s.graph.max_level,
-		attributes_count = s.attributes,
+		attributes_count = int(s.attributes),
 		vset_uid = s.uid,
 		max_node_uid = s.graph.node_uid,
 	}
@@ -237,8 +290,17 @@ element_name :: #force_inline proc "contextless" (s: Vset, slot: u32) -> []u8 {
 	return e.name[:e.len]
 }
 
+part_element_name :: #force_inline proc "contextless" (p: ^Partition, slot: u32) -> []u8 {
+	e := &p.elements[slot]
+	return e.name[:e.len]
+}
+
 element_attribute :: proc "contextless" (s: Vset, slot: u32) -> (text: string, ok: bool) {
-	e := &s.elements[slot]
+	return part_element_attribute(&s.core, slot)
+}
+
+part_element_attribute :: proc "contextless" (p: ^Partition, slot: u32) -> (text: string, ok: bool) {
+	e := &p.elements[slot]
 	if e.attr.blob == nil {
 		return "", false
 	}
@@ -250,7 +312,7 @@ element_seq :: #force_inline proc "contextless" (s: Vset, slot: u32) -> u64 {
 }
 
 find :: proc "contextless" (s: Vset, name: []u8) -> (slot: u32, ok: bool) {
-	if s == nil {
+	if s == nil || s.lab != nil {
 		return NIL_SLOT, false
 	}
 	v, found := rax.find(s.names, name)
@@ -276,58 +338,66 @@ grow_capacity :: #force_inline proc "contextless" (cap: int) -> int {
 }
 
 ensure_slot :: proc(s: Vset) -> Error {
-	if s.count >= SLOT_MAX {
+	return part_ensure_slot(s, &s.core)
+}
+
+part_ensure_slot :: proc(s: Vset, p: ^Partition) -> Error {
+	if p.count >= SLOT_MAX {
 		return .Out_Of_Memory
 	}
-	if s.arena.free == NIL_SLOT && s.arena.high == s.arena.cap {
-		if vmath.arena_reserve(&s.arena, min(grow_capacity(int(s.arena.cap)), SLOT_MAX)) != nil {
+	if p.arena.free == NIL_SLOT && p.arena.high == p.arena.cap {
+		if vmath.arena_reserve(&p.arena, min(grow_capacity(int(p.arena.cap)), SLOT_MAX)) != nil {
 			return .Out_Of_Memory
 		}
 	}
-	if s.graph.free_head == hnsw.NONE && s.graph.slots == s.graph.cap {
-		if hnsw.reserve_capacity(&s.graph, min(grow_capacity(s.graph.cap), SLOT_MAX)) != .None {
+	if p.mode != .Flat && p.graph.free_head == hnsw.NONE && p.graph.slots == p.graph.cap {
+		if hnsw.reserve_capacity(&p.graph, min(grow_capacity(p.graph.cap), SLOT_MAX)) != .None {
 			return .Out_Of_Memory
 		}
 	}
-	high := int(s.arena.high) + 1
-	if high > s.element_cap {
-		cap := max(high, grow_capacity(s.element_cap))
-		p := block_resize(&s.ledger, s.elements, s.element_cap * size_of(Element), cap * size_of(Element), align_of(Element), true)
-		if p == nil {
+	high := int(p.arena.high) + 1
+	if high > int(p.element_cap) {
+		cap := max(high, grow_capacity(int(p.element_cap)))
+		q := part_resize(s, p, p.elements, int(p.element_cap) * size_of(Element), cap * size_of(Element), align_of(Element), true)
+		if q == nil {
 			return .Out_Of_Memory
 		}
-		s.elements = ([^]Element)(p)
-		s.element_cap = cap
+		p.elements = ([^]Element)(q)
+		p.element_cap = u32(cap)
 	}
-	if s.count + 1 > s.order_cap {
-		cap := max(s.count + 1, grow_capacity(s.order_cap))
-		p := block_resize(&s.ledger, s.order, s.order_cap * size_of(u32), cap * size_of(u32), align_of(u32), false)
-		if p == nil {
+	if p.count + 1 > int(p.order_cap) {
+		cap := max(p.count + 1, grow_capacity(int(p.order_cap)))
+		q := part_resize(s, p, p.order, int(p.order_cap) * size_of(u32), cap * size_of(u32), align_of(u32), false)
+		if q == nil {
 			return .Out_Of_Memory
 		}
-		s.order = ([^]u32)(p)
-		s.order_cap = cap
+		p.order = ([^]u32)(q)
+		p.order_cap = u32(cap)
 	}
 	return .None
 }
 
 refresh_prefetch :: proc(s: Vset) {
-	if !s.prefetch && vmath.arena_footprint(&s.arena) >= PREFETCH_ARENA_BYTES {
-		hnsw.set_prefetch(&s.graph, vmath.arena_prefetch_hook, &s.arena)
-		s.prefetch = true
+	part_refresh_prefetch(&s.core)
+}
+
+part_refresh_prefetch :: proc(p: ^Partition) {
+	if !p.prefetch && p.mode != .Flat && vmath.arena_footprint(&p.arena) >= PREFETCH_ARENA_BYTES {
+		hnsw.set_prefetch(&p.graph, vmath.arena_prefetch_hook, &p.arena)
+		p.prefetch = true
 	}
 }
 
-order_append :: #force_inline proc "contextless" (s: Vset, slot: u32) {
-	s.elements[slot].pos = u32(s.count)
-	s.order[s.count] = slot
-	s.count += 1
+order_append :: #force_inline proc "contextless" (p: ^Partition, slot: u32) {
+	p.elements[slot].pos = u32(p.count)
+	p.order[p.count] = slot
+	p.count += 1
 }
 
-order_remove :: #force_inline proc "contextless" (s: Vset, slot: u32) {
-	pos := s.elements[slot].pos
-	last := s.order[s.count - 1]
-	s.order[pos] = last
-	s.elements[last].pos = pos
-	s.count -= 1
+order_remove :: #force_inline proc "contextless" (p: ^Partition, slot: u32) {
+	pos := p.elements[slot].pos
+	last := p.order[p.count - 1]
+	p.order[pos] = last
+	p.elements[last].pos = pos
+	p.count -= 1
 }

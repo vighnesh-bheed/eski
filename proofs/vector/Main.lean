@@ -262,6 +262,207 @@ structure St where
   vis : Visited := visitedInit
   arena : Arena := arenaInit 0
   eng : Option Eng := none
+  ztbl : List Lbl := []
+  zs : Option ZSession := none
+
+
+def parseLbl (s : String) : Except String Lbl :=
+  match s.splitOn ":" with
+  | [a, b, c] => do return ⟨← parseNat a, ← parseNat b, ← parseNat c⟩
+  | _ => .error ("invalid label " ++ s)
+
+def parseName (s : String) : List Nat := if s == "~" then [] else s.toList.map Char.toNat
+
+def parseAttrSpec (s : String) : Except String (Option (Option Nat)) :=
+  if s == "-" then .ok none
+  else if s == "e" then .ok (some none)
+  else if s.startsWith "a" then do return some (some (← parseNat (s.drop 1).toString))
+  else .error ("invalid attribute " ++ s)
+
+def parseOpt (s : String) : Except String (Option Nat) :=
+  if s == "-" then .ok none else do return some (← parseNat (s.drop 1).toString)
+
+def parseBound (s : String) (lower : Bool) : Except String (List Nat → Bool) :=
+  if s == "-" then .ok (fun _ => lower)
+  else if s == "+" then .ok (fun _ => !lower)
+  else
+    let v := parseName (s.drop 1).toString
+    if s.startsWith "[" then
+      .ok (fun n => if lower then nameLe v n else nameLe n v)
+    else if s.startsWith "(" then
+      .ok (fun n => if lower then nameLt v n else nameLt n v)
+    else .error ("invalid bound " ++ s)
+
+def namesText (xs : List SElem) : String := if xs.isEmpty then "-" else String.intercalate "," (xs.map (fun e => showName e.name))
+
+def zsession (st : St) : Except String ZSession :=
+  match st.zs with
+  | some z => .ok z
+  | none => .error "no labelled session"
+
+def zstep (st : St) (fields : List String) : Except String (St × Option String) := do
+  match fields with
+  | "ZT" :: labels =>
+    let tbl ← labels.mapM parseLbl
+    return ({ st with ztbl := tbl, zs := none }, some s!"ZT|{tbl.length}")
+  | ["ZN", f, s, kind, _] =>
+    let f ← parseNat f
+    let s ← parseNat s
+    let parts : Nat → Option SPart :=
+      if kind == "plain" then fun l => if l = 0 then some { mode := .pinned, uid := 0, rng := 0, order := [] } else none
+      else fun _ => none
+    let z : ZSession := ⟨st.ztbl, f, s, ⟨parts, fun _ => [], streamSeed⟩⟩
+    return ({ st with zs := some z }, some "ZN|ok")
+  | ["ZA", lab, name, mask, attr] =>
+    let z ← zsession st
+    let w ← parseNat lab
+    let n := parseName name
+    let v : SVal := ⟨← parseNat mask, ← parseAttrSpec attr⟩
+    let ls := z.st.index n
+    if w ∈ ls then
+      return ({ st with zs := some (z.write ⟨w, .add n v⟩) }, some "ZA|0|0|0|0|none|-")
+    else if visibleOther (simSees z.tbl) w ls then
+      return (st, some s!"ZA|0|0|0|0|inuse|{(resolveL (z.reader w) ls).getD 0}")
+    else
+      let created := (z.st.parts w).isNone
+      return ({ st with zs := some (z.write ⟨w, .add n v⟩) }, some s!"ZA|1|{boolBit created}|0|0|none|-")
+  | ["ZR", lab, name] =>
+    let z ← zsession st
+    let w ← parseNat lab
+    let n := parseName name
+    let ls := z.st.index n
+    if w ∈ ls then
+      let z' := z.write ⟨w, .rem n⟩
+      return ({ st with zs := some z' }, some s!"ZR|1|{boolBit (z'.st.parts w).isNone}|{boolBit z'.allEmpty}|none|-")
+    else if visibleOther (simSees z.tbl) w ls then
+      return (st, some s!"ZR|0|0|0|inuse|{(resolveL (z.reader w) ls).getD 0}")
+    else return (st, some "ZR|0|0|0|none|-")
+  | ["ZE", lab, name, attr] =>
+    let z ← zsession st
+    let w ← parseNat lab
+    let n := parseName name
+    let ls := z.st.index n
+    let v : SVal := ⟨0, ← parseAttrSpec attr⟩
+    if w ∈ ls then
+      return ({ st with zs := some (z.write ⟨w, .set n v⟩) }, some "ZE|1|none|-")
+    else if visibleOther (simSees z.tbl) w ls then
+      return (st, some s!"ZE|0|inuse|{(resolveL (z.reader w) ls).getD 0}")
+    else return (st, some "ZE|0|none|-")
+  | ["ZL", lab] =>
+    let z ← zsession st
+    let w ← parseNat lab
+    let removed := (z.part w).order.length
+    let found := (z.st.parts w).isSome && removed > 0
+    let z' := z.write ⟨w, .drop⟩
+    let removed := if found then removed else 0
+    return ({ st with zs := some z' }, some s!"ZL|{removed}|{boolBit found}|{boolBit found}|{boolBit z'.allEmpty}")
+  | ["ZC", rd] =>
+    let z ← zsession st
+    let vo := z.view (← parseNat rd)
+    let uid := (vo.labels.map (fun l => (z.part l).uid)).foldl (· + ·) 0
+    let parts := vo.labels.map (fun l => let p := z.part l; s!"{l}:{showMode p.mode}:{p.order.length}:{p.uid}")
+    return (st, some s!"ZC|{vo.size}|{vo.attrs}|{uid}|{joinOr parts}")
+  | ["ZF", rd, name] =>
+    let z ← zsession st
+    let r := z.reader (← parseNat rd)
+    let n := parseName name
+    match viewFind r z.st n with
+    | none => return (st, some "ZF|-")
+    | some l =>
+      let e := z.elem l n
+      return (st, some s!"ZF|{l}|{showAttr e.attr}|{e.mask}")
+  | ["ZG", rd, lo, hi, lim] =>
+    let z ← zsession st
+    let r := z.reader (← parseInt rd).toNat
+    let lower ← parseBound lo true
+    let upper ← parseBound hi false
+    let limit ← parseInt lim
+    if limit == 0 || lo == "+" || hi == "-" then return (st, some "ZG|-")
+    let lim := if limit < 0 then none else some limit.toNat
+    let hits := viewRange r z.st z.namesU (fun n => lower n && upper n) lim
+    return (st, some s!"ZG|{if hits.isEmpty then "-" else String.intercalate "," (hits.map (fun h => showName h.1))}")
+  | ["ZQ", rd, kind, arg, count, _, filter, _, eps] =>
+    let z ← zsession st
+    let rd ← parseNat rd
+    let vo := z.view rd
+    let count ← parseNat count
+    let count := if count = 0 then 10 else count
+    let filter ← parseOpt filter
+    let eps ← parseOpt eps
+    let query : Option Nat ← if kind == "v" then pure (some (← parseNat arg)) else
+      match viewFind (z.reader rd) z.st (parseName arg) with
+      | none => pure none
+      | some l => pure (some (z.elem l (parseName arg)).mask)
+    if vo.size = 0 then
+      return (st, some (if kind == "e" then "ZQ|notfound" else "ZQ|ok|-"))
+    match query with
+    | none => return (st, some "ZQ|notfound")
+    | some q => return (st, some s!"ZQ|ok|{showHits (viewSearch z vo q count filter eps)}")
+  | ["ZM", rd, kind, count] =>
+    let z ← zsession st
+    let rd ← parseNat rd
+    let vo := z.view rd
+    let k ← parseNat count
+    let s0 := z.st.stream rd
+    let (refs, s1) :=
+      if kind == "m" then
+        if vo.size = 0 then ([], s0) else
+        let (j, s') := streamBelow s0 vo.size
+        ([viewRefAt z vo j], s')
+      else if kind == "d" then randomDistinct z vo k s0
+      else randomRepeats z vo k s0
+    let z' := { z with st := setStream z.st rd s1 }
+    return ({ st with zs := some z' }, some s!"ZM|{namesText refs}")
+  | ["ZK", rd, name] =>
+    let z ← zsession st
+    let rd ← parseNat rd
+    let vo := z.view rd
+    let n := parseName name
+    match viewFind (z.reader rd) z.st n with
+    | none => return (st, some "ZK|-")
+    | some l =>
+      let p := z.part l
+      if p.mode != .flat then return (st, some "ZK|graph")
+      else return (st, some s!"ZK|{showHits (flatLinks z vo l (z.elem l n))}")
+  | "ZO" :: rest =>
+    let z ← zsession st
+    let p := z.part 0
+    let rebuild : SPart → ZSession := fun q =>
+      { z with st := { z.st with parts := fun l => if l = 0 then some q else z.st.parts l,
+                                  index := fun m => if (simNames q).contains m then [0] else [] } }
+    match rest with
+    | ["add", name, mask, attr] =>
+      let n := parseName name
+      let v : SVal := ⟨← parseNat mask, ← parseAttrSpec attr⟩
+      let added := !(simNames p).contains n
+      let q := plainOp (simOps z.flat z.shrink) simNames (.add n v) p
+      return ({ st with zs := some (rebuild q) }, some s!"ZO|add|{boolBit added}")
+    | ["rem", name] =>
+      let n := parseName name
+      let found := (simNames p).contains n
+      let q := plainOp (simOps z.flat z.shrink) simNames (.rem n) p
+      return ({ st with zs := some (rebuild q) }, some s!"ZO|rem|{boolBit found}|{boolBit (found && q.order.isEmpty)}")
+    | ["set", name, attr] =>
+      let n := parseName name
+      let found := (simNames p).contains n
+      let q := plainOp (simOps z.flat z.shrink) simNames (.set n ⟨0, ← parseAttrSpec attr⟩) p
+      return ({ st with zs := some (rebuild q) }, some s!"ZO|set|{boolBit found}")
+    | ["card"] => return (st, some s!"ZO|card|{p.order.length}")
+    | ["info"] => return (st, some s!"ZO|info|{p.order.length}|{simAcc.attrs p}|{p.uid}")
+    | ["find", name] =>
+      let n := parseName name
+      match p.order.find? (fun e => e.name == n) with
+      | none => return (st, some "ZO|find|0")
+      | some e => return (st, some s!"ZO|find|1|{showAttr e.attr}|{e.mask}")
+    | ["range"] =>
+      let ns := (simNames p).mergeSort nameLe
+      return (st, some s!"ZO|range|{if ns.isEmpty then "-" else String.intercalate "," (ns.map showName)}")
+    | ["sim", mask, count, filter] =>
+      let count ← parseNat count
+      let count := if count = 0 then 10 else count
+      return (st, some s!"ZO|sim|{showHits (plainSearch p (← parseNat mask) count (← parseOpt filter))}")
+    | _ => throw ("invalid ZO line: " ++ String.intercalate " " rest)
+  | _ => throw ("invalid case line: " ++ String.intercalate " " fields)
 
 def step (st : St) (fields : List String) : Except String (St × Option String) := do
   match fields with
@@ -418,7 +619,8 @@ def step (st : St) (fields : List String) : Except String (St × Option String) 
     let some e := st.eng | throw "no index"
     let r := e.search (← parseInt x) (← parseInt y) (← parseNat k) (← parseNat ef)
     return (st, some s!"XS|{showHeap r}")
-  | _ => throw ("invalid case line: " ++ String.intercalate " " fields)
+  | f :: _ => if f.startsWith "Z" then zstep st fields else throw ("invalid case line: " ++ String.intercalate " " fields)
+  | [] => throw "empty case line"
 
 def main (args : List String) : IO Unit := do
   let [path] := args | throw (IO.userError "expected case path")
