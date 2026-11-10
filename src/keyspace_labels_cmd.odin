@@ -195,9 +195,35 @@ label_cmd_declassify :: proc(c: ^Conn, argv: [][]u8) {
 
 label_target_access :: proc(target: lb.Id, vis: ^lb.Visibility) -> vt.Access {
 	if owner_user() && access.owner_entry != nil {
-		return vt.Access{label = target, owner = vt.Owner(access.owner), visibility = vis, table = &label_table, stream = &owner_stream_of(access.owner_entry, target).vset}
+		return vt.Access{label = target, owner = vt.Owner(access.owner), visibility = vis, table = &label_table, stream = &owner_stream_peek(access.owner_entry, target).vset}
 	}
 	return vt.Access{label = target, visibility = vis, table = &label_table, stream = &label_stream_of(target).vset}
+}
+
+label_scope_room :: proc(dbi: int, id: lb.Id) -> string {
+	if owner_user() {
+		if access.owner_entry == nil {
+			return ERR_OWNER_INVALID
+		}
+		if owner_space_part(owner_space_of(access.owner_entry, dbi), id) == nil && owner_partitions_max > 0 && i64(owner_parts_total) >= owner_partitions_max {
+			return ERR_OWNER_PARTITIONS
+		}
+		return ""
+	}
+	if label_part(dbi, id) == nil && i64(label_partitions) >= label_partitions_max {
+		return ERR_LABEL_PARTITIONS
+	}
+	return ""
+}
+
+label_target_vset_save :: proc(target: lb.Id, word: u64) {
+	if owner_user() && access.owner_entry != nil {
+		if word != owner_stream_peek(access.owner_entry, target).vset {
+			owner_stream_of(access.owner_entry, target).vset = word
+		}
+		return
+	}
+	label_stream_of(target).vset = word
 }
 
 label_scope_make :: proc(dbi: int, id: lb.Id) -> (^Db, string) {
@@ -273,20 +299,27 @@ label_declassify_element :: proc(c: ^Conn, key: []u8, target: Label_Target) {
 		}
 		return
 	}
-	made, made_msg := label_scope_make(dbi, target.id)
-	if made_msg != "" {
-		reply_error(c, made_msg)
+	if room := label_scope_room(dbi, target.id); room != "" {
+		reply_error(c, room)
 		return
 	}
 	a := label_vt_access()
 	to := a
 	to.label = target.id
-	to.stream = label_target_access(target.id, a.visibility).stream
+	word := label_target_access(target.id, a.visibility).stream^
+	to.stream = &word
 	before := label_vset_take(s)
 	from_gone, to_new, failed := vt.relabel_at(s, &a, &to, target.element, vset_scratch_get())
 	if failed.err != .None {
 		label_vset_settle(dbi, before, s)
 		vset_reply_failure(c, failed)
+		return
+	}
+	label_target_vset_save(target.id, word)
+	made, made_msg := label_scope_make(dbi, target.id)
+	if made_msg != "" {
+		label_vset_settle(dbi, before, s)
+		reply_error(c, made_msg)
 		return
 	}
 	if to_new {

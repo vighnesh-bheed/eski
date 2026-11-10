@@ -634,7 +634,6 @@ owner_active_add :: proc(p: ^Owner_Part, k: Owner_Active) {
 	before := cap(owner_active[k])
 	append(&owner_active[k], p)
 	owner_structs(nil, (cap(owner_active[k]) - before) * size_of(^Owner_Part))
-	owner_slot_share(p.space.entry, size_of(^Owner_Part))
 	p.active[k] = u32(len(owner_active[k]))
 }
 
@@ -649,7 +648,6 @@ owner_active_drop :: proc(p: ^Owner_Part, k: Owner_Active) {
 	last.active[k] = u32(at)
 	pop(list)
 	p.active[k] = 0
-	owner_slot_share(p.space.entry, -size_of(^Owner_Part))
 }
 
 owner_bucket_of :: #force_inline proc "contextless" (w: int) -> u8 {
@@ -676,7 +674,6 @@ owner_sampler_remove :: proc(p: ^Owner_Part, k: Owner_Weight) {
 	last.sample[k] = u32(at)
 	pop(list)
 	p.sample[k] = 0
-	owner_slot_share(p.space.entry, -size_of(^Owner_Part))
 	s.mass -= u64(1) << (b + 1)
 }
 
@@ -695,7 +692,6 @@ owner_sampler_note :: proc(p: ^Owner_Part, k: Owner_Weight) {
 	before := cap(s.bucket[b])
 	append(&s.bucket[b], p)
 	owner_structs(nil, (cap(s.bucket[b]) - before) * size_of(^Owner_Part))
-	owner_slot_share(p.space.entry, size_of(^Owner_Part))
 	p.sample[k] = u32(len(s.bucket[b]))
 	p.bucket[k] = b
 	s.mass += u64(1) << (b + 1)

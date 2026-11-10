@@ -897,6 +897,43 @@ class PartitionLimit(unittest.TestCase):
         self.assertEqual(c.call(*AS('S'), 'SET', 'k5', 1), 'OK')
 
 
+class DeclassifyLeavesNothing(unittest.TestCase):
+    def world(self, hidden):
+        server = start_server(('--label-partitions-max', '3'))
+        try:
+            c = Client(server.port)
+            c.call('ACL', 'SETUSER', 'default', 'clearance:*', 'trust:*')
+            c.call(*AS('U'), 'VADD', 'vs', 'VALUES', 2, 0.5, 0.5, 's')
+            c.call(*AS('S'), 'VADD', 'vs', 'VALUES', 2, 0.9, 0.1, 'h')
+            c.call(*AS('U'), 'SET', 'x', 1)
+            out = []
+            if hidden is not None:
+                out.append(error_of(c, *AS('S'), 'LABEL', 'DECLASSIFY', 'vs', 'C', 'ELEMENT', hidden))
+            for label in ('C//A', 'C//B', 'C;VETTED', 'C'):
+                c.send(*AS(label), 'SET', 'k', label)
+                out.append(repr(c.reply()))
+            for label in ('C', 'C//A'):
+                cursor = 0
+                while True:
+                    reply = c.call(*AS(label), 'SCAN', cursor, 'COUNT', 1)
+                    out.append(repr(reply))
+                    cursor = int(reply[0])
+                    if cursor == 0:
+                        break
+                out.append(repr(c.call(*AS(label), 'DBSIZE')))
+            c.close()
+            return out
+        finally:
+            server.close()
+
+    def test_refused_element_declassify_creates_no_partition(self):
+        plain = self.world(None)
+        for hidden, text in (('nosuch', 'ERR element not found in set'), ('s', 'INUSE element in use at U')):
+            noisy = self.world(hidden)
+            self.assertEqual(noisy[0], text)
+            self.assertEqual(noisy[1:], plain, hidden)
+
+
 class ManyCopies(unittest.TestCase):
     COMPARTMENTS = ('A', 'B', 'D', 'E', 'F', 'G', 'H', 'I')
 

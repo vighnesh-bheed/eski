@@ -933,6 +933,62 @@ class Labelled(unittest.TestCase):
         for client in clients:
             self.assertEqual(self.whoami(client)[b'session'], 0)
 
+    def deferred_world(self, hidden):
+        server = Server(BINARY, workers=2, arguments=('--keyspace-threads', str(KEYSPACE_THREADS)) + SCHEME)
+        self.addCleanup(server.close)
+        server.start()
+        admin = Client(server.port)
+        self.addCleanup(admin.close)
+        admin.call('ACL', 'SETUSER', 'default', 'clearance:*')
+        admin.call('ACL', 'SETUSER', 'app', 'on', 'nopass', '+@all', '~*', '&*', 'clearance:S//A')
+        admin.call('ACL', 'SETUSER', 'low', 'on', 'nopass', '+@all', '~*', '&*', 'clearance:C')
+        admin.call('ACL', 'SETUSER', 'peer', 'on', 'nopass', '+@all', '~*', '&*', 'clearance:S//B')
+        def login(name):
+            client = Client(server.port)
+            self.addCleanup(client.close)
+            client.call('AUTH', name, 'x')
+            client.call('CLIENT', 'SETNAME', name)
+            return client
+        app, low, peer, job = login('app'), login('low'), login('peer'), login('app')
+        first = bytes(97 + (i * 7) % 5 for i in range(1100))
+        second = bytes(97 + (i * 11) % 5 for i in range(1100))
+        app.call('SET', 'secretkey1', first)
+        app.call('SET', 'secretkey2', second)
+        admin.call('CONFIG', 'SET', 'slowlog-log-slower-than', 0)
+        admin.call('CONFIG', 'SET', 'slowlog-max-len', 100000)
+        admin.call('SLOWLOG', 'RESET')
+        before = int(info(admin, 'everything')['compute_jobs_completed'])
+        def interleave():
+            for i in range(60):
+                low.call('PING')
+                low.call('LABEL', 'AS', 'U', 'ECHO', 'u%d' % i)
+                peer.call('LABEL', 'AS', 'S//B', 'PING')
+                app.call('LABEL', 'AS', 'C', 'EXISTS', 'nothing')
+        if hidden:
+            job.send('LCS', 'secretkey1', 'secretkey2', 'LEN')
+        interleave()
+        if hidden:
+            self.assertGreater(job.reply(), 0)
+            self.assertEqual(int(info(admin, 'everything')['compute_jobs_completed']), before + 1)
+            job.send('FLUSHDB')
+        interleave()
+        if hidden:
+            self.assertEqual(job.reply(), 'OK')
+        low.call('PING')
+        entries = low.call('SLOWLOG', 'GET', 100000)
+        seen = [(e[3], e[5]) for e in entries]
+        stats = [line for line in low.call('INFO', 'commandstats').decode().split('\r\n') if ':' in line]
+        own = [e[3] for e in app.call('SLOWLOG', 'GET', 100000)]
+        return seen, low.call('SLOWLOG', 'LEN'), stats, own
+
+    def test_deferred_work_is_logged_at_its_own_label(self):
+        quiet = self.deferred_world(False)
+        noisy = self.deferred_world(True)
+        self.assertEqual(quiet[:3], noisy[:3])
+        self.assertIn([b'LCS', b'secretkey1', b'secretkey2', b'LEN'], noisy[3])
+        self.assertIn([b'FLUSHDB'], noisy[3])
+        self.assertNotIn([b'LCS', b'secretkey1', b'secretkey2', b'LEN'], quiet[3])
+
     def test_function_changes_need_top(self):
         app, admin = self.connect('app'), self.admin
         library = "#!lua name=lib\nredis.register_function('f', function() return 'one' end)"

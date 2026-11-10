@@ -3,6 +3,7 @@ package main
 import cp "compute"
 import "core:mem"
 import "core:sys/linux"
+import ow "owner"
 
 COMPUTE_LCS_MIN_CELLS :: 1_048_576
 
@@ -30,6 +31,7 @@ compute_pool: cp.Pool
 compute_threads: i64
 compute_max_memory: i64 = 128 * 1024 * 1024
 compute_tasks: [cp.CAPACITY]^Lcs_Task
+compute_scopes: [cp.CAPACITY]ow.Scope
 compute_reserved: int
 compute_pending: int
 compute_next_token: u64
@@ -78,6 +80,10 @@ compute_before_fork :: proc() {
 		cp.stop(&compute_pool)
 		compute_restart = true
 	}
+}
+
+compute_owner_pending :: proc(c: ^Conn, o: ow.Owner) -> bool {
+	return c.compute != nil && compute_scopes[c.compute.slot].owner == o
 }
 
 compute_conn_closed :: proc(c: ^Conn) {
@@ -162,7 +168,13 @@ compute_tick :: proc() {
 		}
 		saved_stat := stat_cur
 		stat_cur = &task.stats.stats
+		if labels_on {
+			access_resume(compute_scopes[task.slot])
+		}
 		stat_call_slow(c, task.cmd, task.stats, task.argv, mono_now() - task.start)
+		if labels_on {
+			access_reset_to_bottom()
+		}
 		stat_cur = saved_stat
 		compute_completed += 1
 		compute_release(task)
@@ -279,6 +291,7 @@ lcs_try_compute :: proc(c: ^Conn, argv: [][]u8, a, b: []u8, cells: int, want: Lc
 		return false
 	}
 	compute_tasks[task.slot] = task
+	compute_scopes[task.slot] = access_scope() if labels_on else ow.SHARED_BOTTOM
 	compute_pending += 1
 	compute_reserved += len(region)
 	mem_note_peak()

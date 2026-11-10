@@ -124,6 +124,9 @@ owner_holds :: proc(c: ^Conn, o: ow.Owner) -> bool {
 	if (.Multi in c.txf || c.blocked != .None) && a.owner == o {
 		return true
 	}
+	if compute_owner_pending(c, o) {
+		return true
+	}
 	if a.watching && a.watched_owner == o {
 		return true
 	}
@@ -146,6 +149,8 @@ owners_close :: proc(self: ^Conn, o: ow.Owner) -> int {
 		}
 		n += 1
 		c.close_after = true
+		compute_conn_closed(c)
+		block_conn_closed(c)
 		if c != self && !acl_is_doomed(c) {
 			append(&acl_doomed, c)
 		}

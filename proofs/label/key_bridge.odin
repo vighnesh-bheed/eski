@@ -85,8 +85,11 @@ proof_new_conn :: proc(u: ^Acl_User, id: i64) -> ^Conn {
 	return c
 }
 
-proof_boot :: proc(levels, comps, trusts: string, seed: i64, labelled: bool, owners: bool) {
+proof_boot :: proc(levels, comps, trusts: string, seed: i64, labelled: bool, owners: bool, parts_max: i64) {
 	config_init()
+	if parts_max > 0 {
+		label_partitions_max = parts_max
+	}
 	acl_init()
 	access_init()
 	lb.config_destroy(&label_scheme)
@@ -206,11 +209,20 @@ main :: proc() {
 			seed, ok := strconv.parse_i64(f[4], 10)
 			assert(ok)
 			owners := len(f) > 6 && f[6] == "1"
-			proof_boot(f[1], f[2], f[3], seed, f[5] == "1", owners)
+			parts_max: i64 = 0
+			if len(f) > 7 {
+				n, parsed := strconv.parse_i64(f[7], 10)
+				assert(parsed && n > 0)
+				parts_max = n
+			}
+			proof_boot(f[1], f[2], f[3], seed, f[5] == "1", owners, parts_max)
 			booted = true
 			fmt.sbprintf(&b, "S|%d|%d", len(label_scheme.levels), 1 if labels_on else 0)
-			if owners {
+			if owners || parts_max > 0 {
 				fmt.sbprintf(&b, "|%d", 1 if owners_on else 0)
+			}
+			if parts_max > 0 {
+				fmt.sbprintf(&b, "|%d", label_partitions_max)
 			}
 		case "U":
 			assert(booted && owners_on)

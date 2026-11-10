@@ -3,6 +3,7 @@ import hashlib
 import random
 import socket
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -26,6 +27,7 @@ USERS = ('u0', 'u1', 'u2', 'u3', 'u4', 'u5')
 NAMES = ('k', 'a1', 'zz', 'name07', 'profile:12345', 'session:abcdefghij', 'h', 's', 'z', 'l', 'x9', 'counter')
 MEMBERS = tuple('m%d' % i for i in range(40))
 FAR = '4000000000000'
+QUOTA_OOM = "OOM command not allowed when used memory > 'owner-quota'."
 TIME_CLASS = {('TTL',), ('PTTL',), ('OBJECT', 'IDLETIME'), ('OBJECT', 'FREQ')}
 
 
@@ -709,6 +711,90 @@ class Settings(unittest.TestCase):
             self.assertEqual(a, b)
         finally:
             twin.close()
+
+
+class OwnerFigure(unittest.TestCase):
+    def setUp(self):
+        self.twin = None
+
+    def tearDown(self):
+        if self.twin is not None:
+            self.twin.close()
+
+    def start(self, labelled):
+        if self.twin is not None:
+            self.twin.close()
+            self.twin = None
+        self.twin = Twin(labelled)
+        self.twin.both(*self.twin.operator, 'DEBUG', 'SET-ACTIVE-EXPIRE', '1')
+        self.label = ('C',) if labelled else ()
+        self.shared_head = ('LABEL', 'AS') + self.label + ('SHARED',)
+
+    def head(self, owner):
+        return ('LABEL', 'AS') + self.label + ('OWNER', owner)
+
+    def figures(self, owner, field=b'bytes'):
+        out = []
+        for reply in self.twin.both(*self.twin.operator, 'OWNERS', 'INFO', owner):
+            values = items(reply)
+            out.append(int(values[values.index(field) + 1][1]))
+        return out
+
+    def leave_work_lists(self, owner):
+        h = self.head(owner)
+        for command in (('SET', 'k', 'v'), ('SET', 't', 'v', 'EX', '1000'), ('HSET', 'h', 'f', 'v'), ('HPEXPIREAT', 'h', FAR, 'FIELDS', '1', 'f'),
+                        ('SADD', 's', 'a', 'b'), ('ZADD', 'z', '1', 'a'), ('DEL', 't'), ('HPERSIST', 'h', 'FIELDS', '1', 'f')):
+            a, b = self.twin.both(*h, *command)
+            self.assertEqual(a, b)
+
+    def unrelated(self):
+        other = self.head('u2')
+        for command in ((other + ('SET', 'gone', 'v', 'PX', '50')), (other + ('SET', 'a', 'v')), (other + ('MSET', 'b', '1', 'c', 'value-longer-than-seven', 'd', '3', 'e', '4')),
+                        (other + ('HSET', 'h', 'f', 'v')), (other + ('DEL', 'b', 'c', 'd')), ('PING',), (self.shared_head + ('GET', 'k')),
+                        (self.shared_head + ('SET', 'shared', 'v')), (self.head('u3') + ('SET', 't', 'v', 'EX', '1000')), (self.head('u3') + ('DEL', 't'))):
+            a, b = self.twin.both(*command)
+            self.assertEqual(a, b)
+        time.sleep(1.2)
+        self.assertEqual(self.figures('u2', b'keys'), [3, 3])
+        self.twin.both('PING')
+
+    def test_an_owner_figure_ignores_unrelated_activity(self):
+        for labelled in (False, True):
+            with self.subTest(labelled=labelled):
+                self.start(labelled)
+                self.leave_work_lists('u1')
+                before = self.figures('u1')
+                self.unrelated()
+                self.assertEqual(self.figures('u1'), before)
+
+    def test_the_quota_boundary_ignores_unrelated_activity(self):
+        self.start(False)
+        self.leave_work_lists('u1')
+        before = self.figures('u1')
+        for server, limit in enumerate(before):
+            self.twin.clients[server].call(*self.twin.operator, 'OWNERS', 'QUOTA', 'u1', 'LIMIT', str(limit - 1))
+        first = self.twin.both(*self.head('u1'), 'SET', 'k2', 'v')
+        self.assertEqual(first[0], (b'-', QUOTA_OOM.encode()))
+        self.assertEqual(first[1], first[0])
+        self.unrelated()
+        self.assertEqual(self.twin.both(*self.head('u1'), 'SET', 'k2', 'v'), first)
+        self.assertEqual(self.figures('u1'), before)
+
+    def test_owner_figures_add_up_to_the_owner_total(self):
+        self.start(False)
+        self.leave_work_lists('u1')
+        for _ in range(2):
+            known = []
+            for reply in self.twin.both(*self.twin.operator, 'INFO', 'owners'):
+                text = reply.decode()
+                fields = dict(line.split(':', 1) for line in text.splitlines() if ':' in line)
+                known.append((int(fields['owners_known']), int(fields['owner_bytes'])))
+            owners = ['u1', 'u2', 'u3'][:known[0][0]]
+            for server in range(2):
+                self.assertEqual(known[server][0], len(owners))
+                total = sum(self.figures(owner)[server] for owner in owners)
+                self.assertEqual(total, known[server][1])
+            self.unrelated()
 
 
 def main():

@@ -411,3 +411,56 @@ keyspace_owners_table_walkers_stay_inside_short_tables :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+@(test)
+keyspace_owners_bytes_ignore_work_list_membership :: proc(t: ^testing.T) {
+	context.allocator = runtime.heap_allocator()
+	saved := owner_compact
+	saved_now := srv.now_ms
+	defer {
+		owner_compact = saved
+		srv.now_ms = saved_now
+	}
+	srv.now_ms = 1_000_000
+	for compact in ([]bool{true, false}) {
+		owner_compact = compact
+		e := compact_test_entry()
+		base_mem := mem_used()
+		base_global := owner_global_bytes
+		d := compact_test_part(t, e, 0)
+		p := owner_part_of(d)
+		owner_touch(d)
+		compact_test_put(d, "k", "v")
+		compact_test_put(d, "timed", "v", 4_000_000_000_000)
+		owner_settle()
+		testing.expect(t, p.active[.Expire] != 0)
+		testing.expect(t, p.sample[.Expires] != 0)
+		owner_touch(d)
+		found, _ := db_remove_in(d, owner_test_bytes("timed"))
+		testing.expect(t, found)
+		owner_settle()
+		testing.expect(t, p.active[.Expire] != 0)
+		used := e.keyspace.used
+		live := owner_used_live(e)
+		owner_active_expire(now_ns() + 1_000_000_000)
+		testing.expect(t, p.active[.Expire] == 0)
+		testing.expect_value(t, e.keyspace.used, used)
+		testing.expect_value(t, owner_used_live(e), live)
+		owner_active_add(p, .Rehash)
+		owner_active_drop(p, .Rehash)
+		owner_sampler_remove(p, .Keys)
+		testing.expect_value(t, e.keyspace.used, used)
+		owner_sampler_note(p, .Keys)
+		testing.expect_value(t, e.keyspace.used, used)
+		testing.expect_value(t, mem_used() - base_mem, e.keyspace.used + (owner_global_bytes - base_global))
+		owner_touch(d)
+		found, _ = db_remove_in(d, owner_test_bytes("k"))
+		testing.expect(t, found)
+		owner_settle()
+		testing.expect_value(t, mem_used() - base_mem, e.keyspace.used + (owner_global_bytes - base_global))
+		compact_test_drop_spaces(e)
+		testing.expect_value(t, e.keyspace.used, 0)
+		testing.expect_value(t, mem_used() - base_mem, owner_global_bytes - base_global)
+		free(e, runtime.heap_allocator())
+	}
+}

@@ -3,6 +3,7 @@ package main
 import "core:slice"
 import "base:runtime"
 import "hdr"
+import ow "owner"
 
 foreign import libc_stats "system:c"
 
@@ -55,6 +56,7 @@ Stat_Blocked :: struct {
 	carry:  i64,
 	bytes:  [dynamic]u8,
 	spans:  [dynamic][2]int,
+	scope:  ow.Scope,
 }
 
 stat_cur: ^Cmd_Stats
@@ -291,6 +293,7 @@ stat_block_note :: proc(c: ^Conn, st: ^Cmd_Stats, us: i64, argv: [][]u8) {
 	}
 	e.target = st
 	e.carry += us
+	e.scope = access_scope() if labels_on else ow.SHARED_BOTTOM
 	if c.blocked == .Lazyfree {
 		clear(&e.bytes)
 		clear(&e.spans)
@@ -391,7 +394,13 @@ stats_unblocked :: #force_no_inline proc(c: ^Conn, argv: [][]u8, failed: bool) {
 	}
 	stat_record(e.target, e.carry)
 	if args != nil {
+		if labels_on {
+			access_resume(e.scope)
+		}
 		stat_slowlog(c, e.target, args, e.carry)
+		if labels_on {
+			access_reset_to_bottom()
+		}
 	}
 	delete(e.bytes)
 	delete(e.spans)

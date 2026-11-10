@@ -732,6 +732,16 @@ access_reset_to_bottom :: proc() {
 	access_set({}, nil, false)
 }
 
+access_resume :: proc(s: ow.Scope) {
+	l, known := lb.table_label(&label_table, s.label)
+	if !known || !access_set(l, nil, false) {
+		access_reset_to_bottom()
+		return
+	}
+	access.owner = s.owner
+	access.owner_entry = owner_entry(s.owner)
+}
+
 @(cold)
 access_enter :: #force_no_inline proc(c: ^Conn, argv: [][]u8, slot: ^Cmd_Slot) -> ([][]u8, ^Cmd_Slot, bool) {
 	access_arrival = {}

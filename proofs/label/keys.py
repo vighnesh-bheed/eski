@@ -1204,7 +1204,6 @@ class OKeys(Keys):
         self.ever = [dict() for _ in range(DBS)]
         self.login = 'any'
         self.tx = None
-        self.leak = False
         self.quotas = set()
 
     def sees(self, r, d):
@@ -1301,6 +1300,25 @@ class OKeys(Keys):
         labs = self.ever[d].setdefault(W[1], [])
         if W[0] not in labs:
             labs.append(W[0])
+
+    def vadd(self, d, W):
+        if W[1] is None:
+            self.ordered[d].add(W[0])
+        else:
+            self.ever_add(d, W)
+
+    def decl_element(self, d, W, target, ok):
+        if W[1] is None:
+            if ok:
+                self.ordered[d].add(target)
+            return
+        self.ever_add(d, W)
+        if ok:
+            self.ever_add(d, (target, W[1]))
+
+    def copy_refused(self, d, W, dest):
+        if W[1] is not None:
+            self.ever_add(dest, W)
 
     def tidy(self):
         for d in range(DBS):
@@ -1490,14 +1508,29 @@ def owner_argv(cmd, args):
         return ['OBJECT', 'FREQ'] + list(args)
     if cmd == 'LQUOTA':
         return ['LABEL', 'QUOTA', args[0], 'LIMIT', args[1]]
+    return vector_argv(cmd, args)
+
+
+def vector_argv(cmd, args):
     if cmd == 'XVADD':
         return ['VADD', args[0], 'VALUES', '2', '1', '-1', args[1]]
     if cmd == 'XDECL':
         return ['LABEL', 'DECLASSIFY', args[0], text(args[1]), 'ELEMENT', args[2]]
+    if cmd == 'XVRAND':
+        return ['VRANDMEMBER', args[0], args[1]]
+    if cmd == 'XVCARD':
+        return ['VCARD', args[0]]
+    if cmd == 'XCOPY':
+        return ['COPY', args[0], args[1], 'DB', str(args[2])]
     return argv(cmd, args)
 
 
-OWNER_RAW = ('RAWSCAN', 'RAWRANDOM', 'INFOKS', 'FREQ', 'WATCH', 'MULTI', 'EXEC', 'QEXISTS', 'QUOTA', 'NOTES')
+VADDED = 'E|:1^'
+DECL_REFUSED = re.compile(r'E\|-(ERR element not found in set|INUSE element in use at [^^]*)\^')
+VSET_COPY_REFUSED = 'E|-ERR not supported for this module key^'
+PARTITION_LIMIT = '-ERR label partition limit reached^'
+OWNER_RAW = ('RAWSCAN', 'RAWRANDOM', 'INFOKS', 'FREQ', 'WATCH', 'MULTI', 'EXEC', 'QEXISTS', 'QUOTA', 'NOTES', 'XVRAND',
+             'XVCARD')
 OWNER_KINDS = {'KEYS': 'N', 'SCAN': 'C'}
 
 
@@ -1530,17 +1563,15 @@ def oexpected(m, item):
         m.login = args[0]
         return f'U|{args[0]}'
     if cmd == 'XVADD':
-        if scope[1] is None:
-            m.ordered[m.db].add(scope[0])
-        else:
-            m.ever_add(m.db, scope)
-        return None
+        m.vadd(m.db, scope)
+        return VADDED
     if cmd == 'XDECL':
-        if scope[1] is not None:
-            m.ever_add(m.db, scope)
-            if m.leak:
-                m.ever_add(m.db, (args[1], scope[1]))
-        return None
+        ok = args[3] == 'ok'
+        m.decl_element(m.db, scope, args[1], ok)
+        return 'E|' + OK if ok else DECL_REFUSED
+    if cmd == 'XCOPY':
+        m.copy_refused(m.db, scope, int(args[2]))
+        return VSET_COPY_REFUSED
     if cmd in OWNER_RAW or cmd in ('SESSION', 'PSUBSCRIBE'):
         return None
     named = form in ('o', 's')
@@ -1979,9 +2010,8 @@ def owner_twin_case(rng, number, ops, same_owner):
     return setup, base, twin, observers, marker
 
 
-def owner_twin_rows(setup, items, apply_hidden=False, leak=False, mutant=None):
+def owner_twin_rows(setup, items, apply_hidden=False, mutant=None):
     m = OKeys()
-    m.leak = leak
     if mutant:
         mutant(m)
     rows = []
@@ -2047,6 +2077,29 @@ def label_twin_corpus(rng, seed, cases, ops=(20, 50)):
     return [label_twin_case(rng, 4000 + n, rng.randrange(*ops)) for n in range(cases)]
 
 
+def observer_base(rng, observers, ops):
+    base, pending = [], [None]
+    for _ in range(ops):
+        base += observer_command(rng, rng.choice(observers), False, pending)
+    if pending[0] is not None:
+        w = pending[0]
+        base += [(w, 'MULTI', (), default_form(w)), (w, 'QEXISTS', ('k0',), default_form(w)), (w, 'EXEC', (), default_form(w))]
+    return base
+
+
+def reader_probes(la):
+    probes = [((la, 'u1'), 'SCAN', (str(k << SCAN_SHIFT), 'COUNT', '1000'), 'o') for k in range(1, 4)]
+    return probes + [((la, 'u1'), 'RAWSCAN', ('0', 'COUNT', '1'), 'o'),
+                     ((la, 'u1'), 'RAWSCAN', (str(1 << SCAN_SHIFT), 'COUNT', '1'), 'o'),
+                     ((la, 'u1'), 'DBSIZE', (), 'o'), ((la, 'u1'), 'KEYS', ('*',), 'o')]
+
+
+def stream_probes(number, at, reader):
+    vr = f'vr{number}'
+    out = [(at, 'XVADD', (vr, e), default_form(at)) for e in 'abcd']
+    return out + [(reader, 'XVRAND', (vr, '-8'), default_form(reader)) for _ in range(2)]
+
+
 def declassify_twin_case(rng, number, ops, element):
     tops = [lab for lab in all_labels() if lab != TOP_LABEL and sum(1 for t in all_labels() if sees(lab, t)) >= 3]
     la = rng.choice(tops)
@@ -2059,33 +2112,153 @@ def declassify_twin_case(rng, number, ops, element):
         return None
     hl = rng.choice(hidden_labels)
     observers = [(la, 'u1'), (lw, 'u1'), (rng.choice([la, lw]), None)]
-    base, pending = [], [None]
-    for _ in range(ops):
-        base += observer_command(rng, rng.choice(observers), False, pending)
-    if pending[0] is not None:
-        w = pending[0]
-        base += [(w, 'MULTI', (), default_form(w)), (w, 'QEXISTS', ('k0',), default_form(w)), (w, 'EXEC', (), default_form(w))]
+    base = observer_base(rng, observers, ops)
     dx = f'dx{number}'
     shared_at = rng.choice([t for t in all_labels() if sees(tgt, t)])
     base.append(((shared_at, None), 'SET', (dx, 'v'), 's'))
-    probes = [((la, 'u1'), 'SCAN', (str(k << SCAN_SHIFT), 'COUNT', '1000'), 'o') for k in range(1, 4)]
-    probes += [((la, 'u1'), 'RAWSCAN', ('0', 'COUNT', '1'), 'o'), ((la, 'u1'), 'RAWSCAN', (str(1 << SCAN_SHIFT), 'COUNT', '1'), 'o'),
-               ((la, 'u1'), 'DBSIZE', (), 'o'), ((la, 'u1'), 'KEYS', ('*',), 'o')]
+    lows = [x for x in all_labels() if sees(la, x) and x != tgt and part_key(x) > part_key(tgt)]
+    if lows:
+        base.append(((rng.choice(lows), 'u1'), 'SET', (f'lo{number}', 'v'), 'o'))
     scope = (hl, 'u1')
     vs = f'vs{number}'
+    kind = 'key'
     if element:
-        hidden = [(scope, 'XVADD', (vs, 'e'), 'o')]
-        if rng.randrange(2):
-            hidden.append(((hl, None), 'XVADD', (vs, 's'), 's'))
-            hidden.append((scope, 'XDECL', (vs, tgt, 's'), 'o'))
-        else:
-            hidden.append((scope, 'XDECL', (vs, tgt, 'nosuch'), 'o'))
+        others = [h for h in all_labels() if h != hl and sees(hl, h) and not sees(la, h)]
+        lows = [t for t in all_labels() if t != hl and sees(hl, t) and not sees(la, t)]
+        kind = rng.choice(['missing', 'shared'] + (['other_own'] if others else []) + (['moved'] if lows else []))
+        if kind == 'shared':
+            base.append(((hl, None), 'XVADD', (vs, 's'), 's'))
+        if kind == 'other_own':
+            base.append(((rng.choice(others), 'u1'), 'XVADD', (vs, 'f'), 'o'))
+        base.append((scope, 'XVADD', (vs, 'e'), 'o'))
+        element_of = {'missing': 'nosuch', 'shared': 's', 'other_own': 'f', 'moved': 'e'}[kind]
+        to = rng.choice(lows) if kind == 'moved' else tgt
+        hidden = [(scope, 'XDECL', (vs, to, element_of, 'ok' if kind == 'moved' else 'refused'), 'o')]
     else:
         hidden = [(scope, 'DECLASSIFY', (f'missing{number}', tgt), 'o'),
                   (scope, 'SET', (dx, 'own'), 'o'), (scope, 'DECLASSIFY', (dx, tgt), 'o'),
                   (scope, 'DECLASSIFY', (dx, scope[0]), 'o')]
     hidden = [h + ('hidden',) for h in hidden]
-    return [], base + probes, base + hidden + probes, observers, None
+    probes = reader_probes(la)
+    witness = ()
+    if element:
+        probes += stream_probes(number, (shared_at, None), (tgt, 'u1'))
+        probes.append(((tgt, 'u1'), 'XVCARD', (vs,), 'o'))
+        if kind == 'moved':
+            probes.append(((to, 'u1'), 'XVCARD', (vs,), 'o'))
+            witness = (len(base) + len(probes) - 1,)
+    return [], base + probes, base + hidden + probes, observers, (kind, witness)
+
+
+def copy_twin_case(rng, number, ops):
+    tops = [lab for lab in all_labels() if lab != TOP_LABEL and any(t != lab and sees(lab, t) for t in all_labels())]
+    la = rng.choice(tops)
+    lw = rng.choice([t for t in all_labels() if t != la and sees(la, t)])
+    after = {h: [x for x in all_labels() if x != h and sees(h, x) and part_key(x) > part_key(h)] for h in all_labels()}
+    hidden_labels = [t for t in all_labels() if not sees(la, t) and after[t]]
+    if not hidden_labels:
+        return None
+    hl = rng.choice(hidden_labels)
+    observers = [(la, 'u1'), (lw, 'u1'), (rng.choice([la, lw]), None)]
+    base = observer_base(rng, observers, ops)
+    scope = (hl, 'u1')
+    vc = f'vc{number}'
+    base += [((rng.choice(after[hl]), 'u1'), 'SET', (f'lo{number}', 'v'), 'o'),
+             (scope, 'SELECT', ('1',), 'o'), (scope, 'XVADD', (vc, 'e'), 'o'), (scope, 'SELECT', ('0',), 'o')]
+    hidden = [(scope, 'SELECT', ('1',), 'o'), (scope, 'XCOPY', (vc, rng.choice([vc, vc + 'd']), 0), 'o'),
+              (scope, 'SELECT', ('0',), 'o')]
+    hidden = [h + ('hidden',) for h in hidden]
+    probes = reader_probes(la) + [((lw, 'u1'), 'SCAN', (str(1 << SCAN_SHIFT), 'COUNT', '1000'), 'o')]
+    at = len(base) + len(probes)
+    probes += [(scope, 'SCAN', (str(k << SCAN_SHIFT), 'COUNT', '1000'), 'o') for k in range(1, 6)]
+    return [], base + probes, base + hidden + probes, observers, ('copy', tuple(range(at, at + 5)))
+
+
+def copy_twin_corpus(rng, seed, cases, ops=(15, 35)):
+    out, n = [], 0
+    while len(out) < cases:
+        case = copy_twin_case(rng, 6000 + n, rng.randrange(*ops))
+        n += 1
+        if case is not None:
+            out.append(case)
+    return out
+
+
+def limit_scheme(seed, limit):
+    return f'S {",".join(LEVELS)} {",".join(COMPS)} {",".join(TRUSTS)} {seed} 1 0 {limit}'
+
+
+def limit_line(lab, cmd, args):
+    words = ['LABEL', 'AS', text(lab)] + vector_argv(cmd, args)
+    return KINDS.get(cmd, 'E') + ' ' + ' '.join(w.encode().hex() if w else '-' for w in words)
+
+
+def limit_rows(items, limit, leak=False):
+    parts, names, rows = set(), {}, []
+    for lab, cmd, args in items:
+        if cmd == 'XVADD':
+            if lab != BOTTOM:
+                parts.add(lab)
+            names.setdefault(args[0], set()).add(lab)
+            rows.append(VADDED)
+        elif cmd == 'XDECL':
+            if leak and args[1] != BOTTOM:
+                parts.add(args[1])
+            rows.append(DECL_REFUSED)
+        elif cmd == 'SET':
+            if lab != BOTTOM and lab not in parts:
+                if len(parts) >= limit:
+                    rows.append('E|' + PARTITION_LIMIT)
+                    continue
+                parts.add(lab)
+            names.setdefault(args[0], set()).add(lab)
+            rows.append('E|' + OK)
+        elif cmd == 'XVRAND':
+            rows.append(None)
+        else:
+            vis = sorted(n for n, ls in names.items() if any(sees(lab, x) for x in ls))
+            listed = ','.join([str(len(vis))] + vis)
+            rows.append({'DBSIZE': 'E|' + integer(len(vis)), 'KEYS': 'N|' + listed, 'SCAN': 'C|0:' + listed}[cmd])
+    return rows
+
+
+def limit_twin_case(rng, number):
+    labs = [x for x in all_labels() if x != BOTTOM]
+    while True:
+        hl = rng.choice(labs)
+        tgts = [x for x in labs if x != hl and sees(hl, x) and any(g != x and sees(x, g) for g in all_labels())]
+        observers = [x for x in labs if not sees(x, hl)]
+        if not tgts:
+            continue
+        tgt = rng.choice(tgts)
+        grounds = [g for g in all_labels() if g != tgt and sees(tgt, g)]
+        ground = BOTTOM if BOTTOM in grounds else rng.choice(grounds)
+        vs = f'vs{number}'
+        base, elem, kind = [], 'nosuch', 'missing'
+        others = [h for h in all_labels() if h != hl and sees(hl, h) and not sees(tgt, h)]
+        if others and rng.randrange(2):
+            base.append((rng.choice(others), 'XVADD', (vs, 's')))
+            elem, kind = 's', 'inuse'
+        base.append((hl, 'XVADD', (vs, 'e')))
+        writers = [x for x in observers if x != tgt]
+        for i in range(rng.randint(0, 2)):
+            base.append((rng.choice(writers), 'SET', (f'b{number}_{i}', 'v')))
+        used = {x for x, _, _ in base if x != BOTTOM} | ({ground} - {BOTTOM})
+        fresh = [x for x in writers if x not in used]
+        if len(fresh) >= 3:
+            break
+    rng.shuffle(fresh)
+    vr = f'vr{number}'
+    tail = [(ground, 'XVADD', (vr, e)) for e in 'abcd'] + [(tgt, 'XVRAND', (vr, '-8')) for _ in range(2)]
+    tail += [(x, 'SET', (f'f{number}_{i}', 'v')) for i, x in enumerate(fresh[:3])]
+    for r in rng.sample(observers, 2):
+        tail += [(r, 'SCAN', ('0', 'COUNT', '1000')), (r, 'DBSIZE', ()), (r, 'KEYS', ('*',))]
+    hidden = [(hl, 'XDECL', (vs, tgt, elem, 'refused'))]
+    return len(used) + 2, base + tail, base + hidden + tail, hl, kind
+
+
+def limit_twin_corpus(rng, cases):
+    return [limit_twin_case(rng, 7000 + n) for n in range(cases)]
 
 
 def declassify_twin_corpus(rng, seed, cases, element, ops=(15, 35)):
@@ -2266,10 +2439,20 @@ def owner_mutants():
                         del m.ever[d][o]
         m.tidy = tidy
 
+    def declassify_element_leaves_target(m):
+        original = m.decl_element
+
+        def decl_element(d, W, target, ok):
+            original(d, W, target, ok)
+            if W[1] is not None:
+                m.ever_add(d, (target, W[1]))
+        m.decl_element = decl_element
+
     return {f.__name__: f for f in (owner_check_dropped, shared_hidden, other_owner_visible, own_before_shared_reversed,
                                     inuse_names_other_owner, forget_leaves_copy, forget_touches_other_owner,
                                     scan_counts_other_owner, dbsize_counts_other_owner, randomkey_other_owner,
-                                    label_quota_across_owners, flush_naming_ignored, list_dropped_with_last_partition)}
+                                    label_quota_across_owners, flush_naming_ignored, list_dropped_with_last_partition,
+                                    declassify_element_leaves_target)}
 
 
 def osimulate_with(items, expect, mutant):

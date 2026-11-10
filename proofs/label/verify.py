@@ -1449,6 +1449,47 @@ def key_evidence(bridge, lean_model, output):
         stats['KP'] += len(body) * 2 + 2 * n
         detail['p10_runs'] += 1
         del names
+    limits = keys.limit_twin_corpus(random.Random(KEY_SEED ^ 0xD2), 16)
+    detail.update({'limit_twin_pairs': 0, 'limit_twin_rows': 0, 'limit_twin_observer_rows': 0, 'limit_refusals': 0,
+                   'limit_stream_rows': 0, 'limit_stream_sensitive': 0, 'limit_kinds': {}})
+    limit_leak = 0
+    for k, (limit, base, twin, hl, kind) in enumerate(limits):
+        head = keys.limit_scheme(77, limit)
+        oa = key_run(bridge, [head] + [keys.limit_line(*c) for c in base], work / f'limit-twin-{k}-base.txt')
+        ob = key_run(bridge, [head] + [keys.limit_line(*c) for c in twin], work / f'limit-twin-{k}-hidden.txt')
+        if oa[0] != f'S|3|1|0|{limit}' or ob[0] != oa[0]:
+            raise AssertionError('key bridge did not take the label partition limit: ' + oa[0])
+        oa, ob = oa[1:], ob[1:]
+        key_compare(f'limit twin {k} base', oa, keys.limit_rows(base, limit))
+        key_compare(f'limit twin {k} hidden', ob, keys.limit_rows(twin, limit))
+        limit_leak += sum(1 for a, b in zip(ob, keys.limit_rows(twin, limit, leak=True)) if not key_match(a, b))
+        j = refused = 0
+        for i, c in enumerate(twin):
+            if j < len(base) and c is base[j]:
+                if oa[j] != ob[i]:
+                    raise AssertionError(f'limit twin {k}: a refused element DECLASSIFY changed a reply at {c}')
+                detail['limit_twin_rows'] += 1
+                if not keys.sees(c[0], hl):
+                    stats['KH'] += 1
+                    detail['limit_twin_observer_rows'] += 1
+                refused += oa[j] == 'E|' + keys.PARTITION_LIMIT
+                j += 1
+        if j != len(base) or refused != 1:
+            raise AssertionError(f'limit twin {k}: the fill writes did not meet the limit exactly once')
+        detail['limit_refusals'] += refused
+        draws = [i for i, c in enumerate(base) if c[1] == 'XVRAND']
+        sens = base[:draws[0]] + [base[draws[0]]] + base[draws[0]:]
+        os_ = key_run(bridge, [head] + [keys.limit_line(*c) for c in sens], work / f'limit-twin-{k}-stream.txt')[1:]
+        if all(oa[i] == os_[i + 1] for i in draws):
+            raise AssertionError(f'limit twin {k}: one more draw at the target left the later draws unchanged')
+        detail['limit_stream_rows'] += len(draws)
+        detail['limit_stream_sensitive'] += 1
+        detail['limit_twin_pairs'] += 1
+        detail['limit_kinds'][kind] = detail['limit_kinds'].get(kind, 0) + 1
+    if set(detail['limit_kinds']) != {'missing', 'inuse'}:
+        raise AssertionError('limit twins miss a refusal kind')
+    if not limit_leak:
+        raise AssertionError('key model mutant accepted: declassify_element_leaves_partition')
     mutants = {}
     for name, fn in keys.mutants().items():
         differing = 0
@@ -1458,6 +1499,7 @@ def key_evidence(bridge, lean_model, output):
         if not differing:
             raise AssertionError('key model mutant accepted: ' + name)
         mutants['key_' + name] = differing
+    mutants['key_declassify_element_leaves_partition'] = limit_leak
     for name, fn in keys.pause_mutants().items():
         differing = 0
         for (lines, rows, cmds, _), got in zip(pauses, pause_real):
@@ -1645,60 +1687,66 @@ def owner_key_evidence(bridge, lean_model, output):
         raise AssertionError('owner twins lost raw, notification or EXEC coverage')
     twin_real = []
 
-    def plain_twins(name, cases, leak=False):
-        pairs = compared = hidden = 0
-        for k, (setup, base, twin, observers, _) in enumerate(cases):
+    def plain_twins(name, cases):
+        pairs = compared = hidden = witnessed = 0
+        runs = []
+        for k, (setup, base, twin, observers, marker) in enumerate(cases):
             oa = key_run(bridge, keys.owner_twin_lines(77, setup, base), work / f'{name}-{k}-base.txt')[1:]
             ob = key_run(bridge, keys.owner_twin_lines(77, setup, twin), work / f'{name}-{k}-hidden.txt')[1:]
             twin_real.append((setup, base, oa))
             twin_real.append((setup, twin, ob))
+            runs.append((oa, ob))
             key_compare(f'{name} {k} base', oa, keys.owner_twin_rows(setup, base))
             key_compare(f'{name} {k} hidden', ob, keys.owner_twin_rows(setup, twin, apply_hidden=True))
+            witness = set(marker[1]) if marker else set()
             n = len(setup)
-            j = 0
+            j = differed = 0
             for i, c in enumerate(twin):
                 if len(c) > 4:
                     continue
-                if oa[n + j] != ob[n + i]:
+                if j in witness:
+                    differed += oa[n + j] != ob[n + i]
+                elif oa[n + j] != ob[n + i]:
                     raise AssertionError(f'{name} {k}: a hidden command changed an observer reply at {c}')
-                if c[1] not in OWNER_SKIP:
+                elif c[1] not in OWNER_SKIP:
                     compared += 1
                 j += 1
+            if witness and not differed:
+                raise AssertionError(f'{name} {k}: no witness row shows the hidden command')
+            witnessed += differed
             pairs += 1
             hidden += len(twin) - len(base)
         stats['PH'] += compared
-        return pairs, compared, hidden
+        return pairs, compared, hidden, witnessed, runs
 
     label_twins = keys.label_twin_corpus(random.Random(OWNER_KEY_SEED ^ 0xDF), 77, 16)
-    detail['label_twin_pairs'], detail['label_twin_rows'], detail['label_twin_hidden'] = plain_twins('label-twin', label_twins)
+    detail['label_twin_pairs'], detail['label_twin_rows'], detail['label_twin_hidden'], _, _ = \
+        plain_twins('label-twin', label_twins)
     key_decl = keys.declassify_twin_corpus(random.Random(OWNER_KEY_SEED ^ 0xD5), 77, 16, False)
-    detail['declassify_key_pairs'], detail['declassify_key_rows'], detail['declassify_key_hidden'] = \
+    detail['declassify_key_pairs'], detail['declassify_key_rows'], detail['declassify_key_hidden'], _, _ = \
         plain_twins('declassify-key', key_decl)
     element_decl = keys.declassify_twin_corpus(random.Random(OWNER_KEY_SEED ^ 0xD6), 77, 16, True)
-    detail['declassify_element_pairs'] = detail['declassify_element_rows'] = detail['declassify_element_marked'] = 0
-    for k, (setup, base, twin, observers, _) in enumerate(element_decl):
-        oa = key_run(bridge, keys.owner_twin_lines(77, setup, base), work / f'declassify-element-{k}-base.txt')[1:]
-        ob = key_run(bridge, keys.owner_twin_lines(77, setup, twin), work / f'declassify-element-{k}-hidden.txt')[1:]
-        key_compare(f'declassify element {k} base', oa, keys.owner_twin_rows(setup, base))
-        key_compare(f'declassify element {k} hidden', ob, keys.owner_twin_rows(setup, twin, apply_hidden=True, leak=True))
-        fa = keys.owner_twin_rows(setup, base)
-        fb = keys.owner_twin_rows(setup, twin, apply_hidden=True)
-        j = 0
-        for i, c in enumerate(twin):
-            if len(c) > 4:
-                continue
-            if c[1] not in OWNER_SKIP:
-                detail['declassify_element_rows'] += 1
-            if oa[j] != ob[i]:
-                if c[1] not in ('SCAN', 'RAWSCAN') or c[0][1] != 'u1':
-                    raise AssertionError(f'declassify element {k}: an unexpected row differs: {c}')
-                detail['declassify_element_marked'] += 1
-            if fa[j] is not None and not isinstance(fa[j], set) and fa[j] != fb[i]:
-                raise AssertionError(f'declassify element {k}: the rule without the left partition still differs at {c}')
-            j += 1
-        detail['declassify_element_pairs'] += 1
-    if not detail['declassify_element_marked']:
-        raise AssertionError('declassify element pairs no longer show the left target partition (D-2)')
+    detail['declassify_element_pairs'], detail['declassify_element_rows'], detail['declassify_element_hidden'], \
+        detail['declassify_element_witness_rows'], element_runs = plain_twins('declassify-element', element_decl)
+    kinds = {}
+    for case in element_decl:
+        kinds[case[4][0]] = kinds.get(case[4][0], 0) + 1
+    if set(kinds) != {'missing', 'shared', 'other_own', 'moved'}:
+        raise AssertionError('declassify element twins miss a kind: ' + ', '.join(sorted(kinds)))
+    detail['declassify_element_kinds'] = kinds
+    detail['declassify_element_stream_rows'] = detail['declassify_element_stream_sensitive'] = 0
+    for k, ((setup, base, twin, observers, marker), (oa, ob)) in enumerate(zip(element_decl, element_runs)):
+        draws = [i for i, c in enumerate(base) if c[1] == 'XVRAND']
+        extra = base[draws[0]]
+        sens = base[:draws[0]] + [extra] + base[draws[0]:]
+        os_ = key_run(bridge, keys.owner_twin_lines(77, setup, sens), work / f'declassify-element-{k}-stream.txt')[1:]
+        if all(oa[i] == os_[i + 1] for i in draws):
+            raise AssertionError(f'declassify element {k}: one more draw at the target left the later draws unchanged')
+        detail['declassify_element_stream_rows'] += len(draws)
+        detail['declassify_element_stream_sensitive'] += 1
+    copies = keys.copy_twin_corpus(random.Random(OWNER_KEY_SEED ^ 0xC9), 77, 16)
+    detail['copy_twin_pairs'], detail['copy_twin_rows'], detail['copy_twin_hidden'], detail['copy_witness_rows'], _ = \
+        plain_twins('copy-vset', copies)
     p10 = random.Random(OWNER_KEY_SEED ^ 0x10)
     shared_sessions = keys.corpus(p10, 77, 8, 170)
     detail['p10_shared_rows'] = detail['p10_user_rows'] = detail['p10_single_rows'] = 0

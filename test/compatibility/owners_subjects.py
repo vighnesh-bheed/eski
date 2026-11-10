@@ -873,6 +873,51 @@ class Owners(OwnerMode):
         self.assertEqual(gone.reply(), 'OK')
         self.assertTrue(closed(gone))
 
+    def compute_server(self):
+        server = Server(BINARY, workers=2, arguments=('--keyspace-threads', str(KEYSPACE_THREADS), '--memcached-port', '0', '--owners', 'yes') + SCHEME)
+        self.addCleanup(server.close)
+        server.start()
+        admin = Client(server.port)
+        self.addCleanup(admin.close)
+        admin.call('ACL', 'SETUSER', 'default', 'clearance:*', 'owner-operator')
+        admin.call('ACL', 'SETUSER', 'app', 'on', 'nopass', '+@all', '~*', '&*', 'clearance:S//A', 'owners:*')
+        admin.call('CONFIG', 'SET', 'slowlog-log-slower-than', 0)
+        admin.call('CONFIG', 'SET', 'slowlog-max-len', 100000)
+        def login():
+            client = Client(server.port)
+            self.addCleanup(client.close)
+            client.call('AUTH', 'app', 'x')
+            return client
+        return admin, login
+
+    def test_forget_cancels_a_pending_job_of_the_owner(self):
+        admin, login = self.compute_server()
+        app, job = login(), login()
+        first = bytes(97 + (i * 7) % 5 for i in range(3000))
+        second = bytes(97 + (i * 11) % 5 for i in range(3000))
+        for owner in ('u7', 'u8'):
+            app.call('LABEL', 'AS', 'OWNER', owner, 'SET', 'k1', first)
+            app.call('LABEL', 'AS', 'OWNER', owner, 'SET', 'k2', second)
+        admin.call('SLOWLOG', 'RESET')
+        stats = info(admin, 'everything')
+        cancelled, completed = int(stats['compute_jobs_cancelled']), int(stats['compute_jobs_completed'])
+        job.send('LABEL', 'AS', 'OWNER', 'u7', 'LCS', 'k1', 'k2', 'LEN')
+        self.assertEqual(int(info(admin, 'everything')['compute_jobs_pending']), 1)
+        self.assertEqual(as_map(admin.call('OWNERS', 'FORGET', 'u7'))[b'keys'], 2)
+        job.socket.settimeout(5)
+        with self.assertRaises((EOFError, OSError)):
+            job.reply()
+        stats = info(admin, 'everything')
+        self.assertEqual((int(stats['compute_jobs_cancelled']), int(stats['compute_jobs_completed'])), (cancelled + 1, completed))
+        self.assertFalse([e for e in admin.call('SLOWLOG', 'GET', 100000) if e[3][:1] == [b'LCS']])
+        self.assertNotIn('cmdstat_lcs', admin.call('INFO', 'commandstats').decode())
+        reader = login()
+        self.assertGreater(reader.call('LABEL', 'AS', 'OWNER', 'u8', 'LCS', 'k1', 'k2', 'LEN'), 0)
+        seen = [e[3] for e in reader.call('LABEL', 'AS', 'OWNER', 'u8', 'SLOWLOG', 'GET', 100000)]
+        self.assertIn([b'LCS', b'k1', b'k2', b'LEN'], seen)
+        other = [e[3] for e in reader.call('LABEL', 'AS', 'OWNER', 'u9', 'SLOWLOG', 'GET', 100000)]
+        self.assertNotIn([b'LCS', b'k1', b'k2', b'LEN'], other)
+
     def test_a_write_pause_sees_through_owner_prefixes(self):
         admin = self.admin
         app = [self.connect('app') for _ in range(6)]

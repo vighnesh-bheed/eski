@@ -620,6 +620,57 @@ class Resolution(OwnerServer):
         self.ok('C', 'u5', 'GET', 'k')
         self.assertEqual(self.owners_info('u5')[b'bytes'], six[b'bytes'])
 
+    def declassify_setup(self):
+        self.ok('U', SHARED, 'VADD', 'vs', 'VALUES', 2, 0.5, 0.5, 's')
+        self.ok('S', 'u2', 'SET', 'k', 'hidden')
+        self.ok('S', 'u2', 'VADD', 'vs', 'VALUES', 2, 0.9, 0.1, 'm')
+        for owner in ('u1', 'u2'):
+            self.ok('U', owner, 'VADD', 'vs', 'VALUES', 2, 0.1, 0.9, 'e')
+            self.ok('U', owner, 'SET', 'x', 1)
+            self.ok('U', owner, 'SET', 'k', 1)
+            self.ok('C//A', owner, 'SET', 'y', 1)
+
+    def assert_declassify_left_nothing(self, command, expected):
+        before = self.owners_info('u2')
+        reply = self.refused('S', 'u2', 'LABEL', 'DECLASSIFY', *command)
+        self.assertTrue(reply.startswith(expected), reply)
+        for label in ('C', 'C//A'):
+            self.assert_scan_twins(label, 'u1', 'u2')
+            self.assertEqual(self.ok(label, 'u1', 'DBSIZE'), self.ok(label, 'u2', 'DBSIZE'))
+            self.assertEqual(sorted(self.ok(label, 'u1', 'KEYS', '*')), sorted(self.ok(label, 'u2', 'KEYS', '*')))
+        after = self.owners_info('u2')
+        for field in (b'partitions', b'keys', b'elements', b'bytes', b'labels'):
+            self.assertEqual(after[field], before[field], field)
+        self.assertEqual(self.ok('S', 'u2', 'LABEL', 'OF', 'vs', 'm'), b'S OWNER u2')
+
+    def test_element_declassify_of_a_missing_element_leaves_no_partition(self):
+        self.declassify_setup()
+        self.assert_declassify_left_nothing(('vs', 'C', 'ELEMENT', 'nosuch'), 'ERR element not found in set')
+
+    def test_element_declassify_of_a_shared_element_leaves_no_partition(self):
+        self.declassify_setup()
+        self.assert_declassify_left_nothing(('vs', 'C', 'ELEMENT', 's'), 'INUSE element in use at U SHARED')
+
+    def test_element_declassify_of_an_element_held_elsewhere_leaves_no_partition(self):
+        self.declassify_setup()
+        self.assert_declassify_left_nothing(('vs', 'C', 'ELEMENT', 'e'), 'INUSE element in use at U OWNER u2')
+
+    def test_refused_key_declassify_leaves_no_partition(self):
+        self.declassify_setup()
+        self.assert_declassify_left_nothing(('nokey', 'C'), 'ERR')
+        self.assert_declassify_left_nothing(('k', 'C'), 'INUSE name in use at U OWNER u2')
+        self.assert_declassify_left_nothing(('k', 'C//A'), 'ERR')
+
+    def test_declassify_refused_at_the_partition_limit_moves_nothing(self):
+        self.declassify_setup()
+        total = int(self.info('owners')['owner_partitions'])
+        self.op('CONFIG', 'SET', 'owner-partitions-max', total)
+        self.assert_declassify_left_nothing(('vs', 'C', 'ELEMENT', 'm'), PARTITION_LIMIT)
+        self.assertEqual(self.ok('S', 'u2', 'VCARD', 'vs'), 3)
+        self.op('CONFIG', 'SET', 'owner-partitions-max', 0)
+        self.assertEqual(self.ok('S', 'u2', 'LABEL', 'DECLASSIFY', 'vs', 'C', 'ELEMENT', 'm'), 'OK')
+        self.assertEqual(self.ok('C', 'u2', 'LABEL', 'OF', 'vs', 'm'), b'C OWNER u2')
+
     def test_scan_cursors_and_counts_ignore_other_owners(self):
         for i in range(25):
             self.ok('C', SHARED, 'SET', 'sh%d' % i, i)
