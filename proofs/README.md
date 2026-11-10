@@ -13,6 +13,8 @@ Areas 7 and 8, worker scheduling and fork/shutdown, have separate [bounded concu
 
 The vector packages have their own project, [Vectors](vector/README.md), which the aggregate runner includes after the first phase. It covers the Hadamard projection, int8 quantisation, binary encoding, scores and the arena free list in `src/vmath`, the candidate heaps, the visited set, the graph links, the link encoding and the twin chains in `src/hnsw`, and compiled filter programs in `src/vfilter`. Its receipt names its areas instead of numbering them.
 
+The access labels have their own project, [Labels](label/README.md), which the aggregate runner includes after the vector project. It covers the label lattice, the marking parser and formatter, the label table and its persistence encoding, the visibility bitsets, the accept adapters with a transcription of the filtered search of `src/hnsw`, the read and write rules and the label-partitioned counters in `src/label`. Its receipt also names its areas.
+
 ## Recorded coverage
 
 The first phase contains 278 named contract theorems. The complete kernel inventory additionally checks generated declarations. The comparison counts below use different units and should be read by row.
@@ -39,7 +41,7 @@ From the repository root:
 LEAN_BIN_DIR=/absolute/path/lean-4.35.0-linux/bin python3 -I proofs/verify.py --odin /absolute/path/odin
 ```
 
-The aggregate runner verifies projects sequentially: `storage`, `effects`, `encoding`, `bitfield` and then `vector`. `--odin` puts the named compiler first on the `PATH` every project uses and is passed to the vector verifier, which otherwise finds Odin through `ODIN`, `PATH` or `~/odin/current/odin`. Use `--clean` for a fresh rebuild, `--project storage` or `--project bitfield vector` to select projects, `--list` to show the grouping and `--output /absolute/path` to select an artifact directory. Default artifacts remain under ignored `proofs/.build/phase-one/`, with a separate project log and receipt plus an aggregate receipt. The aggregate receipt is produced only after every selected project succeeds and its theorem assumptions, source fingerprints, per-area evidence and executable identities pass validation. The first-phase projects report numbered items and need comparison rows in every area. The vector project reports the named areas `projection`, `quantisation`, `heaps`, `visited`, `graph`, `arena` and `filter`; `filter` is proof only and must report zero comparison rows, and every other area must report some. The aggregate receipt lists the numbered items under `items` and the named areas under `areas`.
+The aggregate runner verifies projects sequentially: `storage`, `effects`, `encoding`, `bitfield`, `vector` and then `label`. `--odin` puts the named compiler first on the `PATH` every project uses and is passed to the vector and label verifiers, which otherwise find Odin through `ODIN`, `PATH` or `~/odin/current/odin`. Use `--clean` for a fresh rebuild, `--project storage` or `--project bitfield vector` to select projects, `--list` to show the grouping and `--output /absolute/path` to select an artifact directory. Default artifacts remain under ignored `proofs/.build/phase-one/`, with a separate project log and receipt plus an aggregate receipt. The aggregate receipt is produced only after every selected project succeeds and its theorem assumptions, source fingerprints, per-area evidence and executable identities pass validation. The first-phase projects report numbered items and need comparison rows in every area. The vector project reports the named areas `projection`, `quantisation`, `heaps`, `visited`, `graph`, `arena` and `filter`; `filter` is proof only and must report zero comparison rows, and every other area must report some. The label project reports the named areas `lattice`, `marking`, `interning`, `persistence`, `visibility`, `admission`, `rules` and `counters`, and every one must report comparison rows. The aggregate receipt lists the numbered items under `items` and the named areas under `areas`.
 
 ## Vector packages
 
@@ -64,6 +66,31 @@ python3 -I proofs/vector/verify.py --lean-bin /absolute/path/lean-4.35.0-linux/b
 ```
 
 `LEAN_BIN_DIR` and `ODIN` may replace the two options. Artifacts and `receipt.json` default to ignored `proofs/vector/.build/`; through the aggregate runner they go to `proofs/.build/phase-one/vector/`. These checks passed on 6 November 2026 with Lean 4.35.0 and Odin dev-2026-10-nightly:84bc3fc against the sources pinned in [source-sha256.json](vector/source-sha256.json).
+
+## Access labels
+
+The label project contains 136 named contract theorems and 597 kernel-checked theorems. Its comparison rows run the Lean model and the actual imported `label` procedures, with the real `hnsw` brute-force search and compiled `vfilter` programs, on one deterministic case file and check both against independent Python expectations.
+
+| Area | Named theorems | Actual Odin comparison evidence |
+| --- | --- | --- |
+| Lattice | 29 | 1,505 label pairs with compartments in all four words, comparing dominance both ways, join and meet |
+| Markings | 17 | 670 configuration rows with case, space, tab, invalid-byte, overlong and duplicate names and both limits, 10,925 parsed markings, 2,989 of them accepted and every error kind present, and 601 formatted labels |
+| Interning | 19 | 9,581 interning and 463 lookup rows with repeats |
+| Persistence | 15 | 5 encodings, one refused, and 3,297 decodes of prefixes, single-byte substitutions, random mutations and crafted inputs, 107 accepted and re-encoded |
+| Visibility | 10 | 73 builds and 178 refreshes printing every word, over tables of up to 2,330 labels grown across word boundaries |
+| Admission | 18 | 2,200 gate rows with 70,802 slot decisions for the gate and three filter-gate configurations, 6,201 of them stale ids, and 400 `hnsw.brute_force` searches through the gate, 387 with hidden slots |
+| Read and write rules | 17 | 400 subjects with valid and invalid sessions, 1,600 read, write and modify checks each and 400 default writes |
+| Counters | 11 | 2,845 rows of additions, subtractions, underflows, overflows at the u64 ceiling and visible totals |
+
+The proofs establish that dominance is a partial order and that join and meet are the least upper and greatest lower bounds of a distributive lattice with the zero label as bottom and, for each configuration, the highest level with every compartment as top; that the configuration procedures keep names canonical and distinct, that parsing the canonical marking of a valid label returns it, that every accepted marking gives a valid label whose canonical marking parses back to it, and that canonical markings are injective and fit the 32,768-byte limit; that the label table keeps bottom at id 0, never reuses or changes an id, hands out ids below 65,535 and refuses a new label at that limit without changing the table; that decoding an encoded configuration and table returns them, and that every accepted byte string is exactly the encoding of what it decodes to; that a visibility bitset has bit `i` set exactly when the reader dominates label `i`, before and after any growth of the table, that refreshing after growth equals a fresh build, and that ids beyond the last refresh are never visible; that the adapter accepts a slot exactly when its label is dominated, the combinator exactly when the filter also passes, and that every result of the transcribed `search_filtered` and `brute_force` through them is dominated by the reader and by the caller's clearance; that this is soundness and not non-interference for graph search, by a four-node counterexample, while an exact scan returns the same results when the visible slots agree; that reads never exceed the clearance, writes go only to labels between the session and the clearance, every label read flows only to labels that dominate it, and modification is allowed exactly at the session label; and that the visible total of the counters is the sum over dominated labels, is unchanged by counts the reader cannot see and never exceeds the u64 total. The [project documentation](label/README.md) states the models, assumptions and the cases outside the proofs.
+
+From the repository root:
+
+```sh
+python3 -I proofs/label/verify.py --lean-bin /absolute/path/lean-4.35.0-linux/bin --odin /absolute/path/odin
+```
+
+Artifacts and `receipt.json` default to ignored `proofs/label/.build/`; through the aggregate runner they go to `proofs/.build/phase-one/label/`. These checks passed on 6 November 2026 with Lean 4.35.0 and Odin dev-2026-10-nightly:84bc3fc against the sources pinned in [source-sha256.json](label/source-sha256.json), together with the bitfield and vector projects through `proofs/verify.py --project bitfield vector label`.
 
 ## Audit coverage
 

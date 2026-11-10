@@ -1,0 +1,11 @@
+name = "eski-label"
+version = "0.1.0"
+defaultTargets = ["Labels", "label_model"]
+moreLeanArgs = ["-j1"]
+
+[[lean_lib]]
+name = "Labels"
+
+[[lean_exe]]
+name = "label_model"
+root = "Main"

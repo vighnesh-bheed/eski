@@ -21,6 +21,9 @@ PROJECTS = {
     'vector': {'areas': ['projection', 'quantisation', 'heaps', 'visited', 'graph', 'arena', 'filter'],
                'proof_only': ['filter'], 'odin_option': True,
                'description': 'Vector projection, quantisation, heaps, visited set, graph links and twins, arena free list and filter programs'},
+    'label': {'areas': ['lattice', 'marking', 'interning', 'persistence', 'visibility', 'admission', 'rules', 'counters'],
+              'odin_option': True,
+              'description': 'Access label lattice, markings, interning, persistence, visibility bitsets, search admission, read and write rules and partitioned counters'},
 }
 ALLOWED_AXIOMS = {'propext', 'Classical.choice', 'Quot.sound'}
 
