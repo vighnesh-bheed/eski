@@ -1,4 +1,5 @@
 import math
+import re
 import struct
 
 M64 = (1 << 64) - 1
@@ -169,7 +170,8 @@ class Model:
     def insert(self, key, o, lab, name, mask, attr):
         created = lab not in o.parts
         if created:
-            self.streams[lab] = (self.streams[lab] + GOLDEN) & M64
+            k = self.skey(lab)
+            self.streams[k] = (self.streams[k] + GOLDEN) & M64
             o.parts[lab] = {'order': [], 'elems': {}, 'uid': 0}
             self.presence_add(key, lab, o)
         p = o.parts[lab]
@@ -220,8 +222,17 @@ class Model:
         if c['kind'] != 'vset':
             if c['label'] == writer:
                 return WRONGTYPE + '^', None
-            return f'-INUSE name in use at {text(c["label"])}^', None
+            return f'-INUSE name in use at {self.place(c["label"])}^', None
         return None, c['obj']
+
+    def place(self, x):
+        return text(x)
+
+    def new_obj(self, dim):
+        return Obj(dim)
+
+    def skey(self, lab):
+        return lab
 
     def run(self, lab, cmd, args):
         return getattr(self, 'c_' + cmd.lower())(lab, *args)
@@ -229,7 +240,7 @@ class Model:
     def c_set(self, lab, key, value):
         c = self.lookup(lab, key)
         if c is not None and c['label'] != lab:
-            return f'-INUSE name in use at {text(c["label"])}^'
+            return f'-INUSE name in use at {self.place(c["label"])}^'
         if c is None:
             self.seq += 1
             self.copies(key).append({'label': lab, 'kind': 'string', 'obj': None, 'seq': self.seq})
@@ -241,7 +252,7 @@ class Model:
             return refusal
         mask &= (1 << dim) - 1
         if o is None:
-            o = Obj(dim)
+            o = self.new_obj(dim)
             self.next_obj += 1
             self.insert(key, o, lab, name, mask, attr)
             return integer(1)
@@ -256,7 +267,7 @@ class Model:
             return integer(0)
         other = o.other(lab, name)
         if other is not None:
-            return f'-INUSE element in use at {text(other)}^'
+            return f'-INUSE element in use at {self.place(other)}^'
         self.insert(key, o, lab, name, mask, attr)
         return integer(1)
 
@@ -271,7 +282,7 @@ class Model:
             return integer(1)
         other = o.other(lab, name)
         if other is not None:
-            return f'-INUSE element in use at {text(other)}^'
+            return f'-INUSE element in use at {self.place(other)}^'
         return integer(0)
 
     def c_vsetattr(self, lab, key, name, attr):
@@ -285,7 +296,7 @@ class Model:
             return integer(1)
         other = o.other(lab, name)
         if other is not None:
-            return f'-INUSE element in use at {text(other)}^'
+            return f'-INUSE element in use at {self.place(other)}^'
         return integer(0)
 
     def c_vcard(self, lab, key):
@@ -402,13 +413,13 @@ class Model:
         if count is None:
             if v is None:
                 return NULL
-            return bulk(v[1][below(self.streams, lab, len(v[1]))][1])
+            return bulk(v[1][below(self.streams, self.skey(lab), len(v[1]))][1])
         if v is None or count == 0:
             return '*0^'
         refs = v[1]
         n = len(refs)
         if count < 0:
-            return array([bulk(refs[below(self.streams, lab, n)][1]) for _ in range(-count)])
+            return array([bulk(refs[below(self.streams, self.skey(lab), n)][1]) for _ in range(-count)])
         want = min(count, n)
         if want >= n:
             out = list(refs)
@@ -416,7 +427,7 @@ class Model:
         elif want * 4 <= n:
             picks, out = set(), []
             for j in range(n - want, n):
-                t = below(self.streams, lab, j + 1)
+                t = below(self.streams, self.skey(lab), j + 1)
                 if t not in picks:
                     picks.add(t)
                     out.append(refs[t])
@@ -427,14 +438,14 @@ class Model:
         else:
             pool = list(range(n))
             for i in range(want):
-                j = i + below(self.streams, lab, n - i)
+                j = i + below(self.streams, self.skey(lab), n - i)
                 pool[i], pool[j] = pool[j], pool[i]
             out = [refs[pool[i]] for i in range(want)]
         return array([bulk(name) for _, name in out])
 
     def shuffle(self, lab, out):
         for i in range(len(out) - 1, 0, -1):
-            j = below(self.streams, lab, i + 1)
+            j = below(self.streams, self.skey(lab), i + 1)
             out[i], out[j] = out[j], out[i]
 
     def c_vsim(self, lab, key, query, count, with_scores, with_attribs, flt):
@@ -794,3 +805,262 @@ def model_mutants():
     return {'lookup_ignores_own': ('lookup', ignores_own), 'lookup_ignores_visibility': ('lookup', sees_all),
             'element_ties_newest': (('Obj', 'resolve'), newest), 'creation_keeps_stream': ('insert', no_stream),
             'vinfo_shows_uid': ('c_vinfo', uid_shown), 'vsim_ties_reversed': ('c_vsim', ties_reversed)}
+
+
+OWNER_IDS = ['u1', 'u2', 'u3']
+TOP_LABEL = (len(LEVELS) - 1, (1 << len(COMPS)) - 1, 0)
+
+
+def fnv(text):
+    h = 0xCBF29CE484222325
+    for b in text.encode():
+        h = ((h ^ b) * 0x100000001B3) & M64
+    return h
+
+
+def scope_text(x):
+    lab, o = x
+    return text(lab) + (' SHARED' if o is None else ' OWNER ' + o)
+
+
+def osees(r, d):
+    return sees(r[0], d[0]) and (d[1] is None or d[1] == r[1])
+
+
+def okey(reader, x):
+    return rank(x[0]), int(reader[1] is not None and x[1] == reader[1])
+
+
+def scope_order(x):
+    return tuple(-v for v in rank(x[0])), 0 if x[1] is not None else 1, -x[0][1]
+
+
+class OObj(Obj):
+    def resolve(self, reader, name):
+        ls = self.index.get(name, [])
+        if reader in ls:
+            return reader
+        if reader[1] is not None and (reader[0], None) in ls:
+            return (reader[0], None)
+        best = None
+        for x in ls:
+            if not self.sees(reader, x):
+                continue
+            if best is None or self.key(reader, x) > self.key(reader, best):
+                best = x
+        return best
+
+    def sees(self, r, d):
+        return osees(r, d)
+
+    def key(self, reader, x):
+        return okey(reader, x)
+
+    def other(self, writer, name):
+        if any(x != writer and self.sees(writer, x) for x in self.index.get(name, [])):
+            return self.resolve(writer, name)
+        return None
+
+
+class Streams(dict):
+    def __init__(self, secret):
+        super().__init__()
+        self.secret = secret
+
+    def __missing__(self, x):
+        lab, o = x
+        base = label_hash(lab) ^ self.secret
+        if o is not None:
+            base ^= label_mix((fnv(o) + 0x517CC1B727220A95) & M64)
+        v = label_mix((base + 6) & M64)
+        self[x] = v
+        return v
+
+
+class OModel(Model):
+    def __init__(self, seed):
+        super().__init__(seed)
+        self.streams = Streams(label_mix(seed & M64))
+
+    def new_obj(self, dim):
+        return OObj(dim)
+
+    def place(self, x):
+        return scope_text(x)
+
+    def ksees(self, r, d):
+        return osees(r, d)
+
+    def lookup(self, reader, key):
+        cs = self.copies(key)
+        for c in cs:
+            if c['label'] == reader:
+                return c
+        if reader[1] is not None:
+            for c in cs:
+                if c['label'] == (reader[0], None):
+                    return c
+        best = None
+        for c in cs:
+            if not self.ksees(reader, c['label']):
+                continue
+            if best is None or okey(reader, c['label']) > okey(reader, best['label']):
+                best = c
+        return best
+
+    def view(self, reader, o):
+        labs = sorted((x for x in o.parts if o.sees(reader, x)), key=scope_order)
+        refs = []
+        for lab in labs:
+            for name in o.parts[lab]['order']:
+                if o.resolve(reader, name) == lab:
+                    refs.append((lab, name))
+        return labs, refs
+
+    def c_forget(self, lab, owner):
+        keys = elements = 0
+        for key in list(self.keys):
+            cs = self.keys[key]
+            keys += sum(1 for c in cs if c['label'][1] == owner)
+            for c in cs:
+                if c['kind'] == 'vset':
+                    o = c['obj']
+                    for x in [x for x in o.parts if x[1] == owner]:
+                        for name in list(o.parts[x]['order']):
+                            elements += 1
+                            o.index[name].remove(x)
+                            if not o.index[name]:
+                                del o.index[name]
+                        del o.parts[x]
+            cs[:] = [c for c in cs if c['label'][1] != owner]
+        for x in [x for x in self.streams if x[1] == owner]:
+            del self.streams[x]
+        return re.compile(re.escape(f'E|*6^$4^keys^:{keys}^$8^elements^:{elements}^$5^bytes^:') + r'\d+\^')
+
+
+def owner_command_args(cmd, args):
+    if cmd == 'FORGET':
+        return ['OWNERS', 'FORGET', args[0]]
+    return command_args(cmd, args)
+
+
+def orow_line(scope, cmd, args):
+    argv = owner_command_args(cmd, args)
+    head = ['LABEL', 'AS', text(scope[0])] + (['OWNER', scope[1]] if scope[1] is not None else ['SHARED'])
+    return 'E ' + ' '.join(a.encode().hex() if a else '-' for a in head + argv)
+
+
+def oscheme_line(seed):
+    return f'S {",".join(LEVELS)} {",".join(COMPS)} {",".join(TRUSTS)} {seed} 1 1'
+
+
+def osimulate(seed, cmds, stats=None, model=OModel):
+    m = model(seed)
+    rows = []
+    for scope, cmd, args in cmds:
+        out = m.run(scope, cmd, args)
+        rows.append(out if hasattr(out, 'fullmatch') else 'E|' + out)
+        if stats is not None:
+            stats['command_owner_rows'] += 1
+            if isinstance(rows[-1], str) and 'INUSE' in rows[-1]:
+                stats['command_owner_refusals'] += 1
+    return rows
+
+
+def owner_random_command(rng, scopes, keys, strings):
+    scope = rng.choice(scopes)
+    lab, cmd, args = random_command(rng, [scope[0]], keys, strings)
+    return scope, cmd, args
+
+
+def owner_session(rng, number, ops):
+    labs = rng.sample(all_labels(), rng.randrange(3, 7))
+    if number % 5 == 4:
+        labs = [(1, 1, 0), (1, 2, 0), (2, 3, 0), (0, 0, 0)]
+    if number % 5 == 3:
+        labs = [(1, 0, 0), (1, 0, 1), (0, 0, 1), (2, 1, 0)]
+    owners = [None, 'u1', 'u2'] if number % 3 else [None, 'u1', 'u2', 'u3']
+    scopes = [(lab, o) for lab in labs for o in owners]
+    keys = [f'k{number}_{i}' for i in range(rng.randrange(1, 3))]
+    strings = [f's{number}']
+    out = [(rng.choice(scopes), 'SET', (strings[0], 'v')) for _ in range(rng.randrange(0, 3))]
+    for _ in range(ops):
+        if rng.randrange(60) == 0:
+            out.append(((TOP_LABEL, None), 'FORGET', (rng.choice(OWNER_IDS),)))
+        out.append(owner_random_command(rng, scopes, keys, strings))
+    return out, labs
+
+
+def owner_hidden(rng, cmds, labs, number):
+    la, lb = rng.sample(labs, 2)
+    lc = rng.choice(labs)
+    observers = [(la, 'u1'), (lb, 'u1'), (lc, None)]
+    base = [c for c in cmds if c[0] in observers]
+    hidden = [(lab, o) for lab in all_labels() for o in (None, 'u2', 'u3') if not any(osees(w, (lab, o)) for w in observers)]
+    keys = sorted({args[0] for _, cmd, args in base if cmd != 'SET'} | {f'k{number}_0'})
+    seen = [lab for lab in all_labels() if sees(la, lab)]
+    marker = ((rng.choice(seen), None), 'VADD', (f'z{number}', DIM, rng.randrange(256), 'zz', None))
+    at = rng.randrange(len(base) + 1)
+    base = base[:at] + [marker, ((la, 'u1'), 'VCARD', (f'z{number}',))] + base[at:]
+    twin = []
+    for c in base:
+        while rng.randrange(3) == 0:
+            scope = rng.choice(hidden)
+            name = rng.choice(NAMES)
+            k = rng.randrange(12)
+            key = rng.choice(keys)
+            if k < 6:
+                twin.append((scope, 'VADD', (key, DIM, rng.randrange(256), name, rng.choice([None, '{"a":1}']))))
+            elif k < 8:
+                twin.append((scope, 'VREM', (key, name)))
+            elif k < 10:
+                twin.append((scope, 'VRANDMEMBER', (key, rng.choice([None, 3, -2]))))
+            elif k < 11 and scope[1] is not None:
+                twin.append(((TOP_LABEL, None), 'FORGET', (scope[1],)))
+            else:
+                twin.append((scope, 'VCARD', (key,)))
+        twin.append(c)
+    return base, twin, observers, marker
+
+
+def owner_corpus(rng, seed, sessions, twins):
+    stats = {'command_owner_rows': 0, 'command_owner_refusals': 0, 'command_owner_sessions': 0, 'command_owner_twin_pairs': 0,
+             'command_owner_twin_hidden': 0, 'command_owner_twin_rows': 0, 'command_owner_sensitivity_runs': 0}
+    cmds = []
+    for n in range(sessions):
+        s, _ = owner_session(rng, n, rng.randrange(30, 90))
+        cmds += s
+        stats['command_owner_sessions'] += 1
+    main = ([oscheme_line(seed)] + [orow_line(*c) for c in cmds], osimulate(seed, cmds, stats), cmds)
+    pairs = []
+    for n in range(twins):
+        base, labs = owner_session(rng, 2000 + n, rng.randrange(40, 90))
+        base = [c for c in base if c[1] != 'FORGET']
+        b2, twin, observers, marker = owner_hidden(rng, base, labs, 2000 + n)
+        pairs.append((b2, twin, observers, marker))
+    return main, pairs, stats
+
+
+def owner_model_mutants():
+    original_insert = OModel.insert
+
+    def owner_check_dropped(self, key, o, lab, name, mask, attr):
+        return original_insert(self, key, o, (lab[0], None), name, mask, attr)
+
+    def shared_hidden(self, r, d):
+        return sees(r[0], d[0]) and d[1] == r[1]
+
+    def other_owner_visible(self, r, d):
+        return sees(r[0], d[0])
+
+    def tie_reversed(self, reader, x):
+        return rank(x[0]), int(x[1] is None)
+
+    def one_stream(self, lab):
+        return (lab[0], None)
+
+    return {'owner_check_dropped': (OModel, 'insert', owner_check_dropped),
+            'shared_hidden': (OObj, 'sees', shared_hidden),
+            'other_owner_visible': (OObj, 'sees', other_owner_visible),
+            'tie_reversed': (OObj, 'key', tie_reversed),
+            'one_stream_two_owners': (OModel, 'skey', one_stream)}

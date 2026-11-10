@@ -1,6 +1,7 @@
 package main
 
 import "base:intrinsics"
+import "base:runtime"
 import ht "hashtype"
 import lb "label"
 import ow "owner"
@@ -26,17 +27,73 @@ Owner_Weight :: enum u8 {
 }
 
 Owner_Part :: struct {
-	db:     Db,
 	space:  ^Owner_Space,
-	hreg:   ht.Registry,
-	sctx:   st.Context,
-	zctx:   zt.Context,
 	active: [Owner_Active]u32,
 	sample: [Owner_Weight]u32,
 	bucket: [Owner_Weight]u8,
+	db:     Db_Core,
 }
 
-#assert(offset_of(Owner_Part, db) == 0)
+Owner_Ctx :: struct {
+	hreg: ht.Registry,
+	sctx: st.Context,
+	zctx: zt.Context,
+}
+
+OWNER_HEAD_BYTES :: offset_of(Owner_Part, db)
+
+#assert(OWNER_HEAD_BYTES == 48)
+#assert(OWNER_HEAD_BYTES + size_of(Db_Core) == size_of(Owner_Part))
+#assert(size_of(Owner_Part) == 376)
+#assert(offset_of(Db, slab) == size_of(Db_Core))
+#assert(offset_of(Owner_Ctx, hreg) == 0)
+#assert(size_of(Owner_Ctx) == 152)
+
+owner_compact := true
+
+owner_db :: #force_inline proc "contextless" (p: ^Owner_Part) -> ^Db {
+	return (^Db)(&p.db)
+}
+
+owner_part_of :: #force_inline proc "contextless" (db: ^Db) -> ^Owner_Part {
+	return (^Owner_Part)(uintptr(db) - OWNER_HEAD_BYTES)
+}
+
+@(cold)
+owner_ctx_need :: #force_no_inline proc "contextless" (db: ^Db, type: Obj_Type) {
+	if db.hreg == nil && (type == .Hash || type == .Set || type == .Zset) {
+		owner_ctx_make(db)
+	}
+}
+
+owner_ctx_make :: proc "contextless" (db: ^Db) {
+	c := (^Owner_Ctx)(runtime.heap_alloc(size_of(Owner_Ctx), true))
+	if c == nil {
+		store_fatal("out of memory")
+	}
+	c.hreg.owner = db
+	c.sctx.owner = db
+	c.zctx.owner = db
+	db.hreg = &c.hreg
+	db.sctx = &c.sctx
+	db.zctx = &c.zctx
+	owner_structs(owner_part_of(db).space.entry, size_of(Owner_Ctx))
+}
+
+owner_ctx_drop :: proc "contextless" (db: ^Db) {
+	if db.hreg == nil {
+		return
+	}
+	c := (^Owner_Ctx)(db.hreg)
+	ht.registry_destroy(&c.hreg)
+	st.maintenance_clear(&c.sctx)
+	zt.maintenance_clear(&c.zctx)
+	db.hreg = nil
+	db.sctx = nil
+	db.zctx = nil
+	owner_structs(owner_part_of(db).space.entry, -size_of(Owner_Ctx))
+	runtime.heap_free(c)
+}
 
 Owner_Slot :: struct {
 	label: lb.Id,
@@ -156,10 +213,12 @@ owner_user :: #force_inline proc "contextless" () -> bool {
 owner_db_ready :: proc(dbi: int) -> ^Owner_Db {
 	if owner_dbs == nil {
 		owner_dbs = make([]Owner_Db, max(len(dbs), 1))
+		owner_structs(nil, len(owner_dbs) * size_of(Owner_Db))
 	}
 	if dbi >= len(owner_dbs) {
 		grown := make([]Owner_Db, dbi + 1)
 		copy(grown, owner_dbs)
+		owner_structs(nil, (len(grown) - len(owner_dbs)) * size_of(Owner_Db))
 		delete(owner_dbs)
 		owner_dbs = grown
 	}
@@ -180,6 +239,12 @@ owner_structs :: #force_inline proc "contextless" (e: ^Owner_Entry, n: int) {
 	} else {
 		owner_global_bytes += n
 	}
+}
+
+owner_slot_share :: #force_inline proc "contextless" (e: ^Owner_Entry, n: int) {
+	owner_global_bytes -= n
+	e.keyspace.structs += n
+	e.keyspace.used += n
 }
 
 owner_space_of :: proc "contextless" (e: ^Owner_Entry, dbi: int) -> ^Owner_Space {
@@ -211,11 +276,11 @@ owner_space_make :: proc(e: ^Owner_Entry, dbi: int) -> ^Owner_Space {
 	s.first.label = lb.ID_NONE
 	s.ever_first = lb.ID_NONE
 	s.pos = len(od.spaces)
+	before_slots := cap(od.spaces)
 	append(&od.spaces, s)
+	owner_structs(nil, (cap(od.spaces) - before_slots) * size_of(^Owner_Space))
+	owner_slot_share(e, size_of(^Owner_Space))
 	ks := &e.keyspace
-	if ks.space == nil && ks.spaces == nil {
-		owner_holding += 1
-	}
 	if ks.space == nil {
 		ks.space = s
 	} else {
@@ -239,6 +304,7 @@ owner_space_drop :: proc(s: ^Owner_Space) {
 	od.spaces[s.pos] = last
 	last.pos = s.pos
 	pop(&od.spaces)
+	owner_slot_share(e, -size_of(^Owner_Space))
 	if ks.space == s {
 		ks.space = nil
 		if ks.spaces != nil && len(ks.spaces) > 0 {
@@ -257,9 +323,6 @@ owner_space_drop :: proc(s: ^Owner_Space) {
 		delete(ks.spaces^)
 		free(ks.spaces)
 		ks.spaces = nil
-	}
-	if ks.space == nil {
-		owner_holding -= 1
 	}
 	if s.copies != nil {
 		for name, cp in s.copies {
@@ -376,11 +439,11 @@ owner_ever_put :: #force_inline proc "contextless" (s: ^Owner_Space, i: int, lab
 }
 
 owner_part_bytes :: #force_inline proc "contextless" (p: ^Db) -> int {
-	return p.t[0].size + p.t[1].size + p.next.size + p.heap_bytes
+	return p.t[0].size + p.t[1].size + p.heap_bytes
 }
 
 owner_part_tables :: #force_inline proc "contextless" (p: ^Db) -> int {
-	return p.t[0].size + p.t[1].size + p.next.size
+	return p.t[0].size + p.t[1].size
 }
 
 owner_part_make :: proc(e: ^Owner_Entry, dbi: int, label: lb.Id) -> (^Owner_Part, bool) {
@@ -394,18 +457,19 @@ owner_part_make :: proc(e: ^Owner_Entry, dbi: int, label: lb.Id) -> (^Owner_Part
 	if s == nil {
 		s = owner_space_make(e, dbi)
 	}
-	p := new(Owner_Part)
-	db_part_init(&p.db, dbi)
-	p.db.label = label
-	p.db.owner = e.number
-	p.db.role = DB_ROLE_HEAP | DB_ROLE_OWNER
-	p.db.hreg = &p.hreg
-	p.hreg.owner = &p.db
-	p.db.sctx = &p.sctx
-	p.sctx.owner = &p.db
-	p.db.zctx = &p.zctx
-	p.zctx.owner = &p.db
+	p := (^Owner_Part)(runtime.heap_alloc(size_of(Owner_Part), true))
+	if p == nil {
+		store_fatal("out of memory")
+	}
+	d := owner_db(p)
+	db_part_init(d, dbi)
+	d.label = label
+	d.owner = e.number
+	d.role = DB_ROLE_HEAP | DB_ROLE_OWNER
 	p.space = s
+	if !owner_compact {
+		owner_ctx_make(d)
+	}
 	if s.first.part == nil {
 		s.first = Owner_Slot{label, p}
 	} else {
@@ -419,6 +483,9 @@ owner_part_make :: proc(e: ^Owner_Entry, dbi: int, label: lb.Id) -> (^Owner_Part
 	}
 	s.nparts += 1
 	owner_ever_add(s, label)
+	if e.keyspace.parts == 0 {
+		owner_holding += 1
+	}
 	e.keyspace.parts += 1
 	owner_parts_total += 1
 	owner_structs(e, size_of(Owner_Part))
@@ -433,31 +500,29 @@ owner_part_release :: proc(p: ^Owner_Part) {
 	for k in Owner_Weight {
 		owner_sampler_remove(p, k)
 	}
-	evict_pool_forget(&p.db)
+	d := owner_db(p)
+	evict_pool_forget(d)
 	for i := len(owner_touched) - 1; i >= 0; i -= 1 {
 		if owner_touched[i].p == p {
 			ordered_remove(&owner_touched, i)
 		}
 	}
-	d := &p.db
 	if d.rehash_idx >= 0 {
 		store_rehashing -= 1
 	}
-	if d.next.region != nil && d.next_warm < d.next.size {
-		store_warming -= 1
-	}
-	table_detach(&d.next)
+	gone := owner_part_bytes(d)
+	owner_dbs[d.id].tables -= owner_part_tables(d)
 	for k in 0 ..< 2 {
 		table_detach(&d.t[k])
 	}
 	if d.heap_bytes != 0 {
 		db_used_memory -= d.heap_bytes
 	}
-	ht.registry_destroy(&p.hreg)
-	st.maintenance_clear(&p.sctx)
-	zt.maintenance_clear(&p.zctx)
+	owner_ctx_drop(d)
 	s := p.space
 	e := s.entry
+	e.keyspace.used -= gone
+	owner_bytes_total -= gone
 	if s.first.part == p {
 		s.first = Owner_Slot{lb.ID_NONE, nil}
 		if s.more != nil && len(s.more) > 0 {
@@ -474,19 +539,19 @@ owner_part_release :: proc(p: ^Owner_Part) {
 	s.nparts -= 1
 	s.dup.valid = false
 	e.keyspace.parts -= 1
+	if e.keyspace.parts == 0 {
+		owner_holding -= 1
+	}
 	owner_parts_total -= 1
 	owner_structs(e, -size_of(Owner_Part))
 	if db_cur == d {
 		db_cur = label_dbs[d.id].sentinel if d.id >= 0 && d.id < len(label_dbs) else &dbs[0]
 	}
-	free(p)
-	if s.nparts == 0 {
-		owner_space_drop(s)
-	}
+	runtime.heap_free(p)
 }
 
 owner_touch :: proc(p: ^Db) {
-	op := (^Owner_Part)(p)
+	op := owner_part_of(p)
 	for t in owner_touched {
 		if t.p == op {
 			return
@@ -510,8 +575,11 @@ owner_settle :: proc() {
 
 owner_settle_part :: proc(t: Owner_Touch) {
 	p := t.p
-	d := &p.db
+	d := owner_db(p)
 	e := p.space.entry
+	if d.t[0].cap == TABLE_MIN_CAP && table_lanes(&d.t[0]) == TABLE_MIN_CAP && d.rehash_idx < 0 {
+		db_table_compact(d)
+	}
 	dk := db_size_of(d) - t.keys
 	dbytes := owner_part_bytes(d) - t.bytes
 	dtabs := owner_part_tables(d) - t.tabs
@@ -534,21 +602,23 @@ owner_settle_part :: proc(t: Owner_Touch) {
 }
 
 owner_enroll :: proc(p: ^Owner_Part) {
-	d := &p.db
+	d := owner_db(p)
 	if d.expires > 0 {
 		owner_active_add(p, .Expire)
 	}
-	if p.hreg.len > 0 {
-		owner_active_add(p, .Field)
-	}
-	if p.hreg.resize_head != nil {
-		owner_active_add(p, .Hash_Resize)
-	}
-	if p.sctx.resize_head != nil {
-		owner_active_add(p, .Set_Resize)
-	}
-	if p.zctx.resize_head != nil {
-		owner_active_add(p, .Zset_Resize)
+	if d.hreg != nil {
+		if d.hreg.len > 0 {
+			owner_active_add(p, .Field)
+		}
+		if d.hreg.resize_head != nil {
+			owner_active_add(p, .Hash_Resize)
+		}
+		if d.sctx.resize_head != nil {
+			owner_active_add(p, .Set_Resize)
+		}
+		if d.zctx.resize_head != nil {
+			owner_active_add(p, .Zset_Resize)
+		}
 	}
 	if d.rehash_idx >= 0 {
 		owner_active_add(p, .Rehash)
@@ -564,6 +634,7 @@ owner_active_add :: proc(p: ^Owner_Part, k: Owner_Active) {
 	before := cap(owner_active[k])
 	append(&owner_active[k], p)
 	owner_structs(nil, (cap(owner_active[k]) - before) * size_of(^Owner_Part))
+	owner_slot_share(p.space.entry, size_of(^Owner_Part))
 	p.active[k] = u32(len(owner_active[k]))
 }
 
@@ -578,6 +649,7 @@ owner_active_drop :: proc(p: ^Owner_Part, k: Owner_Active) {
 	last.active[k] = u32(at)
 	pop(list)
 	p.active[k] = 0
+	owner_slot_share(p.space.entry, -size_of(^Owner_Part))
 }
 
 owner_bucket_of :: #force_inline proc "contextless" (w: int) -> u8 {
@@ -586,7 +658,7 @@ owner_bucket_of :: #force_inline proc "contextless" (w: int) -> u8 {
 
 owner_weight :: #force_inline proc "contextless" (p: ^Owner_Part, k: Owner_Weight) -> int {
 	if k == .Keys {
-		return db_size_of(&p.db)
+		return db_size_of(owner_db(p))
 	}
 	return p.db.expires
 }
@@ -604,6 +676,7 @@ owner_sampler_remove :: proc(p: ^Owner_Part, k: Owner_Weight) {
 	last.sample[k] = u32(at)
 	pop(list)
 	p.sample[k] = 0
+	owner_slot_share(p.space.entry, -size_of(^Owner_Part))
 	s.mass -= u64(1) << (b + 1)
 }
 
@@ -622,6 +695,7 @@ owner_sampler_note :: proc(p: ^Owner_Part, k: Owner_Weight) {
 	before := cap(s.bucket[b])
 	append(&s.bucket[b], p)
 	owner_structs(nil, (cap(s.bucket[b]) - before) * size_of(^Owner_Part))
+	owner_slot_share(p.space.entry, size_of(^Owner_Part))
 	p.sample[k] = u32(len(s.bucket[b]))
 	p.bucket[k] = b
 	s.mass += u64(1) << (b + 1)
@@ -817,9 +891,9 @@ owner_best_own :: proc(s: ^Owner_Space, key: []u8, l: ^Lookup, skip: lb.Id, vis:
 					break
 				}
 				if q := owner_space_part(s, cp.copies[best].label); q != nil {
-					tt, ii := db_locate_slot(&q.db, l)
-					if ii >= 0 && label_slot_live(&q.db, tt, ii) {
-						return &q.db, tt, ii
+					tt, ii := db_locate_slot(owner_db(q), l)
+					if ii >= 0 && label_slot_live(owner_db(q), tt, ii) {
+						return owner_db(q), tt, ii
 					}
 				}
 				floor = cp.copies[best]
@@ -829,7 +903,7 @@ owner_best_own :: proc(s: ^Owner_Space, key: []u8, l: ^Lookup, skip: lb.Id, vis:
 		}
 	}
 	for k in 0 ..< int(s.nparts) {
-		q := &owner_space_at(s, k).db
+		q := owner_db(owner_space_at(s, k))
 		if q.label == skip || db_size_of(q) == 0 || !lb.visible(vis, q.label) {
 			continue
 		}
@@ -864,7 +938,7 @@ owner_locate_other :: proc(dbi: int, key: []u8, l: ^Lookup, reader: lb.Id, e: ^O
 
 @(cold)
 owner_note_created :: #force_no_inline proc(db: ^Db, key: []u8) {
-	p := (^Owner_Part)(db)
+	p := owner_part_of(db)
 	s := p.space
 	e := s.entry
 	s.own_gen += 1
@@ -881,7 +955,7 @@ owner_note_created :: #force_no_inline proc(db: ^Db, key: []u8) {
 	}
 	l := lookup_make(key)
 	for k in 0 ..< int(s.nparts) {
-		q := &owner_space_at(s, k).db
+		q := owner_db(owner_space_at(s, k))
 		if q == db || db_size_of(q) == 0 {
 			continue
 		}
@@ -907,7 +981,7 @@ owner_note_created :: #force_no_inline proc(db: ^Db, key: []u8) {
 
 @(cold)
 owner_note_erased :: #force_no_inline proc(db: ^Db, key: []u8) {
-	p := (^Owner_Part)(db)
+	p := owner_part_of(db)
 	s := p.space
 	s.own_gen += 1
 	if s.copies == nil || len(s.copies) == 0 {
@@ -940,7 +1014,7 @@ owner_copies_drop_label :: proc(s: ^Owner_Space, cp: ^Label_Copies, label: lb.Id
 }
 
 owner_registry_purge :: proc(db: ^Db) {
-	p := (^Owner_Part)(db)
+	p := owner_part_of(db)
 	s := p.space
 	s.own_gen += 1
 	if s.copies == nil || len(s.copies) == 0 {
@@ -974,13 +1048,13 @@ owner_touch_take :: proc(p: ^Owner_Part) -> Owner_Touch {
 			return t
 		}
 	}
-	d := &p.db
+	d := owner_db(p)
 	return Owner_Touch{p, db_size_of(d), owner_part_bytes(d), d.expires, owner_part_tables(d)}
 }
 
 owner_part_flush :: proc(p: ^Owner_Part, lazy: bool, watch: bool) -> int {
 	t := owner_touch_take(p)
-	d := &p.db
+	d := owner_db(p)
 	n := db_size_of(d)
 	if watch {
 		watch_flush(d)
@@ -1098,8 +1172,8 @@ owner_active_expire :: proc(deadline: i64) -> bool {
 			continue
 		}
 		next^ += 1
-		owner_touch(&p.db)
-		db_expire_scan(&p.db, deadline)
+		owner_touch(owner_db(p))
+		db_expire_scan(owner_db(p), deadline)
 		owner_settle()
 		if now_ns() >= deadline {
 			return true
@@ -1118,16 +1192,17 @@ owner_field_tick :: proc(deadline: i64, now: u64) {
 			next^ = 0
 		}
 		p := list[next^]
-		if ht.registry_len(&p.hreg) == 0 {
+		d := owner_db(p)
+		if ht.registry_len(d.hreg) == 0 {
 			owner_active_drop(p, .Field)
 			continue
 		}
 		next^ += 1
-		if ht.registry_next_expire(&p.hreg) > now {
+		if ht.registry_next_expire(d.hreg) > now {
 			continue
 		}
-		owner_touch(&p.db)
-		hash_expire_partition(&p.db, now)
+		owner_touch(d)
+		hash_expire_partition(d, now)
 		owner_settle()
 	}
 }
@@ -1142,45 +1217,48 @@ owner_resize_tick :: proc(k: Owner_Active, deadline: i64) {
 			next^ = 0
 		}
 		p := list[next^]
+		d := owner_db(p)
 		pending := false
-		switch k {
-		case .Hash_Resize:
-			pending = p.hreg.resize_head != nil
-		case .Set_Resize:
-			pending = p.sctx.resize_head != nil
-		case .Zset_Resize:
-			pending = p.zctx.resize_head != nil
-		case .Expire, .Field, .Rehash:
+		if d.hreg != nil {
+			switch k {
+			case .Hash_Resize:
+				pending = d.hreg.resize_head != nil
+			case .Set_Resize:
+				pending = d.sctx.resize_head != nil
+			case .Zset_Resize:
+				pending = d.zctx.resize_head != nil
+			case .Expire, .Field, .Rehash:
+			}
 		}
 		if !pending {
 			owner_active_drop(p, k)
 			continue
 		}
 		next^ += 1
-		owner_touch(&p.db)
+		owner_touch(d)
 		for _ in 0 ..< 16 {
 			done := false
 			switch k {
 			case .Hash_Resize:
-				h, _ := ht.maintenance_step(&p.hreg, ht.RESIZE_WRITE_SCANS, ht.RESIZE_WRITE_MOVES)
+				h, _ := ht.maintenance_step(d.hreg, ht.RESIZE_WRITE_SCANS, ht.RESIZE_WRITE_MOVES)
 				if h == nil {
 					done = true
 				} else {
-					hash_sync(&p.db, h)
+					hash_sync(d, h)
 				}
 			case .Set_Resize:
-				h, _ := st.maintenance_step(&p.sctx, st.RESIZE_WRITE_SCANS, st.RESIZE_WRITE_MOVES)
+				h, _ := st.maintenance_step(d.sctx, st.RESIZE_WRITE_SCANS, st.RESIZE_WRITE_MOVES)
 				if h == nil {
 					done = true
 				} else {
-					set_sync(&p.db, h)
+					set_sync(d, h)
 				}
 			case .Zset_Resize:
-				h, _ := zt.maintenance_step(&p.zctx, zt.RESIZE_WRITE_SCANS, zt.RESIZE_WRITE_MOVES)
+				h, _ := zt.maintenance_step(d.zctx, zt.RESIZE_WRITE_SCANS, zt.RESIZE_WRITE_MOVES)
 				if h == nil {
 					done = true
 				} else {
-					zset_sync(&p.db, h)
+					zset_sync(d, h)
 				}
 			case .Expire, .Field, .Rehash:
 				done = true

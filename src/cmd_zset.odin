@@ -87,17 +87,17 @@ zset_lookup :: proc(key: []u8, read: bool) -> (e: ^Entry, z: zt.Zset, wrong: boo
 
 zset_attach_new :: proc(key: []u8, z: zt.Zset) -> ^Entry {
 	e, _ := db_upsert(key)
-	zt.maintenance_bind(z, e.db.zctx)
 	z.acct = zt.memory_usage(z)
 	entry_object_attach(e, z, .Zset, zset_obj_encoding(z), z.acct)
+	zt.maintenance_bind(z, e.db.zctx)
 	return e
 }
 
 zset_store :: proc(db: ^Db, key: []u8, z: zt.Zset) {
 	e, _ := db_upsert_in(db, key)
-	zt.maintenance_bind(z, db.zctx)
 	z.acct = zt.memory_usage(z)
 	entry_object_attach(e, z, .Zset, zset_obj_encoding(z), z.acct)
+	zt.maintenance_bind(z, db.zctx)
 	entry_set_expire(e, 0)
 }
 
@@ -932,9 +932,9 @@ zset_copy_dup :: proc(src: ^Entry) -> (obj: rawptr, extra: u64, ok: bool) {
 
 zset_copy_attach :: proc(dst: ^Entry, key: []u8, obj: rawptr, extra: u64) {
 	z := cast(zt.Zset)obj
-	zt.maintenance_bind(z, dst.db.zctx)
 	z.acct = zt.memory_usage(z)
 	entry_object_attach(dst, z, .Zset, zset_obj_encoding(z), z.acct)
+	zt.maintenance_bind(z, dst.db.zctx)
 	block_signal_key(dst.db, key, .Zset)
 }
 

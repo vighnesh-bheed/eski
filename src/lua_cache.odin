@@ -40,6 +40,7 @@ Lua_Scope :: struct {
 lua_scopes: map[u64]^Lua_Scope
 lua_holders: map[^Lua_Source]^Lua_Holder
 lua_scope_bytes: int
+lua_owner_bytes: map[ow.Owner]int
 
 lua_sources: [LUA_CACHE_BUCKETS]^Lua_Source
 lua_sources_head, lua_sources_tail: ^Lua_Source
@@ -380,7 +381,7 @@ lua_holder_drop :: proc(h: ^Lua_Holder, free_entry := true) {
 		lua_holder_unlink_lru(h)
 		home.eval_count -= 1
 	}
-	home.bytes -= lua_holder_charge(entry)
+	lua_scope_charge(home, -lua_holder_charge(entry))
 	head := lua_holders[entry]
 	if head == h {
 		if h.entry_next != nil {
@@ -439,7 +440,7 @@ lua_cache_hold :: proc(body: []u8, digest: [40]u8, pinned: bool) -> ^Lua_Source 
 	h.entry_next = lua_holders[entry]
 	lua_holders[entry] = h
 	lua_cache_bytes += size_of(Lua_Holder)
-	home.bytes += charge
+	lua_scope_charge(home, charge)
 	if !pinned {
 		lua_holder_push_lru(h)
 		home.eval_count += 1
@@ -465,6 +466,60 @@ lua_holders_release :: proc() {
 		home.lru_head, home.lru_tail = nil, nil
 		home.eval_count, home.bytes = 0, 0
 	}
+	clear(&lua_owner_bytes)
+}
+
+@(private = "file")
+lua_scope_charge :: proc(home: ^Lua_Scope, delta: int) {
+	home.bytes += delta
+	if !ow.is_user(home.scope.owner) {
+		return
+	}
+	left := lua_owner_bytes[home.scope.owner] + delta
+	if left == 0 {
+		delete_key(&lua_owner_bytes, home.scope.owner)
+	} else {
+		lua_owner_bytes[home.scope.owner] = left
+	}
+}
+
+lua_owner_script_bytes :: proc(o: ow.Owner) -> int {
+	if len(lua_owner_bytes) == 0 {
+		return 0
+	}
+	return lua_owner_bytes[o]
+}
+
+lua_scope_room :: proc(digest: [40]u8, body: []u8) -> bool {
+	e := access.owner_entry
+	if e == nil || !ow.is_user(access.owner) {
+		return true
+	}
+	quota := owner_quota_of(e)
+	home := lua_scope_of(access_scope(), true)
+	if quota <= 0 || len(body) > max(int)-size_of(Lua_Source) {
+		return true
+	}
+	if entry := lua_cache_find(digest); entry != nil && lua_holder_of(entry, home) != nil {
+		return true
+	}
+	charge := size_of(Lua_Source) + len(body)
+	need := i64(owner_used_live(e) + charge) - quota
+	if need <= 0 {
+		return true
+	}
+	spare := 0
+	for h := home.lru_head; h != nil; h = h.lru_next {
+		spare += lua_holder_charge(h.entry)
+	}
+	if i64(spare) < need {
+		return false
+	}
+	for home.lru_tail != nil && i64(owner_used_live(e) + charge) > quota {
+		lua_holder_drop(home.lru_tail)
+		lua_cache_evictions += 1
+	}
+	return true
 }
 
 lua_scopes_forget_owner :: proc(o: ow.Owner) {

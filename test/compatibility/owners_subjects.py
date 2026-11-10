@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -871,6 +872,112 @@ class Owners(OwnerMode):
         gone.send('AUTH', 'app', 'x')
         self.assertEqual(gone.reply(), 'OK')
         self.assertTrue(closed(gone))
+
+    def test_a_write_pause_sees_through_owner_prefixes(self):
+        admin = self.admin
+        app = [self.connect('app') for _ in range(6)]
+        fixed = self.connect('fixed')
+        ro = "#!lua flags=no-writes\nreturn 'ro'"
+        sha = app[0].call('LABEL', 'AS', 'OWNER', 'u1', 'SCRIPT', 'LOAD', ro)
+        known = int(info(admin, 'owners')['owners_known'])
+        self.assertEqual(app[5].call('LABEL', 'AS', 'OWNER', 'u1', 'MULTI'), 'OK')
+        self.assertEqual(app[5].call('LABEL', 'AS', 'OWNER', 'u1', 'SET', 'k2', 'v'), 'QUEUED')
+        self.assertEqual(admin.call('CLIENT', 'PAUSE', 5000, 'WRITE'), 'OK')
+        held = [(app[0], ('LABEL', 'AS', 'OWNER', 'fresh7', 'SET', 'k', 'v')), (app[1], ('LABEL', 'AS', 'S//A', 'OWNER', 'u2', 'SET', 'k', 'v')),
+                (app[2], ('LABEL', 'AS', 'OWNER', 'u1', 'EVALSHA', sha, 0)), (app[5], ('LABEL', 'AS', 'OWNER', 'u1', 'EXEC')),
+                (fixed, ('SET', 'k', 'v')), (app[4], ('LABEL', 'AS', 'SHARED', 'SET', 'k', 'v'))]
+        for client, command in held:
+            client.send(*command)
+        self.assertIsNone(app[3].call('LABEL', 'AS', 'OWNER', 'u1', 'GET', 'k'))
+        self.assertEqual(app[3].call('LABEL', 'AS', 'OWNER', 'u1', 'EVAL', ro, 0), b'ro')
+        self.assertEqual(error_of(app[3], 'LABEL', 'AS', 'S//A'), "ERR wrong number of arguments for 'label|as' command")
+        self.assertEqual(error_of(app[3], 'LABEL', 'AS', 'NOPE', 'OWNER', 'u1', 'SET', 'k', 'v'), 'ERR invalid label')
+        for client, command in held:
+            self.assertFalse(client.available(0.3), command)
+        self.assertEqual(int(info(admin, 'owners')['owners_known']), known)
+        self.assertEqual(as_map(admin.call('OWNERS', 'INFO', 'fresh7'))[b'keys'], 0)
+        self.assertEqual(admin.call('CLIENT', 'UNPAUSE'), 'OK')
+        replies = [client.reply() for client, _ in held]
+        self.assertEqual(replies[:5] + [str(replies[5])], ['OK', 'OK', b'ro', ['OK'], 'OK', INVALID_OWNER])
+        self.assertEqual(int(info(admin, 'owners')['owners_known']), known + 3)
+        self.assertEqual(as_map(admin.call('OWNERS', 'INFO', 'fresh7'))[b'keys'], 1)
+        self.assertEqual(app[3].call('LABEL', 'AS', 'OWNER', 'fresh7', 'GET', 'k'), b'v')
+        for client in app:
+            who = self.whoami(client)
+            self.assertEqual((who[b'session'], who[b'pinned-owner']), (0, None))
+
+    def owner_bytes(self, owner):
+        return as_map(self.admin.call('OWNERS', 'INFO', owner))[b'bytes']
+
+    def test_a_users_scripts_count_toward_its_quota(self):
+        admin, app, shared = self.admin, self.connect('app'), self.connect('shared')
+        u1, u2 = ('LABEL', 'AS', 'OWNER', 'u1'), ('LABEL', 'AS', 'OWNER', 'u2')
+        quota_oom = "OOM command not allowed when used memory > 'owner-quota'."
+        app.call(*u1, 'PING')
+        base = self.owner_bytes('u1')
+        pinned, evaled, common = 'return "%s"' % ('a' * 200), 'return "%s"' % ('b' * 300), 'return "%s"' % ('c' * 50)
+        held = app.call(*u1, 'SCRIPT', 'LOAD', pinned)
+        step_pinned = self.owner_bytes('u1') - base
+        self.assertEqual(app.call(*u1, 'EVAL', evaled, 0), b'b' * 300)
+        step_evaled = self.owner_bytes('u1') - base - step_pinned
+        charge = step_pinned - len(pinned)
+        self.assertGreater(charge, 0)
+        self.assertEqual(step_evaled - len(evaled), charge)
+        before = self.owner_bytes('u1')
+        self.assertEqual(shared.call('LABEL', 'AS', 'SHARED', 'SCRIPT', 'LOAD', common), hashlib.sha1(common.encode()).hexdigest().encode())
+        self.assertEqual(self.owner_bytes('u1'), before)
+        app.call(*u1, 'SCRIPT', 'LOAD', common)
+        self.assertEqual(self.owner_bytes('u1') - before, charge + len(common))
+        self.assertEqual(app.call(*u1, 'EVAL', pinned, 0), b'a' * 200)
+        self.assertEqual(app.call(*u1, 'SCRIPT', 'LOAD', pinned), held)
+        self.assertEqual(self.owner_bytes('u1') - before, charge + len(common))
+        used = self.owner_bytes('u1')
+        self.assertEqual(admin.call('OWNERS', 'QUOTA', 'u1', 'LIMIT', used + charge + 100), 'OK')
+        cached = int(info(admin, 'memory')['number_of_cached_scripts'])
+        big = 'return "%s"' % ('d' * 600)
+        self.assertEqual(error_of(app, *u1, 'SCRIPT', 'LOAD', big), quota_oom)
+        self.assertEqual(error_of(app, *u1, 'EVAL', big, 0), quota_oom)
+        self.assertEqual(admin.call('SCRIPT', 'EXISTS', hashlib.sha1(big.encode()).hexdigest()), [0])
+        self.assertEqual(app.call(*u1, 'SCRIPT', 'EXISTS', held, hashlib.sha1(evaled.encode()).hexdigest()), [1, 1])
+        self.assertEqual(int(info(admin, 'memory')['number_of_cached_scripts']), cached)
+        self.assertEqual(self.owner_bytes('u1'), used)
+        room = 'return "%s"' % ('e' * 300)
+        self.assertEqual(app.call(*u1, 'EVAL', room, 0), b'e' * 300)
+        self.assertEqual(app.call(*u1, 'SCRIPT', 'EXISTS', held, hashlib.sha1(evaled.encode()).hexdigest()), [1, 0])
+        self.assertEqual(self.owner_bytes('u1'), used - len(evaled) + len(room))
+        later = 'return "%s"' % ('f' * 300)
+        self.assertEqual(app.call(*u1, 'EVAL', later, 0), b'f' * 300)
+        self.assertEqual(app.call(*u1, 'SCRIPT', 'EXISTS', hashlib.sha1(room.encode()).hexdigest(), hashlib.sha1(later.encode()).hexdigest(), held), [0, 1, 1])
+        self.assertEqual(admin.call('OWNERS', 'QUOTA', 'u1', 'LIMIT', 1), 'OK')
+        self.assertEqual(app.call(*u1, 'EVALSHA', held, 0), b'a' * 200)
+        self.assertEqual(app.call(*u1, 'EVAL', pinned, 0), b'a' * 200)
+        self.assertEqual(app.call(*u1, 'SCRIPT', 'LOAD', common), hashlib.sha1(common.encode()).hexdigest().encode())
+        self.assertEqual(shared.call('LABEL', 'AS', 'SHARED', 'SCRIPT', 'LOAD', big), hashlib.sha1(big.encode()).hexdigest().encode())
+        self.assertEqual(app.call(*u2, 'SCRIPT', 'LOAD', big), hashlib.sha1(big.encode()).hexdigest().encode())
+        self.assertEqual(error_of(app, *u1, 'SCRIPT', 'LOAD', big), quota_oom)
+        total = self.owner_bytes('u1')
+        cached = int(info(admin, 'memory')['number_of_cached_scripts'])
+        self.assertEqual(as_map(admin.call('OWNERS', 'FORGET', 'u1'))[b'bytes'], total)
+        self.assertEqual(int(info(admin, 'memory')['number_of_cached_scripts']), cached - 2)
+        self.assertEqual(app.call(*u1, 'SCRIPT', 'EXISTS', held), [0])
+        self.assertEqual(app.call(*u2, 'SCRIPT', 'EXISTS', hashlib.sha1(big.encode()).hexdigest()), [1])
+
+    def test_script_bytes_count_once_in_used_memory(self):
+        admin, app = self.admin, self.connect('app')
+        u3 = ('LABEL', 'AS', 'OWNER', 'u3')
+        shared = self.connect('shared')
+        app.call(*u3, 'PING')
+        shared.call('LABEL', 'AS', 'SHARED', 'PING')
+        grown = []
+        for client, prefix, letter in ((shared, ('LABEL', 'AS', 'SHARED'), 'h'), (app, u3, 'g')):
+            body = 'return "%s"' % (letter * 20000)
+            memory, owned = int(info(admin, 'memory')['used_memory']), self.owner_bytes('u3')
+            client.call(*prefix, 'SCRIPT', 'LOAD', body)
+            grown.append(int(info(admin, 'memory')['used_memory']) - memory)
+            charged = self.owner_bytes('u3') - owned
+        self.assertGreater(charged, len(body))
+        self.assertGreaterEqual(grown[1], len(body))
+        self.assertLess(abs(grown[1] - grown[0]), len(body) // 2)
 
     def test_function_changes_need_the_operator_at_top(self):
         library = "#!lua name=lib\nredis.register_function('f', function() return 'one' end)"

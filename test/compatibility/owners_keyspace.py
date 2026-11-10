@@ -531,6 +531,95 @@ class Resolution(OwnerServer):
         for i in range(60):
             self.assertIn(b'keep%d' % i, found)
 
+    CRAFTED_CURSORS = (0, 1, 1 << 48, (1 << 48) | 1, 2 << 48, (2 << 48) | 1, 3 << 48)
+
+    def scan_replies(self, label, owner):
+        out = []
+        for count in (1, 1000):
+            cursor = 0
+            for _ in range(10000):
+                reply = self.at(label, owner, 'SCAN', cursor, 'COUNT', count)
+                out.append((count, cursor, reply))
+                cursor = int(reply[0])
+                if cursor == 0:
+                    break
+        return out
+
+    def assert_scan_twins(self, label, plain, hidden):
+        replies = self.scan_replies(label, plain)
+        self.assertEqual(replies, self.scan_replies(label, hidden))
+        cursors = sorted({int(r[2][0]) for r in replies} | set(self.CRAFTED_CURSORS))
+        for cursor in cursors:
+            for count in (1, 1000):
+                self.assertEqual(self.at(label, plain, 'SCAN', cursor, 'COUNT', count),
+                                 self.at(label, hidden, 'SCAN', cursor, 'COUNT', count), (cursor, count))
+        return replies
+
+    def test_scan_cursor_space_ignores_hidden_history(self):
+        self.ok('U', SHARED, 'SET', 'pub', 1)
+        self.ok('C', SHARED, 'SET', 'pub2', 1)
+        self.ok('S', 'u2', 'SET', 'h', 1)
+        for owner in ('u1', 'u2'):
+            self.ok('C', owner, 'SET', 'a', 1)
+            self.ok('U', owner, 'SET', 'b', 1)
+            self.ok('U', owner, 'DEL', 'b')
+            self.ok('C', owner, 'DEL', 'a')
+            for i in range(5):
+                self.ok('U', owner, 'SET', 'c%d' % i, i)
+        replies = self.assert_scan_twins('C', 'u1', 'u2')
+        names = {n for r in replies for n in r[2][1]}
+        self.assertEqual(names, {b'c%d' % i for i in range(5)} | {b'pub', b'pub2'})
+        self.assertEqual(self.at('C', 'u1', 'SCAN', 1 << 48, 'COUNT', 1000), self.at('C', 'u2', 'SCAN', 1 << 48, 'COUNT', 1000))
+
+    def test_scan_cursor_space_ignores_hidden_removal(self):
+        self.ok('U', SHARED, 'SET', 'pub', 1)
+        steps = [
+            ([('C', 'SET', 'a', 1)], [('S', 'SET', 'h', 1)]),
+            ([('C', 'DEL', 'a')], []),
+            ([('U', 'SET', 'x', 1), ('U', 'SET', 'x2', 1)], []),
+            ([], [('S', 'DEL', 'h')]),
+            ([('C', 'SET', 'a', 1)], []),
+            ([('U', 'DEL', 'x', 'x2'), ('C', 'DEL', 'a')], [('S', 'SET', 'h2', 1)]),
+            ([('U', 'SET', 'y', 1)], [('S', 'DEL', 'h2')]),
+            ([('C', 'SET', 'z', 1)], []),
+        ]
+        for visible, hidden in steps:
+            for label, *command in hidden:
+                self.ok(label, 'u2', *command)
+            for owner in ('u1', 'u2'):
+                for label, *command in visible:
+                    self.ok(label, owner, *command)
+            self.assert_scan_twins('C', 'u1', 'u2')
+            self.assert_scan_twins('U', 'u1', 'u2')
+
+    def test_scan_cursor_space_ignores_a_late_hidden_write(self):
+        self.ok('C', SHARED, 'SET', 'pub', 1)
+        for owner in ('u1', 'u2'):
+            self.ok('C', owner, 'SET', 'a', 1)
+            self.ok('U', owner, 'SET', 'b', 1)
+        self.ok('S//A/B', 'u2', 'SET', 'h', 1)
+        for owner in ('u1', 'u2'):
+            self.ok('U', owner, 'DEL', 'b')
+            self.ok('C', owner, 'DEL', 'a')
+            self.ok('U', owner, 'SET', 'c', 1)
+        self.assert_scan_twins('C', 'u1', 'u2')
+        self.ok('S//A/B', 'u2', 'DEL', 'h')
+        self.assert_scan_twins('C', 'u1', 'u2')
+
+    def test_retained_cursor_space_is_counted_and_forgotten(self):
+        self.ok('C', 'u5', 'SET', 'k', 1)
+        self.ok('C', 'u5', 'DEL', 'k')
+        self.ok('C', 'u6', 'GET', 'k')
+        five, six = self.owners_info('u5'), self.owners_info('u6')
+        self.assertEqual((five[b'keys'], five[b'partitions'], six[b'keys']), (0, 0, 0))
+        self.assertGreater(five[b'bytes'], six[b'bytes'])
+        self.assertEqual(self.info('owners')['owners_holding_data'], '0')
+        self.assertEqual(self.op('OWNERS', 'LIST', 0), [b'0', []])
+        reply = self.op('OWNERS', 'FORGET', 'u5')
+        self.assertEqual(dict(zip(reply[0::2], reply[1::2]))[b'bytes'], five[b'bytes'])
+        self.ok('C', 'u5', 'GET', 'k')
+        self.assertEqual(self.owners_info('u5')[b'bytes'], six[b'bytes'])
+
     def test_scan_cursors_and_counts_ignore_other_owners(self):
         for i in range(25):
             self.ok('C', SHARED, 'SET', 'sh%d' % i, i)

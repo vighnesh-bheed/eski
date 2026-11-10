@@ -11,6 +11,8 @@ VERSION :: "proof-harness"
 REDIS_COMPAT_VERSION :: "7.4.11"
 
 proof_conn: ^Conn
+proof_watch: ^Conn
+proof_logins: map[string]^Acl_User
 
 proof_unhex :: proc(s: string) -> []u8 {
 	if s == "-" {
@@ -56,7 +58,34 @@ proof_escape :: proc(b: ^strings.Builder, out: []u8) {
 	}
 }
 
-proof_boot :: proc(levels, comps, trusts: string, seed: i64, labelled: bool) {
+proof_login :: proc(name: string, rules: []string) -> ^Acl_User {
+	u := new(Acl_User)
+	u.username = transmute([]u8)strings.clone(name)
+	u.labels.clearance_top = true
+	u.labels.trust_top = true
+	for r in rules {
+		e, handled := acl_label_rule(&u.labels, transmute([]u8)r)
+		assert(handled && e == .None)
+	}
+	proof_logins[name] = u
+	return u
+}
+
+proof_new_conn :: proc(u: ^Acl_User, id: i64) -> ^Conn {
+	c := new(Conn)
+	c.fd = -1
+	c.id = id
+	c.wbuf = mem_alloc(WBUF_INIT)
+	c.wcap = WBUF_INIT
+	c.last_cmd = "NULL"
+	c.db = &dbs[0]
+	c.resp = RESP2
+	c.user = u
+	c.authed = true
+	return c
+}
+
+proof_boot :: proc(levels, comps, trusts: string, seed: i64, labelled: bool, owners: bool) {
 	config_init()
 	acl_init()
 	access_init()
@@ -72,6 +101,13 @@ proof_boot :: proc(levels, comps, trusts: string, seed: i64, labelled: bool) {
 		assert(lb.config_add_trust(&label_scheme, n) == .None)
 	}
 	labels_on = labelled && lb.config_labelled(&label_scheme)
+	if owners {
+		owners_on = true
+		owners_wanted = true
+		label_scheme_labelled = lb.config_labelled(&label_scheme)
+		labels_on = true
+		label_scheme_runtime = true
+	}
 	access_scheme_changed()
 	label_stream_seed = seed
 	update_clock()
@@ -82,24 +118,21 @@ proof_boot :: proc(levels, comps, trusts: string, seed: i64, labelled: bool) {
 	argv_init()
 	commands_init()
 	hooks_update()
-	u := new(Acl_User)
-	u.username = transmute([]u8)strings.clone("proof")
-	u.labels.clearance_top = true
-	u.labels.trust_top = true
-	c := new(Conn)
-	c.fd = -1
-	c.wbuf = mem_alloc(WBUF_INIT)
-	c.wcap = WBUF_INIT
-	c.last_cmd = "NULL"
-	c.db = &dbs[0]
-	c.resp = RESP2
-	c.user = u
-	c.authed = true
-	proof_conn = c
+	u: ^Acl_User
+	if owners {
+		clear(&pst.save_params)
+		u = proof_login("any", {"owners:*", "owner-shared", "owner-operator"})
+		proof_login("op", {"owner-operator"})
+		proof_login("plain", {})
+		proof_login("fx", {"owner:fx", "owner-operator"})
+		proof_watch = proof_new_conn(proof_login("watch", {"owners:*", "owner-shared"}), 2)
+	} else {
+		u = proof_login("proof", {})
+	}
+	proof_conn = proof_new_conn(u, 1)
 }
 
-proof_run :: proc(f: []string) -> []u8 {
-	c := proof_conn
+proof_on :: proc(c: ^Conn, f: []string) -> []u8 {
 	argv := make([][]u8, len(f))
 	for a, i in f {
 		argv[i] = proof_unhex(a)
@@ -113,6 +146,23 @@ proof_run :: proc(f: []string) -> []u8 {
 	c.wpos = 0
 	return out
 }
+
+proof_run :: proc(f: []string) -> []u8 {
+	if proof_watch != nil && proof_watch.wlen > 0 {
+		append(&proof_pending, ..proof_watch.wbuf[:proof_watch.wlen])
+		proof_watch.wlen = 0
+		proof_watch.wpos = 0
+	}
+	out := proof_on(proof_conn, f)
+	if proof_watch != nil && proof_watch.wlen > 0 {
+		append(&proof_pending, ..proof_watch.wbuf[:proof_watch.wlen])
+		proof_watch.wlen = 0
+		proof_watch.wpos = 0
+	}
+	return out
+}
+
+proof_pending: [dynamic]u8
 
 proof_sorted :: proc(b: ^strings.Builder, out: []u8, scan: bool) {
 	text := string(out)
@@ -155,9 +205,35 @@ main :: proc() {
 			assert(!booted)
 			seed, ok := strconv.parse_i64(f[4], 10)
 			assert(ok)
-			proof_boot(f[1], f[2], f[3], seed, f[5] == "1")
+			owners := len(f) > 6 && f[6] == "1"
+			proof_boot(f[1], f[2], f[3], seed, f[5] == "1", owners)
 			booted = true
 			fmt.sbprintf(&b, "S|%d|%d", len(label_scheme.levels), 1 if labels_on else 0)
+			if owners {
+				fmt.sbprintf(&b, "|%d", 1 if owners_on else 0)
+			}
+		case "U":
+			assert(booted && owners_on)
+			u, found := proof_logins[f[1]]
+			assert(found)
+			proof_conn.user = u
+			access_user_changed(proof_conn)
+			fmt.sbprintf(&b, "U|%s", f[1])
+		case "W":
+			assert(booted && proof_watch != nil)
+			strings.write_string(&b, "W|")
+			out := proof_on(proof_watch, f[1:])
+			proof_escape(&b, out)
+		case "Q":
+			assert(booted && proof_watch != nil)
+			strings.write_string(&b, "Q|")
+			if proof_watch.wlen > 0 {
+				append(&proof_pending, ..proof_watch.wbuf[:proof_watch.wlen])
+				proof_watch.wlen = 0
+				proof_watch.wpos = 0
+			}
+			proof_escape(&b, proof_pending[:])
+			clear(&proof_pending)
 		case "A":
 			assert(booted && !labels_on)
 			msg := label_scheme_apply()

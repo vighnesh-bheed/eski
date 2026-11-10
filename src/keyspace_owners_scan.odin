@@ -33,17 +33,17 @@ owner_visible_own :: proc(sp: ^Owner_Space) -> []^Db {
 			continue
 		}
 		if q := owner_space_part(sp, l); q != nil {
-			append(&owner_visible_parts, &q.db)
+			append(&owner_visible_parts, owner_db(q))
 		}
 	}
 	return owner_visible_parts[:]
 }
 
 owner_own_resolve :: proc(sp: ^Owner_Space, name: []u8, l: ^Lookup) -> (p: ^Db, t: ^Table, i: int) {
-	if q := owner_space_part(sp, access.id); q != nil && db_size_of(&q.db) > 0 {
-		tt, ii := db_locate_slot(&q.db, l)
-		if ii >= 0 && label_slot_live(&q.db, tt, ii) {
-			return &q.db, tt, ii
+	if q := owner_space_part(sp, access.id); q != nil && db_size_of(owner_db(q)) > 0 {
+		tt, ii := db_locate_slot(owner_db(q), l)
+		if ii >= 0 && label_slot_live(owner_db(q), tt, ii) {
+			return owner_db(q), tt, ii
 		}
 	}
 	return owner_best_own(sp, name, l, access.id, access.vis)
@@ -111,7 +111,7 @@ owner_own_counts :: proc(sp: ^Owner_Space) -> (keys, expires: int) {
 			if q == nil {
 				continue
 			}
-			t, i := db_locate_slot(&q.db, &l)
+			t, i := db_locate_slot(owner_db(q), &l)
 			if i >= 0 && key_timed(t.slots[i].key) {
 				expires -= 1
 			}
@@ -482,7 +482,7 @@ owner_scan :: proc(dbi: int, cursor: u64, count: i64, pat: []u8, has_pat: bool) 
 		p: ^Db
 		if phase == 0 {
 			if q := owner_space_part(sp, everc[ord]); q != nil {
-				p = &q.db
+				p = owner_db(q)
 			}
 		} else {
 			p = sharedc[ord]

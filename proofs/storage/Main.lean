@@ -32,10 +32,10 @@ def showCell (r : Role) : Cell → String
       (if e.cell.timed then s!"t{e.cell.deadline}" else "u")
 
 def kindText (r : Role) (cap : Nat) : String :=
-  if cap = 0 then "-" else if heapTable r cap then "h" else "m"
+  if cap = 0 then "-" else if heapTable r cap then "h" else if r = .heap then "c" else "m"
 
 def showTable (r : Role) (t : Table) : String :=
-  s!"{t.slots.length},{t.live},{t.tombs},{t.growth},{kindText r t.slots.length};" ++
+  s!"{t.slots.length},{t.live},{t.tombs},{t.growth},{kindText r t.slots.length},{t.lanes};" ++
     String.intercalate "," (t.slots.map (showCell r))
 
 def startAt (k : Keyspace) (cap : Nat) : Except String (Keyspace × String) := do
@@ -45,7 +45,7 @@ def startAt (k : Keyspace) (cap : Nat) : Except String (Keyspace × String) := d
 def tableStep (k : Keyspace) : List String → Except String (Keyspace × String)
   | ["I", key, hash, value, deadline, clock] => do
     let key ← nat key
-    let some (next, created) := ksUpsert k key (← nat hash) (← nat value) (← nat deadline) (← nat clock)
+    let some (next, created) := ksInsert k key (← nat hash) (← nat value) (← nat deadline) (← nat clock)
       (keyLength key) | throw "destination full"
     return (next, if created then "1" else "0")
   | ["D", key, hash] => do
@@ -62,6 +62,7 @@ def tableStep (k : Keyspace) : List String → Except String (Keyspace × String
     if 0 ≤ k.banks.cursor then throw "nested resize"
     return (ksBegin k (← nat cap), "0")
   | ["O"] => return (ksMakeRoom k, "0")
+  | ["C"] => return (ksCompact k, "0")
   | ["U"] =>
     let cap := k.banks.src.slots.length
     startAt k (if k.banks.src.live > (cap * 7 / 16 : Nat) then growCap cap else cap)
@@ -79,7 +80,7 @@ def memoryStep (l : Ledger) (limit : Int) (initialized : Bool) : List String →
 def main (args : List String) : IO Unit := do
   let [path] := args | throw (IO.userError "expected trace path")
   let input ← IO.FS.readFile path
-  let mut k : Keyspace := ksReset .slab 16
+  let mut k : Keyspace := ksReset .slab false 16
   let mut roleBits : Nat := 0
   let mut l : Ledger := ⟨0, []⟩
   let mut limit : Int := 0
@@ -87,9 +88,9 @@ def main (args : List String) : IO Unit := do
   for line in input.splitOn "\n" do
     if line.isEmpty then continue
     match line.splitOn " " with
-    | ["R", cap, role] =>
+    | ["R", cap, role, compact] =>
       roleBits ← expect (nat role)
-      k := ksReset (roleOf roleBits) (← expect (nat cap))
+      k := ksReset (roleOf roleBits) (compact == "1") (← expect (nat cap))
     | ["A", budget, init] =>
       limit ← expect (int budget)
       initialized := init == "1"

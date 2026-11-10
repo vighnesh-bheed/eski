@@ -214,7 +214,7 @@ special_mc_port := Config_Special{config_mc_port_set, config_mc_port_get, config
 special_mc_item_size := Config_Special{config_mc_item_size_set, config_mc_item_size_get, config_mc_item_size_rewrite}
 special_databases := Config_Special{config_databases_set, config_databases_get, config_databases_rewrite}
 
-CONFIG_TABLE_LEN :: 210
+CONFIG_TABLE_LEN :: 212
 
 configs: [CONFIG_TABLE_LEN]Config
 
@@ -430,6 +430,8 @@ config_table_init :: proc() {
 		{name = "owners", type = .Special, flags = {.Hidden}, special = &special_owners, apply = label_scheme_apply},
 		{name = "owner-quota-default", type = .Num, flags = {.Memory, .Hidden}, def = 0, lo = 0, hi = LLONG_MAX_CFG, store = &owner_quota_default},
 		{name = "owner-partitions-max", type = .Num, flags = {.Hidden}, def = 0, lo = 0, hi = LLONG_MAX_CFG, store = &owner_partitions_max},
+		{name = "owner-compact", type = .Bool, flags = {.Immutable, .Hidden}, def = 1, store = &owner_compact},
+		{name = "debug-hash-seed", type = .Num, flags = {.Immutable, .Hidden}, def = 0, lo = 0, hi = LLONG_MAX_CFG, store = &debug_hash_seed},
 	}
 	#assert(len(t) == CONFIG_TABLE_LEN)
 	configs = t

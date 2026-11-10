@@ -209,8 +209,8 @@ label_scope_make :: proc(dbi: int, id: lb.Id) -> (^Db, string) {
 		if !ok {
 			return nil, ERR_OWNER_PARTITIONS
 		}
-		owner_touch(&p.db)
-		return &p.db, ""
+		owner_touch(owner_db(p))
+		return owner_db(p), ""
 	}
 	p, ok := label_part_make(dbi, id)
 	if !ok {
@@ -405,15 +405,15 @@ label_copies_owner :: proc(c: ^Conn, e: ^Owner_Entry, args: [][]u8) {
 	types := make([dynamic]Obj_Type, context.temp_allocator)
 	for i in 0 ..< owner_ever_len(sp) {
 		q := owner_space_part(sp, owner_ever_at(sp, i))
-		if q == nil || db_size_of(&q.db) == 0 {
+		if q == nil || db_size_of(owner_db(q)) == 0 {
 			continue
 		}
-		t, j := db_locate_slot(&q.db, &l)
-		if j < 0 || !label_slot_live(&q.db, t, j) {
+		t, j := db_locate_slot(owner_db(q), &l)
+		if j < 0 || !label_slot_live(owner_db(q), t, j) {
 			continue
 		}
-		append(&found, &q.db)
-		append(&types, entry_type(db_view_slot(&q.db, t, j)))
+		append(&found, owner_db(q))
+		append(&types, entry_type(db_view_slot(owner_db(q), t, j)))
 	}
 	reply_array(c, len(found))
 	for p, k in found {

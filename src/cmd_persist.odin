@@ -1996,7 +1996,7 @@ persist_dataset_digest :: proc(final: ^[20]u8) {
 		for od in owner_dbs {
 			for sp in od.spaces {
 				for k in 0 ..< int(sp.nparts) {
-					digest_owner_db = &owner_space_at(sp, k).db
+					digest_owner_db = owner_db(owner_space_at(sp, k))
 					digest_db(&total, digest_owner_db)
 				}
 			}

@@ -89,7 +89,7 @@ evict_pool_forget :: proc(db: ^Db) {
 @(private = "file")
 evict_pool_admits :: #force_inline proc(db: ^Db) -> bool {
 	if evict_owner != nil {
-		return db != nil && db.role & DB_ROLE_OWNER != 0 && (^Owner_Part)(db).space.entry == evict_owner
+		return db != nil && db.role & DB_ROLE_OWNER != 0 && owner_part_of(db).space.entry == evict_owner
 	}
 	if evict_scope >= 0 {
 		return db != nil && int(db.label) == evict_scope && db.role & DB_ROLE_OWNER == 0
@@ -114,7 +114,7 @@ evict_owner_draws :: #force_no_inline proc(volatile: bool, shared: int) -> int {
 		if p == nil {
 			break
 		}
-		evict_pool_populate(&p.db, volatile)
+		evict_pool_populate(owner_db(p), volatile)
 	}
 	return owned
 }
@@ -124,16 +124,16 @@ evict_owner_partition :: proc(volatile: bool) -> ^Db {
 	owner_parts_of(evict_owner, &evict_owner_parts)
 	total := 0
 	for q in evict_owner_parts {
-		total += q.db.expires if volatile else db_size_of(&q.db)
+		total += q.db.expires if volatile else db_size_of(owner_db(q))
 	}
 	if total == 0 {
 		return nil
 	}
 	r := int(rng_next() % u64(total))
 	for q in evict_owner_parts {
-		w := q.db.expires if volatile else db_size_of(&q.db)
+		w := q.db.expires if volatile else db_size_of(owner_db(q))
 		if r < w {
-			return &q.db
+			return owner_db(q)
 		}
 		r -= w
 	}
@@ -275,7 +275,7 @@ evict_pick_pool :: proc() -> (db: ^Db, found: bool) {
 		if evict_owner != nil {
 			owner_parts_of(evict_owner, &evict_owner_parts)
 			for q in evict_owner_parts {
-				d := &q.db
+				d := owner_db(q)
 				keys := d.expires if volatile else db_size_of(d)
 				if keys == 0 {
 					continue
@@ -391,7 +391,7 @@ evict_random_owner :: proc(volatile: bool) -> ^Db {
 		return nil
 	}
 	p := owner_sampler_pick(weight)
-	return &p.db if p != nil else nil
+	return owner_db(p) if p != nil else nil
 }
 
 @(private = "file")

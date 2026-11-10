@@ -109,6 +109,7 @@ structure St where
   odyn : ODyn := ⟨[], []⟩
   busy : Option (TLabel × Owner) := none
   keys : List (KState (List Nat) Unit) := []
+  okeys : List (OState (List Nat) Unit) := []
 
 def cfgCounts (c : TConfig) : String := s!"{c.base.levels.length}|{c.base.comps.length}|{c.trusts.length}"
 
@@ -209,9 +210,14 @@ def ownerText : Owner → String
   | .every => "e"
   | .user t => hex t
 
-def arrivalOText : ArrivalO → String
-  | .ok l o inner x => s!"ok:{showLabel l}:{ownerText o}:{inner.length}:{ctxText x}"
+def arrivalOText (n : Bool) : ArrivalO → String
+  | .ok l o inner x => s!"ok:{showLabel l}:{ownerText o}:{inner.length}:{ctxText x}:{bit n}"
   | .refused m => s!"no:{m}"
+
+def namedOf (a : ArrivalO) (OD : ODyn) (id : Nat) : Bool :=
+  match a with
+  | .ok _ _ inner _ => cmdExists inner && (oconnOf OD id).named
+  | .refused _ => false
 
 def replyOText (tc : TConfig) : ReplyO → String
   | .base r => replyText tc r
@@ -225,7 +231,10 @@ def oconnText (D : ADyn) (OD : ODyn) (id : Nat) : String :=
   | some c =>
     let o := oconnOf OD id
     s!"{bit c.inMulti}{bit c.dirty}{bit c.explicit}{bit c.cas}:{if c.explicit then showLabel c.session else "-"}:{showLabel c.bound}:" ++
-      s!"{c.watched.length}:{bit o.pinned}:{if o.pinned then ownerText o.pin else "-"}:{ownerText o.owner}:{owsText o}"
+      s!"{c.watched.length}:{bit o.pinned}:{if o.pinned then ownerText o.pin else "-"}:{ownerText o.owner}:{owsText o}:{bit o.named}"
+
+def parseKeyOwner (s : String) : Except String Owner :=
+  if s == "-" then .ok .shared else do return .user (← unhex s)
 
 def parseOKind (k id : String) : Except String OKind :=
   if k == "-" then .ok .none else if k == "*" then .ok .any else if k == "f" then do return .fixed (← unhex id)
@@ -268,7 +277,7 @@ def stepRequest (st : St) (kind id : String) (args : List String) : Except Strin
     let busy := match a with
       | .ok l o _ _ => if kind == "OS" then (if inMultiOf D id then none else some (l, o)) else st.busy
       | .refused _ => if kind == "OS" then none else st.busy
-    return ({ st with adyn := D, odyn := OD, busy := busy }, s!"{kind}|{arrivalOText a}|{replyOText st.aenv.cfg r}|{oconnText D OD id}|{D.ctxs.length}")
+    return ({ st with adyn := D, odyn := OD, busy := busy }, s!"{kind}|{arrivalOText (namedOf a OD id) a}|{replyOText st.aenv.cfg r}|{oconnText D OD id}|{D.ctxs.length}")
   else if kind == "AB" then
     let (a, D) := arrive st.aenv st.adyn id args
     let verdict := match a with
@@ -280,7 +289,7 @@ def stepRequest (st : St) (kind id : String) (args : List String) : Except Strin
     return ({ st with adyn := D }, s!"AV|{arrivalText a}|-|{connText D id}|{D.ctxs.length}")
   else if kind == "OV" then
     let (a, D, OD) := arriveOVeto st.aenv st.oenv st.adyn st.odyn id args
-    return ({ st with adyn := D, odyn := OD }, s!"OV|{arrivalOText a}|-|{oconnText D OD id}|{D.ctxs.length}")
+    return ({ st with adyn := D, odyn := OD }, s!"OV|{arrivalOText (namedOf a OD id) a}|-|{oconnText D OD id}|{D.ctxs.length}")
   else if kind == "OB" then
     let (a, D, OD) := arriveO st.aenv st.oenv st.adyn st.odyn id args
     let r := match connOf st.adyn id with
@@ -289,7 +298,7 @@ def stepRequest (st : St) (kind id : String) (args : List String) : Except Strin
     let verdict := match a with
       | .ok l o _ _ => busyText st.busy (inMultiOf D id) fun s => mayKill true (topLabelOf st.aenv l && r.operator) l r.operator o s.1 s.2
       | .refused _ => "-"
-    return ({ st with adyn := D, odyn := OD }, s!"OB|{arrivalOText a}|{verdict}|{oconnText D OD id}|{D.ctxs.length}")
+    return ({ st with adyn := D, odyn := OD }, s!"OB|{arrivalOText (namedOf a OD id) a}|{verdict}|{oconnText D OD id}|{D.ctxs.length}")
   else throw ("unknown case " ++ kind)
 
 def denyStep (st : St) (kind login names : String) : Except String (St × String) := do
@@ -481,6 +490,29 @@ def step (st : St) (f : List String) : Except String (St × String) := do
       match resolve s r n with
       | some c => return (st, s!"KQ|{showLabel c.label}")
       | none => return (st, "KQ|-")
+  | ["PX"] => return ({ st with okeys := List.replicate 16 ⟨[], []⟩ }, "PX")
+  | ["PA", d, n, l, o] =>
+    let d ← parseNat d
+    let n ← unhex n
+    let w : Scope := (← parseLabel l, ← parseKeyOwner o)
+    let ks := st.okeys.modify d fun s => ⟨s.copies ++ [⟨n, w, ()⟩], if w ∈ s.parts then s.parts else s.parts ++ [w]⟩
+    return ({ st with okeys := ks }, "PA")
+  | ["PD", d, n, l, o] =>
+    let d ← parseNat d
+    let n ← unhex n
+    let w : Scope := (← parseLabel l, ← parseKeyOwner o)
+    let ks := st.okeys.modify d fun s => odelOwn s w n
+    return ({ st with okeys := ks }, "PD")
+  | ["PQ", d, r, o, n] =>
+    let d ← parseNat d
+    let w : Scope := (← parseLabel r, ← parseKeyOwner o)
+    let n ← unhex n
+    match st.okeys[d]? with
+    | none => throw "unknown database"
+    | some s =>
+      match oresolve s w n with
+      | some c => return (st, s!"PQ|{showLabel c.scope.1}:{ownerText c.scope.2}")
+      | none => return (st, "PQ|-")
   | kind :: id :: args => stepRequest st kind id args
   | _ => throw ("unknown case " ++ String.intercalate " " f)
 

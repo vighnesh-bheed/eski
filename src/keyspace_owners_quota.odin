@@ -12,10 +12,10 @@ owner_quota_of :: #force_inline proc "contextless" (e: ^Owner_Entry) -> i64 {
 }
 
 owner_used_live :: proc(e: ^Owner_Entry) -> int {
-	used := e.keyspace.used + ow.table_entry_bytes(&owner_table, e)
+	used := e.keyspace.used + ow.table_entry_bytes(&owner_table, e) + lua_owner_script_bytes(e.number)
 	for t in owner_touched {
 		if t.p.space.entry == e {
-			used += owner_part_bytes(&t.p.db) - t.bytes
+			used += owner_part_bytes(owner_db(t.p)) - t.bytes
 		}
 	}
 	return used

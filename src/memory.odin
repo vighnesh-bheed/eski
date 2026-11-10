@@ -214,7 +214,7 @@ mem_sample :: proc() {
 	mapped, retired, _ := ht.maintenance_memory()
 	set_mapped, set_retired, _ := st.maintenance_memory()
 	zset_mapped, zset_retired, _ := zt.maintenance_memory()
-	mem_sample_allocated = int(mi.uordblks + mi.hblkhd) + slab_live + storage_table_allocated() + mapped - retired + set_mapped - set_retired + zset_mapped - zset_retired + intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed) + diagnostics_memory_used()
+	mem_sample_allocated = int(mi.uordblks + mi.hblkhd) + slab_live + storage_table_mapped_live() + mapped - retired + set_mapped - set_retired + zset_mapped - zset_retired + intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed) + diagnostics_memory_used()
 	mem_sample_ms = srv.now_ms
 }
 

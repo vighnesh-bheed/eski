@@ -835,13 +835,21 @@ cmd_client :: proc(c: ^Conn, argv: [][]u8) {
 	s.handler(c, argv)
 }
 
-pause_should_hold :: proc(c: ^Conn, argv: [][]u8) -> bool {
+pause_should_hold :: proc(c: ^Conn, args: [][]u8) -> bool {
 	if srv.now_ms >= srv.pause_end_ms {
 		pause_clear()
 		return false
 	}
 	if .Monitor in c.flags {
 		return false
+	}
+	argv := args
+	if labels_on {
+		inner, parsed := label_as_inner(c, args)
+		if !parsed {
+			return false
+		}
+		argv = inner
 	}
 	cmd := lookup_command(argv[0])
 	if cmd == nil || !arity_ok(cmd.arity, len(argv)) || pubsub_rejects(c, cmd) {

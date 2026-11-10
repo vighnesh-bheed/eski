@@ -159,6 +159,23 @@
     "info::stats: eventloop metrics",
     "info::stats: instantaneous metrics"
    ]
+  },
+  {
+   "id": "pause-scripts",
+   "reason": "During CLIENT PAUSE WRITE a labelled server holds every EVALSHA until the pause ends, because whether a cached script is read-only would have to be looked up before the command's label is known, and that lookup would tell one scope about another's cache (decision R11). The pause unit's test of a read-only EVALSHA under a write pause therefore waits for its reply until the suite reports no progress, which ends the unit, so the tests after it do not run.",
+   "doc": "docs/scripting.md#labels-and-owners",
+   "entries": [
+    "pause::Test RO scripts are not blocked by pause RO",
+    "pause::Test read-only scripts in multi-exec are not blocked by pause RO",
+    "pause::Test write scripts in multi-exec are blocked by pause RO",
+    "pause::Test may-replicate commands are rejected in RO scripts",
+    "pause::Test multiple clients can be queued up and unblocked",
+    "pause::Test clients with syntax errors will get responses immediately",
+    "pause::Test both active and passive expires are skipped during client pause",
+    "pause::Test that client pause starts at the end of a transaction",
+    "pause::Test the randomkey command will not cause the server to get into an infinite loop during the client pause write",
+    "pause::CLIENT UNBLOCK is not allow to unblock client blocked by CLIENT PAUSE"
+   ]
   }
  ]
 }

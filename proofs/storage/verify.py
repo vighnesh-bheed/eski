@@ -114,12 +114,38 @@ def cell_text(cell, heap):
     return f'{key}:{value}:{clock}:{form}' + (f't{deadline}' if deadline else 'u')
 
 
-def table_text(slots, heap):
+SHORT_FIRST, SHORT_KEEP, SHORT_SHRINK, SHORT_FULL = 1, 2, 4, 8
+
+
+def alloc_lanes(heap, compact, cap, present):
+    if heap and compact and cap == 16:
+        lanes = SHORT_FIRST if present is None else present * 2
+        if lanes < SHORT_FULL:
+            return lanes
+    return cap
+
+
+def bank_bytes(slots, lanes, heap):
+    return 16 + 18 * lanes if lanes < len(slots) else table_bytes(len(slots), heap)
+
+
+def bank_mapped(slots, lanes, heap):
+    return 0 if lanes < len(slots) else mapped_bytes(len(slots), heap)
+
+
+def bank_growth(slots, lanes):
+    live = sum(isinstance(c, tuple) for c in slots)
+    tombs = sum(c is False for c in slots)
+    reserve = lanes if lanes < len(slots) else len(slots) - len(slots) // 8
+    return reserve - live - tombs
+
+
+def table_text(slots, lanes, heap):
     live = sum(isinstance(c, tuple) for c in slots)
     tombs = sum(c is False for c in slots)
     cap = len(slots)
-    kind = '-' if cap == 0 else 'h' if heap_table(heap, cap) else 'm'
-    return (f'{cap},{live},{tombs},{cap - cap // 8 - live - tombs},{kind};' +
+    kind = '-' if cap == 0 else 'h' if heap_table(heap, cap) else 'c' if heap else 'm'
+    return (f'{cap},{live},{tombs},{bank_growth(slots, lanes)},{kind},{lanes};' +
             ','.join(cell_text(c, heap) for c in slots))
 
 
@@ -146,22 +172,29 @@ def corpus():
              'twelve_byte_insertions': 0, 'untimed_slab_key_insertions': 0, 'heap_tables': 0,
              'mapped_tables_under_heap_role': 0, 'crossings_to_mapped': 0, 'crossings_to_heap': 0,
              'production_begins': 0, 'production_make_rooms': 0, 'synchronous_migrations': 0,
-             'short_timed_heap_hits': 0}
+             'short_timed_heap_hits': 0, 'short_tables': 0, 'ladder_steps': 0, 'insert_make_rooms': 0,
+             'compactions': 0, 'compactions_refused': 0, 'short_erasures': 0, 'short_claims_after_erase': 0,
+             'short_rows': 0}
     src, dst, cursor, logical, role = [], [], -1, {}, 0
+    shape = {'src': 0, 'dst': 0, 'compact': False}
     tokens, limit, initialized = {}, 0, False
     scan = {'cursor': None, 'returned': set(), 'stable': None}
 
     def heap():
         return bool(role & ROLE_HEAP)
 
-    def claim(slots, entry):
+    def free_index(slots, hashed):
         groups = len(slots) // 16
-        for group in probe(groups, home_of(entry[1], groups)):
+        for group in probe(groups, home_of(hashed, groups)):
             for i in range(group * 16, (group + 1) * 16):
                 if not isinstance(slots[i], tuple):
-                    slots[i] = entry
-                    return
+                    return i
         raise AssertionError('invalid corpus destination capacity')
+
+    def claim(slots, entry, lanes):
+        i = free_index(slots, entry[1])
+        assert i < lanes, 'claim beyond the lane count'
+        slots[i] = entry
 
     def note_table(cap):
         if heap():
@@ -170,7 +203,13 @@ def corpus():
     def allocate(cap):
         nonlocal dst, cursor
         assert cursor < 0 and cap % 16 == 0 and cap >= 16
-        assert len(logical) <= cap * 7 // 8
+        lanes = alloc_lanes(heap(), shape['compact'], cap, shape['src'] if src else None)
+        assert len(logical) <= (lanes if lanes < cap else cap * 7 // 8)
+        if lanes < cap:
+            stats['short_tables'] += 1
+        if shape['src'] < len(src) or lanes < cap:
+            stats['ladder_steps'] += 1
+        shape['dst'] = lanes
         groups = cap // 16
         if groups & (groups - 1):
             stats['non_power_of_two_tables'] += 1
@@ -192,7 +231,7 @@ def corpus():
                             if isinstance(src[i], tuple)]
                 chosen = occupied[:want - moved]
                 for i in chosen:
-                    claim(dst, src[i])
+                    claim(dst, src[i], shape['dst'])
                     src[i] = False
                 moved += len(chosen)
                 if len(chosen) < len(occupied):
@@ -202,6 +241,13 @@ def corpus():
                 visited += 1
             if cursor >= groups or not any(isinstance(c, tuple) for c in src):
                 src, dst, cursor = dst, [], -1
+                shape['src'], shape['dst'] = shape['dst'], 0
+
+    def make_room():
+        migrate(MAX, MAX)
+        assert cursor == -1
+        live = sum(isinstance(c, tuple) for c in src)
+        begin(grow_cap(len(src)) if live > len(src) * 7 // 16 else len(src))
 
     def begin(cap):
         sync = len(src) <= SYNC_CAP
@@ -229,6 +275,10 @@ def corpus():
         lines.append(' '.join(map(str, (code,) + args)))
         if code == 'R':
             src, dst, cursor, logical, role = [None] * args[0], [], -1, {}, args[1]
+            shape['compact'] = bool(args[2])
+            shape['src'], shape['dst'] = alloc_lanes(heap(), shape['compact'], args[0], None), 0
+            if shape['src'] < args[0]:
+                stats['short_tables'] += 1
             groups = args[0] // 16
             if groups & (groups - 1):
                 stats['non_power_of_two_tables'] += 1
@@ -302,7 +352,15 @@ def corpus():
                         stats['deadline_cleared'] += 1
                     found[0][found[1]] = entry
                 else:
-                    claim(dst if cursor >= 0 else src, entry)
+                    target, which = (dst, 'dst') if cursor >= 0 else (src, 'src')
+                    i = free_index(target, entry[1])
+                    if bank_growth(target, shape[which]) == 0 and target[i] is None:
+                        stats['insert_make_rooms'] += 1
+                        make_room()
+                        target, which = (dst, 'dst') if cursor >= 0 else (src, 'src')
+                    elif shape[which] < len(target) and any(isinstance(c, tuple) for c in target[i + 1:]):
+                        stats['short_claims_after_erase'] += 1
+                    claim(target, entry, shape[which])
                     length = len(key_text(key))
                     if entry[3]:
                         stats['timed_insertions'] += 1
@@ -319,6 +377,8 @@ def corpus():
                 if found:
                     reply = '1'
                     bank, i = found
+                    if shape['src' if bank is src else 'dst'] < len(bank):
+                        stats['short_erasures'] += 1
                     group = bank[(i // 16) * 16:(i // 16 + 1) * 16]
                     bank[i] = None if any(c is None for c in group) else False
                     del logical[key]
@@ -332,10 +392,16 @@ def corpus():
             begin(args[0])
         elif code == 'O':
             stats['production_make_rooms'] += 1
-            migrate(MAX, MAX)
-            assert cursor == -1
-            live = sum(isinstance(c, tuple) for c in src)
-            begin(grow_cap(len(src)) if live > len(src) * 7 // 16 else len(src))
+            make_room()
+        elif code == 'C':
+            live_lanes = [i for i, c in enumerate(src) if isinstance(c, tuple)]
+            if (heap() and shape['compact'] and cursor < 0 and len(src) == 16 and shape['src'] == 16 and
+                    False not in src and live_lanes and max(live_lanes) < SHORT_KEEP):
+                src = src[:SHORT_KEEP] + [None] * (16 - SHORT_KEEP)
+                shape['src'] = SHORT_SHRINK
+                stats['compactions'] += 1
+            else:
+                stats['compactions_refused'] += 1
         elif code == 'U':
             live = sum(isinstance(c, tuple) for c in src)
             allocate(grow_cap(len(src)) if live > len(src) * 7 // 16 else len(src))
@@ -349,14 +415,18 @@ def corpus():
             raise AssertionError(code)
         physical = [c for c in src + dst if isinstance(c, tuple)]
         assert len(physical) == len(logical) and {e[0]: e for e in physical} == logical
-        for bank in (src, dst):
+        for bank, which in ((src, 'src'), (dst, 'dst')):
             assert not bank or bank.count(None) > len(bank) // 8 - 1
+            assert all(c is None for c in bank[shape[which]:]), 'control byte at or above the lane count'
+            assert shape[which] <= len(bank) and (shape[which] == len(bank) or heap())
+        if shape['src'] < len(src) or shape['dst'] < len(dst):
+            stats['short_rows'] += 1
         timed = sum(1 for e in physical if e[3])
         cells = sum(cell_bytes(heap(), len(key_text(e[0])), bool(e[3])) for e in physical)
-        tables = table_bytes(len(src), heap()) + table_bytes(len(dst), heap())
-        mapped = mapped_bytes(len(src), heap()) + mapped_bytes(len(dst), heap())
+        tables = bank_bytes(src, shape['src'], heap()) + bank_bytes(dst, shape['dst'], heap())
+        mapped = bank_mapped(src, shape['src'], heap()) + bank_mapped(dst, shape['dst'], heap())
         expected.append(f'T|{reply}|{cursor}|{role}|{timed},{cells},{tables},{mapped}|'
-                        f'{table_text(src, heap())}|{table_text(dst, heap())}')
+                        f'{table_text(src, shape["src"], heap())}|{table_text(dst, shape["dst"], heap())}')
         stats['table_operations'] += 1
         if heap():
             stats['heap_role_operations'] += 1
@@ -374,7 +444,7 @@ def corpus():
         return (1, (1 << 48) - 1)[index % 2] if index % 9 == 1 else source.randrange(1, 1 << 48)
 
     def scenario(index, start, role_bits, keys, source):
-        step('R', start, role_bits)
+        step('R', start, role_bits, 0)
         for position, key in enumerate(keys):
             step('I', key, key_hash(key), MASK if position % 3 == 0 else source.randrange(1 << 32),
                  deadline(position, source), 65535 if position % 5 == 0 else position)
@@ -440,7 +510,7 @@ def corpus():
         start = starts[index % len(starts)]
         keys = collisions[start] if index < 3 else rng.sample(range(1, 100000), 40)
         scenario(index, start, 0, keys, rng)
-    step('R', 336, 0)
+    step('R', 336, 0, 0)
     keys = rng.sample(range(100000, 200000), 160)
     for index, key in enumerate(keys):
         step('I', key, key_hash(key), rng.randrange(1 << 64), deadline(index, rng), index % 65536)
@@ -474,7 +544,7 @@ def corpus():
         step('Q', key, key_hash(key))
     for cap, other in ((16, 16), (32, 16), (48, 16), (64, 16), (80, 16), (128, 16), (208, 224), (224, 304),
                        (304, 1040), (1040, 4096), (4096, 1040)):
-        step('R', cap, 0)
+        step('R', cap, 0, 0)
         step('G', other)
         step('M', 0, 0)
         assert cursor == -1
@@ -532,7 +602,7 @@ def corpus():
         scan_step()
         scan_all()
     for role_bits, count in ((12, 310), (4, 304)):
-        step('R', 688, role_bits)
+        step('R', 688, role_bits, 0)
         keys = [key for pair in zip(roles.sample(range(1, 100000), count // 2), roles.sample(long_keys, count // 2))
                 for key in pair]
         for position, key in enumerate(keys):
@@ -580,12 +650,12 @@ def corpus():
         for key in keys:
             step('Q', key, key_hash(key))
     for cap, role_bits in ((1024, 12), (1040, 12), (16, 12), (1024, 4), (1024, 0), (16, 2)):
-        step('R', cap, role_bits)
+        step('R', cap, role_bits, 0)
         step('B', 1040 if cap == 1024 else 16)
         step('O')
     wide = 10 ** 11 + 3
     for role_bits in (0, 12, 4):
-        step('R', 16, role_bits)
+        step('R', 16, role_bits, 0)
         step('I', 1, key_hash(1), 7, 5, 0)
         step('Q', 1, key_hash(1))
         step('D', 1, key_hash(1))
@@ -599,6 +669,166 @@ def corpus():
         step('D', 2, key_hash(2))
         step('I', wide, key_hash(wide), 10, 7, 4)
         step('Q', wide, key_hash(wide))
+    lanes_rng = random.Random(0xE5A1508)
+
+    def keyset(count):
+        short = lanes_rng.sample(range(1, 100000), (count + 1) // 2)
+        wide = lanes_rng.sample(long_keys, count // 2)
+        mixed = []
+        for i in range(count):
+            mixed.append(short[i // 2] if i % 2 == 0 else wide[i // 2])
+        return mixed
+
+    def insert(key, position):
+        step('I', key, key_hash(key), lanes_rng.randrange(1 << 32), deadline(position, lanes_rng), position)
+
+    for role_bits in (12, 4):
+        step('R', 16, role_bits, 1)
+        keys = keyset(18)
+        for position, key in enumerate(keys):
+            insert(key, position)
+            probe_key = keys[position // 2]
+            step('Q', probe_key, key_hash(probe_key))
+            if position in (0, 1, 3, 13, 15):
+                scan_step()
+                scan_all()
+        for key in keys[::2]:
+            step('D', key, key_hash(key))
+        for key in keys:
+            step('Q', key, key_hash(key))
+    for role_bits in (12, 4):
+        for keep in ((1,), (0,), (0, 1)):
+            step('R', 16, role_bits, 1)
+            keys = keyset(6)
+            for position, key in enumerate(keys):
+                insert(key, position)
+            step('C')
+            for position, key in enumerate(keys):
+                if position not in keep:
+                    step('D', key, key_hash(key))
+            step('C')
+            assert shape['src'] == SHORT_SHRINK
+            scan_step()
+            scan_all()
+            for key in keys:
+                step('Q', key, key_hash(key))
+            step('C')
+            extra = keyset(6)
+            for position, key in enumerate(extra):
+                insert(key, position + 1)
+                step('Q', key, key_hash(key))
+            step('C')
+            for key in keys + extra:
+                step('D', key, key_hash(key))
+            step('C')
+            insert(extra[0], 7)
+            step('C')
+    for role_bits, compact in ((12, 0), (0, 1), (2, 1)):
+        step('R', 16, role_bits, compact)
+        keys = keyset(2)
+        for position, key in enumerate(keys):
+            insert(key, position)
+        step('C')
+    step('R', 16, 12, 1)
+    keys = keyset(5)
+    for position, key in enumerate(keys):
+        insert(key, position)
+    for key in keys[2:]:
+        step('D', key, key_hash(key))
+    step('G', 48)
+    step('C')
+    step('M', MAX, MAX)
+    step('C')
+    step('R', 16, 12, 1)
+    keys = keyset(2)
+    for position, key in enumerate(keys):
+        insert(key, position)
+    step('G', 16)
+    assert shape['dst'] == SHORT_SHRINK
+    step('M', 1, 1)
+    scan_step()
+    step('D', keys[1], key_hash(keys[1]))
+    step('Q', keys[0], key_hash(keys[0]))
+    if scan['cursor']:
+        scan_step()
+    step('M', MAX, MAX)
+    scan_all()
+    twin_plans = []
+    for pool_size in (7, 4):
+        twin_plan = []
+        pool = keyset(pool_size)
+        for op in range(150):
+            choice = lanes_rng.randrange(10)
+            key = lanes_rng.choice(pool)
+            due = lanes_rng.choice((0, 0, lanes_rng.randrange(1, 1 << 48)))
+            twin_plan.append((choice, key, lanes_rng.randrange(1 << 32), due, op))
+        twin_plans.append(twin_plan)
+    twin_rows = {}
+    for role_bits, twin_plan in ((12, twin_plans[0]), (4, twin_plans[0]), (12, twin_plans[1]), (4, twin_plans[1])):
+        for compact in (1, 0):
+            begin_row = len(expected)
+            step('R', 16, role_bits, compact)
+            for choice, key, value, due, op in twin_plan:
+                if choice < 5:
+                    step('I', key, key_hash(key), value, due, op % 65536)
+                elif choice < 8:
+                    step('D', key, key_hash(key))
+                elif choice == 8:
+                    step('C')
+                else:
+                    step('Q', key, key_hash(key))
+                if op % 25 == 24:
+                    scan_step()
+                    scan_all()
+            twin_rows[(role_bits, compact)] = expected[begin_row:]
+        compact_rows, full_rows = twin_rows[(role_bits, 1)], twin_rows[(role_bits, 0)]
+        assert len(compact_rows) == len(full_rows)
+        for a, b in zip(compact_rows, full_rows):
+            ca, cb = a.split('|'), b.split('|')
+            if ca[0] == 'S':
+                assert a == b
+                continue
+            assert ca[1] == cb[1] and ca[2] == cb[2] and ca[4].split(',')[:2] == cb[4].split(',')[:2]
+            for column in (5, 6):
+                assert ca[column].split(';')[1] == cb[column].split(';')[1], 'compact form differs lane by lane'
+        stats['twin_rows'] = stats.get('twin_rows', 0) + len(compact_rows)
+    step('R', 16, 12, 1)
+    keys = keyset(40)
+    for position, key in enumerate(keys):
+        insert(key, position)
+    assert len(src) == 48
+    step('G', 1040)
+    for _ in range(3):
+        step('M', 2, 16)
+    step('M', MAX, MAX)
+    assert len(src) == 1040
+    for key in keys[::3]:
+        step('D', key, key_hash(key))
+    step('B', 1024)
+    assert cursor == 0
+    step('M', 8, 32)
+    step('M', MAX, MAX)
+    step('B', 1040)
+    assert cursor == -1 and len(src) == 1040
+    for key in keys[::5]:
+        step('Q', key, key_hash(key))
+    step('R', 16, 12, 1)
+    for role_bits in (12, 4):
+        for keep in ((2,), (0, 2), (1, 2), (0, 1, 2)):
+            step('R', 16, role_bits, 1)
+            keys = keyset(5)
+            for position, key in enumerate(keys):
+                insert(key, position)
+            for position, key in enumerate(keys):
+                if position not in keep:
+                    step('D', key, key_hash(key))
+            step('C')
+            assert shape['src'] == 16
+            stats['compactions_refused_at_lane_two'] = stats.get('compactions_refused_at_lane_two', 0) + 1
+            for key in keys:
+                step('Q', key, key_hash(key))
+            scan_step()
+            scan_all()
     stats['rows'] = len(expected)
     assert stats['table_operations'] > 5000 and stats['accounting_operations'] > 1000
     assert stats['partial_batches'] > 0 and stats['zero_budget_batches'] > 0
@@ -607,7 +837,9 @@ def corpus():
     assert min(stats['deadline_set'], stats['deadline_cleared'], stats['deadline_rewritten']) > 0
     assert min(stats['heap_key_insertions'], stats['twelve_byte_insertions'], stats['untimed_slab_key_insertions'],
                stats['crossings_to_mapped'], stats['crossings_to_heap'], stats['synchronous_migrations'],
-               stats['short_timed_heap_hits']) > 0
+               stats['short_timed_heap_hits'], stats['short_tables'], stats['ladder_steps'], stats['insert_make_rooms'],
+               stats['compactions'], stats['compactions_refused'], stats['short_erasures'],
+               stats['short_claims_after_erase'], stats['twin_rows'], stats['compactions_refused_at_lane_two']) > 0
     return '\n'.join(lines) + '\n', expected, stats
 
 
@@ -821,13 +1053,15 @@ def procedure(text, name, marker='::'):
     return text[start:i] + '\n'
 
 
-CONSTANTS = ('DB_ROLE_HEAP', 'DB_ROLE_OWNER', 'REHASH_SYNC_CAP', 'ENTRY_RING', 'BIG_STR_BYTES', 'STRING_DOUBLING_LIMIT')
+CONSTANTS = ('DB_ROLE_HEAP', 'DB_ROLE_OWNER', 'REHASH_SYNC_CAP', 'ENTRY_RING', 'BIG_STR_BYTES', 'STRING_DOUBLING_LIMIT',
+             'TABLE_SHORT_FIRST', 'TABLE_SHORT_FULL', 'TABLE_SHORT_KEEP', 'TABLE_SHORT_SHRINK')
 PROCEDURES = ('Entry', 'mem_alloc', 'mem_free', 'key_store', 'key_store_heap', 'key_store_timed', 'key_store_timed_heap',
               'key_release', 'key_restore', 'key_set_deadline', 'db_locate', 'db_erase', 'db_rehash_swap',
               'db_rehash_groups', 'db_rehash_finish', 'db_rehash_start', 'table_alloc_for', 'db_rehash_begin',
               'db_drop_next', 'db_make_room', 'scan_take_home', 'scan_round', 'big_new', 'big_attach', 'val_release',
               'entry_load', 'entry_view', 'entry_store', 'entry_store_heap', 'entry_append', 'entry_append_heap',
-              'entry_heap_open', 'entry_heap_close', 'string_grown_capacity', 'entry_setrange', 'db_move_heap')
+              'entry_heap_open', 'entry_heap_close', 'string_grown_capacity', 'entry_setrange', 'db_move_heap',
+              'table_alloc_owner', 'table_lanes', 'table_alloc_short', 'db_table_compact')
 SLAB_CONSTANTS = ('SLAB_UNIT', 'SLAB_MAX', 'SLAB_CLASSES')
 SLAB_DECLARATIONS = (('slab_class_size', ':='), ('slab_class', '::'), ('slab_size_of', '::'))
 
@@ -959,8 +1193,14 @@ def run():
         mutated[at] = '|'.join(cells)
         cases[name] = '\n'.join(mutated) + '\n'
 
+    def header(cells, column):
+        if cells[0] != 'T' or len(cells) <= column:
+            return None
+        return re.match(r'(\d+),(\d+),(\d+),(-?\d+),([-hcm]),(\d+);', cells[column])
+
     def heap_row(cells):
-        return cells[0] == 'T' and cells[3] == '12' and ':h' in cells[5] and ',h;' in cells[5]
+        return (cells[0] == 'T' and cells[3] == '12' and ':h' in cells[5] and header(cells, 5) is not None and
+                header(cells, 5).group(5) == 'h')
 
     def counter(field):
         def change(cells):
@@ -972,11 +1212,48 @@ def run():
     for field, name in enumerate(('expires', 'cells', 'tables', 'mapped')):
         row_mutant(f'heap_counter_{name}', heap_row, counter(field))
     row_mutant('heap_role_value', heap_row, lambda cells: cells.__setitem__(3, '0'))
-    row_mutant('heap_table_kind', heap_row, lambda cells: cells.__setitem__(5, cells[5].replace(',h;', ',m;', 1)))
+    row_mutant('heap_table_kind', heap_row, lambda cells: cells.__setitem__(5, re.sub(r',h,(\d+);', r',m,\1;', cells[5], 1)))
     row_mutant('heap_key_form', heap_row, lambda cells: cells.__setitem__(5, cells[5].replace(':h', ':s', 1)))
-    row_mutant('crossing_destination_kind', lambda cells: cells[0] == 'T' and cells[3] == '12' and
-               ',h;' in cells[5] and ',m;' in cells[6],
-               lambda cells: cells.__setitem__(6, cells[6].replace(',m;', ',h;', 1)))
+    row_mutant('old_negative_warm_test', lambda cells: cells[0] == 'T' and cells[3] == '12' and
+               header(cells, 5) is not None and header(cells, 6) is not None and
+               header(cells, 5).group(5) == 'h' and header(cells, 6).group(5) == 'c',
+               lambda cells: cells.__setitem__(6, re.sub(r',c,(\d+);', r',h,\1;', cells[6], 1)))
+
+    def short(cells, lanes):
+        found = header(cells, 5) if cells[0] == 'T' else None
+        return found is not None and found.group(1) == '16' and found.group(6) == str(lanes)
+
+    def bump(cells, field, delta):
+        values = cells[4].split(',')
+        values[field] = str(int(values[field]) + delta)
+        cells[4] = ','.join(values)
+
+    def relane(cells, lanes):
+        cells[5] = re.sub(r',(\d+);', f',{lanes};', cells[5], 1)
+
+    row_mutant('short_lane_count', lambda cells: short(cells, 1), lambda cells: relane(cells, 2))
+    row_mutant('short_alloc_one_lane_too_few', lambda cells: short(cells, 1), lambda cells: bump(cells, 2, -18))
+    row_mutant('ladder_doubling_skipped', lambda cells: short(cells, 2),
+               lambda cells: (relane(cells, 4), bump(cells, 2, 36)))
+    compacted = next(i for i in range(1, len(expected)) if short(expected[i].split('|'), 4) and
+                     header(expected[i - 1].split('|'), 5) is not None and
+                     header(expected[i - 1].split('|'), 5).group(6) == '16' and
+                     expected[i].split('|')[5].split(';')[1].split(',')[0] == '-')
+    def growth_is_lanes(cells):
+        cells[5] = re.sub(r'^(\d+,\d+,\d+,)(-?\d+)', r'\g<1>4', cells[5])
+
+    def swap_lanes(cells):
+        head, body = cells[5].split(';')
+        slots = body.split(',')
+        cells[5] = head + ';' + ','.join([slots[1], slots[0]] + slots[2:])
+
+    for name, change in (('compaction_growth_is_lanes', growth_is_lanes), ('compaction_lane_swap', swap_lanes)):
+        mutated = list(expected)
+        cells = mutated[compacted].split('|')
+        change(cells)
+        assert '|'.join(cells) != expected[compacted]
+        mutated[compacted] = '|'.join(cells)
+        cases[name] = '\n'.join(mutated) + '\n'
     row_mutant('slab_key_form', lambda cells: cells[0] == 'T' and cells[3] == '0' and ':su' in cells[5],
                lambda cells: cells.__setitem__(5, cells[5].replace(':su', ':hu', 1)))
     row_mutant('old_matcher_query', lambda cells: cells[0] == 'T' and cells[3] in ('4', '12') and

@@ -227,6 +227,10 @@ proof_veto_call :: proc(b: ^strings.Builder, kind: string, id: int, f: []string,
 		}
 		fmt.sbprintf(b, ":%d:", len(inner))
 		proof_ctx_text(b, access.ctx)
+		if owner {
+			strings.write_byte(b, ':')
+			proof_bit(b, access.owner_named)
+		}
 	} else {
 		strings.write_string(b, "|no:")
 		strings.write_string(b, proof_reply(c, false))
@@ -592,6 +596,8 @@ proof_state_owner :: proc(b: ^strings.Builder, c: ^Conn) {
 	} else {
 		strings.write_byte(b, '-')
 	}
+	strings.write_byte(b, ':')
+	proof_bit(b, a.owner_named)
 }
 
 proof_reply_owner :: proc(c: ^Conn, creating: bool) -> string {
@@ -651,6 +657,8 @@ proof_request_owner :: proc(b: ^strings.Builder, kind: string, id: int, f: []str
 		proof_owner_text(b, access.owner)
 		fmt.sbprintf(b, ":%d:", len(inner))
 		proof_ctx_text(b, access.ctx)
+		strings.write_byte(b, ':')
+		proof_bit(b, access.owner_named)
 		strings.write_byte(b, '|')
 		strings.write_string(b, proof_handler_owner(c, s, inner))
 	} else {
@@ -685,6 +693,10 @@ proof_busy_call :: proc(b: ^strings.Builder, kind: string, id: int, f: []string,
 		}
 		fmt.sbprintf(b, ":%d:", len(inner))
 		proof_ctx_text(b, access.ctx)
+		if owner {
+			strings.write_byte(b, ':')
+			proof_bit(b, access.owner_named)
+		}
 		strings.write_byte(b, '|')
 		switch {
 		case !proof_busy_set:

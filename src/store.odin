@@ -22,17 +22,14 @@ Entry :: struct {
 	vp:        ^Val_Handle,
 }
 
-Db :: struct {
+Db_Core :: struct {
 	t:             [2]Table,
 	rehash_idx:    i64,
-	slab:          Slab,
 	expires:       int,
 	heap_objs:     int,
 	heap_bytes:    int,
 	expire_cursor: int,
 	rehash_credit: int,
-	next:          Table,
-	next_warm:     int,
 	id:            int,
 	avg_ttl:       i64,
 	hreg:          ^ht.Registry,
@@ -42,6 +39,13 @@ Db :: struct {
 	label:         lb.Id,
 	role:          u8,
 	owner:         ow.Owner,
+}
+
+Db :: struct {
+	using core: Db_Core,
+	slab:       Slab,
+	next:       Table,
+	next_warm:  int,
 }
 
 Release :: struct {
@@ -58,14 +62,25 @@ Dead :: struct {
 #assert(size_of(Entry) == 64)
 #assert(size_of(Db) == 3 * size_of(Table) + 8 + size_of(Slab) + 13 * 8)
 #assert(size_of(Db) == 936)
-#assert(offset_of(Db, owner) == 932)
-#assert(offset_of(Db, zctx) == 3 * size_of(Table) + 8 + size_of(Slab) + 11 * 8)
-#assert(offset_of(Db, sctx) == 3 * size_of(Table) + 8 + size_of(Slab) + 10 * 8)
+#assert(size_of(Db_Core) == DB_CORE_BYTES)
+#assert(offset_of(Db, core) == 0)
+#assert(offset_of(Db, owner) == DB_CORE_BYTES - 4)
+#assert(offset_of(Db, sctx) == 2 * size_of(Table) + 8 + 9 * 8)
+#assert(offset_of(Db, zctx) == 2 * size_of(Table) + 8 + 10 * 8)
+#assert(offset_of(Db, slab) == DB_CORE_BYTES)
+#assert(offset_of(Db, next) == DB_CORE_BYTES + size_of(Slab))
+#assert(offset_of(Db, next_warm) + size_of(int) == size_of(Db))
 #assert(size_of(Release) == 24)
-#assert(offset_of(Db, slab) == 2 * size_of(Table) + size_of(i64))
 #assert(size_of(Dead) == size_of(Table) + 8)
+#assert(TABLE_SHORT_KEEP < TABLE_SHORT_SHRINK && TABLE_SHORT_SHRINK < TABLE_SHORT_FULL && TABLE_SHORT_FULL < GROUP_SLOTS)
+#assert(TABLE_SHORT_SHRINK * 2 == TABLE_SHORT_FULL && TABLE_SHORT_FIRST * 4 == TABLE_SHORT_SHRINK)
 
 DB_COUNT :: 16
+DB_CORE_BYTES :: 328
+TABLE_SHORT_FIRST :: 1
+TABLE_SHORT_FULL :: 8
+TABLE_SHORT_KEEP :: 2
+TABLE_SHORT_SHRINK :: 4
 DB_ROLE_HEAP :: u8(4)
 DB_ROLE_OWNER :: u8(8)
 DB_MAX :: 1024
@@ -926,6 +941,9 @@ entry_object_attach :: proc "contextless" (e: ^Entry, obj: rawptr, type: Obj_Typ
 	vp := e.vp
 	tally := vp.small.tally
 	mc_meta_on_write(db, kp)
+	if db.role & DB_ROLE_OWNER != 0 {
+		owner_ctx_need(db, type)
+	}
 	if kp.small.tag.val_form >= FORM_SLAB {
 		val_release(db, kp, vp)
 	}
@@ -1078,9 +1096,9 @@ owner_rehash_tick :: #force_no_inline proc "contextless" (deadline: i64) {
 			continue
 		}
 		p := list[i]
-		owner_touch(&p.db)
+		owner_touch(owner_db(p))
 		for p.db.rehash_idx >= 0 {
-			db_rehash_groups(&p.db, REHASH_TICK_GROUPS, REHASH_TICK_SLOTS)
+			db_rehash_groups(owner_db(p), REHASH_TICK_GROUPS, REHASH_TICK_SLOTS)
 			if now_ns() >= deadline {
 				break
 			}
@@ -1109,10 +1127,76 @@ db_rehash_start :: proc "contextless" (db: ^Db, cap: int) {
 }
 
 table_alloc_for :: proc "contextless" (db: ^Db, cap: int) -> Table {
-	if db.role & DB_ROLE_HEAP != 0 && cap <= TABLE_HEAP_MAX_CAP {
-		return table_alloc_heap(cap)
+	if db.role & DB_ROLE_HEAP != 0 {
+		return table_alloc_owner(db, cap)
 	}
 	return table_alloc(cap)
+}
+
+@(cold)
+table_alloc_owner :: #force_no_inline proc "contextless" (db: ^Db, cap: int) -> Table {
+	if cap == TABLE_MIN_CAP && owner_compact {
+		lanes := TABLE_SHORT_FIRST
+		if db.t[0].region != nil {
+			lanes = table_lanes(&db.t[0]) * 2
+		}
+		if lanes < TABLE_SHORT_FULL {
+			return table_alloc_short(lanes)
+		}
+	}
+	if cap <= TABLE_HEAP_MAX_CAP {
+		return table_alloc_heap(cap)
+	}
+	t := table_alloc(cap)
+	t.warm_at = TABLE_COLD_WARM
+	return t
+}
+
+table_lanes :: #force_inline proc "contextless" (t: ^Table) -> int {
+	return len(t.slots)
+}
+
+table_alloc_short :: proc "contextless" (lanes: int) -> (t: Table) {
+	size := GROUP_SLOTS + lanes * SLOT_BYTES
+	base := ([^]u8)(runtime.heap_alloc(size, true))
+	if base == nil {
+		store_fatal("cannot allocate the key table")
+	}
+	intrinsics.atomic_add_explicit(&storage_table_bytes, size, .Relaxed)
+	keys := ([^]Key_Handle)(&base[GROUP_SLOTS])[:lanes]
+	vals := ([^]Val_Handle)(&base[GROUP_SLOTS + lanes * size_of(Key_Handle)])[:lanes]
+	metas := ([^]Slot_Meta)(&base[GROUP_SLOTS + lanes * (size_of(Key_Handle) + size_of(Val_Handle))])[:lanes]
+	t.region = base
+	t.size = size
+	t.ctrl = base
+	t.slots = soa_zip(meta = metas, key = keys, val = vals)
+	t.groups = 1
+	t.pmask = 0
+	t.cap = TABLE_MIN_CAP
+	t.growth = lanes
+	t.warm_at = TABLE_HEAP_WARM
+	return
+}
+
+@(cold)
+db_table_compact :: #force_no_inline proc "contextless" (db: ^Db) {
+	t := &db.t[0]
+	if !owner_compact || db.role & DB_ROLE_HEAP == 0 || db.rehash_idx >= 0 || t.region == nil || t.cap != TABLE_MIN_CAP || table_lanes(t) != TABLE_MIN_CAP || t.tombs != 0 {
+		return
+	}
+	full := group_full(group_load(t.ctrl, 0))
+	if full == 0 || full >= u32(1) << TABLE_SHORT_KEEP {
+		return
+	}
+	short := table_alloc_short(TABLE_SHORT_SHRINK)
+	for i in 0 ..< TABLE_SHORT_KEEP {
+		short.ctrl[i] = t.ctrl[i]
+		short.slots[i] = t.slots[i]
+	}
+	short.live = t.live
+	short.growth = TABLE_SHORT_SHRINK - t.live
+	table_detach(t)
+	t^ = short
 }
 
 @(private = "file")
@@ -1127,6 +1211,9 @@ db_rehash_begin :: proc "contextless" (db: ^Db) {
 
 @(private = "file")
 db_drop_next :: proc "contextless" (db: ^Db) {
+	if db.role & DB_ROLE_HEAP != 0 {
+		return
+	}
 	if db.next.region != nil {
 		if db.next_warm < db.next.size {
 			store_warming -= 1
@@ -1186,7 +1273,7 @@ db_make_room :: #force_no_inline proc "contextless" (db: ^Db) -> ^Table {
 			cap = table_tight_cap(t.cap)
 		}
 	}
-	if db.next.region != nil && db.next.cap == cap {
+	if db.role & DB_ROLE_HEAP == 0 && db.next.region != nil && db.next.cap == cap {
 		if db.next_warm < db.next.size {
 			store_warming -= 1
 		}
@@ -1672,6 +1759,9 @@ db_move :: proc(src: ^Db, dst: ^Db, key: []u8) -> bool #no_bounds_check {
 		kp.small.tag.val_form = FORM_NONE
 	case FORM_OBJECT:
 		n: int
+		if dst.role & DB_ROLE_OWNER != 0 {
+			owner_ctx_need(dst, vh.slab.info.type)
+		}
 		#partial switch vh.slab.info.type {
 		case .Set:
 			n = set_object_move(rawptr(vh.ref.addr), src, dst)
@@ -1755,10 +1845,13 @@ db_flush_in :: proc(db: ^Db, lazy: bool = false) {
 	}
 	mc_meta_on_flush(db)
 	hash_registry_flush(db)
-	st.maintenance_clear(db.sctx)
-	zt.maintenance_clear(db.zctx)
+	if db.sctx != nil {
+		st.maintenance_clear(db.sctx)
+		zt.maintenance_clear(db.zctx)
+	}
 	db.avg_ttl = 0
-	if db_size_of(db) == 0 && db.rehash_idx < 0 && db.t[0].region == nil && db.slab.base == nil && db.heap_objs == 0 {
+	heap := db.role & DB_ROLE_HEAP != 0
+	if db_size_of(db) == 0 && db.rehash_idx < 0 && db.t[0].region == nil && (heap || db.slab.base == nil) && db.heap_objs == 0 {
 		db.expires = 0
 		db.expire_cursor = 0
 		return
@@ -1793,11 +1886,14 @@ db_flush_in :: proc(db: ^Db, lazy: bool = false) {
 	}
 	db_used_memory -= db.heap_bytes
 	if lazy {
-		job.bytes += db.heap_bytes + db.slab.live
-		job.slab_live = db.slab.live
-		job.slab_base, job.slab_size = slab_take(&db.slab)
+		job.bytes += db.heap_bytes
+		if !heap {
+			job.bytes += db.slab.live
+			job.slab_live = db.slab.live
+			job.slab_base, job.slab_size = slab_take(&db.slab)
+		}
 		lazyfree_submit(job)
-	} else {
+	} else if !heap {
 		slab_detach(&db.slab)
 	}
 	db.t[0] = table_empty()

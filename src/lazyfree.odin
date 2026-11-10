@@ -191,7 +191,7 @@ lazyfree_run :: proc "contextless" (job: ^Lazy_Job) {
 			table_release_values(t)
 		}
 		intrinsics.atomic_sub_explicit(&storage_table_bytes, t.size, .Relaxed)
-		if t.warm_at < 0 {
+		if t.warm_at == TABLE_HEAP_WARM {
 			runtime.heap_free(t.region)
 		} else {
 			storage_unmap(t.region, t.size, .Table)

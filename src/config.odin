@@ -2694,6 +2694,9 @@ clients_timeout_cron :: proc() {
 }
 
 config_startup :: proc() {
+	if debug_hash_seed != 0 && cfg.enable_debug_command == 0 {
+		config_fatal(0, "", "debug-hash-seed is a test setting and needs enable-debug-command set to yes or local")
+	}
 	label_scheme_startup()
 	process_title_init()
 	if cfg.logfile != "" {

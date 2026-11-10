@@ -19,6 +19,7 @@ Mc_Table :: struct {}
 Lazy_Mode :: enum { Off, Async, Server }
 Value_Config :: struct { lazyfree_lazy_server_del: bool }
 labels_on: bool
+owner_compact: bool
 lazy_mode: Lazy_Mode
 cfg: Value_Config
 entry_ring: [ENTRY_RING]Entry
@@ -147,9 +148,19 @@ show_slot :: proc(db: ^Db, t: ^Table, i: int) {
 }
 show_table :: proc(db: ^Db, t: ^Table) {
 	kind := "-"
-	if t.region != nil { kind = "h" if t.warm_at < 0 else "m" }
-	assert(t.region == nil || t.warm_at >= 0 || uintptr(t.region) % TABLE_HEAP_ALIGN == 0)
-	fmt.printf("%d,%d,%d,%d,%s;", t.cap, t.live, t.tombs, t.growth, kind)
+	lanes := len(t.slots)
+	if t.region != nil {
+		switch t.warm_at {
+		case TABLE_HEAP_WARM:
+			kind = "h"
+			assert(uintptr(t.region) % uintptr(TABLE_HEAP_ALIGN if lanes == t.cap else GROUP_SLOTS) == 0)
+		case TABLE_COLD_WARM: kind = "c"
+		case: kind = "m"
+		}
+		assert(lanes <= t.cap)
+		for i in lanes ..< t.cap { assert(t.ctrl[i] == CTRL_EMPTY) }
+	}
+	fmt.printf("%d,%d,%d,%d,%s,%d;", t.cap, t.live, t.tombs, t.growth, kind, lanes)
 	for i in 0 ..< t.cap {
 		if i > 0 { fmt.print(",") }
 		switch t.ctrl[i] {
@@ -345,6 +356,7 @@ main :: proc() {
 			release_keys(&db)
 			db = {}
 			db.role = u8(number(fields[2]))
+			owner_compact = fields[3] == "1"
 			db.t[0] = table_alloc_for(&db, number(fields[1]))
 			db.rehash_idx = -1
 			continue
@@ -366,6 +378,8 @@ main :: proc() {
 		case "B":
 			assert(db.rehash_idx < 0)
 			db_rehash_start(&db, number(fields[1]))
+		case "C":
+			db_table_compact(&db)
 		case "O":
 			_ = db_make_room(&db)
 		case "U":
@@ -395,7 +409,12 @@ main :: proc() {
 					exists: bool
 					i, exists = table_find_slot(t, &db.slab, &l, true)
 					assert(!exists && i >= 0)
-					table_place(t, i, l.hash)
+					if t.growth == 0 && t.ctrl[i] == CTRL_EMPTY {
+						t = db_make_room(&db)
+						i = table_claim(t, l.hash)
+					} else {
+						table_place(t, i, l.hash)
+					}
 					if deadline != 0 {
 						key_store_timed(&db, &t.slots[i].key, transmute([]u8)key, deadline)
 						db.expires += 1

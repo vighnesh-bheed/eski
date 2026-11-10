@@ -174,6 +174,18 @@ class LabelsOff(unittest.TestCase):
         self.assertIn('persistence stays off', error_of(self.client, 'CONFIG', 'SET', 'save', '60 10'))
         self.assertEqual(error_of(self.client, 'SAVE'), PERSIST_ERROR)
 
+    def test_a_read_only_evalsha_passes_a_write_pause(self):
+        c, other = self.client, self.server.client()
+        sha = c.call('SCRIPT', 'LOAD', "#!lua flags=no-writes\nreturn 'ro'")
+        self.assertEqual(c.call('CLIENT', 'PAUSE', 5000, 'WRITE'), 'OK')
+        other.send('EVALSHA', sha, 0)
+        self.assertTrue(other.available(2))
+        self.assertEqual(other.reply(), b'ro')
+        other.send('SET', 'k', 'v')
+        self.assertFalse(other.available(0.3))
+        self.assertEqual(c.call('CLIENT', 'UNPAUSE'), 'OK')
+        self.assertEqual(other.reply(), 'OK')
+
     def test_a_scheme_is_refused_while_the_server_holds_keys(self):
         c = self.client
         c.call('CONFIG', 'SET', 'save', '')
@@ -872,6 +884,54 @@ class Labelled(unittest.TestCase):
         self.assertGreaterEqual(int(info(self.admin, 'memory')['mem_clients_normal']) - before, 8 * (labelled - unlabelled))
         for x in extra:
             x.close()
+
+    def test_a_read_only_evalsha_waits_out_a_write_pause(self):
+        app, other, admin = self.connect('app'), self.connect('app'), self.admin
+        held = app.call('SCRIPT', 'LOAD', "#!lua flags=no-writes\nreturn 'ro'")
+        hidden = self.connect('peer').call('LABEL', 'AS', 'S//B', 'SCRIPT', 'LOAD', "#!lua flags=no-writes\nreturn 'hidden'")
+        self.assertEqual(app.call('SCRIPT', 'EXISTS', held, hidden), [1, 0])
+        low = self.connect('low')
+        for last in (admin, low):
+            self.assertEqual(admin.call('CLIENT', 'PAUSE', 5000, 'WRITE'), 'OK')
+            self.assertEqual(last.call('PING'), 'PONG')
+            app.send('EVALSHA', held, 0)
+            other.send('EVALSHA', hidden, 0)
+            self.assertFalse(app.available(0.5))
+            self.assertFalse(other.available(0.1))
+            self.assertEqual(admin.call('CLIENT', 'UNPAUSE'), 'OK')
+            self.assertEqual(app.reply(), b'ro')
+            self.assertEqual(str(other.reply()), 'NOSCRIPT No matching script. Please use EVAL.')
+        self.assertEqual(app.call('EVALSHA_RO', held, 0), b'ro')
+
+    def test_a_write_pause_sees_through_the_label_prefix(self):
+        admin = self.admin
+        clients = [self.connect('app') for _ in range(8)]
+        ro = "#!lua flags=no-writes\nreturn 'ro'"
+        sha = clients[0].call('LABEL', 'AS', 'U', 'SCRIPT', 'LOAD', ro)
+        writer_tx, reader_tx, wrapped_tx = clients[5], clients[6], clients[7]
+        for tx, body in ((writer_tx, ('SET', 'k3', 'v')), (reader_tx, ('GET', 'k')), (wrapped_tx, ('SET', 'k4', 'v'))):
+            self.assertEqual(tx.call('MULTI'), 'OK')
+            self.assertEqual(tx.call('LABEL', 'AS', 'S//A', *body), 'QUEUED')
+        self.assertEqual(admin.call('CLIENT', 'PAUSE', 5000, 'WRITE'), 'OK')
+        held = [(clients[0], ('LABEL', 'AS', 'S//A', 'SET', 'k', 'v')), (clients[1], ('LABEL', 'AS', 'U', 'EVALSHA', sha, 0)),
+                (writer_tx, ('EXEC',)), (wrapped_tx, ('LABEL', 'AS', 'S//A', 'EXEC'))]
+        free = [(clients[2], ('LABEL', 'AS', 'U', 'GET', 'k'), None), (clients[3], ('LABEL', 'AS', 'C', 'EVAL', ro, 0), b'ro'),
+                (reader_tx, ('EXEC',), [None]), (clients[4], ('LABEL', 'AS', 'C', 'EVAL_RO', "return 'ro'", 0), b'ro')]
+        for client, command in held:
+            client.send(*command)
+        for client, command, reply in free:
+            self.assertEqual(client.call(*command), reply)
+        self.assertEqual(error_of(clients[4], 'LABEL', 'AS', 'NOPE', 'SET', 'k', 'v'), INVALID)
+        self.assertEqual(error_of(clients[4], 'LABEL', 'AS', 'S//A'), "ERR wrong number of arguments for 'label|as' command")
+        self.assertEqual(error_of(clients[4], 'LABEL', 'AS', 'S//A', 'LABEL', 'AS', 'U', 'SET', 'k', 'v'), 'ERR LABEL AS cannot wrap LABEL AS or LABEL SESSION')
+        for client, _ in held:
+            self.assertFalse(client.available(0.3))
+        self.assertIsNone(admin.call('LABEL', 'AS', 'S//A', 'GET', 'k'))
+        self.assertEqual(admin.call('CLIENT', 'UNPAUSE'), 'OK')
+        self.assertEqual([client.reply() for client, _ in held], ['OK', b'ro', ['OK'], ['OK']])
+        self.assertEqual(admin.call('LABEL', 'AS', 'S//A', 'GET', 'k'), b'v')
+        for client in clients:
+            self.assertEqual(self.whoami(client)[b'session'], 0)
 
     def test_function_changes_need_top(self):
         app, admin = self.connect('app'), self.admin

@@ -9,7 +9,7 @@ owner_live_keys :: proc(e: ^Owner_Entry) -> int {
 	keys := e.keyspace.keys
 	for t in owner_touched {
 		if t.p.space.entry == e {
-			keys += db_size_of(&t.p.db) - t.keys
+			keys += db_size_of(owner_db(t.p)) - t.keys
 		}
 	}
 	return keys
@@ -52,7 +52,7 @@ owner_elements :: proc(e: ^Owner_Entry) -> int {
 	owner_parts_of(e, &parts)
 	sets := make([dynamic]vt.Vset, context.temp_allocator)
 	for q in parts {
-		owner_presences(&q.db, &sets)
+		owner_presences(owner_db(q), &sets)
 	}
 	n := 0
 	for s in sets {
@@ -122,7 +122,7 @@ keyspace_owner_forget :: proc(e: ^Owner_Entry) -> Owner_Counts {
 	homes := make([dynamic]int, context.temp_allocator)
 	for q in parts {
 		had := len(sets)
-		owner_presences(&q.db, &sets)
+		owner_presences(owner_db(q), &sets)
 		for _ in had ..< len(sets) {
 			append(&homes, q.db.id)
 		}
@@ -143,13 +143,16 @@ keyspace_owner_forget :: proc(e: ^Owner_Entry) -> Owner_Counts {
 	}
 	for q in parts {
 		if events || q.db.heap_objs > 0 {
-			owner_forget_walk(&q.db, o, events)
+			owner_forget_walk(owner_db(q), o, events)
 		}
 	}
 	for q in parts {
 		label := q.db.label
 		owner_part_flush(q, true, true)
 		label_tracking_flush(label, o)
+	}
+	for e.keyspace.space != nil {
+		owner_space_drop(e.keyspace.space)
 	}
 	owner_streams_drop(e)
 	if access.owner_entry == e {

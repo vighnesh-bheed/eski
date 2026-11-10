@@ -504,13 +504,15 @@ label_token_verify :: proc(c: ^Conn, token: []u8) -> (l: lb.Label, ctx: ^Label_C
 	return entry.label, ctx, true
 }
 
-label_as_parse :: proc(c: ^Conn, args: [][]u8, out: ^lb.Label, ctx: ^^Label_Context) -> (used: int, msg: string) {
+label_as_parse :: proc(c: ^Conn, args: [][]u8, out: ^lb.Label, ctx: ^^Label_Context, probe := false) -> (used: int, msg: string) {
 	rules := &c.user.labels if c.user != nil else nil
 	i := 2
 	if i >= len(args) {
 		return 0, "ERR wrong number of arguments for 'label|as' command"
 	}
 	switch {
+	case probe && eq_nocase(args[i], "token") && i + 2 < len(args):
+		return i + 2, ""
 	case eq_nocase(args[i], "token") && i + 2 < len(args):
 		l, x, ok := label_token_verify(c, args[i + 1])
 		if !ok {
@@ -520,14 +522,20 @@ label_as_parse :: proc(c: ^Conn, args: [][]u8, out: ^lb.Label, ctx: ^^Label_Cont
 		ctx^ = x
 		return i + 2, ""
 	case owners_on && eq_nocase(args[i], "owner") && i + 2 < len(args):
-		access_arrival.pick = .Text
-		access_arrival.text = args[i + 1]
-		return label_as_owner_only(c, args, i + 2, out, ctx)
+		if !probe {
+			access_arrival.pick = .Text
+			access_arrival.text = args[i + 1]
+		}
+		return label_as_owner_only(c, args, i + 2, out, ctx, probe)
 	case owners_on && eq_nocase(args[i], "shared") && i + 1 < len(args):
-		access_arrival.pick = .Shared
-		return label_as_owner_only(c, args, i + 1, out, ctx)
+		if !probe {
+			access_arrival.pick = .Shared
+		}
+		return label_as_owner_only(c, args, i + 1, out, ctx, probe)
 	case rules != nil && rules.require_token:
 		return 0, ERR_LABEL_TOKEN_ONLY
+	case probe && eq_nocase(args[i], "context") && i + 2 < len(args) && label_handle_shaped(args[i + 1]):
+		return i + 2, ""
 	case eq_nocase(args[i], "context") && i + 2 < len(args) && label_handle_shaped(args[i + 1]):
 		x := label_context_find(c, args[i + 1])
 		if x == nil {
@@ -551,14 +559,20 @@ label_as_parse :: proc(c: ^Conn, args: [][]u8, out: ^lb.Label, ctx: ^^Label_Cont
 		return 0, ERR_LABEL_INVALID
 	}
 	if owners_on && i + 2 < len(args) && eq_nocase(args[i], "owner") {
-		access_arrival.pick = .Text
-		access_arrival.text = args[i + 1]
+		if !probe {
+			access_arrival.pick = .Text
+			access_arrival.text = args[i + 1]
+		}
 		i += 2
 	} else if owners_on && i + 1 < len(args) && eq_nocase(args[i], "shared") {
-		access_arrival.pick = .Shared
+		if !probe {
+			access_arrival.pick = .Shared
+		}
 		i += 1
 	}
-	if i + 2 < len(args) && eq_nocase(args[i], "context") && label_handle_shaped(args[i + 1]) {
+	if probe && i + 2 < len(args) && eq_nocase(args[i], "context") && label_handle_shaped(args[i + 1]) {
+		i += 2
+	} else if i + 2 < len(args) && eq_nocase(args[i], "context") && label_handle_shaped(args[i + 1]) {
 		x := label_context_find(c, args[i + 1])
 		if x == nil {
 			return 0, ERR_LABEL_CONTEXT
@@ -576,12 +590,28 @@ label_as_parse :: proc(c: ^Conn, args: [][]u8, out: ^lb.Label, ctx: ^^Label_Cont
 	return i, ""
 }
 
+label_as_inner :: proc(c: ^Conn, args: [][]u8) -> ([][]u8, bool) {
+	if len(args) < 2 || !eq_nocase(args[1], "as") {
+		return args, true
+	}
+	if wrap := lookup_command(args[0]); wrap == nil || wrap.handler != cmd_label {
+		return args, true
+	}
+	l: lb.Label
+	x: ^Label_Context
+	used, msg := label_as_parse(c, args, &l, &x, true)
+	return args[used:], msg == ""
+}
+
 @(private = "file")
-label_as_owner_only :: proc(c: ^Conn, args: [][]u8, at: int, out: ^lb.Label, ctx: ^^Label_Context) -> (used: int, msg: string) {
+label_as_owner_only :: proc(c: ^Conn, args: [][]u8, at: int, out: ^lb.Label, ctx: ^^Label_Context, probe := false) -> (used: int, msg: string) {
 	i := at
 	if i + 2 < len(args) && eq_nocase(args[i], "context") && label_handle_shaped(args[i + 1]) {
 		if c.user != nil && c.user.labels.require_token {
 			return 0, ERR_LABEL_TOKEN_ONLY
+		}
+		if probe {
+			return i + 2, ""
 		}
 		l := access_conn_session(c)
 		x := label_context_find(c, args[i + 1])
@@ -595,7 +625,9 @@ label_as_owner_only :: proc(c: ^Conn, args: [][]u8, at: int, out: ^lb.Label, ctx
 		out^ = l
 		return i + 2, ""
 	}
-	access_arrival.owner_only = true
+	if !probe {
+		access_arrival.owner_only = true
+	}
 	return i, ""
 }
 

@@ -99,6 +99,7 @@ keyspace_owners_empty_heap_values_charge_their_allocation :: proc(t: ^testing.T)
 	two := db_used_memory - base - one
 	testing.expect_value(t, one, 1 + BIG_STR_BYTES)
 	testing.expect_value(t, two, one)
+	stored, _ = db_upsert_in(db, owner_test_bytes("s"))
 	entry_copy_string(stored, nil, .Raw)
 	testing.expect_value(t, db_used_memory - base, one + two)
 	found, _ := db_remove_in(db, owner_test_bytes("s"))

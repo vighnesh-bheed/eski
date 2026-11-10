@@ -23,6 +23,8 @@ redis-cli -p 6399 TYPE demo:copy
 
 With a label scheme, and in owner mode, each key belongs to the label and owner that wrote it, and `KEYS`, `SCAN`, `RANDOMKEY`, `DBSIZE` and the flush commands work over the caller's view; see [Labels](labels.md#keys) and [Owners](owners.md#keys). A user reader's `SCAN` cursor, like every cursor, is an unsigned 64-bit number sent as text.
 
+In owner mode each user's keys at a label live in a partition of their own, a reduced database record in the heap role: its keys and values are separate heap blocks, it has no slab and no prepared next table, and its first key tables hold one, two or four keys; the [owner memory notes](owners.md#quotas-and-memory) give the sizes. For contributors the rule is that code reached with a database record must test the heap role before it touches the slab or the prepared next table, because an owner partition's allocation ends where those fields would begin. The record's owner fields sit before its database fields, so any such access lands outside the allocation and the address sanitizer reports it.
+
 `WAIT` and `WAITAOF` are compatibility commands, not replication. `WAIT` validates arguments and reports zero replicas. `WAITAOF` can wait for local AOF synchronization and reports zero replica acknowledgements; requesting a local acknowledgement with AOF disabled is an error. See [persistence](persistence.md).
 
 Verify storage/expiry/sort ownership with `bash test/run_packages.sh`, and run `./test/conformance/run.sh --suite redis --units keyspace,expire,sort`. Replication remains excluded. Lua inner commands have the restrictions described in [scripting](scripting.md); [conformance](conformance.md) records the selected tests and implementation differences.

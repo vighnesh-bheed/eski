@@ -41,13 +41,14 @@ AREAS = {
     'contexts': ['Contexts'],
     'arrival': ['Arrival'],
     'owners': ['Owner', 'OwnerArrival'],
-    'resolution': ['KeyModel'],
-    'confinement': ['KeyReads'],
-    'placement': ['KeyWrites'],
-    'purge': ['KeyPurge'],
-    'plain': ['KeyPlain'],
+    'resolution': ['KeyModel', 'OwnerKeyModel'],
+    'confinement': ['KeyReads', 'OwnerKeyReads'],
+    'placement': ['KeyWrites', 'OwnerKeyWrites'],
+    'purge': ['KeyPurge', 'OwnerKeyPurge'],
+    'plain': ['KeyPlain', 'OwnerKeyPlain'],
+    'forget': ['OwnerForget'],
 }
-KEY_AREAS = ('resolution', 'confinement', 'placement', 'purge', 'plain')
+KEY_AREAS = ('resolution', 'confinement', 'placement', 'purge', 'plain', 'forget')
 ROW_AREAS = {'L': 'lattice', 'CR': 'marking', 'CL': 'marking', 'CC': 'marking', 'CT': 'marking', 'M': 'marking', 'F': 'marking',
              'TR': 'interning', 'TI': 'interning', 'TF': 'interning', 'E': 'persistence', 'D': 'persistence',
              'V': 'visibility', 'VR': 'visibility', 'G': 'admission', 'B': 'admission', 'SU': 'rules', 'SR': 'rules', 'SW': 'rules',
@@ -57,7 +58,9 @@ ROW_AREAS = {'L': 'lattice', 'CR': 'marking', 'CL': 'marking', 'CC': 'marking', 
              'AP': 'arrival', 'AE': 'arrival', 'AB': 'arrival', 'AV': 'arrival',
              'OX': 'owners', 'OU': 'owners', 'OC': 'owners', 'OO': 'owners', 'OR': 'owners', 'OA': 'owners', 'OT': 'owners',
              'OP': 'owners', 'OS': 'owners', 'OB': 'owners', 'OV': 'owners',
-             'KO': 'resolution', 'KR': 'confinement', 'KW': 'placement', 'KH': 'purge', 'KP': 'plain'}
+             'KO': 'resolution', 'KR': 'confinement', 'KW': 'placement', 'KH': 'purge', 'KP': 'plain',
+             'PO': 'resolution', 'PR': 'confinement', 'PW': 'placement', 'PL': 'placement', 'PH': 'purge',
+             'PP': 'plain', 'PF': 'forget'}
 KEY_SEED = 0x6B3E7
 ARRIVAL_SEED = 0xA2217
 ARRIVAL_NOTES = ['created', 'create_full', 'dropped', 'swept', 'find_ok', 'find_expired', 'find_other_login',
@@ -77,7 +80,7 @@ ARRIVAL_NOTES = ['created', 'create_full', 'dropped', 'swept', 'find_ok', 'find_
                  'refused_noperm_push', 'kill_allowed', 'kill_refused', 'owner_refused_unpinned', 'owner_noperm',
                  'owner_noperm_push', 'owner_kill_same', 'owner_kill_operator', 'owner_kill_refused_shared',
                  'owner_kill_refused_user', 'owner_kill_refused_label', 'vetoed_unpinned', 'vetoed_owner_unpinned',
-                 'refused_operator', 'exec_owner_watch_text', 'refused_owner_persist']
+                 'refused_operator', 'exec_owner_watch_text', 'refused_owner_persist', 'tx_named', 'token_unnamed']
 ARRIVAL_SEMANTIC = {'expired_handle_used': 'find_expired', 'other_login_handle_used': 'find_other_login',
                     'handle_above_clearance_used': 'find_outside_ceiling', 'expired_token_used': 'token_expired',
                     'token_above_clearance_used': 'token_outside_ceiling', 'token_context_mismatch_used': 'token_context_refused',
@@ -1283,7 +1286,13 @@ def key_run(bridge, lines, path):
 
 
 def key_match(got, want):
-    return want is None or (got in want if isinstance(want, set) else got == want)
+    if want is None:
+        return True
+    if isinstance(want, set):
+        return got in want
+    if isinstance(want, re.Pattern):
+        return want.fullmatch(got) is not None
+    return got == want
 
 
 def key_compare(label, got, want):
@@ -1471,6 +1480,277 @@ def key_evidence(bridge, lean_model, output):
             mutants['key_row_' + cmd.lower()] = 1
         else:
             raise AssertionError('key row control accepted: ' + cmd)
+    detail['sessions_sha256'] = hashlib.sha256('\n'.join(hashes).encode()).hexdigest()
+    ostats, odetail, omutants = owner_key_evidence(bridge, lean_model, output)
+    stats.update(ostats)
+    detail['owners'] = odetail
+    mutants.update(omutants)
+    return stats, detail, mutants
+
+
+OWNER_KEY_SEED = KEY_SEED ^ 0x0E
+OWNER_SKIP = ('T', 'U')
+
+
+def owner_count(stats, items, kind=None):
+    n = 0
+    for item in items:
+        if item[1] in OWNER_SKIP:
+            continue
+        stats[kind or keys.owner_row_kind(item[1])] += 1
+        n += 1
+    return n
+
+
+def owner_controls(runs, prefix, mutants):
+    seen = {}
+    for k, (real, rows, items) in enumerate(runs):
+        for i, item in enumerate(items):
+            if item[1] not in OWNER_SKIP and item[1] not in seen and rows[i] is not None:
+                seen[item[1]] = (k, i)
+    for cmd, (k, i) in sorted(seen.items()):
+        real, rows, _ = runs[k]
+        mutated = list(real)
+        mutated[i] = mutated[i] + 'controlled-mutant'
+        try:
+            key_compare('owner key control', mutated, rows)
+        except AssertionError:
+            mutants[f'{prefix}_row_{cmd.lower()}'] = 1
+        else:
+            raise AssertionError('owner key row control accepted: ' + cmd)
+
+
+def owner_key_evidence(bridge, lean_model, output):
+    work = output / 'owner-keys'
+    work.mkdir(exist_ok=True)
+    stats = {'PO': 0, 'PR': 0, 'PW': 0, 'PL': 0, 'PH': 0, 'PP': 0, 'PF': 0}
+    detail = {'sessions': 0, 'rows': 0, 'notes': {}, 'commands': {}}
+    mutants = {}
+    hashes = []
+    sessions = keys.owner_corpus(random.Random(OWNER_KEY_SEED), 77, 48, 170)
+    real = []
+    for k, (lines, rows, items, notes) in enumerate(sessions):
+        got = key_run(bridge, lines, work / f'session-{k}.txt')
+        if got[0] != 'S|3|1|1':
+            raise AssertionError('owner key bridge did not start in owner mode: ' + got[0])
+        key_compare(f'owner key session {k}', got[1:], rows)
+        hashes.append(hashlib.sha256('\n'.join(got).encode()).hexdigest())
+        real.append(got[1:])
+        detail['sessions'] += 1
+        detail['rows'] += owner_count(stats, items)
+        for item in items:
+            detail['commands'][item[1]] = detail['commands'].get(item[1], 0) + 1
+        for name, n in notes.items():
+            detail['notes'][name] = detail['notes'].get(name, 0) + n
+    flines, frows, fitems, fnotes = keys.flush_corpus(random.Random(OWNER_KEY_SEED ^ 0xF1), 77, 60)
+    freal = key_run(bridge, flines, work / 'flush.txt')
+    if freal[0] != 'S|3|1|1':
+        raise AssertionError('owner flush bridge did not start in owner mode')
+    freal = freal[1:]
+    key_compare('owner flush', freal, frows)
+    detail['flush_rows'] = owner_count(stats, fitems, 'PL')
+    detail['flush_cases'] = 60
+    for name, n in fnotes.items():
+        detail['notes'][name] = detail['notes'].get(name, 0) + n
+    qlines, qrows, qitems = keys.quota_corpus(random.Random(OWNER_KEY_SEED ^ 0x0A), 77, 12)
+    qreal = key_run(bridge, qlines, work / 'quota.txt')[1:]
+    key_compare('owner label quota', qreal, qrows)
+    detail['quota_rows'] = owner_count(stats, qitems, 'PL')
+    glines, grows, gitems, spans, gnotes = keys.forget_corpus(random.Random(OWNER_KEY_SEED ^ 0xF0), 77, 10)
+    greal = key_run(bridge, glines, work / 'forget.txt')[1:]
+    key_compare('owner forget', greal, grows)
+    detail['forget_rows'] = owner_count(stats, gitems, 'PF')
+    for name, n in gnotes.items():
+        detail['notes'][name] = detail['notes'].get(name, 0) + n
+    unchanged = shared_view = 0
+    for a, b, c, n in spans:
+        ordinal = {}
+        index = {}
+        for i in range(n):
+            scope, cmd, args, _ = gitems[a + i]
+            key = (scope, ordinal.get(scope, 0))
+            ordinal[scope] = key[1] + 1
+            index[key] = i
+        for (scope, j), i in index.items():
+            before, after = greal[a + i], greal[c + i]
+            if scope[1] != 'u1':
+                if before != after:
+                    raise AssertionError(f'forget changed a reply of {scope}: {before[:200]} != {after[:200]}')
+                unchanged += 1
+            else:
+                twin = greal[c + index[((scope[0], None), j)]]
+                if after != twin:
+                    raise AssertionError(f'forgotten owner view differs from the shared view: {after[:200]} != {twin[:200]}')
+                shared_view += 1
+    if not unchanged or not shared_view:
+        raise AssertionError('forget corpus compared nothing')
+    detail['forget_unchanged_rows'] = unchanged
+    detail['forget_shared_view_rows'] = shared_view
+    stats['PF'] += unchanged + shared_view
+    missing = [n for n in keys.OWNER_NOTES if not detail['notes'].get(n)]
+    if missing:
+        raise AssertionError('owner key corpus misses ' + ', '.join(missing))
+    rlines, rrows = keys.owner_resolution_trace(sessions)
+    rpath = work / 'owner-resolution-cases.txt'
+    rpath.write_text('\n'.join(rlines) + '\n')
+    result = subprocess.run([str(lean_model.resolve()), str(rpath)], text=True, capture_output=True)
+    if result.returncode or result.stderr:
+        raise AssertionError(f'lean owner resolution: exit {result.returncode}, stderr: {result.stderr[-2000:]}')
+    compare('lean owner resolution', result.stdout, rrows)
+    queried = [r for r in rrows if r.startswith('PQ|')]
+    if len(queried) != stats['PO']:
+        raise AssertionError('Lean owner resolution rows do not cover every owner LABEL OF row')
+    detail['lean_resolution_rows'] = len(rrows)
+    detail['lean_resolution_queries'] = len(queried)
+    twins = keys.owner_twin_corpus(random.Random(OWNER_KEY_SEED ^ 0x7E), 77, 30)
+    detail.update({'twin_pairs': 0, 'twin_hidden': 0, 'twin_observer_rows': 0, 'twin_raw_rows': 0,
+                   'twin_notification_rows': 0, 'twin_exec_rows': 0, 'sensitivity_runs': 0})
+    for k, (setup, base, twin, observers, marker) in enumerate(twins):
+        oa = key_run(bridge, keys.owner_twin_lines(77, setup, base), work / f'twin-{k}-base.txt')[1:]
+        ob = key_run(bridge, keys.owner_twin_lines(77, setup, twin), work / f'twin-{k}-hidden.txt')[1:]
+        key_compare(f'owner twin {k} base', oa, keys.owner_twin_rows(setup, base))
+        key_compare(f'owner twin {k} hidden', ob, keys.owner_twin_rows(setup, twin))
+        n = len(setup)
+        j = 0
+        for i, c in enumerate(twin):
+            if len(c) > 4:
+                continue
+            if c is not base[j]:
+                raise AssertionError('owner twin merge lost base commands')
+            if oa[n + j] != ob[n + i]:
+                raise AssertionError(f'owner twin {k}: a hidden command changed an observer reply at row {j}')
+            if c[1] not in OWNER_SKIP:
+                stats['PH'] += 1
+                detail['twin_observer_rows'] += 1
+                if c[1] in keys.OWNER_RAW:
+                    detail['twin_raw_rows'] += 1
+                if c[1] == 'NOTES' and oa[n + j] != 'Q|-':
+                    detail['twin_notification_rows'] += 1
+                if c[1] == 'EXEC':
+                    detail['twin_exec_rows'] += 1
+            j += 1
+        if j != len(base):
+            raise AssertionError('owner twin merge lost base commands')
+        detail['twin_pairs'] += 1
+        detail['twin_hidden'] += len(twin) - len(base)
+        drop = base.index(marker)
+        sens = base[:drop] + base[drop + 1:]
+        os_ = key_run(bridge, keys.owner_twin_lines(77, setup, sens), work / f'twin-{k}-sensitivity.txt')[1:]
+        da = hashlib.sha256('\n'.join(oa[:n + drop] + oa[n + drop + 1:]).encode()).hexdigest()
+        ds = hashlib.sha256('\n'.join(os_).encode()).hexdigest()
+        if da == ds:
+            raise AssertionError(f'owner twin {k}: dropping a shared command left the user observer digest unchanged')
+        detail['sensitivity_runs'] += 1
+    if not (detail['twin_notification_rows'] and detail['twin_exec_rows'] and detail['twin_raw_rows']):
+        raise AssertionError('owner twins lost raw, notification or EXEC coverage')
+    twin_real = []
+
+    def plain_twins(name, cases, leak=False):
+        pairs = compared = hidden = 0
+        for k, (setup, base, twin, observers, _) in enumerate(cases):
+            oa = key_run(bridge, keys.owner_twin_lines(77, setup, base), work / f'{name}-{k}-base.txt')[1:]
+            ob = key_run(bridge, keys.owner_twin_lines(77, setup, twin), work / f'{name}-{k}-hidden.txt')[1:]
+            twin_real.append((setup, base, oa))
+            twin_real.append((setup, twin, ob))
+            key_compare(f'{name} {k} base', oa, keys.owner_twin_rows(setup, base))
+            key_compare(f'{name} {k} hidden', ob, keys.owner_twin_rows(setup, twin, apply_hidden=True))
+            n = len(setup)
+            j = 0
+            for i, c in enumerate(twin):
+                if len(c) > 4:
+                    continue
+                if oa[n + j] != ob[n + i]:
+                    raise AssertionError(f'{name} {k}: a hidden command changed an observer reply at {c}')
+                if c[1] not in OWNER_SKIP:
+                    compared += 1
+                j += 1
+            pairs += 1
+            hidden += len(twin) - len(base)
+        stats['PH'] += compared
+        return pairs, compared, hidden
+
+    label_twins = keys.label_twin_corpus(random.Random(OWNER_KEY_SEED ^ 0xDF), 77, 16)
+    detail['label_twin_pairs'], detail['label_twin_rows'], detail['label_twin_hidden'] = plain_twins('label-twin', label_twins)
+    key_decl = keys.declassify_twin_corpus(random.Random(OWNER_KEY_SEED ^ 0xD5), 77, 16, False)
+    detail['declassify_key_pairs'], detail['declassify_key_rows'], detail['declassify_key_hidden'] = \
+        plain_twins('declassify-key', key_decl)
+    element_decl = keys.declassify_twin_corpus(random.Random(OWNER_KEY_SEED ^ 0xD6), 77, 16, True)
+    detail['declassify_element_pairs'] = detail['declassify_element_rows'] = detail['declassify_element_marked'] = 0
+    for k, (setup, base, twin, observers, _) in enumerate(element_decl):
+        oa = key_run(bridge, keys.owner_twin_lines(77, setup, base), work / f'declassify-element-{k}-base.txt')[1:]
+        ob = key_run(bridge, keys.owner_twin_lines(77, setup, twin), work / f'declassify-element-{k}-hidden.txt')[1:]
+        key_compare(f'declassify element {k} base', oa, keys.owner_twin_rows(setup, base))
+        key_compare(f'declassify element {k} hidden', ob, keys.owner_twin_rows(setup, twin, apply_hidden=True, leak=True))
+        fa = keys.owner_twin_rows(setup, base)
+        fb = keys.owner_twin_rows(setup, twin, apply_hidden=True)
+        j = 0
+        for i, c in enumerate(twin):
+            if len(c) > 4:
+                continue
+            if c[1] not in OWNER_SKIP:
+                detail['declassify_element_rows'] += 1
+            if oa[j] != ob[i]:
+                if c[1] not in ('SCAN', 'RAWSCAN') or c[0][1] != 'u1':
+                    raise AssertionError(f'declassify element {k}: an unexpected row differs: {c}')
+                detail['declassify_element_marked'] += 1
+            if fa[j] is not None and not isinstance(fa[j], set) and fa[j] != fb[i]:
+                raise AssertionError(f'declassify element {k}: the rule without the left partition still differs at {c}')
+            j += 1
+        detail['declassify_element_pairs'] += 1
+    if not detail['declassify_element_marked']:
+        raise AssertionError('declassify element pairs no longer show the left target partition (D-2)')
+    p10 = random.Random(OWNER_KEY_SEED ^ 0x10)
+    shared_sessions = keys.corpus(p10, 77, 8, 170)
+    detail['p10_shared_rows'] = detail['p10_user_rows'] = detail['p10_single_rows'] = 0
+    detail['p10_user_cursor_rows'] = 0
+    for k, (_, krows, cmds, _) in enumerate(shared_sessions):
+        got = key_run(bridge, keys.owner_p10_lines(77, cmds, None), work / f'p10-shared-{k}.txt')[1:]
+        for g, w, c in zip(got, krows, cmds):
+            if not key_match(keys.strip_suffix(g), w):
+                raise AssertionError(f'P10 shared row {c}: {g[:200]} != {str(w)[:200]}')
+            if c[1] != 'T':
+                stats['PP'] += 1
+                detail['p10_shared_rows'] += 1
+        got = key_run(bridge, keys.owner_p10_lines(77, cmds, 'u1'), work / f'p10-user-{k}.txt')[1:]
+        for g, w, c in zip(got, krows, cmds):
+            g2 = re.sub(r'\$(\d+)\^([^^]*?) OWNER u1\^', lambda x: f'${len(x.group(2))}^{x.group(2)}^', g)
+            g2 = re.sub(r'(-INUSE name in use at [^^]*?) OWNER u1\^', lambda x: x.group(1) + '^', g2)
+            if c[1] == 'SCAN' and int(c[2][0]) >> keys.SCAN_SHIFT:
+                detail['p10_user_cursor_rows'] += 1
+                continue
+            if not key_match(g2, w):
+                raise AssertionError(f'P10 user row {c}: {g2[:200]} != {str(w)[:200]}')
+            if c[1] != 'T':
+                stats['PP'] += 1
+                detail['p10_user_rows'] += 1
+    for k in range(6):
+        writes, reads = keys.p10_commands(p10)
+        plain_rows, _ = keys.simulate(writes + reads, labelled=False)
+        got = key_run(bridge, keys.owner_p10_lines(77, writes + reads, 'u1'), work / f'p10-single-{k}.txt')[1:]
+        key_compare(f'P10 single user {k}', got, plain_rows)
+        stats['PP'] += len(got)
+        detail['p10_single_rows'] += len(got)
+    for name, fn in keys.owner_mutants().items():
+        differing = 0
+        for (lines, rows, items, _), got in zip(sessions, real):
+            mrows = keys.osimulate_with(items, keys.oexpected, fn)
+            differing += sum(1 for a, b in zip(got, mrows) if not key_match(a, b))
+        mrows = keys.osimulate_with(fitems, keys.fexpected, fn)
+        differing += sum(1 for a, b in zip(freal, mrows) if not key_match(a, b))
+        mrows = keys.osimulate_with(gitems, keys.oexpected, fn)
+        differing += sum(1 for a, b in zip(greal, mrows) if not key_match(a, b))
+        mrows = keys.osimulate_with(qitems, keys.oexpected, fn)
+        differing += sum(1 for a, b in zip(qreal, mrows) if not key_match(a, b))
+        for setup, twin, ob in twin_real:
+            mrows = keys.owner_twin_rows(setup, twin, apply_hidden=True, mutant=fn)
+            differing += sum(1 for a, b in zip(ob, mrows) if not key_match(a, b))
+        if not differing:
+            raise AssertionError('owner key model mutant accepted: ' + name)
+        mutants['owner_key_' + name] = differing
+    owner_controls([(real[k], rows, items) for k, (_, rows, items, _) in enumerate(sessions)], 'owner_key', mutants)
+    owner_controls([(freal, frows, fitems)], 'owner_flush', mutants)
+    owner_controls([(greal, grows, gitems)], 'owner_forget', mutants)
+    owner_controls([(qreal, qrows, qitems)], 'owner_quota', mutants)
     detail['sessions_sha256'] = hashlib.sha256('\n'.join(hashes).encode()).hexdigest()
     return stats, detail, mutants
 

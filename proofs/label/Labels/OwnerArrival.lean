@@ -31,9 +31,10 @@ structure OConn where
   wlabel : TLabel
   wowner : Owner
   wlmixed : Bool
+  named : Bool
 deriving DecidableEq, Repr
 
-def oconnFresh : OConn := ⟨false, .shared, .shared, false, false, tbottom, .shared, false⟩
+def oconnFresh : OConn := ⟨false, .shared, .shared, false, false, tbottom, .shared, false, false⟩
 
 structure OEnv where
   rules : List (List Nat × ORules)
@@ -118,9 +119,10 @@ def resolveOwner (r : ORules) (oc : OConn) (inMulti : Bool) (inner : List Arg) :
         else if r.operator && needsSession inner then .ok .every
         else .error errOwnerRequired
 
-def bindOwner (oc : OConn) (inMulti : Bool) (inner : List Arg) (o : Owner) : OConn :=
-  if inMulti then oc
-  else { oc with owner := o, pinned := oc.pinned || needsSession inner, pin := if !oc.pinned && needsSession inner then o else oc.pin }
+def bindOwner (oc : OConn) (inMulti : Bool) (inner : List Arg) (o : Owner) (n : Bool) : OConn :=
+  if inMulti then { oc with named := oc.named || n }
+  else { oc with owner := o, named := n, pinned := oc.pinned || needsSession inner,
+                 pin := if !oc.pinned && needsSession inner then o else oc.pin }
 
 def ownerPhase (r : ORules) (oc : OConn) (inMulti : Bool) (inner : List Arg) (topLabel : Bool)
     (pick : Pick) (ctx : Option Owner) (tok : Option TokOwner) : Except String (Owner × OConn) :=
@@ -134,7 +136,7 @@ def ownerPhase (r : ORules) (oc : OConn) (inMulti : Bool) (inner : List Arg) (to
       | .ok o =>
         if named.isSome && oc.pinned && o != oc.pin then .error errOwnerBound
         else if named.isSome && inMulti && o != oc.owner then .error errOwnerTransaction
-        else .ok (o, bindOwner oc inMulti inner o)
+        else .ok (o, bindOwner oc inMulti inner o named.isSome)
 
 structure PO where
   used : Nat
@@ -521,7 +523,7 @@ theorem ownerPhase_ok {r : ORules} {oc oc' : OConn} {m : Bool} {inner : List Arg
     (ownerTop inner = true → t = true ∧ r.operator = true) ∧
     ∃ named, credential r pick ctx tok = .ok named ∧ resolveOwner r oc m inner named = .ok o ∧
       (named.isSome = true → oc.pinned = true → o = oc.pin) ∧
-      (named.isSome = true → m = true → o = oc.owner) ∧ oc' = bindOwner oc m inner o := by
+      (named.isSome = true → m = true → o = oc.owner) ∧ oc' = bindOwner oc m inner o named.isSome := by
   unfold ownerPhase at h
   split at h
   · simp at h
@@ -669,12 +671,75 @@ theorem push_pins_owner {r : ORules} {oc oc' : OConn} {inner : List Arg} {t : Bo
 
 theorem multi_binds_owner {r : ORules} {oc oc' : OConn} {inner : List Arg} {t : Bool} {pick : Pick}
     {ctx : Option Owner} {tok : Option TokOwner} {o : Owner}
-    (h : ownerPhase r oc true inner t pick ctx tok = .ok (o, oc')) : o = oc.owner ∧ oc' = oc := by
+    (h : ownerPhase r oc true inner t pick ctx tok = .ok (o, oc')) : o = oc.owner ∧ { oc' with named := oc.named } = oc := by
   obtain ⟨_, named, _, hr, _, hm, hb⟩ := ownerPhase_ok h
   refine ⟨?_, by rw [hb]; simp [bindOwner]⟩
   cases named with
   | none => exact resolve_multi hr
   | some _ => exact hm rfl rfl
+
+theorem named_flag_spec {r : ORules} {oc oc' : OConn} {m : Bool} {inner : List Arg} {t : Bool} {pick : Pick}
+    {ctx : Option Owner} {tok : Option TokOwner} {o : Owner}
+    (h : ownerPhase r oc m inner t pick ctx tok = .ok (o, oc')) :
+    ∃ named, credential r pick ctx tok = .ok named ∧ oc'.named = (named.isSome || (m && oc.named)) := by
+  obtain ⟨_, named, hc, _, _, _, hb⟩ := ownerPhase_ok h
+  refine ⟨named, hc, ?_⟩
+  rw [hb]
+  cases m <;> cases named.isSome <;> simp [bindOwner, Bool.or_comm]
+
+theorem named_of_credential {r : ORules} {oc oc' : OConn} {m : Bool} {inner : List Arg} {t : Bool} {pick : Pick}
+    {ctx : Option Owner} {tok : Option TokOwner} {o x : Owner}
+    (h : ownerPhase r oc m inner t pick ctx tok = .ok (o, oc')) (hc : credential r pick ctx tok = .ok (some x)) :
+    oc'.named = true := by
+  obtain ⟨named, hn, he⟩ := named_flag_spec h
+  rw [hc] at hn
+  cases hn
+  simp [he]
+
+theorem named_sticky_in_multi {r : ORules} {oc oc' : OConn} {inner : List Arg} {t : Bool} {pick : Pick}
+    {ctx : Option Owner} {tok : Option TokOwner} {o : Owner}
+    (h : ownerPhase r oc true inner t pick ctx tok = .ok (o, oc')) (hn : oc.named = true) : oc'.named = true := by
+  obtain ⟨named, _, he⟩ := named_flag_spec h
+  simp [he, hn]
+
+theorem unnamed_without_credential {r : ORules} {oc oc' : OConn} {inner : List Arg} {t : Bool} {pick : Pick}
+    {ctx : Option Owner} {tok : Option TokOwner} {o : Owner}
+    (h : ownerPhase r oc false inner t pick ctx tok = .ok (o, oc')) (hc : credential r pick ctx tok = .ok none) :
+    oc'.named = false := by
+  obtain ⟨named, hn, he⟩ := named_flag_spec h
+  rw [hc] at hn
+  cases hn
+  simp [he]
+
+theorem credTok_none {r : ORules} {ctx : Option Owner} {n : Option Owner} (h : credTok r ctx .none = .ok n) :
+    n = none := by
+  unfold credTok tokenOwner at h
+  cases hk : (r.kind == OKind.any) with
+  | true => simp [hk] at h
+  | false =>
+    simp only [hk, Bool.false_eq_true, ↓reduceIte] at h
+    cases ctx with
+    | none =>
+      simp only [Except.ok.injEq] at h
+      exact h.symm
+    | some co =>
+      simp only at h
+      split at h
+      · simp only [Except.ok.injEq] at h
+        exact h.symm
+      · simp at h
+
+theorem token_without_owner_unnamed {r : ORules} {oc oc' : OConn} {inner : List Arg} {t : Bool} {pick : Pick}
+    {ctx : Option Owner} {o : Owner}
+    (h : ownerPhase r oc false inner t pick ctx (some .none) = .ok (o, oc')) : oc'.named = false := by
+  obtain ⟨named, hn, he⟩ := named_flag_spec h
+  have : named = none := credTok_none (by simpa [credential] using hn)
+  subst this
+  simp [he]
+
+theorem implicit_owner_unnamed {r : ORules} {oc oc' : OConn} {inner : List Arg} {t : Bool} {o : Owner}
+    (h : ownerPhase r oc false inner t .none none none = .ok (o, oc')) : oc'.named = false :=
+  unnamed_without_credential h (by simp [credential, credPick])
 
 theorem owner_top_needs_operator {r : ORules} {oc oc' : OConn} {m : Bool} {inner : List Arg} {t : Bool} {pick : Pick}
     {ctx : Option Owner} {tok : Option TokOwner} {o : Owner} (ho : ownerTop inner = true)

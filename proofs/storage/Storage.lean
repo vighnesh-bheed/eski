@@ -4,6 +4,7 @@ import Storage.Table
 import Storage.Probe
 import Storage.Placement
 import Storage.Scan
+import Storage.Lanes
 import Storage.Cells
 
 #print axioms Storage.admission_arithmetic
@@ -152,6 +153,15 @@ import Storage.Cells
 #print axioms Storage.scan_round_covers
 #print axioms Storage.scan_round_advances
 #print axioms Storage.scan_visits_present_keys
+#print axioms Storage.one_group_wellplaced
+#print axioms Storage.claim_lowest_lane
+#print axioms Storage.lane_claim_preserves
+#print axioms Storage.lane_erase_preserves
+#print axioms Storage.lane_preserving_migration
+#print axioms Storage.lane_preserving_rehash
+#print axioms Storage.rehash_lanes
+#print axioms Storage.compaction_preserves
+#print axioms Storage.compaction_lane_bound
 #print axioms Storage.table_bytes_bounds
 #print axioms Storage.heap_table_bytes_bounds
 #print axioms Storage.mapped_table_rounds_heap
@@ -169,3 +179,12 @@ import Storage.Cells
 #print axioms Storage.begin_sound
 #print axioms Storage.make_room_sound
 #print axioms Storage.sound_finds_present
+#print axioms Storage.cost_congr
+#print axioms Storage.absent_bank_free
+#print axioms Storage.alloc_fresh
+#print axioms Storage.ladder_tables
+#print axioms Storage.short_table_saving
+#print axioms Storage.insert_sound
+#print axioms Storage.compact_sound
+#print axioms Storage.compaction_bytes
+#print axioms Storage.ladder_keeps_slots

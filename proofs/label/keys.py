@@ -1,4 +1,5 @@
 import fnmatch
+import re
 
 LEVELS = ['L0', 'L1', 'L2']
 COMPS = ['CA', 'CB']
@@ -101,6 +102,9 @@ class Keys:
     def inuse_label(self, d, lab, name):
         return self.other(d, lab, name).label
 
+    def inuse_text(self, lab):
+        return inuse(lab)
+
     def note(self, key):
         self.notes[key] = self.notes.get(key, 0) + 1
 
@@ -195,7 +199,7 @@ class Keys:
                         self.note('create_only_visible')
                         continue
                     self.note('inuse')
-                    return inuse(self.inuse_label(d, lab, name))
+                    return self.inuse_text(self.inuse_label(d, lab, name))
         return getattr(self, 'c_' + cmd.lower())(d, lab, *args)
 
     def find(self, d, lab, name):
@@ -531,7 +535,7 @@ class Keys:
                     self.note('create_only_visible')
                     return integer(0)
                 self.note('inuse')
-                return inuse(o.label)
+                return self.inuse_text(o.label)
         if own is not None:
             if not replace:
                 return integer(0)
@@ -1172,3 +1176,1103 @@ def pause_mutants():
 
     return {f.__name__: f for f in (expired_never_drawn, hidden_expired_drawn, expired_drawn_unpaused,
                                     expired_name_drawn_beside_live)}
+
+
+OWNER_IDS = ['u1', 'u2', 'u3']
+TOP_LABEL = (len(LEVELS) - 1, (1 << len(COMPS)) - 1, 0)
+LOGINS = {'any': True, 'op': True, 'plain': False, 'fx': True}
+OWNER_NOTES = ('own_exact', 'shared_exact', 'shared_exact_over_own', 'own_before_shared', 'shared_over_own',
+               'own_over_shared', 'other_owner_present', 'own_tie_by_age', 'inuse_own', 'inuse_shared',
+               'create_only_visible', 'foreign_read', 'scan_phase0', 'scan_phase1', 'scan_skip_own_list',
+               'ever_kept_empty', 'renamed', 'copied_shared', 'moved', 'declassified',
+               'declassify_target_sees', 'forgot', 'flush_everything', 'flush_user_label', 'flush_user_all',
+               'flush_shared_label', 'flush_shared_all', 'flush_named_multi', 'flush_unnamed_multi')
+
+
+def scope_text(scope):
+    lab, o = scope
+    return text(lab) + (' SHARED' if o is None else ' OWNER ' + o)
+
+
+def osees(r, d):
+    return sees(r[0], d[0]) and (d[1] is None or d[1] == r[1])
+
+
+class OKeys(Keys):
+    def __init__(self):
+        super().__init__(True)
+        self.ever = [dict() for _ in range(DBS)]
+        self.login = 'any'
+        self.tx = None
+        self.leak = False
+        self.quotas = set()
+
+    def sees(self, r, d):
+        return osees(r, d)
+
+    def inuse_text(self, scope):
+        return f'-INUSE name in use at {scope_text(scope)}^'
+
+    def okey(self, reader, c):
+        return rank(c.label[0]), int(reader[1] is not None and c.label[1] == reader[1])
+
+    def other(self, d, W, name):
+        cs = self.copies(d, name)
+        if W[1] is not None:
+            for c in cs:
+                if c.label == (W[0], None):
+                    return c
+        best = None
+        for c in cs:
+            if c.label[0] == W[0] or not self.sees(W, c.label):
+                continue
+            if best is None or self.okey(W, c) > self.okey(W, best):
+                best = c
+        return best
+
+    def resolve(self, d, W, name):
+        o = self.own(d, W, name)
+        if o is not None:
+            return o
+        return self.other(d, W, name)
+
+    def own_resolve(self, d, W, name):
+        o = self.own(d, W, name)
+        if o is not None:
+            return o
+        best = None
+        for c in self.copies(d, name):
+            if c.label[1] != W[1] or c.label[0] == W[0] or not sees(W[0], c.label[0]):
+                continue
+            if best is None or rank(c.label[0]) > rank(best.label[0]):
+                best = c
+        return best
+
+    def shared_resolve(self, d, W, name):
+        best = None
+        for c in self.copies(d, name):
+            if c.label[1] is not None or not sees(W[0], c.label[0]):
+                continue
+            if c.label[0] == W[0]:
+                return c
+            if best is None or rank(c.label[0]) > rank(best.label[0]):
+                best = c
+        return best
+
+    def survey(self, d, W, name):
+        cs = self.copies(d, name)
+        if any(c.label[1] is not None and c.label[1] != W[1] for c in cs):
+            self.note('other_owner_present')
+        if self.own(d, W, name) is not None:
+            if W[1] is not None:
+                self.note('own_exact')
+            return
+        vis = [c for c in cs if c.label[0] != W[0] and self.sees(W, c.label)]
+        if W[1] is not None and any(c.label == (W[0], None) for c in cs):
+            self.note('shared_exact')
+            if any(c.label[1] == W[1] and rank(c.label[0]) > rank(W[0]) for c in vis):
+                self.note('shared_exact_over_own')
+            return
+        if not vis or W[1] is None:
+            return
+        top = max(rank(c.label[0]) for c in vis)
+        at = [c for c in vis if rank(c.label[0]) == top]
+        owners = {c.label[1] for c in at}
+        if W[1] in owners and None in owners:
+            self.note('own_before_shared')
+        elif None in owners and any(c.label[1] == W[1] for c in vis):
+            self.note('shared_over_own')
+        elif W[1] in owners and any(c.label[1] is None for c in vis):
+            self.note('own_over_shared')
+        if sum(1 for c in at if c.label[1] == W[1]) > 1:
+            self.note('own_tie_by_age')
+
+    def create(self, d, W, name, c):
+        self.events.append(('A', d, name, W))
+        self.names[d].setdefault(name, []).append(c)
+        if W[1] is None:
+            self.ordered[d].add(W[0])
+        else:
+            self.ever_add(d, W)
+        if len(self.names[d][name]) > 1:
+            self.note('copies_held')
+
+    def ever_add(self, d, W):
+        labs = self.ever[d].setdefault(W[1], [])
+        if W[0] not in labs:
+            labs.append(W[0])
+
+    def tidy(self):
+        for d in range(DBS):
+            for o, labs in self.ever[d].items():
+                held = {c.label[0] for cs in self.names[d].values() for c in cs if c.label[1] == o}
+                if any(lab not in held for lab in labs):
+                    self.note('ever_kept_empty')
+                    return
+
+    def own_parts(self, d, W):
+        return self.part_order([p for p in self.ever[d].get(W[1], []) if sees(W[0], p)]) if W[1] is not None else []
+
+    def shared_parts(self, d, W):
+        return self.part_order([p for p in self.ordered[d] if sees(W[0], p)])
+
+    def has_own(self, d, W, name):
+        return any(c.label[1] == W[1] and sees(W[0], c.label[0]) for c in self.copies(d, name))
+
+    def c_labelof(self, d, W, k):
+        c = self.find(d, W, k)
+        return NULL if c is None else bulk(scope_text(c.label))
+
+    def scan_names(self, d, W, phase, k, pat):
+        out = set()
+        if phase == 0:
+            chosen = set(self.own_parts(d, W)[k:])
+            for n in self.names[d]:
+                c = self.own_resolve(d, W, n)
+                if c is not None and c.label[1] == W[1] and c.label[0] in chosen:
+                    out.add(n)
+            k = 0
+        chosen = set(self.shared_parts(d, W)[k:])
+        for n in self.names[d]:
+            if W[1] is not None and self.has_own(d, W, n):
+                continue
+            c = self.shared_resolve(d, W, n)
+            if c is not None and c.label[0] in chosen:
+                out.add(n)
+        return sorted(n for n in out if fnmatch.fnmatchcase(n, pat))
+
+    def c_scan(self, d, W, cursor, *opts):
+        pat = opts[opts.index('MATCH') + 1] if 'MATCH' in opts else '*'
+        cur = int(cursor)
+        if W[1] is None:
+            names = self.scan_names(d, W, 1, cur >> SCAN_SHIFT, pat)
+        else:
+            phase, k = cur & 1, (cur >> SCAN_SHIFT) & 0x7FFF
+            if phase == 0 and k >= len(self.own_parts(d, W)):
+                if k:
+                    self.note('scan_skip_own_list')
+                phase, k = 1, 0
+            self.note('scan_phase0' if phase == 0 else 'scan_phase1')
+            names = self.scan_names(d, W, phase, k, pat)
+        return '0:' + f'{len(names)}' + ''.join(',' + n for n in names)
+
+    def c_declassify(self, d, W, k, target):
+        if target == W[0] or not sees(W[0], target):
+            self.note('declassify_direction')
+            return DIRECTION
+        c = self.own(d, W, k)
+        if c is None:
+            return NO_KEY
+        to = (target, W[1])
+        seen = self.resolve(d, to, k)
+        if seen is not None:
+            self.note('declassify_target_sees')
+            return self.inuse_text(seen.label)
+        self.drop(d, W, k)
+        self.create(d, to, k, c.clone(to))
+        self.note('declassified')
+        return OK
+
+    def flush(self, W, named, all_dbs):
+        user = W[1] is not None
+        everything = W[0] == TOP_LABEL and LOGINS[self.login] and not user and not named
+        top = W[0] == TOP_LABEL
+        for d in range(DBS):
+            if not all_dbs and d != self.db:
+                continue
+            for name in list(self.names[d]):
+                cs = self.names[d][name]
+                keep = [c for c in cs if not (everything or (c.label[1] == W[1] and (top or c.label[0] == W[0])))]
+                for c in cs:
+                    if c not in keep:
+                        self.events.append(('D', d, name, c.label))
+                cs[:] = keep
+                if not cs:
+                    del self.names[d][name]
+        if everything:
+            self.note('flush_everything')
+        else:
+            self.note(('flush_user_' if user else 'flush_shared_') + ('all' if top else 'label'))
+        return OK
+
+    def c_flushdb(self, d, W, *opts, named=True):
+        return self.flush(W, named, False)
+
+    def c_flushall(self, d, W, *opts, named=True):
+        return self.flush(W, named, True)
+
+    def c_forget(self, d, W, o):
+        n = 0
+        for dd in range(DBS):
+            self.ever[dd].pop(o, None)
+            for name in list(self.names[dd]):
+                cs = self.names[dd][name]
+                gone = [c for c in cs if c.label[1] == o]
+                n += len(gone)
+                for c in gone:
+                    self.events.append(('D', dd, name, c.label))
+                cs[:] = [c for c in cs if c.label[1] != o]
+                if not cs:
+                    del self.names[dd][name]
+        self.note('forgot')
+        return re.compile(re.escape(f'E|*6^$4^keys^:{n}^$8^elements^:0^$5^bytes^:') + r'\d+\^')
+
+    def c_config(self, d, W, *args):
+        return OK
+
+    def c_lquota(self, d, W, marking, limit):
+        if limit == '0':
+            self.quotas.discard(marking)
+        else:
+            self.quotas.add(marking)
+        return OK
+
+    def conflict_copy(self, d, W, name):
+        return self.other(d, W, name)
+
+    def write_cmd(self, cmd):
+        return cmd in WRITES or cmd in ('MSET', 'FLUSHDB', 'FLUSHALL')
+
+    def orun(self, W, cmd, args, named):
+        d = self.db
+        if cmd in ('FLUSHDB', 'FLUSHALL'):
+            if W[1] is not None:
+                self.ever_add(d, W)
+            out = getattr(self, 'c_' + cmd.lower())(d, W, *args, named=named)
+            self.tidy()
+            return out
+        for name, creates_only in self.writes(cmd, args):
+            if self.own(d, W, name) is not None:
+                continue
+            o = self.conflict_copy(d, W, name)
+            if o is not None:
+                if creates_only:
+                    self.note('create_only_visible')
+                    continue
+                self.note('inuse_shared' if o.label[1] is None else 'inuse_own')
+                return self.inuse_text(o.label)
+        if W[1] is not None and self.write_cmd(cmd):
+            self.ever_add(d, W)
+        if cmd == 'COPY':
+            src = self.find(d, W, args[0])
+            if src is not None and src.label[1] is None and W[1] is not None:
+                self.note('copied_shared')
+        out = getattr(self, 'c_' + cmd.lower())(d, W, *args)
+        self.tidy()
+        return out
+
+
+def owner_words(scope, form):
+    lab, o = scope
+    if form == 'o':
+        return ['OWNER', o]
+    if form == 's':
+        return ['SHARED']
+    return []
+
+
+def default_form(scope):
+    return 'o' if scope[1] is not None else 's'
+
+
+def owner_argv(cmd, args):
+    if cmd == 'FORGET':
+        return ['OWNERS', 'FORGET', args[0]]
+    if cmd == 'QUOTA':
+        return ['OWNERS', 'QUOTA', args[0], 'LIMIT', str(args[1])]
+    if cmd == 'RAWSCAN':
+        return ['SCAN'] + list(args)
+    if cmd == 'RAWRANDOM':
+        return ['RANDOMKEY']
+    if cmd == 'INFOKS':
+        return ['INFO', 'keyspace']
+    if cmd == 'FREQ':
+        return ['OBJECT', 'FREQ'] + list(args)
+    if cmd == 'LQUOTA':
+        return ['LABEL', 'QUOTA', args[0], 'LIMIT', args[1]]
+    if cmd == 'XVADD':
+        return ['VADD', args[0], 'VALUES', '2', '1', '-1', args[1]]
+    if cmd == 'XDECL':
+        return ['LABEL', 'DECLASSIFY', args[0], text(args[1]), 'ELEMENT', args[2]]
+    return argv(cmd, args)
+
+
+OWNER_RAW = ('RAWSCAN', 'RAWRANDOM', 'INFOKS', 'FREQ', 'WATCH', 'MULTI', 'EXEC', 'QEXISTS', 'QUOTA', 'NOTES')
+OWNER_KINDS = {'KEYS': 'N', 'SCAN': 'C'}
+
+
+def owner_line(item):
+    scope, cmd, args, form = item
+    if cmd == 'T':
+        return f'T {args[0]}'
+    if cmd == 'U':
+        return f'U {args[0]}'
+    if cmd == 'NOTES':
+        return 'Q'
+    if cmd == 'QEXISTS':
+        cmd = 'EXISTS'
+    words = owner_argv(cmd, args)
+    head = ['LABEL', 'AS', text(scope[0])] + owner_words(scope, form)
+    kind = 'W' if cmd in ('SESSION', 'PSUBSCRIBE') else OWNER_KINDS.get(cmd, 'E')
+    if cmd == 'SESSION':
+        return 'W ' + ' '.join(w.encode().hex() for w in ['LABEL', 'SESSION', text(scope[0])])
+    if cmd == 'PSUBSCRIBE':
+        head = ['LABEL', 'AS'] + (['OWNER', scope[1]] if scope[1] is not None else ['SHARED'])
+    return kind + ' ' + ' '.join(w.encode().hex() if w else '-' for w in head + words)
+
+
+def oexpected(m, item):
+    scope, cmd, args, form = item
+    if cmd == 'T':
+        m.now = int(args[0])
+        return f'T|{m.now}'
+    if cmd == 'U':
+        m.login = args[0]
+        return f'U|{args[0]}'
+    if cmd == 'XVADD':
+        if scope[1] is None:
+            m.ordered[m.db].add(scope[0])
+        else:
+            m.ever_add(m.db, scope)
+        return None
+    if cmd == 'XDECL':
+        if scope[1] is not None:
+            m.ever_add(m.db, scope)
+            if m.leak:
+                m.ever_add(m.db, (args[1], scope[1]))
+        return None
+    if cmd in OWNER_RAW or cmd in ('SESSION', 'PSUBSCRIBE'):
+        return None
+    named = form in ('o', 's')
+    if cmd == 'SELECT':
+        m.db = int(args[0])
+        return 'E|' + OK
+    if cmd == 'FORGET':
+        return m.c_forget(m.db, scope, args[0])
+    out = m.orun(scope, cmd, args, named)
+    if isinstance(out, set):
+        return {'E|' + x for x in out}
+    if cmd in OWNER_KINDS:
+        return OWNER_KINDS[cmd] + '|' + out
+    return 'E|' + out
+
+
+def osimulate(items, mutant=None):
+    m = OKeys()
+    if mutant:
+        mutant(m)
+    rows = [oexpected(m, it) for it in items]
+    return rows, m
+
+
+def owner_scheme_line(seed):
+    return f'S {",".join(LEVELS)} {",".join(COMPS)} {",".join(TRUSTS)} {seed} 1 1'
+
+
+def pick_owner(rng, weights=(4, 4, 2, 1)):
+    return rng.choices([None] + OWNER_IDS, weights=weights)[0]
+
+
+def owner_write(rng, scope, labs, names):
+    cmd, args = write_command(rng, scope[0], labs, names)
+    return cmd, args
+
+
+def owner_read(rng, scope, names, shared_parts=4):
+    cmd, args = read_command(rng, names)
+    if cmd == 'SCAN':
+        k = int(args[0]) >> SCAN_SHIFT
+        if scope[1] is not None:
+            args = (str((k << SCAN_SHIFT) | rng.randrange(2)),) + args[1:]
+    return cmd, args
+
+
+CORNER = [(1, 0, 0), (1, 0, 1), (0, 0, 1), (2, 1, 0), (2, 1, 1)]
+
+
+def owner_session_labels(rng, number):
+    if number % 4 == 3:
+        return list(TIES)
+    if number % 4 == 2:
+        return list(CORNER)
+    return rng.sample(all_labels(), rng.randrange(3, 8))
+
+
+def owner_session(rng, number, ops):
+    labs = owner_session_labels(rng, number)
+    out, now, probes = [], NOW, 0
+    owners = [None, 'u1', 'u2'] if number % 3 else [None, 'u1', 'u2', 'u3']
+
+    def at(lab, o):
+        return (lab, o)
+
+    if number % 3 == 0:
+        first = rng.choice(labs)
+        out += [((first, 'u2'), 'SET', (f'o{number}', 'x'), 'o'), ((TOP_LABEL, 'u1'), 'RANDOMKEY', (), 'o'),
+                ((TOP_LABEL, 'u3'), 'DBSIZE', (), 'o'), ((TOP_LABEL, 'u1'), 'SCAN', ('0', 'COUNT', '1000'), 'o')]
+    for _ in range(ops):
+        r = rng.randrange(100)
+        lab = rng.choice(labs)
+        o = rng.choice(owners)
+        scope = at(lab, o)
+        if r < 3:
+            now += 1000 * rng.randint(1, 5)
+            out.append((None, 'T', (now,), ''))
+        elif r < 12:
+            name = rng.choice(NAMES)
+            group = rng.sample(labs, min(len(labs), rng.randint(1, 3)))
+            group.sort(key=lambda x: -reach(x))
+            who = [None, rng.choice(owners[1:])]
+            for x in group:
+                for w in who:
+                    if rng.randrange(3):
+                        cmd = rng.choice(['SET', 'SET', 'HSET', 'RPUSH'])
+                        out.append((at(x, w), cmd, (name, 'f', 'b') if cmd == 'HSET' else (name, 'b'), default_form(at(x, w))))
+            for _ in range(rng.randint(2, 4)):
+                reader = at(rng.choice(labs), rng.choice(owners))
+                cmd = rng.choice(['GET', 'LABELOF', 'LABELOF', 'TYPE', 'EXISTS', 'DBSIZE'])
+                out.append((reader, cmd, () if cmd == 'DBSIZE' else (name,), default_form(reader)))
+        elif r < 15:
+            x = rng.choice(labs)
+            name = f'e{number}_{probes}'
+            probes += 1
+            out += [(at(x, o), 'SET', (name, 'e'), default_form(at(x, o))), (at(x, o), 'DEL', (name,), default_form(at(x, o)))]
+            for k in range(0, 3):
+                reader = at(rng.choice(labs), o)
+                cur = (k << SCAN_SHIFT) | (rng.randrange(2) if o is not None else 0)
+                out.append((reader, 'SCAN', (str(cur), 'COUNT', '1000'), default_form(reader)))
+        elif r < 17:
+            ys = [(y, x) for y in labs for x in labs if y != x and sees(y, x)]
+            if ys:
+                y, x = rng.choice(ys)
+                name = f'm{number}_{probes}'
+                probes += 1
+                out += [(at(x, o), 'SELECT', ('1',), default_form(at(x, o))), (at(x, o), 'SET', (name, 'one'), default_form(at(x, o))),
+                        (at(x, o), 'SELECT', ('0',), default_form(at(x, o))), (at(y, o), 'SET', (name, 'zero'), default_form(at(y, o))),
+                        (at(y, o), 'MOVE', (name, '1'), default_form(at(y, o))), (at(y, o), 'GET', (name,), default_form(at(y, o))),
+                        (at(y, o), 'SELECT', ('1',), default_form(at(y, o))), (at(y, o), 'LABELOF', (name,), default_form(at(y, o))),
+                        (at(y, o), 'GET', (name,), default_form(at(y, o))), (at(y, o), 'SELECT', ('0',), default_form(at(y, o)))]
+        elif r < 19:
+            name = f'c{number}_{probes}'
+            probes += 1
+            src = at(rng.choice(labs), None)
+            dst = at(rng.choice([x for x in labs if sees(x, src[0])] or [src[0]]), rng.choice(owners[1:]))
+            out += [(src, 'SET', (name, 's'), 's'), (dst, 'COPY', (name, name + 'x'), 'o'), (dst, 'GET', (name + 'x',), 'o'),
+                    (dst, 'LABELOF', (name + 'x',), 'o'), (dst, 'LABELOF', (name,), 'o')]
+        elif r < 20 and number % 5 == 1:
+            victim = rng.choice(OWNER_IDS)
+            out.append(((TOP_LABEL, None), 'FORGET', (victim,), 's'))
+            for _ in range(2):
+                reader = at(rng.choice(labs), victim)
+                cmd = rng.choice(['DBSIZE', 'SCAN', 'KEYS'])
+                out.append((reader, cmd, {'DBSIZE': (), 'SCAN': ('0', 'COUNT', '1000'), 'KEYS': ('*',)}[cmd], default_form(reader)))
+        elif r < 21:
+            scope = at(lab, rng.choice(owners))
+            out.append((scope, rng.choice(['FLUSHDB', 'FLUSHDB', 'FLUSHALL']), (), default_form(scope)))
+        elif r < 24 and number % 4 == 3:
+            name = f't{number}_{probes}'
+            probes += 1
+            u = rng.choice(owners[1:])
+            first, second = rng.sample([(1, 1, 0), (1, 2, 0)], 2)
+            out += [((first, u), 'SET', (name, 'x'), 'o'), ((second, u), 'SET', (name, 'y'), 'o')]
+            if rng.randrange(2):
+                out.append(((rng.choice([(1, 1, 0), (1, 2, 0)]), None), 'SET', (name, 's'), 's'))
+            out += [(((2, 3, 0), u), 'LABELOF', (name,), 'o'), (((2, 3, 0), u), 'GET', (name,), 'o'),
+                    (((2, 3, 0), None), 'LABELOF', (name,), 's')]
+        elif r < 55:
+            cmd, args = owner_write(rng, scope, labs, NAMES)
+            out.append((scope, cmd, args, default_form(scope)))
+        else:
+            cmd, args = owner_read(rng, scope, NAMES)
+            out.append((scope, cmd, args, default_form(scope)))
+    return out, labs
+
+
+def owner_row_kind(cmd):
+    if cmd == 'LABELOF':
+        return 'PO'
+    if cmd in WRITES or cmd in ('FLUSHDB', 'FLUSHALL', 'FORGET'):
+        return 'PW'
+    return 'PR'
+
+
+def owner_corpus(rng, seed, sessions, ops):
+    out = []
+    for number in range(sessions):
+        items, labs = owner_session(rng, number, rng.randrange(ops // 2, ops))
+        rows, m = osimulate(items)
+        lines = [owner_scheme_line(seed)] + [owner_line(it) for it in items]
+        out.append((lines, rows, items, m.notes))
+    return out
+
+
+def tx_line(item):
+    scope, cmd, args, form = item
+    if cmd in ('TXMULTI', 'TXEXEC'):
+        return owner_line((scope, cmd[2:], (), form))
+    if cmd == 'TXQ':
+        return owner_line((scope, args[0], args[1], form))
+    return owner_line(item)
+
+
+def fexpected(m, item):
+    scope, cmd, args, form = item
+    named = form in ('o', 's')
+    if cmd == 'TXMULTI':
+        m.tx = {'scope': scope, 'named': named, 'queue': []}
+        return 'E|' + OK
+    if cmd == 'TXQ':
+        if named:
+            m.tx['named'] = True
+        m.tx['queue'].append(args)
+        return 'E|+QUEUED^'
+    if cmd == 'TXEXEC':
+        tx, m.tx = m.tx, None
+        named = named or tx['named']
+        m.note('flush_named_multi' if named else 'flush_unnamed_multi')
+        replies = [m.orun(tx['scope'], c, a, named) for c, a in tx['queue']]
+        return 'E|' + f'*{len(replies)}^' + ''.join(replies)
+    return oexpected(m, item)
+
+
+FLUSH_LABS = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (2, 1, 0), (1, 0, 1), TOP_LABEL]
+FLUSH_OWNERS = [None, 'u1', 'u2', 'fx']
+
+
+def flush_case(rng, number):
+    out = []
+    names = [f'f{number}_{i}' for i in range(rng.randint(3, 6))]
+    for d in (1, 0):
+        if d:
+            out.append(((BOTTOM, None), 'SELECT', ('1',), 's'))
+        for name in names:
+            for _ in range(rng.randint(1, 4)):
+                scope = (rng.choice(FLUSH_LABS), rng.choice(FLUSH_OWNERS))
+                cmd = rng.choice(['SET', 'SET', 'RPUSH'])
+                out.append((scope, cmd, (name, 'v'), default_form(scope)))
+        if d:
+            out.append(((BOTTOM, None), 'SELECT', ('0',), 's'))
+    login = rng.choice(['any', 'any', 'op', 'op', 'plain', 'fx'])
+    lab = TOP_LABEL if rng.randrange(3) else rng.choice(FLUSH_LABS[:-1])
+    if login == 'any':
+        owner = rng.choice(FLUSH_OWNERS)
+        form = default_form((lab, owner))
+    elif login == 'fx':
+        owner, form = 'fx', rng.choice(['', 'o'])
+    else:
+        owner, form = None, rng.choice(['', '', 's'])
+    scope = (lab, owner)
+    cmd = rng.choice(['FLUSHDB', 'FLUSHALL'])
+    out.append((None, 'U', (login,), ''))
+    if login == 'op' and rng.randrange(2):
+        out.append((scope, 'TXMULTI', (), form))
+        if rng.randrange(2):
+            out.append((scope, 'TXQ', ('EXISTS', (names[0],)), 's'))
+        out.append((scope, 'TXQ', (cmd, ()), ''))
+        out.append((scope, 'TXQ', ('DBSIZE', ()), ''))
+        out.append((scope, 'TXEXEC', (), ''))
+    else:
+        out.append((scope, cmd, (), form))
+    out.append((None, 'U', ('any',), ''))
+    for d in (0, 1):
+        if d:
+            out.append(((BOTTOM, None), 'SELECT', ('1',), 's'))
+        for o in FLUSH_OWNERS:
+            probe = (TOP_LABEL, o)
+            out.append((probe, 'KEYS', ('*',), default_form(probe)))
+            out.append((probe, 'DBSIZE', (), default_form(probe)))
+        for name in names:
+            for o in FLUSH_OWNERS:
+                probe = (rng.choice(FLUSH_LABS), o)
+                out.append((probe, 'LABELOF', (name,), default_form(probe)))
+        if d:
+            out.append(((BOTTOM, None), 'SELECT', ('0',), 's'))
+    return out
+
+
+def flush_corpus(rng, seed, cases):
+    items = []
+    for n in range(cases):
+        items += flush_case(rng, n)
+    m = OKeys()
+    rows = [fexpected(m, it) for it in items]
+    lines = [owner_scheme_line(seed)] + [tx_line(it) for it in items]
+    return lines, rows, items, m.notes
+
+
+def forget_case(rng, number):
+    labs = rng.sample(all_labels(), rng.randrange(3, 6))
+    names = [f'g{number}_{i}' for i in range(rng.randint(3, 6))]
+    setup = []
+    for name in names:
+        for _ in range(rng.randint(1, 4)):
+            scope = (rng.choice(labs), rng.choice([None, 'u1', 'u1', 'u2']))
+            setup.append((scope, rng.choice(['SET', 'HSET', 'SADD']), (name, 'v') if True else (), default_form(scope)))
+    setup = [(s, c, (a[0], 'f', 'v') if c == 'HSET' else a, f) for s, c, a, f in setup]
+    probes = []
+    for lab in labs:
+        picks = [rng.choice(['GET', 'TYPE', 'LABELOF', 'EXISTS']) for _ in names]
+        for o in (None, 'u1', 'u2'):
+            sc = (lab, o)
+            probes.append((sc, 'DBSIZE', (), default_form(sc)))
+            probes.append((sc, 'KEYS', ('*',), default_form(sc)))
+            probes.append((sc, 'SCAN', ('0', 'COUNT', '1000'), default_form(sc)))
+            for name, cmd in zip(names, picks):
+                probes.append((sc, cmd, (name,), default_form(sc)))
+    forget = [((TOP_LABEL, None), 'FORGET', ('u1',), 's')]
+    return setup, probes, forget
+
+
+def forget_corpus(rng, seed, cases):
+    items, spans = [], []
+    for n in range(cases):
+        setup, probes, forget = forget_case(rng, n)
+        start = len(items)
+        items += setup
+        a = len(items)
+        items += probes
+        b = len(items)
+        items += forget
+        c = len(items)
+        items += probes
+        spans.append((a, b, c, len(probes)))
+        items += [(None, 'U', ('op',), ''), ((TOP_LABEL, None), 'FLUSHALL', (), ''), (None, 'U', ('any',), '')]
+    m = OKeys()
+    rows = [oexpected(m, it) for it in items]
+    lines = [owner_scheme_line(seed)] + [owner_line(it) for it in items]
+    return lines, rows, items, spans, m.notes
+
+
+def observer_scan(rng, scope):
+    k = rng.randrange(3)
+    ph = rng.randrange(2) if scope[1] is not None else 0
+    return str((k << SCAN_SHIFT) | ph)
+
+
+def observer_command(rng, scope, lfu, pending):
+    r = rng.randrange(100)
+    if r < 38:
+        cmd, args = write_command(rng, scope[0], [scope[0]], NAMES)
+        if cmd == 'DECLASSIFY':
+            cmd, args = 'SET', (args[0], 'd')
+        return [(scope, cmd, args, default_form(scope))]
+    if r < 70:
+        cmd, args = read_command(rng, NAMES)
+        if cmd == 'SCAN':
+            args = (observer_scan(rng, scope),) + args[1:]
+        return [(scope, cmd, args, default_form(scope))]
+    if r < 80:
+        k = rng.randrange(4)
+        if k == 0:
+            return [(scope, 'RAWSCAN', (observer_scan(rng, scope), 'COUNT', str(rng.choice([1, 2, 3]))), default_form(scope))]
+        if k == 1:
+            return [(scope, 'RAWRANDOM', (), default_form(scope))]
+        if k == 2:
+            return [(scope, 'INFOKS', (), default_form(scope))]
+        return [(scope, 'FREQ' if lfu else 'IDLETIME', (rng.choice(NAMES),), default_form(scope))]
+    if r < 88:
+        if pending[0] is None:
+            pending[0] = scope
+            return [(scope, 'WATCH', (rng.choice(NAMES),), default_form(scope))]
+        w = pending[0]
+        pending[0] = None
+        return [(w, 'MULTI', (), default_form(w)), (w, 'QEXISTS', (rng.choice(NAMES),), default_form(w)),
+                (w, 'EXEC', (), default_form(w))]
+    if r < 94:
+        return [(None, 'NOTES', (), '')]
+    return [(scope, 'DBSIZE', (), default_form(scope))]
+
+
+def hidden_command(rng, scope, quota):
+    o = scope[1]
+    other_user = o in ('u2', 'u3')
+    r = rng.randrange(100)
+    if r < 52:
+        cmd, args = write_command(rng, scope[0], [scope[0]], NAMES)
+        if cmd == 'DECLASSIFY' and not other_user:
+            cmd, args = 'SET', (args[0], 'h')
+        if cmd == 'DECLASSIFY':
+            below = [t for t in all_labels() if t != scope[0] and sees(scope[0], t)]
+            if not below:
+                cmd, args = 'SET', (args[0], 'h')
+            else:
+                args = (args[0], rng.choice(below))
+        return [(scope, cmd, args, default_form(scope))]
+    if r < 64:
+        cmd, args = read_command(rng, NAMES)
+        if cmd == 'SCAN':
+            args = (observer_scan(rng, scope),) + args[1:]
+        return [(scope, cmd, args, default_form(scope))]
+    if r < 70:
+        if r < 68:
+            return [(scope, 'RAWRANDOM', (), default_form(scope))]
+        return [(scope, 'RAWSCAN', ('0', 'COUNT', '2'), default_form(scope))]
+    if r < 76:
+        if scope[0] == TOP_LABEL and not other_user:
+            return [(scope, 'DEL', (rng.choice(NAMES),), default_form(scope))]
+        return [(scope, 'FLUSHDB', (), default_form(scope))]
+    if r < 80 and other_user:
+        top = (TOP_LABEL, o)
+        return [(top, rng.choice(['FLUSHDB', 'FLUSHALL']), (), 'o')]
+    if r < 84 and other_user:
+        return [((TOP_LABEL, None), 'FORGET', (o,), 's')]
+    if r < 88 and other_user and quota:
+        return [((TOP_LABEL, None), 'QUOTA', (o, rng.choice([200, 600, 1500])), 's')] + \
+            [(scope, 'SET', (rng.choice(NAMES), 'q' * rng.choice([8, 40, 200])), 'o') for _ in range(rng.randint(1, 3))]
+    if r < 94:
+        return [(scope, 'EXPIRE', (rng.choice(NAMES), str(rng.choice([50000, 90000]))), default_form(scope))]
+    a, b = rng.sample(NAMES, 2)
+    return [(scope, rng.choice(['RENAME', 'COPY']), (a, b), default_form(scope))]
+
+
+def owner_twin_case(rng, number, ops, same_owner):
+    labs = rng.sample(all_labels(), rng.randrange(3, 7))
+    if same_owner:
+        labs = rng.sample([lab for lab in all_labels() if lab != TOP_LABEL], rng.randrange(2, 5))
+    la, lb = rng.sample(labs, 2) if len(labs) > 1 else (labs[0], labs[0])
+    lc = rng.choice(labs)
+    observers = [(la, 'u1'), (lb, 'u1'), (lc, None)]
+    lfu = number % 3 == 2 and not same_owner
+    watcher = rng.choice(observers)
+    setup = [((TOP_LABEL, None), 'CONFIG', ('SET', 'notify-keyspace-events', 'KEA'), 's')]
+    if lfu:
+        setup.append(((TOP_LABEL, None), 'CONFIG', ('SET', 'maxmemory-policy', 'allkeys-lfu'), 's'))
+    setup += [(watcher, 'SESSION', (), ''), (watcher, 'PSUBSCRIBE', ('__key*__:*',), '')]
+    base, pending = [], [None]
+    for _ in range(ops):
+        base += observer_command(rng, rng.choice(observers), lfu, pending)
+    if pending[0] is not None:
+        w = pending[0]
+        base += [(w, 'MULTI', (), default_form(w)), (w, 'QEXISTS', ('k0',), default_form(w)), (w, 'EXEC', (), default_form(w))]
+    base.append((None, 'NOTES', (), ''))
+    if same_owner:
+        hidden_scopes = [(lab, 'u1') for lab in all_labels() if not any(osees(w, (lab, 'u1')) for w in observers)]
+        if not hidden_scopes:
+            return None
+    else:
+        hidden_scopes = [(lab, o) for lab in all_labels() for o in (None, 'u2', 'u3')
+                         if not any(osees(w, (lab, o)) for w in observers)]
+    marker = None
+    seen = [lab for lab in all_labels() if sees(la, lab)]
+    if not same_owner:
+        free, inside = [], False
+        for i, c in enumerate(base):
+            if not inside:
+                free.append(i)
+            inside = (inside or c[1] == 'MULTI') and c[1] != 'EXEC'
+        at = rng.choice(free)
+        marker = ((rng.choice(seen), None), 'SET', (f'z{number}', 'v'), 's')
+        base[at:at] = [marker, ((la, 'u1'), 'DBSIZE', (), 'o')]
+    twin, inside = [], False
+    for c in base:
+        while not inside and rng.randrange(3) == 0:
+            scope = rng.choice(hidden_scopes)
+            for h in hidden_command(rng, scope, not same_owner):
+                if same_owner and h[1] in ('RAWRANDOM', 'RAWSCAN', 'FORGET', 'QUOTA', 'FLUSHALL'):
+                    continue
+                twin.append(h + ('hidden',))
+        twin.append(c)
+        if c[1] == 'MULTI':
+            inside = True
+        elif c[1] == 'EXEC':
+            inside = False
+    return setup, base, twin, observers, marker
+
+
+def owner_twin_rows(setup, items, apply_hidden=False, leak=False, mutant=None):
+    m = OKeys()
+    m.leak = leak
+    if mutant:
+        mutant(m)
+    rows = []
+    for it in setup + items:
+        hidden = len(it) > 4
+        item = it[:4]
+        if hidden and not apply_hidden:
+            rows.append(None)
+            continue
+        r = oexpected(m, item)
+        rows.append(None if hidden and item[1] in ('FORGET',) else r)
+    return rows
+
+
+def owner_twin_lines(seed, setup, items):
+    return [owner_scheme_line(seed)] + [owner_line(it[:4]) for it in setup + items]
+
+
+def owner_twin_corpus(rng, seed, pairs, ops=(40, 90), same_owner=False):
+    out = []
+    for n in range(pairs):
+        case = owner_twin_case(rng, 3000 + n + (500 if same_owner else 0), rng.randrange(*ops), same_owner)
+        if case is None:
+            continue
+        out.append(case)
+    return out
+
+
+def label_twin_case(rng, number, ops):
+    tops = [lab for lab in all_labels() if lab != TOP_LABEL and any(t != lab and sees(lab, t) for t in all_labels())]
+    la = rng.choice(tops)
+    lw = rng.choice([t for t in all_labels() if t != la and sees(la, t)])
+    hidden_labels = [t for t in all_labels() if not sees(la, t)]
+    observers = [(la, 'u1'), (lw, 'u1'), (rng.choice([la, lw]), None)]
+    setup = []
+    base, pending = [], [None]
+    for _ in range(ops):
+        base += observer_command(rng, rng.choice(observers), False, pending)
+    if pending[0] is not None:
+        w = pending[0]
+        base += [(w, 'MULTI', (), default_form(w)), (w, 'QEXISTS', ('k0',), default_form(w)), (w, 'EXEC', (), default_form(w))]
+    block = [((la, 'u1'), 'FLUSHDB', (), 'o'), ((lw, 'u1'), 'FLUSHDB', (), 'o'), ((lw, 'u1'), 'SET', (f'w{number}', 'v'), 'o')]
+    for k in range(1, 4):
+        block.append(((la, 'u1'), 'SCAN', (str(k << SCAN_SHIFT), 'COUNT', '1000'), 'o'))
+    block += [((la, 'u1'), 'RAWSCAN', ('0', 'COUNT', '1'), 'o'), ((la, 'u1'), 'DBSIZE', (), 'o'),
+              ((la, 'u1'), 'KEYS', ('*',), 'o')]
+    twin = []
+    for c in base:
+        twin.append(c)
+    hidden = [((rng.choice(hidden_labels), 'u1'), 'SET', (f'h{number}_{i}', 'h'), 'o', 'hidden') for i in range(rng.randint(1, 3))]
+    free, inside = [], False
+    for i, c in enumerate(base):
+        if not inside:
+            free.append(i)
+        inside = (inside or c[1] == 'MULTI') and c[1] != 'EXEC'
+    free.append(len(base))
+    at = rng.choice(free)
+    twin = base[:at] + hidden + base[at:] + block
+    return setup, base + block, twin, observers, None
+
+
+def label_twin_corpus(rng, seed, cases, ops=(20, 50)):
+    return [label_twin_case(rng, 4000 + n, rng.randrange(*ops)) for n in range(cases)]
+
+
+def declassify_twin_case(rng, number, ops, element):
+    tops = [lab for lab in all_labels() if lab != TOP_LABEL and sum(1 for t in all_labels() if sees(lab, t)) >= 3]
+    la = rng.choice(tops)
+    below = [t for t in all_labels() if t != la and sees(la, t)]
+    lw = rng.choice(below)
+    targets = [t for t in below if t != lw]
+    tgt = rng.choice(targets)
+    hidden_labels = [h for h in all_labels() if not sees(la, h) and sees(h, tgt)]
+    if not hidden_labels:
+        return None
+    hl = rng.choice(hidden_labels)
+    observers = [(la, 'u1'), (lw, 'u1'), (rng.choice([la, lw]), None)]
+    base, pending = [], [None]
+    for _ in range(ops):
+        base += observer_command(rng, rng.choice(observers), False, pending)
+    if pending[0] is not None:
+        w = pending[0]
+        base += [(w, 'MULTI', (), default_form(w)), (w, 'QEXISTS', ('k0',), default_form(w)), (w, 'EXEC', (), default_form(w))]
+    dx = f'dx{number}'
+    shared_at = rng.choice([t for t in all_labels() if sees(tgt, t)])
+    base.append(((shared_at, None), 'SET', (dx, 'v'), 's'))
+    probes = [((la, 'u1'), 'SCAN', (str(k << SCAN_SHIFT), 'COUNT', '1000'), 'o') for k in range(1, 4)]
+    probes += [((la, 'u1'), 'RAWSCAN', ('0', 'COUNT', '1'), 'o'), ((la, 'u1'), 'RAWSCAN', (str(1 << SCAN_SHIFT), 'COUNT', '1'), 'o'),
+               ((la, 'u1'), 'DBSIZE', (), 'o'), ((la, 'u1'), 'KEYS', ('*',), 'o')]
+    scope = (hl, 'u1')
+    vs = f'vs{number}'
+    if element:
+        hidden = [(scope, 'XVADD', (vs, 'e'), 'o')]
+        if rng.randrange(2):
+            hidden.append(((hl, None), 'XVADD', (vs, 's'), 's'))
+            hidden.append((scope, 'XDECL', (vs, tgt, 's'), 'o'))
+        else:
+            hidden.append((scope, 'XDECL', (vs, tgt, 'nosuch'), 'o'))
+    else:
+        hidden = [(scope, 'DECLASSIFY', (f'missing{number}', tgt), 'o'),
+                  (scope, 'SET', (dx, 'own'), 'o'), (scope, 'DECLASSIFY', (dx, tgt), 'o'),
+                  (scope, 'DECLASSIFY', (dx, scope[0]), 'o')]
+    hidden = [h + ('hidden',) for h in hidden]
+    return [], base + probes, base + hidden + probes, observers, None
+
+
+def declassify_twin_corpus(rng, seed, cases, element, ops=(15, 35)):
+    out = []
+    n = 0
+    while len(out) < cases:
+        case = declassify_twin_case(rng, 5000 + n + (500 if element else 0), rng.randrange(*ops), element)
+        n += 1
+        if case is not None:
+            out.append(case)
+    return out
+
+
+def quota_case(rng, number):
+    lab = rng.choice([x for x in all_labels() if x != TOP_LABEL])
+    names = [f'q{number}_{i}' for i in range(rng.randint(2, 4))]
+    out = [((lab, None), 'SET', (n, 'v' * 64), 's') for n in names]
+    out.append(((TOP_LABEL, None), 'LQUOTA', (text(lab), '1'), 's'))
+    user = rng.choice(OWNER_IDS)
+    for i in range(rng.randint(2, 5)):
+        out.append(((lab, user), 'SET', (f'p{number}_{i}', 'w' * rng.choice([8, 64])), 'o'))
+    out += [((lab, user), 'DBSIZE', (), 'o'), ((lab, user), 'KEYS', ('p*',), 'o')]
+    out.append(((TOP_LABEL, None), 'LQUOTA', (text(lab), '0'), 's'))
+    out.append((None, 'U', ('op',), ''))
+    out.append(((TOP_LABEL, None), 'FLUSHALL', (), ''))
+    out.append((None, 'U', ('any',), ''))
+    return out
+
+
+def quota_corpus(rng, seed, cases):
+    items = []
+    for n in range(cases):
+        items += quota_case(rng, n)
+    m = OKeys()
+    rows = [oexpected(m, it) for it in items]
+    lines = [owner_scheme_line(seed)] + [owner_line(it) for it in items]
+    return lines, rows, items
+
+
+def strip_suffix(row):
+    row = re.sub(r'(-INUSE (?:name|element) in use at [^^]*?) SHARED\^', lambda m: m.group(1) + '^', row)
+    def bulk_fix(m):
+        body = m.group(2)
+        return f'${len(body)}^{body}^'
+    return re.sub(r'\$(\d+)\^([^^]*?) SHARED\^', bulk_fix, row)
+
+
+def owner_p10_lines(seed, cmds, owner):
+    out = [owner_scheme_line(seed)]
+    for lab, cmd, args in cmds:
+        if cmd == 'T':
+            out.append(f'T {args[0]}')
+            continue
+        scope = (lab, owner)
+        out.append(owner_line((scope, cmd, args, default_form(scope))))
+    return out
+
+
+def owner_resolution_trace(sessions):
+    lines, rows = [], []
+    for _, _, items, _ in sessions:
+        m = OKeys()
+        lines.append('PX')
+        rows.append('PX')
+        for item in items:
+            oexpected(m, item)
+            for kind, d, name, sc in m.events:
+                lines.append(f'P{kind} {d} {name.encode().hex()} {ids(sc[0])} {sc[1].encode().hex() if sc[1] else "-"}')
+                rows.append(f'P{kind}')
+            m.events = []
+            scope, cmd, args, _ = item
+            if cmd == 'LABELOF':
+                c = m.resolve(m.db, scope, args[0])
+                lines.append(f'PQ {m.db} {ids(scope[0])} {scope[1].encode().hex() if scope[1] else "-"} {args[0].encode().hex()}')
+                rows.append('PQ|' + (f'{ids(c.label[0])}:{c.label[1].encode().hex() if c.label[1] else "s"}' if c is not None else '-'))
+    return lines, rows
+
+
+def owner_mutants():
+    def owner_check_dropped(m):
+        original = m.orun
+
+        def orun(W, cmd, args, named):
+            if W[1] is not None and m.write_cmd(cmd):
+                W = (W[0], None)
+            return original(W, cmd, args, named)
+        m.orun = orun
+
+    def shared_hidden(m):
+        m.sees = lambda r, d: sees(r[0], d[0]) and d[1] == r[1]
+
+    def other_owner_visible(m):
+        m.sees = lambda r, d: sees(r[0], d[0])
+
+    def own_before_shared_reversed(m):
+        m.okey = lambda reader, c: (rank(c.label[0]), int(c.label[1] is None))
+
+    def inuse_names_other_owner(m):
+        def conflict_copy(d, W, name):
+            best = None
+            for c in m.copies(d, name):
+                if c.label == W or not sees(W[0], c.label[0]):
+                    continue
+                if best is None or rank(c.label[0]) > rank(best.label[0]):
+                    best = c
+            return best
+        m.conflict_copy = conflict_copy
+
+    def forget_leaves_copy(m):
+        original = m.c_forget
+
+        def c_forget(d, W, o):
+            kept = None
+            for dd in range(DBS):
+                for name, cs in m.names[dd].items():
+                    for c in cs:
+                        if c.label[1] == o and kept is None:
+                            kept = (dd, name, c)
+            out = original(d, W, o)
+            if kept is not None:
+                dd, name, c = kept
+                m.names[dd].setdefault(name, []).append(c)
+            return out
+        m.c_forget = c_forget
+
+    def forget_touches_other_owner(m):
+        original = m.c_forget
+
+        def c_forget(d, W, o):
+            out = original(d, W, o)
+            for dd in range(DBS):
+                for name in list(m.names[dd]):
+                    cs = m.names[dd][name]
+                    for c in cs:
+                        if c.label[1] is not None and c.label[1] != o:
+                            cs.remove(c)
+                            if not cs:
+                                del m.names[dd][name]
+                            return out
+            return out
+        m.c_forget = c_forget
+
+    def scan_counts_other_owner(m):
+        def own_parts(d, W):
+            if W[1] is None:
+                return []
+            labs = {lab for labs in m.ever[d].values() for lab in labs}
+            return m.part_order([p for p in labs if sees(W[0], p)])
+        m.own_parts = own_parts
+
+    def dbsize_counts_other_owner(m):
+        m.c_dbsize = lambda d, W: integer(len({n for n, cs in m.names[d].items() if any(sees(W[0], c.label[0]) for c in cs)}))
+
+    def randomkey_other_owner(m):
+        def c_randomkey(d, W):
+            names = sorted({n for n, cs in m.names[d].items() if any(sees(W[0], c.label[0]) for c in cs)})
+            return {NULL} if not names else {bulk(n) for n in names}
+        m.c_randomkey = c_randomkey
+
+    def label_quota_across_owners(m):
+        original = m.orun
+
+        def orun(W, cmd, args, named):
+            if W[1] is not None and cmd == 'SET' and text(W[0]) in m.quotas:
+                return "-OOM command not allowed when used memory > 'label-quota'.^"
+            return original(W, cmd, args, named)
+        m.orun = orun
+
+    def flush_naming_ignored(m):
+        original = m.flush
+        m.flush = lambda W, named, all_dbs: original(W, False, all_dbs)
+
+    def list_dropped_with_last_partition(m):
+        def tidy():
+            for d in range(DBS):
+                for o in list(m.ever[d]):
+                    if not any(c.label[1] == o for cs in m.names[d].values() for c in cs):
+                        del m.ever[d][o]
+        m.tidy = tidy
+
+    return {f.__name__: f for f in (owner_check_dropped, shared_hidden, other_owner_visible, own_before_shared_reversed,
+                                    inuse_names_other_owner, forget_leaves_copy, forget_touches_other_owner,
+                                    scan_counts_other_owner, dbsize_counts_other_owner, randomkey_other_owner,
+                                    label_quota_across_owners, flush_naming_ignored, list_dropped_with_last_partition)}
+
+
+def osimulate_with(items, expect, mutant):
+    m = OKeys()
+    mutant(m)
+    return [expect(m, it) for it in items]

@@ -59,6 +59,10 @@ lua_options :: proc() -> lr.Options {
 
 lua_scope_load :: proc(client: ^Conn, body: []u8, pinned: bool) -> ^Lua_Source {
 	digest := lua_digest(body)
+	if !lua_scope_room(digest, body) {
+		reply_error(client, ERR_OWNER_QUOTA_OOM)
+		return nil
+	}
 	fresh := lua_cache_find(digest) == nil
 	if fresh && !lua_source_prepare(client, body, digest) {
 		return nil
@@ -97,7 +101,7 @@ lua_outer_readonly :: proc(cmd: ^Command, argv: [][]u8) -> bool {
 		_, flags, _, err := lua_source_plan(argv[1])
 		return err == "" && flags & LUA_FLAG_NO_WRITES != 0
 	}
-	if cmd.handler == cmd_evalsha {
+	if cmd.handler == cmd_evalsha && !labels_on {
 		digest, good := lua_digest_parse(argv[1])
 		if good {
 			if entry := lua_cache_lookup(digest); entry != nil {

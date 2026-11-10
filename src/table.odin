@@ -16,6 +16,8 @@ TABLE_PAGE :: 4096
 HUGE_PAGE :: 2 << 20
 TABLE_HEAP_MAX_CAP :: 1024
 TABLE_HEAP_ALIGN :: 64
+TABLE_HEAP_WARM :: -1
+TABLE_COLD_WARM :: -2
 
 Group :: #simd[GROUP_SLOTS]u8
 
@@ -297,14 +299,14 @@ table_alloc_heap :: proc "contextless" (cap: int) -> (t: Table) {
 	t.pmask -= 1
 	t.cap = cap
 	t.growth = cap - cap / 8
-	t.warm_at = -1
+	t.warm_at = TABLE_HEAP_WARM
 	return
 }
 
 table_detach :: proc "contextless" (t: ^Table) {
 	if t.region != nil {
 		intrinsics.atomic_sub_explicit(&storage_table_bytes, t.size, .Relaxed)
-		if t.warm_at < 0 {
+		if t.warm_at == TABLE_HEAP_WARM {
 			runtime.heap_free(t.region)
 		} else {
 			graveyard_push(t.region, t.size, .Table)

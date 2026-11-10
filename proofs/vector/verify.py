@@ -1434,7 +1434,91 @@ def command_evidence(bridge, output):
     if any(stats[k] == 0 for k in ('command_refusals', 'command_split_keys', 'p2_pairs', 'p2_observer_rows',
                                    'p2_hidden_writes_accepted')):
         raise AssertionError('command corpus lost coverage')
+    owner_command_evidence(bridge, output, seed, stats, mutants)
     return stats, mutants
+
+
+def owner_command_match(got, want):
+    if hasattr(want, 'fullmatch'):
+        return want.fullmatch(got) is not None
+    return got == want
+
+
+def owner_command_compare(label, got, want):
+    if len(got) != len(want):
+        raise AssertionError(f'{label}: {len(got)} rows, expected {len(want)}')
+    for i, (a, b) in enumerate(zip(got, want)):
+        if not owner_command_match(a, b):
+            raise AssertionError(f'{label}: row {i}: {a[:200]!r} != {str(b)[:200]!r}')
+
+
+def owner_command_evidence(bridge, output, seed, stats, mutants):
+    (lines, rows, cmds), pairs, ostats = vcommands.owner_corpus(random.Random(SEED ^ 0x0C0DE), seed, 60, 40)
+    got = run_bridge(bridge, lines, output / 'owner-command-cases.txt')
+    if got[0] != 'S|3|1|1':
+        raise AssertionError('command bridge did not start in owner mode: ' + got[0])
+    (output / 'owner-command-results.txt').write_text('\n'.join(got) + '\n')
+    real = got[1:]
+    owner_command_compare('owner command bridge', real, rows)
+    ostats['command_owner_forgets'] = sum(1 for c in cmds if c[1] == 'FORGET')
+    ostats['command_owner_user_rows'] = sum(1 for c in cmds if c[0][1] is not None)
+    for k, (base, twin, observers, marker) in enumerate(pairs):
+        la = [vcommands.oscheme_line(seed)] + [vcommands.orow_line(*c) for c in base]
+        lb = [vcommands.oscheme_line(seed)] + [vcommands.orow_line(*c) for c in twin]
+        oa = run_bridge(bridge, la, output / 'owner-command-twin-a.txt')[1:]
+        ob = run_bridge(bridge, lb, output / 'owner-command-twin-b.txt')[1:]
+        owner_command_compare(f'owner twin {k} base', oa, vcommands.osimulate(seed, base))
+        owner_command_compare(f'owner twin {k} hidden', ob, vcommands.osimulate(seed, twin))
+        j = 0
+        for i, c in enumerate(twin):
+            if j < len(base) and c is base[j]:
+                if oa[j] != ob[i]:
+                    raise AssertionError(f'owner twin {k}: hidden commands changed an observer reply at row {j}')
+                ostats['command_owner_twin_rows'] += 1
+                j += 1
+        if j != len(base):
+            raise AssertionError('owner twin merge lost base commands')
+        ostats['command_owner_twin_pairs'] += 1
+        ostats['command_owner_twin_hidden'] += len(twin) - len(base)
+        drop = base.index(marker)
+        ls = [vcommands.oscheme_line(seed)] + [vcommands.orow_line(*c) for c in base[:drop] + base[drop + 1:]]
+        os_ = run_bridge(bridge, ls, output / 'owner-command-twin-s.txt')[1:]
+        if hashlib.sha256('\n'.join(oa[:drop] + oa[drop + 1:]).encode()).digest() == hashlib.sha256('\n'.join(os_).encode()).digest():
+            raise AssertionError(f'owner twin {k}: dropping a shared command left the user observer digest unchanged')
+        ostats['command_owner_sensitivity_runs'] += 1
+    for name, (owner, attr, fn) in vcommands.owner_model_mutants().items():
+        original = getattr(owner, attr)
+        setattr(owner, attr, fn)
+        try:
+            mutated = vcommands.osimulate(seed, cmds)
+            for base, twin, _, _ in pairs:
+                mutated += vcommands.osimulate(seed, twin)
+        finally:
+            setattr(owner, attr, original)
+        expected_rows = list(real)
+        for k, (base, twin, _, _) in enumerate(pairs):
+            expected_rows += run_bridge(bridge, [vcommands.oscheme_line(seed)] + [vcommands.orow_line(*c) for c in twin],
+                                        output / 'owner-command-twin-b.txt')[1:]
+        differing = sum(1 for a, b in zip(expected_rows, mutated) if not owner_command_match(a, b))
+        if not differing:
+            raise AssertionError('owner command model mutant accepted: ' + name)
+        mutants['owner_command_' + name] = differing
+    kinds = {}
+    for i, (_, cmd, _) in enumerate(cmds):
+        kinds.setdefault(cmd, i)
+    for cmd, i in sorted(kinds.items()):
+        mutated = list(real)
+        mutated[i] = 'E|-controlled-mutant^'
+        try:
+            owner_command_compare('owner command control', mutated, rows)
+        except AssertionError:
+            mutants['owner_command_row_' + cmd.lower()] = 1
+        else:
+            raise AssertionError('owner command row control accepted: ' + cmd)
+    if any(ostats[k] == 0 for k in ('command_owner_refusals', 'command_owner_twin_pairs', 'command_owner_twin_rows', 'command_owner_forgets',
+                                    'command_owner_sensitivity_runs')):
+        raise AssertionError('owner command corpus lost coverage')
+    stats.update(ostats)
 
 
 def relabel_mutants():
@@ -1609,7 +1693,8 @@ def run():
                    'independence': stats['independence_rows'] + stats['owner_independence_rows'],
                    'compatibility': stats['compatibility_rows'] + stats['owner_compatibility_rows'],
                    'relabel': stats['relabel_rows'] + stats['relabel_bytes'],
-                   'commands': stats['command_rows'] + stats['p2_observer_rows'] + stats['p10_rows']}
+                   'commands': stats['command_rows'] + stats['p2_observer_rows'] + stats['p10_rows'] +
+                   stats['command_owner_rows'] + stats['command_owner_twin_rows']}
     if any(comparisons[area] for area in PROOF_ONLY) or any(not comparisons[area] for area in AREAS if area not in PROOF_ONLY):
         raise AssertionError('comparison evidence does not match the proof-only areas')
     area_evidence = {area: {'theorems': sorted(name for name in axioms

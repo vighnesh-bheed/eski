@@ -119,6 +119,7 @@ Server :: struct {
 }
 
 srv: Server
+debug_hash_seed: i64
 events: [MAX_EVENTS]linux.EPoll_Event
 
 update_clock :: #force_inline proc() {
@@ -1049,7 +1050,11 @@ server_run :: proc() -> bool {
 	srv.start_ms = srv.now_ms
 	srv.next_cron_ms = srv.now_ms + cron_interval_ms()
 	srv.pid = i64(linux.getpid())
-	rng_state ~= u64(srv.now_ms) * 0x2545F4914F6CDD1D ~ u64(srv.pid)
+	if debug_hash_seed != 0 {
+		rng_state = u64(debug_hash_seed) << 1 | 1
+	} else {
+		rng_state ~= u64(srv.now_ms) * 0x2545F4914F6CDD1D ~ u64(srv.pid)
+	}
 	hex := "0123456789abcdef"
 	for i in 0 ..< 40 {
 		srv.run_id[i] = hex[rng_next() & 15]

@@ -6,7 +6,7 @@
   "src/keyspace_object.odin": "6c76214e8818c76d96a98681193f39764be9397db22ff3fe2f18342df7ac258e",
   "src/keyspace_snapshot.odin": "da976c5f3b886f85dbe441a03b733a6caab4f7df06071ce50ca8ad9e03357144",
   "src/slab.odin": "1077597bd35ccb7ead7bc370ee5710b0bba7a6a15a3795777771767dc4ea77df",
-  "src/store.odin": "5fc0c07e830c02d9f5849a12e3bba9d11a920b783f4654b10f1f429939903f0c",
-  "src/table.odin": "d5afeafac2ca9a63de3a4015e9f9d805c97665d76a9a3b35c2df096c1aa4b565",
+  "src/store.odin": "0803b20e9867200be6e16d6821b25682231e0160504225b77843d6cb1612309f",
+  "src/table.odin": "7bacb360381bd8027c0569b71ea4ca876748ec8a24fb80aa91a1fefdc7263bbe",
   "src/value.odin": "87ba798ee8c85769062bbfbcf0257809346d679fa7c8bbc062d809f63d9ad9bd"
 }

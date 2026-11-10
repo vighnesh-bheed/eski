@@ -89,10 +89,14 @@ structure Table where
   live : Int
   tombs : Int
   growth : Int
+  lanes : Nat
   deriving Repr, Inhabited
 
 def emptyTable (cap : Nat) : Table :=
-  ⟨List.replicate cap .empty, 0, 0, cap - cap / 8⟩
+  ⟨List.replicate cap .empty, 0, 0, cap - cap / 8, cap⟩
+
+def shortTable (lanes : Nat) : Table :=
+  ⟨List.replicate 16 .empty, 0, 0, lanes, lanes⟩
 
 def growCap (cap : Nat) : Nat := max (cap + 16) ((cap * 3 / 2 + 15) / 16 * 16)
 
@@ -101,7 +105,7 @@ def roundCap (n : Nat) : Nat := max 16 ((n + 15) / 16 * 16)
 def place (t : Table) (i : Nat) (e : Entry) : Table :=
   let deleted := t.slots[i]? == some .deleted
   ⟨put t.slots i (.live e), t.live + 1,
-    t.tombs - (if deleted then 1 else 0), t.growth - (if deleted then 0 else 1)⟩
+    t.tombs - (if deleted then 1 else 0), t.growth - (if deleted then 0 else 1), t.lanes⟩
 
 structure Banks where
   src : Table
@@ -110,7 +114,7 @@ structure Banks where
   deriving Repr, Inhabited
 
 def moveOne (b : Banks) (i j : Nat) (e : Entry) : Banks :=
-  ⟨⟨put b.src.slots i .deleted, b.src.live - 1, b.src.tombs + 1, b.src.growth⟩,
+  ⟨⟨put b.src.slots i .deleted, b.src.live - 1, b.src.tombs + 1, b.src.growth, b.src.lanes⟩,
     place b.dst j e, b.cursor⟩
 
 def migrateAt (b : Banks) (i : Nat) : Banks × Nat :=
@@ -181,7 +185,7 @@ def erase (t : Table) (i : Nat) : Table :=
   let g := i / 16
   let empty := (List.range 16).any fun k => t.slots[g * 16 + k]? == some .empty
   ⟨put t.slots i (if empty then .empty else .deleted), t.live - 1,
-    t.tombs + (if empty then 0 else 1), t.growth + (if empty then 1 else 0)⟩
+    t.tombs + (if empty then 0 else 1), t.growth + (if empty then 1 else 0), t.lanes⟩
 
 def locate (b : Banks) (key hash : Nat) : Option (Bool × Nat) :=
   match findIndex b.src key hash with

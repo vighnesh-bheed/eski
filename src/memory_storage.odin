@@ -23,6 +23,10 @@ storage_table_allocated :: #force_inline proc "contextless" () -> int {
 	return intrinsics.atomic_load_explicit(&storage_table_bytes, .Relaxed)
 }
 
+storage_table_mapped_live :: #force_inline proc "contextless" () -> int {
+	return intrinsics.atomic_load_explicit(&storage_table_mapped, .Relaxed) - storage_retired[.Table]
+}
+
 storage_unmap :: proc "contextless" (base: [^]u8, size: int, kind: Storage_Kind, writable: bool = true) {
 	if size == 0 {
 		return

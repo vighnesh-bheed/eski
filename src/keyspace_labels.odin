@@ -319,7 +319,7 @@ label_step :: proc(home: ^Db, cmd: ^Command, argv: [][]u8) -> string {
 	own: ^Db
 	if user {
 		if op := owner_space_part(owner_space_of(access.owner_entry, dbi), access.id); op != nil {
-			own = &op.db
+			own = owner_db(op)
 			owner_touch(own)
 		}
 	} else {
@@ -354,7 +354,7 @@ label_step :: proc(home: ^Db, cmd: ^Command, argv: [][]u8) -> string {
 			if !ok {
 				return ERR_OWNER_PARTITIONS
 			}
-			db_cur = &p.db
+			db_cur = owner_db(p)
 			owner_touch(db_cur)
 		} else {
 			p, ok := label_part_make(dbi, access.id)
@@ -551,7 +551,7 @@ label_scope_part :: proc(dbi: int, reader: lb.Id, o: ow.Owner) -> (own: ^Db, e: 
 	if owners_on && ow.is_user(o) {
 		e = owner_entry(o)
 		if op := owner_space_part(owner_space_of(e, dbi), reader); op != nil {
-			own = &op.db
+			own = owner_db(op)
 		}
 		return
 	}
@@ -821,8 +821,8 @@ label_vset_global :: proc(s: vt.Vset) -> int {
 label_vset_part :: proc(dbi: int, id: lb.Id, o: ow.Owner) -> ^Db {
 	if ow.is_user(o) {
 		if p := owner_space_part(owner_space_of(owner_entry(o), dbi), id); p != nil {
-			owner_touch(&p.db)
-			return &p.db
+			owner_touch(owner_db(p))
+			return owner_db(p)
 		}
 		return nil
 	}
@@ -962,7 +962,7 @@ label_copy_target :: proc(dbi: int, key: []u8, replace: bool) -> (target: ^Db, r
 			return nil, ERR_OWNER_INVALID, false
 		}
 		op := owner_space_part(owner_space_of(e, dbi), access.id)
-		if op == nil || !label_live_in(&op.db, &l) {
+		if op == nil || !label_live_in(owner_db(op), &l) {
 			if other, _, i := owner_locate_other(dbi, key, &l, access.id, e, access.vis); i >= 0 {
 				if !replace {
 					return nil, "", true
@@ -974,8 +974,8 @@ label_copy_target :: proc(dbi: int, key: []u8, replace: bool) -> (target: ^Db, r
 		if !ok {
 			return nil, ERR_OWNER_PARTITIONS, false
 		}
-		owner_touch(&made.db)
-		return &made.db, "", false
+		owner_touch(owner_db(made))
+		return owner_db(made), "", false
 	}
 	own := label_part(dbi, access.id)
 	if own == nil || !label_live_in(own, &l) {

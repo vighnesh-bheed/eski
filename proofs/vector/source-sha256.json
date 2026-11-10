@@ -36,13 +36,15 @@
   "src/vsettype/owners.odin": "ea82fd44885c50658f705cbf59d80462c8554d488eb41a38289aff39d06e8c9a",
   "src/vsettype/cas.odin": "4b70a25439588deb6e84cfbd01cd2a6806dcc44eb8591437b626e322f4c0c867",
   "src/cmd_vset.odin": "511028ca0e4519bc18d97c9b71ca8e65a9546e54d3b74ebcb9f43b068006d709",
-  "src/keyspace_labels.odin": "631f8f8e838493e79ddecc4db0226bff0a87cf2c642a0f12765865813f40fcb1",
+  "src/keyspace_labels.odin": "2b47119d93b4f75931da64392274594835234fba857b2502917c781899abdca0",
   "src/access.odin": "6d2ba3ffdc0cb498737667b382db5757d3c6101b033b625c43b4660391f02158",
   "src/dispatch.odin": "dcb453d97dde45ed076eeabe848ec8dc9483af53b1ccff360a16da113265654a",
-  "src/store.odin": "5fc0c07e830c02d9f5849a12e3bba9d11a920b783f4654b10f1f429939903f0c",
+  "src/store.odin": "0803b20e9867200be6e16d6821b25682231e0160504225b77843d6cb1612309f",
   "src/label_scheme.odin": "8430082d04706a39c30b6323a65b983df60b3ed94503020b18454d717fb47e1f",
-  "src/cmd_label.odin": "d4cf075a3b5f1bff9de54662c54c810fd00d2b16fc50130a064e0ec662508309",
+  "src/cmd_label.odin": "eaac7d102289cbdaef297433d13fa026cdcfaee8ea0d7b4d4075bdb7be47b74a",
   "src/label/table.odin": "463a20b1ac1d02bb56159e0e2876d41cd9d24b491319b41ce3656140aef1c6ce",
   "src/label/marking.odin": "5c2a4d0a04203f4e845dad9d24407f1c3871ff8768da4c8134364141e573a8e0",
-  "src/keyspace_labels_cmd.odin": "5f6669586410c249dd030eb151f23a4e9b0c2880582e31e2d225fd552985c5a8"
+  "src/keyspace_labels_cmd.odin": "b942ba74066a3377c6d2d0038e23417c48bdcd4d5efa473964c0de6bf15a2821",
+  "src/keyspace_owners.odin": "b32a36da36607aff927340479697dd9d90ab776a0c5dbd657e9d5d0bed48cad5",
+  "src/owner_commands.odin": "cd0f72e5ced0f836a7b44413395296e6f11f6c9e762b52e35cf73e07c874fd32"
 }

@@ -33,7 +33,7 @@ REFUSALS = {PER_COMMAND: 'refused_per_command', TOKEN_ONLY: 'refused_token_only'
             TOKEN: 'refused_token'}
 
 
-MUTANTS = ('pin_before_acl', 'kill_by_dominance', 'pin_at_admission')
+MUTANTS = ('pin_before_acl', 'kill_by_dominance', 'pin_at_admission', 'multi_naming_ignored', 'token_counts_as_named')
 ACL_POOL = [b'subscribe', b'psubscribe', b'ssubscribe', b'client|tracking', b'get', b'swapdb', b'monitor', b'bgrewriteaof']
 
 
@@ -829,9 +829,17 @@ class Owners(Arrival):
         if named is not None and c['multi'] and o != oc['owner']:
             self.note('refused_owner_transaction')
             return OWNER_TRANSACTION, None
+        explicit = named is not None or (tok is not None and self.mutant == 'token_counts_as_named')
+        if tok == '-' and not explicit:
+            self.note('token_unnamed')
         if c['multi']:
             self.note('owner_multi')
+            if explicit and not oc['named']:
+                self.note('tx_named')
+            if self.mutant != 'multi_naming_ignored':
+                oc['named'] = oc['named'] or explicit
         else:
+            oc['named'] = explicit
             oc['owner'] = o
             if self.subscribing(inner) and not oc['pinned']:
                 if self.run or self.mutant == 'pin_at_admission':
@@ -881,7 +889,7 @@ class Owners(Arrival):
             pin = self.subscribing(inner) and not c['explicit'] and not c['multi']
         if not (self.known(inner) or self.is_cmd(inner, b'owners')):
             handle = f"h{ctx['handle']}" if ctx else '-'
-            return f"ok:{self.h['label_text'](label)}:s:{len(inner)}:{handle}", (label, 's', inner)
+            return f"ok:{self.h['label_text'](label)}:s:{len(inner)}:{handle}:0", (label, 's', inner)
         msg, o = self.owner_phase(c, oc, inner, label, pick, ctx, tok)
         if msg:
             if pin:
@@ -890,14 +898,15 @@ class Owners(Arrival):
         if pin and (run or self.mutant == 'pin_at_admission'):
             c['explicit'], c['session'] = True, label
         handle = f"h{ctx['handle']}" if ctx else '-'
-        return f"ok:{self.h['label_text'](label)}:{owner_text(o)}:{len(inner)}:{handle}", (label, o, inner)
+        return f"ok:{self.h['label_text'](label)}:{owner_text(o)}:{len(inner)}:{handle}:{int(oc['named'])}", (label, o, inner)
 
     def ostate(self, c, oc):
         lt = self.h['label_text']
         ws = f"{int(oc['wmixed'])}/{lt(oc['wlabel'])}/{owner_text(oc['wowner'])}" if oc['wany'] else '-'
         return f"{int(c['multi'])}{int(c['dirty'])}{int(c['explicit'])}{int(c['cas'])}:" \
                f"{lt(c['session']) if c['explicit'] else '-'}:{lt(c['bound'])}:{len(c['watched'])}:" \
-               f"{int(oc['pinned'])}:{owner_text(oc['pin']) if oc['pinned'] else '-'}:{owner_text(oc['owner'])}:{ws}"
+               f"{int(oc['pinned'])}:{owner_text(oc['pin']) if oc['pinned'] else '-'}:{owner_text(oc['owner'])}:{ws}:" \
+               f"{int(oc['named'])}"
 
     def create_o(self, c, base, owner, opts):
         lv = tr = pick = None
@@ -1084,7 +1093,8 @@ OWNER_NOTES = ('form_owner_only', 'form_marking_owner', 'owner_named', 'owner_co
                'watch_owner_mixed', 'watch_scope_mixed', 'created_owner', 'owner_auth_cleared', 'owner_refused_unpinned',
                'owner_kill_same', 'owner_kill_operator', 'owner_kill_operator_refused', 'owner_kill_refused_shared',
                'owner_kill_refused_user', 'owner_kill_refused_label', 'owner_noperm', 'owner_noperm_push',
-               'vetoed_owner_unpinned', 'refused_operator', 'exec_owner_watch_text', 'refused_owner_persist')
+               'vetoed_owner_unpinned', 'refused_operator', 'exec_owner_watch_text', 'refused_owner_persist', 'tx_named',
+               'token_unnamed')
 
 
 def corpus(helpers, seed, sessions=64, steps=160, watch_sessions=32, episodes=30, owner_sessions=48, owner_steps=150,
@@ -1402,7 +1412,7 @@ def corpus(helpers, seed, sessions=64, steps=160, watch_sessions=32, episodes=30
                             'dirty': False, 'bound': (0, frozenset(), 0), 'bprefixed': False, 'cas': False,
                             'watched': [], 'wlabels': []}
             m.oconns[cid] = {'pinned': False, 'pin': 's', 'owner': 's', 'wany': False, 'wmixed': False,
-                             'wlabel': (0, frozenset(), 0), 'wowner': 's', 'wlmixed': False}
+                             'wlabel': (0, frozenset(), 0), 'wowner': 's', 'wlmixed': False, 'named': False}
             emit(f'OC {cid} {login.hex()}', f'OC|{cid}')
         return logins
 
