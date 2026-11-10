@@ -5,6 +5,7 @@ import "core:crypto/ed25519"
 import "core:strings"
 import "core:testing"
 import lb "label"
+import ow "owner"
 
 @(private = "file")
 Access_Fixture :: struct {
@@ -45,7 +46,7 @@ fixture_open :: proc(t: ^testing.T, f: ^Access_Fixture) {
 @(private = "file")
 fixture_close :: proc(f: ^Access_Fixture) {
 	for len(label_contexts) > 0 {
-		label_contexts_drop_owner(label_contexts[0].owner)
+		label_contexts_drop_login(label_contexts[0].login)
 	}
 	label_token_cache_clear()
 	acl_label_rules_free(&f.user.labels)
@@ -347,4 +348,67 @@ access_label_state_counts_in_client_memory_and_busy_rules :: proc(t: ^testing.T)
 	labels_on = false
 	testing.expect(t, access_busy_sees_script())
 	labels_on = true
+}
+
+@(test)
+access_owner_rules_table_and_dominance :: proc(t: ^testing.T) {
+	context.allocator = runtime.heap_allocator()
+	f: Access_Fixture
+	fixture_open(t, &f)
+	defer fixture_close(&f)
+	r: Acl_Label_Rules
+	defer acl_label_rules_free(&r)
+	e, handled := acl_label_rule(&r, transmute([]u8)string("owners:*"))
+	testing.expect(t, handled && e == .Owners_Off)
+	owners_on = true
+	defer owners_on = false
+	for rule in ([]string{"owners:*", "owner-shared", "owner-operator"}) {
+		e, handled = acl_label_rule(&r, transmute([]u8)rule)
+		testing.expectf(t, handled && e == .None, "%s: %v", rule, e)
+	}
+	text := make([dynamic]u8, context.temp_allocator)
+	acl_label_describe(&text, &r)
+	testing.expect_value(t, string(text[:]), "owners:* owner-shared owner-operator ")
+	testing.expect_value(t, acl_label_flag_count(&r), 2)
+	e, handled = acl_label_rule(&r, transmute([]u8)string("owner:auth0|5f3c"))
+	testing.expect(t, handled && e == .None && r.owners == .Fixed && string(access_fixed_id(&r)) == "auth0|5f3c")
+	for rule in ([]string{"owners:x", "owners:", "owner:", "owner:a b"}) {
+		e, handled = acl_label_rule(&r, transmute([]u8)rule)
+		testing.expectf(t, handled && e == .Bad_Owner, "%s: %v", rule, e)
+	}
+	_, handled = acl_label_rule(&r, transmute([]u8)string("ownerx"))
+	testing.expect(t, !handled)
+	mine, err := owner_intern(transmute([]u8)string("auth0|5f3c"))
+	testing.expect(t, err == .None && mine != nil)
+	other, err2 := owner_intern(transmute([]u8)string("someone-else"))
+	testing.expect(t, err2 == .None && other.number != mine.number)
+	testing.expect(t, access_may_act(&r, mine.number) && !access_may_act(&r, other.number) && access_may_act(&r, ow.SHARED))
+	testing.expect(t, !access_may_act(&r, ow.EVERY) && !access_may_pin(&r, ow.EVERY))
+	r.owners = .Any
+	testing.expect(t, access_may_act(&r, other.number) && access_may_pin(&r, ow.EVERY))
+	plain: Acl_Label_Rules
+	testing.expect(t, access_may_act(&plain, ow.SHARED) && !access_may_act(&plain, mine.number))
+	testing.expect(t, owner_lookup(transmute([]u8)string("someone-else")) == other)
+	text_back, known := owner_text(other.number)
+	testing.expect(t, known && text_back == "someone-else")
+	number := other.number
+	testing.expect(t, owner_drop(number) && owner_entry(number) == nil && owner_lookup(transmute([]u8)string("someone-else")) == nil)
+	again, err3 := owner_intern(transmute([]u8)string("someone-else"))
+	testing.expect(t, err3 == .None && again.number != number)
+	high := marking(t, "S//A")
+	low := marking(t, "C")
+	hid, _ := access_intern(high)
+	lid, _ := access_intern(low)
+	testing.expect(t, scope_sees(ow.Scope{hid, mine.number}, ow.Scope{lid, ow.SHARED}))
+	testing.expect(t, !scope_sees(ow.Scope{hid, mine.number}, ow.Scope{lid, again.number}))
+	testing.expect(t, scope_sees(ow.Scope{hid, ow.EVERY}, ow.Scope{lid, again.number}))
+	testing.expect(t, !scope_sees(ow.Scope{lid, mine.number}, ow.Scope{hid, mine.number}))
+	testing.expect(t, scope_compare(mine.number, ow.Scope{lid, mine.number}, ow.Scope{lid, ow.SHARED}) > 0)
+	testing.expect(t, scope_compare(mine.number, ow.Scope{lid, mine.number}, ow.Scope{hid, ow.SHARED}) < 0)
+	b := make([dynamic]u8, context.temp_allocator)
+	scope_format(&b, ow.Scope{lid, mine.number})
+	testing.expect_value(t, string(b[:]), " OWNER auth0|5f3c")
+	clear(&b)
+	scope_format(&b, ow.Scope{lid, ow.SHARED})
+	testing.expect_value(t, string(b[:]), " SHARED")
 }

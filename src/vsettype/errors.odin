@@ -25,6 +25,7 @@ Failure :: struct {
 	expected: int,
 	near:     string,
 	label:    lbl.Id,
+	owner:    Owner,
 }
 
 ERR_QUANTIZATION_MISMATCH :: "ERR asked quantization mismatch with existing vector set"

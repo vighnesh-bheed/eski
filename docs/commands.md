@@ -1,8 +1,8 @@
 # Command inventory
 
-Generated from a temporary instance of the built executable using `COMMAND DOCS`, `COMMAND LIST` and `COMMAND COUNT`. The inventory contains 253 top-level commands and 366 names including subcommands. Metadata describes the protocol surface; the [command-group pages](README.md) and [conformance record](conformance.md) define implemented behavior and remaining gaps. Lua scripts, Function libraries and debugging have the scope documented in [scripting](scripting.md). Replication and clustering remain outside the node scope.
+Generated from a temporary instance of the built executable using `COMMAND DOCS`, `COMMAND LIST` and `COMMAND COUNT`. The inventory contains 254 top-level commands and 372 names including subcommands. Metadata describes the protocol surface; the [command-group pages](README.md) and [conformance record](conformance.md) define implemented behavior and remaining gaps. Lua scripts, Function libraries and debugging have the scope documented in [scripting](scripting.md). Replication and clustering remain outside the node scope.
 
-Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test/readme_tables.py --check`. Use `--server HOST:PORT` to inspect an existing instance without starting one. The canonical command-metadata SHA256 is `1aca467285c767a69910555a490c7982c92d9f0c1f163b38da7105251336d16e`.
+Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test/readme_tables.py --check`. Use `--server HOST:PORT` to inspect an existing instance without starting one. The canonical command-metadata SHA256 is `33519364f197c5891f2988ca3d0e57d79be5a79e0eda95d5ac56b4809f587090`.
 
 ## Bitmap
 
@@ -311,6 +311,12 @@ Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test
 | `MODULE LOADEX` | `<path> [CONFIG <name> <value> ...] [ARGS <args> ...]` | Loads a module using extended parameters. |
 | `MODULE UNLOAD` | `<name>` | Unloads a module. |
 | `MONITOR` | — | Listens for all requests received by the server in real-time. |
+| `OWNERS` | — | A container for commands that manage the owners of private data. |
+| `OWNERS FORGET` | `<id>` | Removes every key, element, context, cached token and slow log entry of an owner, closes its connections and drops its id. |
+| `OWNERS HELP` | — | Returns helpful text about the different subcommands. |
+| `OWNERS INFO` | `<id>` | Returns the keys, elements, bytes, partitions, labels and quota of an owner. |
+| `OWNERS LIST` | `<cursor> [COUNT <count>]` | Iterates over the ids of the owners holding data. |
+| `OWNERS QUOTA` | `<id> [LIMIT <bytes>]` | Returns or sets the memory quota of an owner. |
 | `SAVE` | — | Synchronously saves the database(s) to disk. |
 | `SHUTDOWN` | `[(NOSAVE \| SAVE)] [NOW] [FORCE] [ABORT]` | Synchronously saves the database(s) to disk and shuts down the server. |
 | `SLOWLOG` | — | A container for slow log commands. |

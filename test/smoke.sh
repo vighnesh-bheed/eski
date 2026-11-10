@@ -3675,7 +3675,7 @@ def run(port, steps):
             ok = all(ch in "0123456789abcdef" for ch in items) and not items.startswith("-")
             notes.append("genpass %s len=%d hex=%s" % (step[2], len(items), ok) if not items.startswith("-") else "genpass %s %s" % (step[2], items))
         elif op == "cat":
-            items = [x for x in conns[step[1]].array("ACL CAT " + step[2] + "\r\n") if x.split("|")[0] not in ("label", "context")]
+            items = [x for x in conns[step[1]].array("ACL CAT " + step[2] + "\r\n") if x.split("|")[0] not in ("label", "context", "owners")]
             notes.append("cat %s %s" % (step[2], ",".join(sorted(items))))
         time.sleep(SETTLE)
         for c in conns.values():
@@ -4583,8 +4583,8 @@ def run(proto):
     j, r = Conn(ESKI, proto), Conn(REF, proto)
     module = set(names_of(j.cmd("COMMAND", "LIST", "FILTERBY", "MODULE", "vectorset")))
     check(len(module) == 13, "resp%d COMMAND LIST FILTERBY MODULE vectorset lists %d commands" % (proto, len(module)))
-    own = set(n for n in names_of(j.cmd("COMMAND", "LIST")) if n.split("|")[0] in ("label", "context"))
-    check(len(own) == 14, "resp%d COMMAND LIST lists %d label and context commands" % (proto, len(own)))
+    own = set(n for n in names_of(j.cmd("COMMAND", "LIST")) if n.split("|")[0] in ("label", "context", "owners"))
+    check(len(own) == 20, "resp%d COMMAND LIST lists %d label, context and owners commands" % (proto, len(own)))
     extra = len(module) + len([n for n in own if "|" not in n])
     module = module | own
     jl = [n for n in names_of(j.cmd("COMMAND", "LIST")) if n not in module]

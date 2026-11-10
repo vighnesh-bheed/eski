@@ -8,6 +8,7 @@ import "core:slice"
 import "core:strconv"
 import "core:strings"
 import lb "label"
+import ow "owner"
 
 VERSION :: "proof-harness"
 REDIS_COMPAT_VERSION :: "7.4.11"
@@ -18,6 +19,9 @@ proof_users: [dynamic]^Acl_User
 proof_conns: map[int]^Conn
 proof_handles: [dynamic][LABEL_HANDLE_BYTES]u8
 proof_tokens: map[int][]u8
+proof_busy: Access
+proof_busy_set: bool
+proof_acl_count: int
 
 proof_nat :: proc(s: string) -> int {
 	v, ok := strconv.parse_i64(s, 10)
@@ -146,8 +150,52 @@ proof_user :: proc(login: []u8) -> ^Acl_User {
 	}
 	u := new(Acl_User)
 	u.username = login
+	u.unrestricted = true
 	append(&proof_users, u)
 	return u
+}
+
+proof_acl :: proc(u: ^Acl_User, names: string) -> int {
+	denied := proof_names(names)
+	defer delete(denied)
+	name := fmt.aprintf("proof-acl-%d", proof_acl_count)
+	proof_acl_count += 1
+	argv := make([dynamic][]u8)
+	for w in ([]string{"user", name, "on", "nopass", "+@all", "~*", "&*"}) {
+		append(&argv, transmute([]u8)strings.clone(w))
+	}
+	for n in denied {
+		rule := make([]u8, len(n) + 1)
+		rule[0] = '-'
+		copy(rule[1:], n)
+		append(&argv, rule)
+	}
+	handled, err := acl_config_directive(argv[:])
+	assert(handled && err == "")
+	acl_startup()
+	shadow := acl_user_find(transmute([]u8)name)
+	assert(shadow != nil && shadow.unrestricted == (len(denied) == 0))
+	u.root = shadow.root
+	u.unrestricted = shadow.unrestricted
+	label_token_cache_clear()
+	return len(denied)
+}
+
+proof_arrive :: proc(c: ^Conn, argv: [][]u8, busy := false) -> ([][]u8, ^Cmd_Slot, bool) {
+	acl_conn_refresh(c)
+	inner, s, ok := access_enter(c, argv, lookup_entry(argv[0]))
+	if ok && s != nil && c.acl_gate {
+		assert(arity_ok(s.cmd.arity, len(inner)))
+		if busy {
+			ok = lua_busy_authorize(c, s.cmd, inner)
+		} else {
+			ok = !acl_reject(c, s.cmd, s.stats, inner)
+		}
+	}
+	if ok {
+		ok = access_admit(c, s, inner)
+	}
+	return inner, s, ok
 }
 
 proof_handle_ordinal :: proc(h: [LABEL_HANDLE_BYTES]u8) -> int {
@@ -193,7 +241,7 @@ proof_arg :: proc(s: string) -> []u8 {
 	panic("unknown argument")
 }
 
-proof_reset :: proc(levels, comps, trusts, audience: string, idle, cap: int) {
+proof_reset :: proc(levels, comps, trusts, audience: string, idle, cap: int, owners := false) {
 	for _, c in proof_conns {
 		tx_conn_closed(c)
 		access_conn_closed(c)
@@ -202,7 +250,7 @@ proof_reset :: proc(levels, comps, trusts, audience: string, idle, cap: int) {
 	}
 	clear(&proof_conns)
 	for len(label_contexts) > 0 {
-		label_contexts_drop_owner(label_contexts[0].owner)
+		label_contexts_drop_login(label_contexts[0].login)
 	}
 	label_token_cache_clear()
 	for u in proof_users {
@@ -212,6 +260,8 @@ proof_reset :: proc(levels, comps, trusts, audience: string, idle, cap: int) {
 	clear(&proof_users)
 	clear(&proof_handles)
 	clear(&proof_tokens)
+	proof_busy = {}
+	proof_busy_set = false
 	lb.config_destroy(&label_scheme)
 	lb.config_init(&label_scheme)
 	for n in proof_names(levels) {
@@ -224,7 +274,8 @@ proof_reset :: proc(levels, comps, trusts, audience: string, idle, cap: int) {
 		assert(lb.config_add_trust(&label_scheme, string(n)) == .None)
 	}
 	access_scheme_changed()
-	labels_on = lb.config_labelled(&label_scheme)
+	owners_on = owners
+	labels_on = lb.config_labelled(&label_scheme) || owners
 	assert(labels_on)
 	label_scheme_runtime = true
 	access = {}
@@ -260,7 +311,7 @@ proof_rules :: proc(u: ^Acl_User, keys: string, rules: string) -> int {
 	return count
 }
 
-proof_token :: proc(f: []string) -> []u8 {
+proof_token :: proc(f: []string, owner_spec := "-") -> []u8 {
 	secret, marking, trust, expires, audience, ref, flaw := proof_nat(f[2]), f[3], f[4], f[5], f[6], f[7], proof_nat(f[8])
 	s := strings.builder_make()
 	strings.write_string(&s, "eski-label-token 2\n" if flaw == 2 else "eski-label-token 1\n")
@@ -292,6 +343,24 @@ proof_token :: proc(f: []string) -> []u8 {
 	case strings.has_prefix(ref, "h:"):
 		strings.write_string(&s, "context ")
 		strings.write_bytes(&s, proof_handle_text(proof_nat(ref[2:]), false))
+		strings.write_byte(&s, '\n')
+	}
+	switch {
+	case owner_spec == "s":
+		strings.write_string(&s, "shared\n")
+	case strings.has_prefix(owner_spec, "x:"):
+		strings.write_string(&s, "owner ")
+		strings.write_bytes(&s, proof_unhex(owner_spec[2:]))
+		strings.write_byte(&s, '\n')
+	case owner_spec == "B":
+		strings.write_string(&s, "owner a\nshared\n")
+	case owner_spec == "D":
+		strings.write_string(&s, "owner a\nowner a\n")
+	case owner_spec == "L":
+		strings.write_string(&s, "owner ")
+		for _ in 0 ..< 129 {
+			strings.write_byte(&s, 'x')
+		}
 		strings.write_byte(&s, '\n')
 	}
 	if flaw == 3 {
@@ -407,7 +476,13 @@ proof_request :: proc(b: ^strings.Builder, kind: string, id: int, f: []string) {
 		argv[i] = proof_arg(a)
 	}
 	assert(c.wlen == 0)
-	inner, s, ok := access_enter(c, argv, lookup_entry(argv[0]))
+	inner, s, ok := proof_arrive(c, argv)
+	if ok && kind == "AE" {
+		proof_busy = access
+		proof_busy_set = .Multi not_in c.txf
+	} else if kind == "AE" {
+		proof_busy_set = false
+	}
 	strings.write_string(b, kind)
 	if ok {
 		strings.write_string(b, "|ok:")
@@ -427,11 +502,178 @@ proof_request :: proc(b: ^strings.Builder, kind: string, id: int, f: []string) {
 	fmt.sbprintf(b, "|%d", len(label_contexts))
 }
 
+proof_owner_text :: proc(b: ^strings.Builder, o: ow.Owner) {
+	switch {
+	case o == ow.SHARED:
+		strings.write_byte(b, 's')
+	case o == ow.EVERY:
+		strings.write_byte(b, 'e')
+	case:
+		text, ok := owner_text(o)
+		assert(ok)
+		proof_write_hex(b, transmute([]u8)text)
+	}
+}
+
+proof_state_owner :: proc(b: ^strings.Builder, c: ^Conn) {
+	a := access_conn(c)
+	proof_bit(b, .Multi in c.txf)
+	proof_bit(b, .Dirty_Exec in c.txf)
+	proof_bit(b, a.explicit)
+	proof_bit(b, .Dirty_Cas in c.txf)
+	strings.write_byte(b, ':')
+	if a.explicit {
+		proof_write_label(b, a.session)
+	} else {
+		strings.write_byte(b, '-')
+	}
+	strings.write_byte(b, ':')
+	proof_write_label(b, a.bound)
+	fmt.sbprintf(b, ":%d:", len(c.tx.watched) if c.tx != nil else 0)
+	proof_bit(b, a.owner_pinned)
+	strings.write_byte(b, ':')
+	if a.owner_pinned {
+		proof_owner_text(b, a.pin_owner)
+	} else {
+		strings.write_byte(b, '-')
+	}
+	strings.write_byte(b, ':')
+	proof_owner_text(b, a.owner)
+	strings.write_byte(b, ':')
+	if a.watching {
+		proof_bit(b, a.watch_mixed)
+		strings.write_byte(b, '/')
+		proof_write_label(b, a.watched)
+		strings.write_byte(b, '/')
+		proof_owner_text(b, a.watched_owner)
+	} else {
+		strings.write_byte(b, '-')
+	}
+}
+
+proof_reply_owner :: proc(c: ^Conn, creating: bool) -> string {
+	out := string(c.wbuf[:c.wlen])
+	if !strings.has_prefix(out, "*6\r\n") {
+		return proof_reply(c, creating)
+	}
+	c.wlen = 0
+	c.wpos = 0
+	parts := strings.split(out, "\r\n")
+	assert(parts[2] == "marking" && parts[6] == "trust" && parts[10] == "owner")
+	b := strings.builder_make()
+	strings.write_string(&b, "info:")
+	proof_write_hex(&b, transmute([]u8)parts[4])
+	strings.write_byte(&b, ':')
+	proof_write_hex(&b, transmute([]u8)parts[8])
+	strings.write_byte(&b, ':')
+	if parts[11] == "$-1" {
+		strings.write_byte(&b, 's')
+	} else {
+		proof_write_hex(&b, transmute([]u8)parts[12])
+	}
+	return strings.to_string(b)
+}
+
+proof_handler_owner :: proc(c: ^Conn, s: ^Cmd_Slot, inner: [][]u8) -> string {
+	if .Multi in c.txf && (s == nil || !tx_immediate(s.cmd)) {
+		return "queued"
+	}
+	if s != nil && s.cmd.handler == cmd_context && len(inner) >= 2 && (eq_nocase(inner[1], "create") || eq_nocase(inner[1], "info") || eq_nocase(inner[1], "drop")) {
+		cmd_context(c, inner)
+		return proof_reply_owner(c, eq_nocase(inner[1], "create"))
+	}
+	return proof_handler(c, s, inner)
+}
+
+proof_request_owner :: proc(b: ^strings.Builder, kind: string, id: int, f: []string) {
+	c, found := proof_conns[id]
+	assert(found)
+	argv := make([][]u8, len(f))
+	for a, i in f {
+		argv[i] = proof_arg(a)
+	}
+	assert(c.wlen == 0)
+	inner, s, ok := proof_arrive(c, argv)
+	if ok && kind == "OS" {
+		proof_busy = access
+		proof_busy_set = .Multi not_in c.txf
+	} else if kind == "OS" {
+		proof_busy_set = false
+	}
+	strings.write_string(b, kind)
+	if ok {
+		strings.write_string(b, "|ok:")
+		proof_write_label(b, access.label)
+		strings.write_byte(b, ':')
+		proof_owner_text(b, access.owner)
+		fmt.sbprintf(b, ":%d:", len(inner))
+		proof_ctx_text(b, access.ctx)
+		strings.write_byte(b, '|')
+		strings.write_string(b, proof_handler_owner(c, s, inner))
+	} else {
+		strings.write_string(b, "|no:")
+		strings.write_string(b, proof_reply(c, false))
+		strings.write_string(b, "|-")
+	}
+	strings.write_byte(b, '|')
+	proof_state_owner(b, c)
+	fmt.sbprintf(b, "|%d", len(label_contexts))
+}
+
+proof_busy_call :: proc(b: ^strings.Builder, kind: string, id: int, f: []string, owner: bool) {
+	c, found := proof_conns[id]
+	assert(found)
+	argv := make([][]u8, len(f))
+	for a, i in f {
+		argv[i] = proof_arg(a)
+	}
+	assert(c.wlen == 0)
+	access = proof_busy
+	access_busy_script = access
+	saved_arrival := access_arrival
+	inner, _, ok := proof_arrive(c, argv, true)
+	strings.write_string(b, kind)
+	if ok {
+		strings.write_string(b, "|ok:")
+		proof_write_label(b, access.label)
+		if owner {
+			strings.write_byte(b, ':')
+			proof_owner_text(b, access.owner)
+		}
+		fmt.sbprintf(b, ":%d:", len(inner))
+		proof_ctx_text(b, access.ctx)
+		strings.write_byte(b, '|')
+		switch {
+		case !proof_busy_set:
+			strings.write_string(b, "nobusy")
+		case .Multi in c.txf:
+			strings.write_string(b, "queued")
+		case:
+			proof_bit(b, access_busy_sees_script())
+		}
+	} else {
+		strings.write_string(b, "|no:")
+		strings.write_string(b, proof_reply(c, false))
+		strings.write_string(b, "|-")
+	}
+	access = access_busy_script
+	access_arrival = saved_arrival
+	strings.write_byte(b, '|')
+	if owner {
+		proof_state_owner(b, c)
+	} else {
+		proof_state(b, c)
+	}
+	fmt.sbprintf(b, "|%d", len(label_contexts))
+}
+
 main :: proc() {
 	assert(len(os.args) == 2)
 	access_init()
+	acl_init()
 	db_init()
 	keyspace_labels_enable()
+	stats_init()
 	input, err := os.read_entire_file(os.args[1], context.allocator)
 	assert(err == nil)
 	lines := strings.split(string(input), "\n")
@@ -445,6 +687,67 @@ main :: proc() {
 		case "AX":
 			proof_reset(f[1], f[2], f[3], f[4], proof_nat(f[5]), proof_nat(f[6]))
 			fmt.sbprintf(&b, "AX|%d|%d|%d", len(label_scheme.levels), len(label_scheme.compartments), len(label_scheme.trusts))
+		case "OX":
+			proof_reset(f[1], f[2], f[3], f[4], proof_nat(f[5]), proof_nat(f[6]), true)
+			fmt.sbprintf(&b, "OX|%d|%d|%d", len(label_scheme.levels), len(label_scheme.compartments), len(label_scheme.trusts))
+		case "OU":
+			u := proof_user(proof_unhex(f[1]))
+			n := proof_rules(u, f[6], f[7])
+			strings.write_string(&b, "OU|")
+			proof_write_label(&b, access_ceiling(u))
+			strings.write_byte(&b, '|')
+			proof_bit(&b, u.labels.per_command)
+			strings.write_byte(&b, '|')
+			proof_bit(&b, u.labels.require_token)
+			fmt.sbprintf(&b, "|%d|", n)
+			switch u.labels.owners {
+			case .None:
+				strings.write_byte(&b, '-')
+			case .Any:
+				strings.write_byte(&b, '*')
+			case .Fixed:
+				strings.write_byte(&b, 'f')
+			}
+			strings.write_byte(&b, '|')
+			proof_bit(&b, u.labels.owner_shared)
+			strings.write_byte(&b, '|')
+			proof_bit(&b, u.labels.owner_operator)
+		case "OC":
+			c := new(Conn)
+			c^ = Conn{fd = -1, resp = 2, wcap = 1 << 16, user = proof_user(proof_unhex(f[2])), authed = true, db = &dbs[0]}
+			c.wbuf = cast([^]u8)runtime.heap_alloc(c.wcap)
+			id := proof_nat(f[1])
+			assert(id not_in proof_conns)
+			proof_conns[id] = c
+			fmt.sbprintf(&b, "OC|%d", id)
+		case "OO":
+			n := proof_nat(f[1])
+			proof_tokens[n] = proof_token(f, f[9])
+			fmt.sbprintf(&b, "OO|%d", n)
+		case "OA":
+			cid := proof_nat(f[1])
+			c, found := proof_conns[cid]
+			assert(found)
+			u := proof_user(proof_unhex(f[2]))
+			changed := c.user != u
+			if changed {
+				access_user_changed(c)
+			}
+			c.user = u
+			if changed {
+				access_user_settled(c)
+			}
+			strings.write_string(&b, "OA|")
+			proof_state_owner(&b, c)
+		case "OR", "OS":
+			proof_request_owner(&b, f[0], proof_nat(f[1]), f[2:])
+		case "OB":
+			proof_busy_call(&b, f[0], proof_nat(f[1]), f[2:], true)
+		case "AB":
+			proof_busy_call(&b, f[0], proof_nat(f[1]), f[2:], false)
+		case "AP", "OP":
+			n := proof_acl(proof_user(proof_unhex(f[1])), f[2])
+			fmt.sbprintf(&b, "%s|%d", f[0], n)
 		case "AU":
 			u := proof_user(proof_unhex(f[1]))
 			n := proof_rules(u, f[6], f[7])
@@ -463,6 +766,9 @@ main :: proc() {
 			assert(id not_in proof_conns)
 			proof_conns[id] = c
 			fmt.sbprintf(&b, "AC|%d", id)
+		case "OT":
+			srv.now_ms = i64(proof_nat(f[1]))
+			fmt.sbprintf(&b, "OT|%d", srv.now_ms)
 		case "AT":
 			srv.now_ms = i64(proof_nat(f[1]))
 			fmt.sbprintf(&b, "AT|%d", srv.now_ms)
@@ -527,7 +833,7 @@ main :: proc() {
 			assert(cmd != nil)
 			strings.write_string(&b, "AS|")
 			proof_bit(&b, label_script_denied(cmd, argv))
-		case "AR", "AH":
+		case "AR", "AH", "AE":
 			proof_request(&b, f[0], proof_nat(f[1]), f[2:])
 		case:
 			panic("unknown row")

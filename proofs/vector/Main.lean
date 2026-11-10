@@ -264,6 +264,7 @@ structure St where
   eng : Option Eng := none
   ztbl : List Lbl := []
   zs : Option ZSession := none
+  ys : Option YSession := none
 
 
 def parseLbl (s : String) : Except String Lbl :=
@@ -413,7 +414,7 @@ def zstep (st : St) (fields : List String) : Except String (St × Option String)
       return (st, some (if kind == "e" then "ZQ|notfound" else "ZQ|ok|-"))
     match query with
     | none => return (st, some "ZQ|notfound")
-    | some q => return (st, some s!"ZQ|ok|{showHits (viewSearch z vo q count filter eps)}")
+    | some q => return (st, some s!"ZQ|ok|{showHits (viewSearch z.part vo q count filter eps)}")
   | ["ZM", rd, kind, count] =>
     let z ← zsession st
     let rd ← parseNat rd
@@ -424,9 +425,9 @@ def zstep (st : St) (fields : List String) : Except String (St × Option String)
       if kind == "m" then
         if vo.size = 0 then ([], s0) else
         let (j, s') := streamBelow s0 vo.size
-        ([viewRefAt z vo j], s')
-      else if kind == "d" then randomDistinct z vo k s0
-      else randomRepeats z vo k s0
+        ([viewRefAt z.part vo j], s')
+      else if kind == "d" then randomDistinct z.part vo k s0
+      else randomRepeats z.part vo k s0
     let z' := { z with st := setStream z.st rd s1 }
     return ({ st with zs := some z' }, some s!"ZM|{namesText refs}")
   | ["ZK", rd, name] =>
@@ -439,7 +440,7 @@ def zstep (st : St) (fields : List String) : Except String (St × Option String)
     | some l =>
       let p := z.part l
       if p.mode != .flat then return (st, some "ZK|graph")
-      else return (st, some s!"ZK|{showHits (flatLinks z vo l (z.elem l n))}")
+      else return (st, some s!"ZK|{showHits (flatLinks z.part vo l (z.elem l n))}")
   | "ZO" :: rest =>
     let z ← zsession st
     let p := z.part 0
@@ -479,6 +480,196 @@ def zstep (st : St) (fields : List String) : Except String (St × Option String)
       return (st, some s!"ZO|sim|{showHits (plainSearch p (← parseNat mask) count (← parseOpt filter))}")
     | _ => throw ("invalid ZO line: " ++ String.intercalate " " rest)
   | _ => throw ("invalid case line: " ++ String.intercalate " " fields)
+
+def ysession (st : St) : Except String YSession :=
+  match st.ys with
+  | some y => .ok y
+  | none => .error "no owner session"
+
+def yscope (l o : String) : Except String (Nat × Nat) := do
+  return (← parseNat l, ← parseNat o)
+
+def ywrite (y : YSession) (w : Nat × Nat) (n : List Nat) (v : SVal) : YSession × String :=
+  let ls := y.st.index n
+  if w ∈ ls then (y.write ⟨w, .add n v⟩, "0|0|0|0|none|-")
+  else if visibleOther (seesP (simSees y.tbl)) w ls then
+    (y, s!"0|0|0|0|inuse|{showScope ((resolveL (y.reader w) ls).getD (0, 0))}")
+  else
+    let created := (y.st.parts w).isNone
+    (y.write ⟨w, .add n v⟩, s!"1|{boolBit created}|0|0|none|-")
+
+def yremove (y : YSession) (w : Nat × Nat) (n : List Nat) : YSession × String :=
+  let ls := y.st.index n
+  if w ∈ ls then
+    let y' := y.write ⟨w, .rem n⟩
+    (y', s!"1|{boolBit (y'.st.parts w).isNone}|{boolBit y'.allEmpty}|none|-")
+  else if visibleOther (seesP (simSees y.tbl)) w ls then
+    (y, s!"0|0|0|inuse|{showScope ((resolveL (y.reader w) ls).getD (0, 0))}")
+  else (y, "0|0|0|none|-")
+
+def ystep (st : St) (fields : List String) : Except String (St × Option String) := do
+  match fields with
+  | ["YN", f, s, kind, owners] =>
+    let f ← parseNat f
+    let s ← parseNat s
+    let k ← parseNat owners
+    let parts : Nat × Nat → Option SPart :=
+      if kind == "plain" then fun x => if x = (0, 0) then some { mode := .pinned, uid := 0, rng := 0, order := [] } else none
+      else fun _ => none
+    let y : YSession := ⟨st.ztbl, f, s, k, ⟨parts, fun _ => [], fun x => scopeSeed x.1 x.2⟩⟩
+    return ({ st with ys := some y }, some "YN|ok")
+  | ["YP", name, mask, attr] =>
+    let y ← ysession st
+    let p := y.part (0, 0)
+    let n := parseName name
+    let v : SVal := ⟨← parseNat mask, ← parseAttrSpec attr⟩
+    let added := !(simNames p).contains n
+    let q := plainOp (simOps y.flat y.shrink) simNames (.add n v) p
+    let y' := { y with st := { y.st with parts := fun x => if x = (0, 0) then some q else y.st.parts x,
+                                          index := fun m => if (simNames q).contains m then [(0, 0)] else [] } }
+    return ({ st with ys := some y' }, some s!"YP|{boolBit added}")
+  | ["YA", lab, own, name, mask, attr] =>
+    let y ← ysession st
+    let w ← yscope lab own
+    let (y', row) := ywrite y w (parseName name) ⟨← parseNat mask, ← parseAttrSpec attr⟩
+    return ({ st with ys := some y' }, some s!"YA|{row}")
+  | ["YR", lab, own, name] =>
+    let y ← ysession st
+    let w ← yscope lab own
+    let (y', row) := yremove y w (parseName name)
+    return ({ st with ys := some y' }, some s!"YR|{row}")
+  | ["YE", lab, own, name, attr] =>
+    let y ← ysession st
+    let w ← yscope lab own
+    let n := parseName name
+    let ls := y.st.index n
+    let v : SVal := ⟨0, ← parseAttrSpec attr⟩
+    if w ∈ ls then
+      return ({ st with ys := some (y.write ⟨w, .set n v⟩) }, some "YE|1|none|-")
+    else if visibleOther (seesP (simSees y.tbl)) w ls then
+      return (st, some s!"YE|0|inuse|{showScope ((resolveL (y.reader w) ls).getD (0, 0))}")
+    else return (st, some "YE|0|none|-")
+  | ["YU", "a", lab, own, name, mask, attr] =>
+    let y ← ysession st
+    let w ← yscope lab own
+    let before := y.st.parts w
+    let (y', row) := ywrite y w (parseName name) ⟨← parseNat mask, ← parseAttrSpec attr⟩
+    let fresh := before.isNone && (y'.st.parts w).isSome
+    let flags := accountFlags w fresh false (modeFlag before (y'.st.parts w))
+    return ({ st with ys := some y' }, some s!"YU|a|{row}|{flags}")
+  | ["YU", "r", lab, own, name] =>
+    let y ← ysession st
+    let w ← yscope lab own
+    let before := y.st.parts w
+    let (y', row) := yremove y w (parseName name)
+    let gone := before.isSome && (y'.st.parts w).isNone
+    let flags := accountFlags w false gone (modeFlag before (y'.st.parts w))
+    return ({ st with ys := some y' }, some s!"YU|r|{row}|{flags}")
+  | ["YL", lab, own] =>
+    let y ← ysession st
+    let w ← yscope lab own
+    let removed := (y.part w).order.length
+    let found := (y.st.parts w).isSome && removed > 0
+    let y' := y.write ⟨w, .drop⟩
+    let removed := if found then removed else 0
+    return ({ st with ys := some y' }, some s!"YL|{removed}|{boolBit found}|{boolBit found}|{boolBit y'.allEmpty}")
+  | ["YW", own] =>
+    let y ← ysession st
+    let o ← parseNat own
+    let labs := y.ownerLabels o
+    let removed := y.ownerCard o
+    let y' := y.forget o
+    let found := removed > 0
+    let shown := if labs.isEmpty then "-" else String.intercalate "," (labs.map toString)
+    return ({ st with ys := some y' }, some s!"YW|{removed}|{boolBit found}|{boolBit found}|{boolBit y'.allEmpty}|{shown}")
+  | ["YC", rd, own] =>
+    let y ← ysession st
+    let vo := y.view (← yscope rd own)
+    let uid := (vo.labels.map (fun x => (y.part x).uid)).foldl (· + ·) 0
+    let parts := vo.labels.map (fun x => let p := y.part x; s!"{x.1}:{x.2}:{showMode p.mode}:{p.order.length}:{p.uid}")
+    return (st, some s!"YC|{vo.size}|{vo.attrs}|{uid}|{joinOr parts}")
+  | ["YF", rd, own, name] =>
+    let y ← ysession st
+    let w ← yscope rd own
+    let n := parseName name
+    match viewFind (y.reader w) y.st n with
+    | none => return (st, some "YF|-")
+    | some x =>
+      let e := y.elem x n
+      return (st, some s!"YF|{showScope x}|{showAttr e.attr}|{e.mask}")
+  | ["YG", rd, own, lo, hi, lim] =>
+    let y ← ysession st
+    let w ← yscope rd own
+    let lower ← parseBound lo true
+    let upper ← parseBound hi false
+    let limit ← parseInt lim
+    if limit == 0 || lo == "+" || hi == "-" then return (st, some "YG|-")
+    let lim := if limit < 0 then none else some limit.toNat
+    let hits := viewRange (y.reader w) y.st y.namesU (fun n => lower n && upper n) lim
+    return (st, some s!"YG|{if hits.isEmpty then "-" else String.intercalate "," (hits.map (fun h => showName h.1))}")
+  | ["YQ", rd, own, kind, arg, count, _, filter, _, eps] =>
+    let y ← ysession st
+    let w ← yscope rd own
+    let vo := y.view w
+    let count ← parseNat count
+    let count := if count = 0 then 10 else count
+    let filter ← parseOpt filter
+    let eps ← parseOpt eps
+    let query : Option Nat ← if kind == "v" then pure (some (← parseNat arg)) else
+      match viewFind (y.reader w) y.st (parseName arg) with
+      | none => pure none
+      | some x => pure (some (y.elem x (parseName arg)).mask)
+    if vo.size = 0 then
+      return (st, some (if kind == "e" then "YQ|notfound" else "YQ|ok|-"))
+    match query with
+    | none => return (st, some "YQ|notfound")
+    | some q => return (st, some s!"YQ|ok|{showHits (viewSearch y.part vo q count filter eps)}")
+  | ["YM", rd, own, kind, count] =>
+    let y ← ysession st
+    let w ← yscope rd own
+    let vo := y.view w
+    let k ← parseNat count
+    let s0 := y.st.stream w
+    let (refs, s1) :=
+      if kind == "m" then
+        if vo.size = 0 then ([], s0) else
+        let (j, s') := streamBelow s0 vo.size
+        ([viewRefAt y.part vo j], s')
+      else if kind == "d" then randomDistinct y.part vo k s0
+      else randomRepeats y.part vo k s0
+    let y' := { y with st := setStream y.st w s1 }
+    return ({ st with ys := some y' }, some s!"YM|{namesText refs}")
+  | ["YK", rd, own, name] =>
+    let y ← ysession st
+    let w ← yscope rd own
+    let vo := y.view w
+    let n := parseName name
+    match viewFind (y.reader w) y.st n with
+    | none => return (st, some "YK|-")
+    | some x =>
+      let p := y.part x
+      if p.mode != .flat then return (st, some "YK|graph")
+      else return (st, some s!"YK|{showHits (flatLinks y.part vo x (y.elem x n))}")
+  | ["YS", rd, own] =>
+    let y ← ysession st
+    let w ← yscope rd own
+    let top := match y.top w with
+      | none => "-"
+      | some x => showScope x
+    let labs := y.ownerLabels w.2
+    let shown := if labs.isEmpty then "-" else String.intercalate "," (labs.map toString)
+    return (st, some s!"YS|{top}|{y.ownerCard w.2}|{y.ownerCount}|{shown}")
+  | ["YZ", own, src] =>
+    let y ← ysession st
+    let o ← parseNat own
+    let src ← parseNat src
+    let y' := { y with st := { y.st with stream := fun x => if x.2 = o then scopeSeed x.1 src else y.st.stream x } }
+    return ({ st with ys := some y' }, some "YZ|ok")
+  | ["YI", op, _, own, stream] =>
+    let o ← parseNat own
+    let ok := op != "relabelx" && accessValid o (stream == "1")
+    return (st, some s!"YI|{op}|{if ok then "ok" else "invalid"}")
+  | _ => throw ("invalid owner line: " ++ String.intercalate " " fields)
 
 def step (st : St) (fields : List String) : Except String (St × Option String) := do
   match fields with
@@ -635,7 +826,10 @@ def step (st : St) (fields : List String) : Except String (St × Option String) 
     let some e := st.eng | throw "no index"
     let r := e.search (← parseInt x) (← parseInt y) (← parseNat k) (← parseNat ef)
     return (st, some s!"XS|{showHeap r}")
-  | f :: _ => if f.startsWith "Z" then zstep st fields else throw ("invalid case line: " ++ String.intercalate " " fields)
+  | f :: _ =>
+    if f.startsWith "Z" then zstep st fields
+    else if f.startsWith "Y" then ystep st fields
+    else throw ("invalid case line: " ++ String.intercalate " " fields)
   | [] => throw "empty case line"
 
 def main (args : List String) : IO Unit := do

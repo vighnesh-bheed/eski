@@ -2,6 +2,7 @@ package main
 
 import "core:container/queue"
 import lb "label"
+import ow "owner"
 
 SLOWLOG_KEPT_ARGS :: 32
 SLOWLOG_KEPT_BYTES :: 128
@@ -17,6 +18,7 @@ Slowlog_Entry :: struct {
 	peer:  []u8,
 	name:  []u8,
 	label: lb.Id,
+	owner: ow.Owner,
 }
 
 @(private = "file")
@@ -182,6 +184,7 @@ slowlog_push :: proc(c: ^Conn, st: ^Cmd_Stats, argv: [][]u8, us: i64) {
 		e.peer = e.buf[peer_at:name_at]
 		e.name = e.buf[name_at:]
 		e.label = access.id if labels_on else lb.BOTTOM_ID
+		e.owner = access.owner if owners_on else ow.SHARED
 		queue.push_back(&slowlog, e)
 	}
 	for i64(queue.len(slowlog)) > cfg.slowlog_max_len {
@@ -266,7 +269,25 @@ cmd_slowlog :: proc(c: ^Conn, argv: [][]u8) {
 
 @(private = "file")
 slowlog_entry_visible :: proc(e: ^Slowlog_Entry) -> bool {
-	return !labels_on || access.top || access_visible(e.label)
+	if !labels_on || access.top {
+		return true
+	}
+	return access_visible(e.label) && (!owners_on || ow.sees(access_view_owner(), e.owner))
+}
+
+slowlog_drop_owner :: proc(o: ow.Owner) -> int {
+	n := queue.len(slowlog)
+	dropped := 0
+	for _ in 0 ..< n {
+		e := queue.pop_front(&slowlog)
+		if e.owner == o {
+			slowlog_free(e)
+			dropped += 1
+		} else {
+			queue.push_back(&slowlog, e)
+		}
+	}
+	return dropped
 }
 
 @(private = "file")

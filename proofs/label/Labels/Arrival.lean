@@ -65,7 +65,8 @@ def nameOf (args : List Arg) : List Nat :=
 def knownCommands : List String :=
   ["get", "set", "ping", "echo", "select", "auth", "hello", "quit", "reset", "client", "label", "context", "multi", "exec",
    "discard", "watch", "unwatch", "subscribe", "psubscribe", "ssubscribe", "save", "bgsave", "bgrewriteaof", "dump", "restore",
-   "migrate", "debug", "monitor", "swapdb", "latency", "memory", "slowlog", "config", "shutdown", "eval", "publish"]
+   "migrate", "debug", "monitor", "swapdb", "latency", "memory", "slowlog", "config", "shutdown", "eval", "publish",
+   "script", "function"]
 
 def isCmd (args : List Arg) (w : String) : Bool := nameOf args == word w
 
@@ -179,6 +180,7 @@ structure AEnv where
   now : Nat
   users : List (List Nat × LRules)
   tokens : List (Nat × TokSpec)
+  acl : List (List Nat × List (List Nat))
 
 structure ADyn where
   conns : List (Nat × AConn)
@@ -362,12 +364,32 @@ def pinConn (c : AConn) (inner : List Arg) (l : TLabel) : AConn :=
 def sessionKept (E : AEnv) (c : AConn) (prefixed : Bool) : Bool :=
   prefixed || (c.inMulti && c.boundPrefixed) || (rulesOf E c.login).perCommand || (rulesOf E c.login).requireToken
 
+def aclTarget (args : List Arg) : List Nat :=
+  if isCmd args "client" then
+    match (args[1]? : Option Arg) with
+    | some (.lit b) => nameOf args ++ [124] ++ b.map lowerByte
+    | _ => nameOf args
+  else nameOf args
+
+def deniedOf (E : AEnv) (login : List Nat) : List (List Nat) := ((E.acl.find? (·.1 == login)).map (·.2)).getD []
+
+def aclDenies (E : AEnv) (login : List Nat) (args : List Arg) : Bool := (deniedOf E login).contains (aclTarget args)
+
+def textOf (b : List Nat) : String := String.ofList (b.map Char.ofNat)
+
+def errNoperm (login target : List Nat) : String :=
+  "NOPERM User " ++ textOf login ++ " has no permissions to run the '" ++ textOf target ++ "' command"
+
+def sessionNeededAt (E : AEnv) (c : AConn) (inner : List Arg) (prefixed : Bool) : Bool :=
+  needsSession inner && !c.explicit && sessionKept E c prefixed
+
 def gate (E : AEnv) (c : AConn) (inner : List Arg) (l : TLabel) (prefixed : Bool) : Option String :=
   if !ceilingAdmits (ceilingFor E c.login) l || !labelValidT E.cfg l then some errInvalid
   else if !known inner then none
+  else if sessionNeededAt E c inner prefixed then some errSessionNeeded
+  else if aclDenies E c.login inner then some (errNoperm c.login (aclTarget inner))
   else if persistenceRefused inner then some errPersistence
   else if topOnly inner && !domT l (ttop E.cfg.base.levels.length E.cfg.base.comps.length) then some errTop
-  else if needsSession inner && !c.explicit && sessionKept E c prefixed then some errSessionNeeded
   else none
 
 def arriveFinish (E : AEnv) (D : ADyn) (id : Nat) (c : AConn) (inner : List Arg) (l0 : TLabel) (ctx : Option ACtx)
@@ -378,6 +400,14 @@ def arriveFinish (E : AEnv) (D : ADyn) (id : Nat) (c : AConn) (inner : List Arg)
         (finishConn c inner (finishLabel c l0) prefixed) inner m
     | none => (.ok (finishLabel c l0) inner ctx,
         setConn D id (pinConn (finishConn c inner (finishLabel c l0) prefixed) inner (finishLabel c l0)))
+
+def arriveCore (E : AEnv) (D : ADyn) (id : Nat) (c : AConn) (inner : List Arg) (l0 : TLabel) (ctx : Option ACtx)
+    (prefixed : Bool) : Arrival × ADyn :=
+  if c.inMulti && prefixed && l0 != c.bound then refuse D id c inner errTransaction
+  else match gate E c inner (finishLabel c l0) prefixed with
+    | some m => refuse (setConn D id (finishConn c inner (finishLabel c l0) prefixed)) id
+        (finishConn c inner (finishLabel c l0) prefixed) inner m
+    | none => (.ok (finishLabel c l0) inner ctx, setConn D id (finishConn c inner (finishLabel c l0) prefixed))
 
 def connOf (D : ADyn) (id : Nat) : Option AConn := (D.conns.find? (·.1 == id)).map (·.2)
 
@@ -554,6 +584,25 @@ theorem finish_spec {E : AEnv} {D D' : ADyn} {id : Nat} {c : AConn} {inner inner
       obtain ⟨⟨rfl, rfl, rfl⟩, rfl⟩ := h
       obtain ⟨g1, g2⟩ := gate_none hg
       refine ⟨g1, g2, rfl, rfl, rfl, fun h1 h2 => ?_, rfl⟩
+      simp only [h1, h2, Bool.true_and, bne_iff_ne, ne_eq, Decidable.not_not] at hm
+      exact hm
+
+theorem core_spec {E : AEnv} {D D' : ADyn} {id : Nat} {c : AConn} {inner inner' : List Arg} {l0 l : TLabel}
+    {ctx ctx' : Option ACtx} {p : Bool} (h : arriveCore E D id c inner l0 ctx p = (.ok l inner' ctx', D')) :
+    ceilingAdmits (ceilingFor E c.login) l = true ∧ labelValidT E.cfg l = true ∧ inner' = inner ∧ ctx' = ctx ∧
+      l = finishLabel c l0 ∧ (c.inMulti = true → p = true → l0 = c.bound) ∧
+      D' = setConn D id (finishConn c inner l p) ∧ gate E c inner l p = none := by
+  unfold arriveCore at h
+  split at h
+  · exact (refuse_not_ok h).elim
+  · rename_i hm
+    split at h
+    · exact (refuse_not_ok h).elim
+    · rename_i hg
+      simp only [Prod.mk.injEq, Arrival.ok.injEq] at h
+      obtain ⟨⟨rfl, rfl, rfl⟩, rfl⟩ := h
+      obtain ⟨g1, g2⟩ := gate_none hg
+      refine ⟨g1, g2, rfl, rfl, rfl, fun h1 h2 => ?_, rfl, hg⟩
       simp only [h1, h2, Bool.true_and, bne_iff_ne, ne_eq, Decidable.not_not] at hm
       exact hm
 
@@ -2178,5 +2227,175 @@ theorem watch_count_write_free (E : AEnv) (evs : List AEv) (D : ADyn) (id : Nat)
   have hl := congrArg (Option.map List.length) hw
   simp only [Option.map_map] at hl
   exact hl
+
+theorem gate_acl {E : AEnv} {c : AConn} {inner : List Arg} {l : TLabel} {p : Bool}
+    (h1 : ceilingAdmits (ceilingFor E c.login) l = true) (h2 : labelValidT E.cfg l = true) (hk : known inner = true)
+    (hs : sessionNeededAt E c inner p = false) (ha : aclDenies E c.login inner = true) :
+    gate E c inner l p = some (errNoperm c.login (aclTarget inner)) := by
+  simp [gate, h1, h2, hk, hs, ha]
+
+theorem gate_none_acl {E : AEnv} {c : AConn} {inner : List Arg} {l : TLabel} {p : Bool}
+    (h : gate E c inner l p = none) (hk : known inner = true) : aclDenies E c.login inner = false := by
+  cases ha : aclDenies E c.login inner
+  · rfl
+  · exfalso
+    unfold gate at h
+    split at h
+    · simp at h
+    · split at h
+      · rename_i hn
+        simp [hk] at hn
+      · split at h
+        · simp at h
+        · simp at h
+
+def sessOf (c : AConn) : Bool × TLabel := (c.explicit, c.session)
+
+theorem find_map_same {α : Type} {l : List (Nat × α)} {id : Nat} {p : Nat × α} (v : α)
+    (h : l.find? (·.1 == id) = some p) :
+    (l.map fun q => if q.1 == id then (id, v) else q).find? (·.1 == id) = some (id, v) := by
+  induction l with
+  | nil => simp at h
+  | cons q rest ih =>
+    by_cases hq : q.1 = id
+    · simp [hq]
+    · have h' : rest.find? (·.1 == id) = some p := by simpa [List.find?_cons, hq] using h
+      simpa [List.find?_cons, hq] using ih h'
+
+theorem connOf_setConn {D : ADyn} {id : Nat} {c : AConn} (hc : connOf D id = some c) (c' : AConn) :
+    connOf (setConn D id c') id = some c' := by
+  unfold connOf at hc ⊢
+  unfold setConn
+  cases hf : D.conns.find? (·.1 == id) with
+  | none =>
+    rw [hf] at hc
+    simp at hc
+  | some q => simp only [find_map_same c' hf, Option.map_some]
+
+theorem connOf_of_conns {D D' : ADyn} (h : D'.conns = D.conns) (id : Nat) : connOf D' id = connOf D id := by
+  unfold connOf
+  rw [h]
+
+theorem sessOf_finishConn (c : AConn) (inner : List Arg) (l : TLabel) (p : Bool) :
+    sessOf (finishConn c inner l p) = sessOf c := by
+  unfold finishConn
+  split <;> rfl
+
+theorem refuse_sess {D : ADyn} {id : Nat} {c c0 : AConn} (hc : connOf D id = some c0) (a : List Arg) (m : String) :
+    ∃ c', connOf (refuse D id c a m).2 id = some c' ∧ sessOf c' = sessOf c := by
+  unfold refuse
+  split
+  · exact ⟨_, connOf_setConn hc _, rfl⟩
+  · exact ⟨_, connOf_setConn hc _, rfl⟩
+
+theorem core_refused_sess {E : AEnv} {D : ADyn} {id : Nat} {c c0 : AConn} {inner : List Arg} {l0 : TLabel}
+    {ctx : Option ACtx} {p : Bool} {m : String} (hc : connOf D id = some c0)
+    (h : (arriveCore E D id c inner l0 ctx p).1 = .refused m) :
+    ∃ c', connOf (arriveCore E D id c inner l0 ctx p).2 id = some c' ∧ sessOf c' = sessOf c := by
+  unfold arriveCore at h ⊢
+  split
+  · exact refuse_sess hc _ _
+  · rename_i hm
+    split
+    · obtain ⟨c', h1, h2⟩ := refuse_sess (connOf_setConn hc (finishConn c inner (finishLabel c l0) p)) inner _
+      exact ⟨c', h1, by rw [h2, sessOf_finishConn]⟩
+    · rename_i hg
+      simp [hm, hg] at h
+
+theorem finish_refused_sess {E : AEnv} {D : ADyn} {id : Nat} {c c0 : AConn} {inner : List Arg} {l0 : TLabel}
+    {ctx : Option ACtx} {p : Bool} {m : String} (hc : connOf D id = some c0)
+    (h : (arriveFinish E D id c inner l0 ctx p).1 = .refused m) :
+    ∃ c', connOf (arriveFinish E D id c inner l0 ctx p).2 id = some c' ∧ sessOf c' = sessOf c := by
+  unfold arriveFinish at h ⊢
+  split
+  · exact refuse_sess hc _ _
+  · rename_i hm
+    split
+    · obtain ⟨c', h1, h2⟩ := refuse_sess (connOf_setConn hc (finishConn c inner (finishLabel c l0) p)) inner _
+      exact ⟨c', h1, by rw [h2, sessOf_finishConn]⟩
+    · rename_i hg
+      simp [hm, hg] at h
+
+theorem arrive_refused_keeps_session {E : AEnv} {D : ADyn} {id : Nat} {args : List Arg} {m : String} {c : AConn}
+    (hc : connOf D id = some c) (h : (arrive E D id args).1 = .refused m) :
+    ∃ c', connOf (arrive E D id args).2 id = some c' ∧ sessOf c' = sessOf c := by
+  unfold arrive at h ⊢
+  rw [hc] at h ⊢
+  simp only at h ⊢
+  split
+  · rename_i hl
+    simp only [hl, ↓reduceIte] at h
+    split
+    · rename_i mm D1 hp
+      have hc1 : connOf D1 id = some c := by
+        have e := labelAsParse_conns E D c.login args
+        rw [hp] at e
+        rw [connOf_of_conns e]
+        exact hc
+      exact refuse_sess hc1 _ _
+    · rename_i pp D1 hp
+      have hc1 : connOf D1 id = some c := by
+        have e := labelAsParse_conns E D c.login args
+        rw [hp] at e
+        rw [connOf_of_conns e]
+        exact hc
+      simp only [hp] at h
+      split
+      · exact refuse_sess hc1 _ _
+      · rename_i hn
+        simp only [hn, Bool.false_eq_true, ↓reduceIte] at h
+        exact finish_refused_sess hc1 h
+  · rename_i hl
+    simp only [hl, Bool.false_eq_true, ↓reduceIte] at h
+    split
+    · exact refuse_sess hc _ _
+    · rename_i hr
+      simp only [hr, Bool.false_eq_true, ↓reduceIte] at h
+      exact finish_refused_sess hc h
+
+theorem arrive_ok_acl {E : AEnv} {D D' : ADyn} {id : Nat} {args inner : List Arg} {l : TLabel} {ctx : Option ACtx}
+    {c : AConn} (hc : connOf D id = some c) (hk : known inner = true) (h : arrive E D id args = (.ok l inner ctx, D')) :
+    aclDenies E c.login inner = false := by
+  unfold arrive at h
+  rw [hc] at h
+  simp only at h
+  split at h
+  · split at h
+    · exact (refuse_not_ok h).elim
+    · split at h
+      · exact (refuse_not_ok h).elim
+      · unfold arriveFinish at h
+        split at h
+        · exact (refuse_not_ok h).elim
+        · split at h
+          · exact (refuse_not_ok h).elim
+          · rename_i hg
+            simp only [Prod.mk.injEq, Arrival.ok.injEq] at h
+            obtain ⟨⟨_, rfl, _⟩, _⟩ := h
+            exact gate_none_acl hg hk
+  · split at h
+    · exact (refuse_not_ok h).elim
+    · unfold arriveFinish at h
+      split at h
+      · exact (refuse_not_ok h).elim
+      · split at h
+        · exact (refuse_not_ok h).elim
+        · rename_i hg
+          simp only [Prod.mk.injEq, Arrival.ok.injEq] at h
+          obtain ⟨⟨_, rfl, _⟩, _⟩ := h
+          exact gate_none_acl hg hk
+
+theorem session_change_needs_admission {E : AEnv} {D : ADyn} {id : Nat} {args : List Arg} {c c' : AConn}
+    (hc : connOf D id = some c) (hc' : connOf (arrive E D id args).2 id = some c') (hs : sessOf c' ≠ sessOf c) :
+    ∃ l inner ctx, (arrive E D id args).1 = .ok l inner ctx ∧ (known inner = true → aclDenies E c.login inner = false) := by
+  cases ha : (arrive E D id args).1 with
+  | refused m =>
+    obtain ⟨c2, h1, h2⟩ := arrive_refused_keeps_session hc ha
+    rw [hc'] at h1
+    cases h1
+    exact absurd h2 hs
+  | ok l inner ctx =>
+    refine ⟨l, inner, ctx, rfl, fun hk => ?_⟩
+    exact arrive_ok_acl hc hk (Prod.ext ha rfl)
 
 end Labels

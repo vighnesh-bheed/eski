@@ -17,6 +17,8 @@ Scratch :: struct {
 	shadow_slots: [dynamic]u32,
 	shadow_pos:   [dynamic]u32,
 	part_view:    [dynamic]i32,
+	own_view:     [dynamic]Own_View,
+	proxies:      [dynamic]Partition,
 	named:        [dynamic]Named_Hit,
 	named_heap:   [dynamic]Named_Hit,
 	slots:        [dynamic]u32,
@@ -38,6 +40,8 @@ scratch_init :: proc(sc: ^Scratch, allocator := context.allocator) {
 	sc.shadow_slots = make([dynamic]u32, 0, 0, allocator)
 	sc.shadow_pos = make([dynamic]u32, 0, 0, allocator)
 	sc.part_view = make([dynamic]i32, 0, 0, allocator)
+	sc.own_view = make([dynamic]Own_View, 0, 0, allocator)
+	sc.proxies = make([dynamic]Partition, 0, 0, allocator)
 	sc.named = make([dynamic]Named_Hit, 0, 0, allocator)
 	sc.named_heap = make([dynamic]Named_Hit, 0, 0, allocator)
 	sc.slots = make([dynamic]u32, 0, 0, allocator)
@@ -60,6 +64,8 @@ scratch_destroy :: proc(sc: ^Scratch) {
 	delete(sc.shadow_slots)
 	delete(sc.shadow_pos)
 	delete(sc.part_view)
+	delete(sc.own_view)
+	delete(sc.proxies)
 	delete(sc.named)
 	delete(sc.named_heap)
 	delete(sc.slots)

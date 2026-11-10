@@ -35,6 +35,7 @@ Info_Section :: enum {
 	Cluster,
 	Keyspace,
 	Debug,
+	Owners,
 }
 
 @(private = "file")
@@ -53,10 +54,11 @@ info_section_names := [Info_Section]string {
 	.Cluster      = "cluster",
 	.Keyspace     = "keyspace",
 	.Debug        = "debug",
+	.Owners       = "owners",
 }
 
-INFO_DEFAULT :: bit_set[Info_Section]{.Server, .Clients, .Memory, .Persistence, .Stats, .Replication, .Cpu, .Modules, .Errorstats, .Cluster, .Keyspace}
-INFO_ALL :: bit_set[Info_Section]{.Server, .Clients, .Memory, .Persistence, .Stats, .Replication, .Cpu, .Modules, .Commandstats, .Errorstats, .Latencystats, .Cluster, .Keyspace}
+INFO_DEFAULT :: bit_set[Info_Section]{.Server, .Clients, .Memory, .Persistence, .Stats, .Replication, .Cpu, .Modules, .Errorstats, .Cluster, .Keyspace, .Owners}
+INFO_ALL :: bit_set[Info_Section]{.Server, .Clients, .Memory, .Persistence, .Stats, .Replication, .Cpu, .Modules, .Commandstats, .Errorstats, .Latencystats, .Cluster, .Keyspace, .Owners}
 
 stat_net_input_bytes: i64
 stat_net_output_bytes: i64
@@ -618,9 +620,22 @@ info_generate :: proc(b: ^[dynamic]u8, want: bit_set[Info_Section]) {
 	if .Keyspace in want {
 		info_keyspace(b)
 	}
+	if .Owners in want && owners_on && access.top {
+		info_owners(b)
+	}
 	if .Debug in want {
 		info_debug(b)
 	}
+}
+
+@(private = "file")
+info_owners :: proc(b: ^[dynamic]u8) {
+	totals := keyspace_owners_totals()
+	info_section_header(b, "Owners")
+	info_line_int(b, "owners_known", i64(owner_count()))
+	info_line_int(b, "owners_holding_data", totals.holding)
+	info_line_int(b, "owner_partitions", totals.partitions)
+	info_line_int(b, "owner_bytes", totals.bytes)
 }
 
 cmd_info :: proc(c: ^Conn, argv: [][]u8) {

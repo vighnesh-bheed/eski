@@ -311,6 +311,9 @@ execute_gate :: #force_no_inline proc(c: ^Conn, cmd: ^Command, st: ^Cmd_Hot, arg
 
 @(cold)
 execute_hooked :: #force_no_inline proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8) {
+	if labels_on && !access_admit(c, slot, argv) {
+		return
+	}
 	cmd := slot.cmd
 	st := slot.stats
 	stat_cur = nil

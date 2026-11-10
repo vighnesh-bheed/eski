@@ -361,6 +361,8 @@ Z_State :: struct {
 	slots:   [dynamic]u32,
 	links:   vt.Links,
 	ready:   bool,
+	ystreams: [dynamic]u64,
+	snap:     Y_Snapshot,
 }
 
 z_reset_set :: proc(z: ^Z_State) {
@@ -385,6 +387,10 @@ z_reset :: proc(z: ^Z_State) {
 		delete(z.slots)
 		vt.links_destroy(&z.links)
 	}
+	delete(z.ystreams)
+	delete(z.snap.labels)
+	delete(z.snap.owners)
+	delete(z.snap.scopes)
 	z^ = {}
 }
 
@@ -579,6 +585,445 @@ z_relabel_bytes :: proc(z: ^Z_State, b: ^strings.Builder, fields: []string) {
 	z_bit(b, to_new)
 	strings.write_byte(b, '|')
 	z_bit(b, from_gone)
+}
+
+OWNER_SLOTS :: 8
+
+Y_Snapshot :: struct {
+	shared: int,
+	index:  int,
+	labels: [dynamic]int,
+	owners: [dynamic]int,
+	scopes: [dynamic]int,
+}
+
+y_seed :: proc(l: int, o: int) -> u64 {
+	return vt.mix64(vt.STREAM_BASE + u64(l + 4096 * o) * vt.GOLDEN_GAMMA) | 1
+}
+
+y_access :: proc(z: ^Z_State, l: int, o: int) -> vt.Access {
+	return vt.Access{label = lbl.Id(l), owner = vt.Owner(o), visibility = &z.views[l], table = &z.table, stream = &z.ystreams[l * OWNER_SLOTS + o]}
+}
+
+y_scope :: proc(b: ^strings.Builder, l: lbl.Id, o: vt.Owner) {
+	fmt.sbprintf(b, "%d:%d", int(l), int(o))
+}
+
+y_err :: proc(b: ^strings.Builder, f: vt.Failure) {
+	#partial switch f.err {
+	case .None:
+		strings.write_string(b, "none|-")
+	case .Name_In_Use:
+		strings.write_string(b, "inuse|")
+		y_scope(b, f.label, f.owner)
+	case .Invalid_Parameter:
+		strings.write_string(b, "invalid|-")
+	case:
+		panic("unexpected owner failure")
+	}
+}
+
+y_add :: proc(z: ^Z_State, b: ^strings.Builder, fields: []string, x: []f32) -> vt.Change {
+	a := y_access(z, nat(fields[0]), nat(fields[1]))
+	z_vector(word(fields[3]), x)
+	text, set := z_attr_text(fields[4])
+	req := vt.Add_Request{name = z_name(fields[2]), vector = x, quant = .BIN, attr = transmute([]u8)text, set_attr = set}
+	ch, f := vt.add_at(z.set, &a, &req, &z.sc)
+	z_bit(b, ch.added)
+	strings.write_byte(b, '|')
+	z_bit(b, ch.label_new)
+	strings.write_byte(b, '|')
+	z_bit(b, ch.label_gone)
+	strings.write_byte(b, '|')
+	z_bit(b, ch.emptied)
+	strings.write_byte(b, '|')
+	y_err(b, f)
+	return ch
+}
+
+y_remove :: proc(z: ^Z_State, b: ^strings.Builder, fields: []string) -> vt.Change {
+	a := y_access(z, nat(fields[0]), nat(fields[1]))
+	ch, f := vt.remove_at(z.set, &a, z_name(fields[2]), &z.sc)
+	z_bit(b, ch.found)
+	strings.write_byte(b, '|')
+	z_bit(b, ch.label_gone)
+	strings.write_byte(b, '|')
+	z_bit(b, ch.emptied)
+	strings.write_byte(b, '|')
+	y_err(b, f)
+	return ch
+}
+
+y_labels :: proc(b: ^strings.Builder, labels: []lbl.Id) {
+	if len(labels) == 0 {
+		strings.write_byte(b, '-')
+	}
+	for l, i in labels {
+		if i > 0 {
+			strings.write_byte(b, ',')
+		}
+		fmt.sbprintf(b, "%d", int(l))
+	}
+}
+
+y_take :: proc(z: ^Z_State, out: ^Y_Snapshot) {
+	s := z.set
+	clear(&out.labels)
+	clear(&out.owners)
+	clear(&out.scopes)
+	out.shared = vt.shared_bytes(s)
+	out.index = vt.index_bytes(s)
+	for l in 0 ..< len(z.views) {
+		append(&out.labels, vt.label_memory(s, lbl.Id(l)))
+	}
+	for o in 1 ..< OWNER_SLOTS {
+		append(&out.owners, vt.owner_memory(s, vt.Owner(o)))
+		for l in 0 ..< len(z.views) {
+			append(&out.scopes, vt.scope_memory(s, lbl.Id(l), vt.Owner(o)))
+		}
+	}
+}
+
+y_mode :: proc(s: vt.Vset, l: int, o: int) -> (m: vt.Part_Mode, ok: bool) {
+	p := vt.part_at_scope(s, lbl.Id(l), vt.Owner(o))
+	if p == nil {
+		return .Flat, false
+	}
+	return p.mode, true
+}
+
+y_checked :: proc(z: ^Z_State, b: ^strings.Builder, fields: []string, x: []f32) {
+	l := nat(fields[2])
+	o := nat(fields[3])
+	y_take(z, &z.snap)
+	bm, bok := y_mode(z.set, l, o)
+	ch: vt.Change
+	strings.write_string(b, "YU|")
+	strings.write_string(b, fields[1])
+	strings.write_byte(b, '|')
+	if fields[1] == "a" {
+		ch = y_add(z, b, fields[2:], x)
+	} else {
+		ch = y_remove(z, b, fields[2:])
+	}
+	am, aok := y_mode(z.set, l, o)
+	strings.write_byte(b, '|')
+	if bok && aok && bm == .Flat && am == .Graph {
+		strings.write_byte(b, 'g')
+	} else if bok && aok && bm == .Graph && am == .Flat {
+		strings.write_byte(b, 'f')
+	} else {
+		strings.write_byte(b, '-')
+	}
+	now: Y_Snapshot
+	defer delete(now.labels)
+	defer delete(now.owners)
+	defer delete(now.scopes)
+	y_take(z, &now)
+	shared_same := now.shared == z.snap.shared
+	for v, i in now.labels {
+		shared_same &&= v == z.snap.labels[i]
+	}
+	others_same := true
+	for oi in 1 ..< OWNER_SLOTS {
+		if oi == o {
+			continue
+		}
+		others_same &&= now.owners[oi - 1] == z.snap.owners[oi - 1]
+		for li in 0 ..< len(z.views) {
+			k := (oi - 1) * len(z.views) + li
+			others_same &&= now.scopes[k] == z.snap.scopes[k]
+		}
+	}
+	total := 0
+	for v in now.owners {
+		total += v
+	}
+	strings.write_byte(b, '|')
+	if o == 0 {
+		strings.write_byte(b, '-')
+	} else {
+		z_bit(b, shared_same)
+	}
+	strings.write_byte(b, '|')
+	z_bit(b, others_same)
+	strings.write_byte(b, '|')
+	if o != 0 && (ch.label_new || ch.label_gone) {
+		strings.write_byte(b, '-')
+	} else {
+		z_bit(b, now.index == z.snap.index)
+	}
+	strings.write_byte(b, '|')
+	z_bit(b, vt.owner_bytes(z.set) == total)
+}
+
+y_invalid :: proc(z: ^Z_State, b: ^strings.Builder, fields: []string, x: []f32) {
+	op := fields[1]
+	l := nat(fields[2])
+	o := nat(fields[3])
+	st := u64(5)
+	other_st := u64(7)
+	a := vt.Access{label = lbl.Id(l), owner = vt.Owner(o), visibility = &z.views[l], table = &z.table}
+	if fields[4] == "1" {
+		a.stream = &st
+	}
+	maker := y_access(z, 0, 0)
+	req := vt.Add_Request{name = transmute([]u8)string("i"), vector = x, quant = .BIN}
+	tmp, cf := vt.create_at(&req, &maker)
+	assert(cf.err == .None)
+	defer vt.destroy(tmp)
+	err: vt.Error
+	switch op {
+	case "create":
+		s, f := vt.create_at(&req, &a)
+		if s != nil {
+			vt.destroy(s)
+		}
+		err = f.err
+	case "view":
+		_, err = vt.view_open(tmp, &a, &z.sc)
+	case "add":
+		_, f := vt.add_at(tmp, &a, &req, &z.sc)
+		err = f.err
+	case "rem":
+		_, f := vt.remove_at(tmp, &a, req.name, &z.sc)
+		err = f.err
+	case "set":
+		_, f := vt.set_attribute_at(tmp, &a, req.name, transmute([]u8)string(`{"a":1}`))
+		err = f.err
+	case "relabel", "relabelx":
+		to := a
+		to.label = lbl.Id(0)
+		if op == "relabelx" {
+			to.owner = vt.Owner(o + 1) if o + 1 < OWNER_SLOTS else vt.Owner(1)
+			to.stream = &other_st
+		}
+		_, _, f := vt.relabel_at(tmp, &a, &to, req.name, &z.sc)
+		err = f.err
+	case "casp":
+		plan: vt.Cas_Plan
+		f := vt.cas_prepare_at(tmp, &a, &req, &plan, &z.sc)
+		vt.cas_discard(&plan)
+		err = f.err
+	case "casc":
+		plan: vt.Cas_Plan
+		pf := vt.cas_prepare_at(tmp, &maker, &req, &plan, &z.sc)
+		assert(pf.err == .None)
+		_, f := vt.cas_commit_at(tmp, &a, &plan, &z.sc)
+		vt.cas_discard(&plan)
+		err = f.err
+	case:
+		panic("invalid YI op")
+	}
+	fmt.sbprintf(b, "YI|%s|%s", op, "invalid" if err == .Invalid_Parameter else "ok")
+}
+
+y_step :: proc(z: ^Z_State, fields: []string, b: ^strings.Builder, x: []f32) {
+	switch fields[0] {
+	case "YN":
+		z_reset_set(z)
+		resize(&z.ystreams, len(z.views) * OWNER_SLOTS)
+		for l in 0 ..< len(z.views) {
+			for o in 0 ..< OWNER_SLOTS {
+				z.ystreams[l * OWNER_SLOTS + o] = y_seed(l, o)
+			}
+		}
+		vt.flat_limit = nat(fields[1])
+		vt.shrink_limit = nat(fields[2])
+		req := vt.Add_Request{vector = x, quant = .BIN}
+		if fields[3] == "plain" {
+			s, f := vt.create_for(&req)
+			assert(f.err == .None)
+			z.set = s
+		} else {
+			a := y_access(z, 0, 0)
+			s, f := vt.create_at(&req, &a)
+			assert(f.err == .None)
+			z.set = s
+		}
+		strings.write_string(b, "YN|ok")
+	case "YP":
+		z_vector(word(fields[2]), x)
+		text, set := z_attr_text(fields[3])
+		req := vt.Add_Request{name = z_name(fields[1]), vector = x, quant = .BIN, attr = transmute([]u8)text, set_attr = set}
+		added, f := vt.add(z.set, &req, &z.sc)
+		assert(f.err == .None)
+		strings.write_string(b, "YP|")
+		z_bit(b, added)
+	case "YA":
+		strings.write_string(b, "YA|")
+		y_add(z, b, fields[1:], x)
+	case "YR":
+		strings.write_string(b, "YR|")
+		y_remove(z, b, fields[1:])
+	case "YE":
+		a := y_access(z, nat(fields[1]), nat(fields[2]))
+		text, _ := z_attr_text(fields[4])
+		ch, f := vt.set_attribute_at(z.set, &a, z_name(fields[3]), transmute([]u8)text)
+		strings.write_string(b, "YE|")
+		z_bit(b, ch.found)
+		strings.write_byte(b, '|')
+		y_err(b, f)
+	case "YU":
+		y_checked(z, b, fields, x)
+	case "YL":
+		removed, ch := vt.remove_scope(z.set, lbl.Id(nat(fields[1])), vt.Owner(nat(fields[2])))
+		fmt.sbprintf(b, "YL|%d|", removed)
+		z_bit(b, ch.found)
+		strings.write_byte(b, '|')
+		z_bit(b, ch.label_gone)
+		strings.write_byte(b, '|')
+		z_bit(b, ch.emptied)
+	case "YW":
+		labels: [dynamic]lbl.Id
+		defer delete(labels)
+		removed, ch := vt.remove_owner(z.set, vt.Owner(nat(fields[1])), &labels)
+		fmt.sbprintf(b, "YW|%d|", removed)
+		z_bit(b, ch.found)
+		strings.write_byte(b, '|')
+		z_bit(b, ch.label_gone)
+		strings.write_byte(b, '|')
+		z_bit(b, ch.emptied)
+		strings.write_byte(b, '|')
+		y_labels(b, labels[:])
+	case "YC":
+		a := y_access(z, nat(fields[1]), nat(fields[2]))
+		v, err := vt.view_open(z.set, &a, &z.sc)
+		assert(err == .None)
+		info := vt.view_info(&v)
+		fmt.sbprintf(b, "YC|%d|%d|%d|", info.size, info.attributes_count, info.max_node_uid)
+		if len(v.parts) == 0 {
+			strings.write_byte(b, '-')
+		}
+		for vp, i in v.parts {
+			if i > 0 {
+				strings.write_byte(b, ',')
+			}
+			p := vp.part
+			y_scope(b, p.label, p.owner)
+			fmt.sbprintf(b, ":%s:%d:%d", z_mode(p.mode), p.count, p.graph.node_uid)
+		}
+	case "YF":
+		a := y_access(z, nat(fields[1]), nat(fields[2]))
+		v, _ := vt.view_open(z.set, &a, &z.sc)
+		r, ok := vt.view_find(&v, z_name(fields[3]))
+		if !ok {
+			strings.write_string(b, "YF|-")
+		} else {
+			sc := vt.ref_scope(z.set, r)
+			strings.write_string(b, "YF|")
+			y_scope(b, sc.label, sc.owner)
+			strings.write_byte(b, '|')
+			text, has := vt.ref_attribute(z.set, r)
+			z_write_attr(b, text, has)
+			fmt.sbprintf(b, "|%d", z_mask_of(vt.ref_raw_embedding(z.set, r)))
+		}
+	case "YG":
+		a := y_access(z, nat(fields[1]), nat(fields[2]))
+		v, _ := vt.view_open(z.set, &a, &z.sc)
+		clear(&z.refs)
+		vt.view_range(&v, z_bound(fields[3]), z_bound(fields[4]), int(integer(fields[5])), &z.refs)
+		strings.write_string(b, "YG|")
+		z_refs(b, z.set, z.refs[:])
+	case "YQ":
+		a := y_access(z, nat(fields[1]), nat(fields[2]))
+		v, _ := vt.view_open(z.set, &a, &z.sc)
+		req := vt.Search_Request{count = nat(fields[5]), ef = 1000, truth = fields[6] == "1"}
+		if fields[3] == "v" {
+			z_vector(word(fields[4]), x)
+			req.kind = .Vector
+			req.vector = x
+		} else {
+			req.kind = .Element
+			req.element = z_name(fields[4])
+		}
+		if fields[7] != "-" {
+			req.filter = fmt.tprintf(".a >= %s", fields[7][1:])
+			req.use_filter = true
+		}
+		if fields[8] != "-" {
+			req.filter_ef = nat(fields[8][1:])
+		}
+		if fields[9] != "-" {
+			req.epsilon = f64(nat(fields[9][1:])) / 64
+			req.use_epsilon = true
+		}
+		clear(&z.hits)
+		f := vt.view_search(&v, &req, &z.sc, &z.hits)
+		if f.err == .Element_Not_Found {
+			strings.write_string(b, "YQ|notfound")
+		} else {
+			assert(f.err == .None)
+			strings.write_string(b, "YQ|ok|")
+			z_hits(b, z.set, z.hits[:])
+		}
+	case "YM":
+		a := y_access(z, nat(fields[1]), nat(fields[2]))
+		v, _ := vt.view_open(z.set, &a, &z.sc)
+		clear(&z.refs)
+		switch fields[3] {
+		case "m":
+			if r, ok := vt.view_random_member(&v); ok {
+				append(&z.refs, r)
+			}
+		case "d":
+			vt.view_random_distinct(&v, nat(fields[4]), &z.refs)
+		case:
+			vt.view_random_repeats(&v, nat(fields[4]), &z.refs)
+		}
+		strings.write_string(b, "YM|")
+		z_refs(b, z.set, z.refs[:])
+	case "YK":
+		a := y_access(z, nat(fields[1]), nat(fields[2]))
+		v, _ := vt.view_open(z.set, &a, &z.sc)
+		name := z_name(fields[3])
+		if !vt.view_links(&v, name, &z.sc, &z.links) {
+			strings.write_string(b, "YK|-")
+		} else {
+			self, _ := vt.view_find(&v, name)
+			if vt.ref_part(z.set, self).mode != .Flat {
+				strings.write_string(b, "YK|graph")
+			} else {
+				assert(len(z.links.ends) == 1)
+				strings.write_string(b, "YK|")
+				if len(z.links.refs) == 0 {
+					strings.write_byte(b, '-')
+				}
+				for r, i in z.links.refs {
+					if i > 0 {
+						strings.write_byte(b, ',')
+					}
+					z_write_name(b, vt.ref_name(z.set, r))
+					fmt.sbprintf(b, ":%d", z_score(f64(vt.ref_link_score(z.set, self, r))))
+				}
+			}
+		}
+	case "YS":
+		a := y_access(z, nat(fields[1]), nat(fields[2]))
+		top, ok := vt.top_visible_scope(z.set, &a)
+		strings.write_string(b, "YS|")
+		if ok {
+			y_scope(b, top.label, top.owner)
+		} else {
+			strings.write_byte(b, '-')
+		}
+		labels: [dynamic]lbl.Id
+		defer delete(labels)
+		vt.owner_labels(z.set, a.owner, &labels)
+		fmt.sbprintf(b, "|%d|%d|", vt.owner_card(z.set, a.owner), vt.owner_count(z.set))
+		y_labels(b, labels[:])
+	case "YZ":
+		o := nat(fields[1])
+		src := nat(fields[2])
+		for l in 0 ..< len(z.views) {
+			z.ystreams[l * OWNER_SLOTS + o] = y_seed(l, src)
+		}
+		strings.write_string(b, "YZ|ok")
+	case "YI":
+		y_invalid(z, b, fields, x)
+	case:
+		panic("invalid owner line")
+	}
 }
 
 z_step :: proc(z: ^Z_State, fields: []string, b: ^strings.Builder) {
@@ -870,6 +1315,8 @@ z_step :: proc(z: ^Z_State, fields: []string, b: ^strings.Builder) {
 		case:
 			panic("invalid ZO line")
 		}
+	case "YN", "YP", "YA", "YR", "YE", "YU", "YL", "YW", "YC", "YF", "YG", "YQ", "YM", "YK", "YS", "YZ", "YI":
+		y_step(z, fields, b, x[:])
 	case:
 		panic("invalid case line")
 	}

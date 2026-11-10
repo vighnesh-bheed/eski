@@ -111,6 +111,9 @@ lua_busy_dispatch_inner :: proc(client: ^Conn, argv: [][]u8) {
 		tx_flag(client)
 		return
 	}
+	if labels_on && !access_admit(client, slot, argv) {
+		return
+	}
 	if lua_active.loading && persist_gate(client, cmd, argv) {
 		stat_reject(hot, argv)
 		return

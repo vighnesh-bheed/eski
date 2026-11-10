@@ -90,7 +90,7 @@ quant_code :: #force_inline proc "contextless" (q: Quant) -> u8 {
 element_encoded_size :: proc "contextless" (s: Vset, slot: u32) -> int {
 	e := &s.elements[slot]
 	n := varint_size(e.seq) + varint_size(u64(e.len)) + int(e.len) + s.arena.stride + 4
-	if s.quant == .Int8 {
+	if s.arena.elem == .Int8 {
 		n += 4
 	}
 	if e.attr.blob == nil {
@@ -127,7 +127,7 @@ serialize :: proc(s: Vset, sink: Sink) -> int {
 	e := &enc
 	magic := CODEC_MAGIC
 	encoder_bytes(e, magic[:])
-	head := [2]u8{CODEC_VERSION, quant_code(elem_quant(s.quant))}
+	head := [2]u8{CODEC_VERSION, quant_code(elem_quant(s.arena.elem))}
 	encoder_bytes(e, head[:])
 	encoder_varint(e, u64(s.dim))
 	encoder_varint(e, u64(s.input_dim))
@@ -142,7 +142,7 @@ serialize :: proc(s: Vset, sink: Sink) -> int {
 		encoder_bytes(e, el.name[:el.len])
 		encoder_bytes(e, vmath.arena_bytes(&s.arena, slot))
 		encoder_f32(e, vmath.arena_norm(&s.arena, slot))
-		if s.quant == .Int8 {
+		if s.arena.elem == .Int8 {
 			encoder_f32(e, vmath.arena_range(&s.arena, slot))
 		}
 		if el.attr.blob == nil {
@@ -333,7 +333,7 @@ decode_elements :: proc(s: Vset, d: ^Decoder, count: int, max_uid: u64, sc: ^Scr
 		return .Out_Of_Memory
 	}
 	stride := s.arena.stride
-	ranged := s.quant == .Int8
+	ranged := s.arena.elem == .Int8
 	for _ in 0 ..< count {
 		seq, seq_ok := decoder_varint(d)
 		if !seq_ok {

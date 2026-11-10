@@ -46,6 +46,8 @@ Acl_Rule_Error :: enum u8 {
 	Subcommand_First_Arg,
 	Labels_Off,
 	Bad_Label,
+	Owners_Off,
+	Bad_Owner,
 }
 
 Acl_User_Flag :: enum u8 {
@@ -224,6 +226,8 @@ acl_rule_error_text := [Acl_Rule_Error]string {
 	.Subcommand_First_Arg   = "Allowing first-arg of a subcommand is not supported",
 	.Labels_Off             = "Labels are not configured on this server",
 	.Bad_Label              = "Invalid label rule",
+	.Owners_Off             = "Owners are not enabled on this server",
+	.Bad_Owner              = "Invalid owner rule",
 }
 
 @(private = "file")
@@ -2288,7 +2292,7 @@ acl_cmd_deluser :: proc(c: ^Conn, argv: [][]u8) {
 				acl_evict_conn(other, c)
 			}
 		}
-		label_contexts_drop_owner(u.username)
+		label_contexts_drop_login(u.username)
 		acl_label_changed(c, "acl-deluser", u.username, nil)
 		acl_user_free(u)
 		deleted += 1
@@ -2304,7 +2308,7 @@ acl_cmd_getuser :: proc(c: ^Conn, argv: [][]u8) {
 		reply_null(c)
 		return
 	}
-	reply_map(c, 9 if labels_on else 6)
+	reply_map(c, 10 if owners_on else 9 if labels_on else 6)
 	reply_bulk_str(c, "flags")
 	n := 0
 	for f in Acl_User_Flag {

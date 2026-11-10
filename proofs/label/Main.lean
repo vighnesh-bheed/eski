@@ -103,8 +103,11 @@ structure St where
   vis : Vis := build tbottom tableInit
   ctr : Ctr := ctrInit
   subj : Subject := subjectMake tbottom
-  aenv : AEnv := ⟨⟨⟨[], []⟩, []⟩, [], 3600, 1000, 0, [], []⟩
+  aenv : AEnv := ⟨⟨⟨[], []⟩, []⟩, [], 3600, 1000, 0, [], [], []⟩
   adyn : ADyn := ⟨[], [], 0, []⟩
+  oenv : OEnv := ⟨[], []⟩
+  odyn : ODyn := ⟨[], []⟩
+  busy : Option (TLabel × Owner) := none
   keys : List (KState (List Nat) Unit) := []
 
 def cfgCounts (c : TConfig) : String := s!"{c.base.levels.length}|{c.base.comps.length}|{c.trusts.length}"
@@ -201,11 +204,93 @@ def connText (D : ADyn) (id : Nat) : String :=
 
 def markedText (D : ADyn) : String := joinOr ((D.conns.filter (·.2.cas)).map (toString ·.1))
 
+def ownerText : Owner → String
+  | .shared => "s"
+  | .every => "e"
+  | .user t => hex t
+
+def arrivalOText : ArrivalO → String
+  | .ok l o inner x => s!"ok:{showLabel l}:{ownerText o}:{inner.length}:{ctxText x}"
+  | .refused m => s!"no:{m}"
+
+def replyOText (tc : TConfig) : ReplyO → String
+  | .base r => replyText tc r
+  | .info l o => s!"info:{hex ((format tc.base l.sec).getD [])}:{hex (tc.trusts.getD l.trust [])}:{ownerText o}"
+
+def owsText (c : OConn) : String := if c.wany then s!"{bit c.wmixed}/{showLabel c.wlabel}/{ownerText c.wowner}" else "-"
+
+def oconnText (D : ADyn) (OD : ODyn) (id : Nat) : String :=
+  match connOf D id with
+  | none => "-"
+  | some c =>
+    let o := oconnOf OD id
+    s!"{bit c.inMulti}{bit c.dirty}{bit c.explicit}{bit c.cas}:{if c.explicit then showLabel c.session else "-"}:{showLabel c.bound}:" ++
+      s!"{c.watched.length}:{bit o.pinned}:{if o.pinned then ownerText o.pin else "-"}:{ownerText o.owner}:{owsText o}"
+
+def parseOKind (k id : String) : Except String OKind :=
+  if k == "-" then .ok .none else if k == "*" then .ok .any else if k == "f" then do return .fixed (← unhex id)
+  else .error ("invalid owner kind " ++ k)
+
+def parseTokOwner (s : String) : Except String (Option TokOwner) :=
+  match s.splitOn ":" with
+  | ["-"] => .ok (some .none)
+  | ["s"] => .ok (some .shared)
+  | ["x", h] => do return some (.owner (← unhex h))
+  | ["B"] => .ok none
+  | ["D"] => .ok none
+  | ["L"] => .ok none
+  | _ => .error ("invalid token owner " ++ s)
+
 def ruleClear (s : String) : Except String (Bool × Option Label) :=
   if s == "*" then .ok (true, none) else if s == "-" then .ok (false, none) else do return (false, some (← parseLabel s).sec)
 
 def ruleTrust (s : String) : Except String (Bool × Option Nat) :=
   if s == "*" then .ok (true, none) else if s == "-" then .ok (false, none) else do return (false, some (← parseNat s))
+
+def inMultiOf (D : ADyn) (id : Nat) : Bool := ((connOf D id).map (·.inMulti)).getD false
+
+def busyText (busy : Option (TLabel × Owner)) (multi : Bool) (allowed : TLabel × Owner → Bool) : String :=
+  match busy with
+  | none => "nobusy"
+  | some s => if multi then "queued" else bit (allowed s)
+
+def stepRequest (st : St) (kind id : String) (args : List String) : Except String (St × String) := do
+  let id ← parseNat id
+  let args ← args.mapM parseArg
+  if kind == "AR" || kind == "AH" || kind == "AE" then
+    let (a, r, D) := request st.aenv st.adyn id args
+    let busy := match a with
+      | .ok l _ _ => if kind == "AE" then (if inMultiOf D id then none else some (l, Owner.shared)) else st.busy
+      | .refused _ => if kind == "AE" then none else st.busy
+    return ({ st with adyn := D, busy := busy }, s!"{kind}|{arrivalText a}|{replyText st.aenv.cfg r}|{connText D id}|{D.ctxs.length}")
+  else if kind == "OR" || kind == "OS" then
+    let (a, r, D, OD) := requestO st.aenv st.oenv st.adyn st.odyn id args
+    let busy := match a with
+      | .ok l o _ _ => if kind == "OS" then (if inMultiOf D id then none else some (l, o)) else st.busy
+      | .refused _ => if kind == "OS" then none else st.busy
+    return ({ st with adyn := D, odyn := OD, busy := busy }, s!"{kind}|{arrivalOText a}|{replyOText st.aenv.cfg r}|{oconnText D OD id}|{D.ctxs.length}")
+  else if kind == "AB" then
+    let (a, D) := arrive st.aenv st.adyn id args
+    let verdict := match a with
+      | .ok l _ _ => busyText st.busy (inMultiOf D id) fun s => mayKill false (topLabelOf st.aenv l) l false .shared s.1 s.2
+      | .refused _ => "-"
+    return ({ st with adyn := D }, s!"AB|{arrivalText a}|{verdict}|{connText D id}|{D.ctxs.length}")
+  else if kind == "OB" then
+    let (a, D, OD) := arriveO st.aenv st.oenv st.adyn st.odyn id args
+    let r := match connOf st.adyn id with
+      | some c => orulesOf st.oenv c.login
+      | none => noORules
+    let verdict := match a with
+      | .ok l o _ _ => busyText st.busy (inMultiOf D id) fun s => mayKill true (topLabelOf st.aenv l && r.operator) l r.operator o s.1 s.2
+      | .refused _ => "-"
+    return ({ st with adyn := D, odyn := OD }, s!"OB|{arrivalOText a}|{verdict}|{oconnText D OD id}|{D.ctxs.length}")
+  else throw ("unknown case " ++ kind)
+
+def denyStep (st : St) (kind login names : String) : Except String (St × String) := do
+  let login ← unhex login
+  let ns ← nameList names
+  let e := { st.aenv with acl := (login, ns) :: st.aenv.acl.filter (·.1 != login) }
+  return ({ st with aenv := e, adyn := { st.adyn with cache := [] } }, s!"{kind}|{ns.length}")
 
 def step (st : St) (f : List String) : Except String (St × String) := do
   match f with
@@ -298,8 +383,8 @@ def step (st : St) (f : List String) : Except String (St × String) := do
   | ["NV"] => return (st, s!"NV|{visibleTotal st.ctr st.vis}|{joinOr (st.ctr.counts.map toString)}")
   | ["AX", lv, cm, tr, aud, idle, cap] =>
     let tc ← buildCfg (← nameList lv) (← nameList cm) (← nameList tr)
-    let e : AEnv := ⟨tc, ← unhex aud, ← parseNat idle, ← parseNat cap, st.aenv.now, [], []⟩
-    return ({ st with aenv := e, adyn := ⟨[], [], 0, []⟩ }, s!"AX|{cfgCounts tc}")
+    let e : AEnv := ⟨tc, ← unhex aud, ← parseNat idle, ← parseNat cap, st.aenv.now, [], [], []⟩
+    return ({ st with aenv := e, adyn := ⟨[], [], 0, []⟩, busy := none }, s!"AX|{cfgCounts tc}")
   | ["AU", login, clr, tr, pc, rt, keys, _] =>
     let login ← unhex login
     let (ct, cl) ← ruleClear clr
@@ -312,6 +397,7 @@ def step (st : St) (f : List String) : Except String (St × String) := do
     let c : AConn := ⟨← unhex login, false, tbottom, false, false, tbottom, false, false, wsEmpty, []⟩
     return ({ st with adyn := { st.adyn with conns := st.adyn.conns ++ [(← parseNat id, c)] } }, s!"AC|{id}")
   | ["AT", now] => return ({ st with aenv := { st.aenv with now := ← parseNat now } }, s!"AT|{now}")
+  | ["OT", now] => return ({ st with aenv := { st.aenv with now := ← parseNat now } }, s!"OT|{now}")
   | ["AK", k, w] =>
     let D := touch st.adyn (← unhex k) (← parseLabel w)
     return ({ st with adyn := D }, s!"AK|{markedText D}")
@@ -334,6 +420,38 @@ def step (st : St) (f : List String) : Except String (St × String) := do
       let (x, D) := findIn st.aenv st.adyn c.login (hrefOf a)
       return ({ st with adyn := D }, s!"AQ|{ctxText x}|{D.ctxs.length}")
   | "AS" :: args => return (st, s!"AS|{bit (scriptDenied (← args.mapM parseArg))}")
+  | ["AP", login, names] => denyStep st "AP" login names
+  | ["OP", login, names] => denyStep st "OP" login names
+  | ["OX", lv, cm, tr, aud, idle, cap] =>
+    let tc ← buildCfg (← nameList lv) (← nameList cm) (← nameList tr)
+    let e : AEnv := ⟨tc, ← unhex aud, ← parseNat idle, ← parseNat cap, st.aenv.now, [], [], []⟩
+    return ({ st with aenv := e, adyn := ⟨[], [], 0, []⟩, oenv := ⟨[], []⟩, odyn := ⟨[], []⟩, busy := none }, s!"OX|{cfgCounts tc}")
+  | ["OU", login, clr, tr, pc, rt, keys, _, okind, oid, osh, oop] =>
+    let login ← unhex login
+    let (ct, cl) ← ruleClear clr
+    let (tt, tl) ← ruleTrust tr
+    let r : LRules := ⟨ct, cl, tt, tl, pc == "1", rt == "1", ← parseIds keys⟩
+    let orr : ORules := ⟨← parseOKind okind oid, osh == "1", oop == "1"⟩
+    let e := { st.aenv with users := (login, r) :: st.aenv.users.filter (·.1 != login) }
+    let oe := { st.oenv with rules := (login, orr) :: st.oenv.rules.filter (·.1 != login) }
+    return ({ st with aenv := e, oenv := oe, adyn := { st.adyn with cache := [] } },
+      s!"OU|{showLabel (ceilingFor e login)}|{bit r.perCommand}|{bit r.requireToken}|{r.keys.length}|{okind}|{osh}|{oop}")
+  | ["OC", id, login] =>
+    let c : AConn := ⟨← unhex login, false, tbottom, false, false, tbottom, false, false, wsEmpty, []⟩
+    let n ← parseNat id
+    return ({ st with adyn := { st.adyn with conns := st.adyn.conns ++ [(n, c)] }, odyn := setOConn st.odyn n oconnFresh }, s!"OC|{id}")
+  | ["OO", n, secret, marking, trust, expires, aud, ctx, flaw, owner] =>
+    let to ← parseTokOwner owner
+    let fl ← parseNat flaw
+    let sp : TokSpec := ⟨← parseNat secret, ← optHex marking, ← optHex trust, ← unhex expires, ← optHex aud,
+      ← parseHRef ctx, if to.isNone && fl == 0 then 4 else fl⟩
+    let n ← parseNat n
+    return ({ st with aenv := { st.aenv with tokens := st.aenv.tokens ++ [(n, sp)] },
+                      oenv := { st.oenv with tokens := st.oenv.tokens ++ [(n, to.getD .none)] } }, s!"OO|{n}")
+  | ["OA", id, login] =>
+    let id ← parseNat id
+    let (D, OD) := authO st.adyn st.odyn id (← unhex login)
+    return ({ st with adyn := D, odyn := OD }, s!"OA|{oconnText D OD id}")
   | ["KX"] => return ({ st with keys := List.replicate 16 ⟨[], []⟩ }, "KX")
   | ["KA", d, n, l] =>
     let d ← parseNat d
@@ -357,12 +475,7 @@ def step (st : St) (f : List String) : Except String (St × String) := do
       match resolve s r n with
       | some c => return (st, s!"KQ|{showLabel c.label}")
       | none => return (st, "KQ|-")
-  | kind :: id :: args =>
-    if kind == "AR" || kind == "AH" then do
-      let id ← parseNat id
-      let (a, r, D) := request st.aenv st.adyn id (← args.mapM parseArg)
-      return ({ st with adyn := D }, s!"{kind}|{arrivalText a}|{replyText st.aenv.cfg r}|{connText D id}|{D.ctxs.length}")
-    else throw ("unknown case " ++ String.intercalate " " f)
+  | kind :: id :: args => stepRequest st kind id args
   | _ => throw ("unknown case " ++ String.intercalate " " f)
 
 def main (args : List String) : IO Unit := do

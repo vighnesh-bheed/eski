@@ -2,6 +2,7 @@ package main
 
 import "base:intrinsics"
 import lb "label"
+import ow "owner"
 
 Tx_Flag :: enum u8 {
 	Multi,
@@ -21,7 +22,10 @@ Watched_Key :: struct {
 	expired: bool,
 	present: bool,
 	label:   lb.Id,
+	owner:   ow.Owner,
 }
+
+#assert(size_of(Watched_Key) == 32)
 
 Watcher :: struct {
 	c:   ^Conn,
@@ -608,7 +612,7 @@ watch_key :: proc(c: ^Conn, db: ^Db, key: []u8) {
 	}
 	watch_metadata_adjust(wk, -1)
 	append(&wk.watchers, Watcher{c, len(st.watched)})
-	append(&st.watched, Watched_Key{db.id, wk.key, exists && expired, exists && !expired, access.id if labels_on else lb.BOTTOM_ID})
+	append(&st.watched, Watched_Key{db.id, wk.key, exists && expired, exists && !expired, access.id if labels_on else lb.BOTTOM_ID, access.owner if owners_on else ow.SHARED})
 	watch_metadata_adjust(wk, 1)
 	client_metadata_sync(c)
 	if len(st.watched) == 1 {
@@ -829,7 +833,7 @@ tx_dirty_visible :: proc(c: ^Conn) -> bool {
 		return true
 	}
 	for w in c.tx.watched {
-		if !access_dominates(access.id, w.label) {
+		if !access_dominates(access.id, w.label) || (owners_on && !ow.sees(access_view_owner(), w.owner)) {
 			return false
 		}
 	}

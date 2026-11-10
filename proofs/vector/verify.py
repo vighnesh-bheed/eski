@@ -19,11 +19,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from kernel_audit import audit as audit_kernel
 import commands as vcommands
 import labelled
-from labelled import labelled_corpus
+from labelled import labelled_corpus, owner_corpus
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = Path(__file__).resolve().parent
 SEED = 0xE5A1EC7
+OWNER_SALT = 0x0B5E
+OWNER_BLOCK = {}
 DIM_MAX = 1 << 19
 U8_MAX = (1 << 8) - 1
 F32_OVERFLOW = Fraction(2 ** 128 - 2 ** 103)
@@ -35,10 +37,10 @@ AREAS = {
     'graph': ['Graph', 'Width', 'Twin'],
     'arena': ['Arena'],
     'filter': ['Filter'],
-    'merge': ['Merge'],
-    'resolution': ['Resolve'],
-    'independence': ['Partition'],
-    'compatibility': ['Plain'],
+    'merge': ['Merge', 'OwnerMerge'],
+    'resolution': ['Resolve', 'Owner', 'OwnerSim'],
+    'independence': ['Partition', 'OwnerPartition', 'OwnerFootprint'],
+    'compatibility': ['Plain', 'OwnerPlain'],
     'relabel': ['Relabel', 'LabelSim'],
     'commands': ['Commands'],
 }
@@ -1137,6 +1139,13 @@ def corpus():
         index_session((2, 3)[session % 2], (1, 1, 1, 2)[(session // 2) % 4], pool, rng.randrange(60, 90), 50)
 
     labelled_corpus(rng, emit, stats)
+    owner_start = len(expected)
+    owner_run, twins, singles, sensitivity = owner_corpus(random.Random(SEED ^ OWNER_SALT), stats)
+    for line, row in zip(owner_run.lines, owner_run.rows):
+        emit(line, row)
+    OWNER_BLOCK.clear()
+    OWNER_BLOCK.update(start=owner_start, lines=list(owner_run.lines), twins=twins, singles=singles,
+                       sensitivity=sensitivity)
     assert stats['refusals'] > 0 and stats['forced_copies'] > 0 and stats['hidden_bursts'] > 0
     assert stats['trusted_labels'] > 0 and stats['own_rule_decisive'] > 0
     assert stats['relabel_moves'] > 0 and stats['relabel_refusals'] > 0 and stats['relabel_bytes'] > 0
@@ -1259,6 +1268,19 @@ def swap_tied(row):
     return (head + '|' if head else '') + ','.join(items)
 
 
+def owner_mixed(row):
+    parts = row.split('|')[4].split(',')
+    return len(parts) > 1 and parts[0].split(':')[1] != parts[1].split(':')[1]
+
+
+def swap_parts(row):
+    head = row.split('|')
+    parts = head[4].split(',')
+    parts[0], parts[1] = parts[1], parts[0]
+    head[4] = ','.join(parts)
+    return '|'.join(head)
+
+
 def negative_controls(expected):
     cases = {'empty': '', 'truncated': '\n'.join(expected[:-1]) + '\n',
              'extra': '\n'.join(expected + [expected[0]]) + '\n'}
@@ -1308,6 +1330,14 @@ def negative_controls(expected):
         'relabel_refusal_label': ('ZX|0|0|inuse|', lambda r: True, lambda r: r[:-1] + str((int(r[-1]) + 1) % 10)),
         'relabel_refusal_kind': ('ZX|0|0|notfound|', lambda r: True, lambda r: 'ZX|0|0|inuse|0'),
         'relabel_bytes_differ': ('ZB|', lambda r: True, lambda r: r.replace('|1|', '|0|', 1)),
+        'owner_view_order': ('YC|', lambda r: r.count(',') > 0 and owner_mixed(r), swap_parts),
+        'owner_refusal_scope': ('YA|0|0|0|0|inuse|', lambda r: True, lambda r: r[:-1] + str((int(r[-1]) + 1) % 10)),
+        'owner_found_scope': ('YF|', lambda r: r != 'YF|-' and r.split('|')[1].split(':')[1] != '0',
+                              lambda r: '|'.join([r.split('|')[0], r.split('|')[1].split(':')[0] + ':0'] + r.split('|')[2:])),
+        'owner_forget_labels': ('YW|', lambda r: r.split('|')[-1] != '-', lambda r: r.rsplit('|', 1)[0] + '|-'),
+        'owner_account_flag': ('YU|', lambda r: r.split('|')[-4] == '1', lambda r: '|'.join(r.split('|')[:-4] + ['0'] + r.split('|')[-3:])),
+        'owner_graduation_flag': ('YU|', lambda r: r.split('|')[-5] == 'g', lambda r: '|'.join(r.split('|')[:-5] + ['-'] + r.split('|')[-4:])),
+        'owner_access_valid': ('YI|', lambda r: r.endswith('|invalid'), lambda r: r[:-len('invalid')] + 'ok'),
     }
     for name, (prefix, accept, mutate) in semantic.items():
         index = next((i for i, row in enumerate(expected) if row.startswith(prefix) and (accept(row) or
@@ -1444,6 +1474,76 @@ def relabel_mutants():
             'refuses_visible_other': refuses_visible_other, 'keeps_source': keeps_source}
 
 
+def owner_mutants():
+    class OwnerCheckDropped(labelled.OSet):
+        def write_scope(self, w):
+            return (w[0], 0)
+
+    class SharedHidden(labelled.OSet):
+        def sees(self, w, x):
+            return self.scheme.sees(w[0], x[0]) and (x[1] == w[1] if w[1] != 0 else x[1] == 0)
+
+    class OtherOwnerVisible(labelled.OSet):
+        def sees(self, w, x):
+            leak = 1 if w[1] != 1 else 2
+            return self.scheme.sees(w[0], x[0]) and x[1] in (0, w[1], leak)
+
+    class TieReversed(labelled.OSet):
+        def key(self, w, x):
+            return (self.scheme.rank(x[0]), x[1] == 0)
+
+    class StreamShared(labelled.OSet):
+        def stream_key(self, x):
+            return (x[0], 1) if x[1] in (1, 2) else x
+
+    class SharedExactSkipped(labelled.OSet):
+        def resolve(self, w, ls):
+            if w in ls:
+                return w
+            best = None
+            for x in ls:
+                if self.sees(w, x) and (best is None or self.key(w, x) > self.key(w, best)):
+                    best = x
+            return best
+
+        def row_stats(self, w):
+            scopes, _ = self.view(w)
+            top = w if w in self.parts else (scopes[0] if scopes else None)
+            labels = [] if w[1] == 0 else sorted(l for (l, v) in self.parts if v == w[1])
+            ocard = sum(len(self.parts[(l, w[1])]['order']) for l in labels)
+            ocount = len({v for (_, v) in self.parts if v != 0})
+            shown = ','.join(map(str, labels)) or '-'
+            return f"YS|{labelled.scope_token(top) if top is not None else '-'}|{ocard}|{ocount}|{shown}"
+
+    return {'check_dropped': OwnerCheckDropped, 'shared_hidden': SharedHidden, 'other_visible': OtherOwnerVisible,
+            'tie_reversed': TieReversed, 'stream_shared': StreamShared, 'shared_exact_skipped': SharedExactSkipped}
+
+
+def owner_evidence(rows, stats):
+    start, lines = OWNER_BLOCK['start'], OWNER_BLOCK['lines']
+    got = rows[start:start + len(lines)]
+    if len(got) != len(lines):
+        raise AssertionError('owner block rows missing')
+    for k, (a, b) in enumerate(OWNER_BLOCK['twins']):
+        if [got[i] for i in a] != [got[j] for j in b]:
+            raise AssertionError(f'owner twin {k}: hidden commands changed an observer reply')
+    for k, (a, c) in enumerate(OWNER_BLOCK['sensitivity']):
+        if [got[i] for i in a] == [got[j] for j in c]:
+            raise AssertionError(f'owner sensitivity {k}: dropping a visible shared write changed no observer reply')
+    for k, (a, b, u) in enumerate(OWNER_BLOCK['singles']):
+        if [labelled.normalise_owner(got[j], u) for j in b] != [got[i] for i in a]:
+            raise AssertionError(f'single owner pair {k}: owner replies differ from the shared replies')
+    mutants = {}
+    for name, cls in owner_mutants().items():
+        mutated = labelled.replay(lines, cls)
+        differing = sum(1 for a, b in zip(got, mutated) if a != b) + abs(len(got) - len(mutated))
+        if not differing:
+            raise AssertionError('owner model mutant accepted: ' + name)
+        mutants['owner_' + name] = differing
+    stats['owner_block_rows'] = len(got)
+    return mutants
+
+
 def model_controls(rows):
     original = labelled.LSet.relabel
     rejected = {}
@@ -1489,7 +1589,10 @@ def run():
     if results['lean'] != results['odin']:
         raise AssertionError('Lean oracle and Odin rows differ')
     rejected = negative_controls(expected)
-    mutants = model_controls((output / 'odin-results.txt').read_text().splitlines())
+    odin_rows = (output / 'odin-results.txt').read_text().splitlines()
+    owner_rejected = owner_evidence(odin_rows, stats)
+    mutants = model_controls(odin_rows)
+    mutants.update(owner_rejected)
     command_stats, command_mutants = command_evidence(command_bridge, output)
     stats.update(command_stats)
     mutants.update(command_mutants)
@@ -1501,8 +1604,10 @@ def run():
                    'heaps': stats['heap_operations'], 'visited': stats['visited_operations'],
                    'graph': stats['sort_rows'] + stats['width_rows'] + stats['index_sessions'] + stats['index_operations'],
                    'arena': stats['live_norm_rows'] + stats['arena_sessions'] + stats['arena_operations'], 'filter': 0,
-                   'merge': stats['merge_rows'], 'resolution': stats['resolution_rows'],
-                   'independence': stats['independence_rows'], 'compatibility': stats['compatibility_rows'],
+                   'merge': stats['merge_rows'] + stats['owner_merge_rows'],
+                   'resolution': stats['resolution_rows'] + stats['owner_resolution_rows'],
+                   'independence': stats['independence_rows'] + stats['owner_independence_rows'],
+                   'compatibility': stats['compatibility_rows'] + stats['owner_compatibility_rows'],
                    'relabel': stats['relabel_rows'] + stats['relabel_bytes'],
                    'commands': stats['command_rows'] + stats['p2_observer_rows'] + stats['p10_rows']}
     if any(comparisons[area] for area in PROOF_ONLY) or any(not comparisons[area] for area in AREAS if area not in PROOF_ONLY):

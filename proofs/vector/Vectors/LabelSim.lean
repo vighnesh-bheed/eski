@@ -155,32 +155,36 @@ def ZSession.allEmpty (z : ZSession) : Bool := z.labelsU.all (fun l => (z.st.par
 
 def scoreOf (a b : Nat) : Int := 64 - (popcount (a ^^^ b) : Int)
 
-def shadowNames (vo : ViewObj Nat (List Nat)) (l : Nat) : List (List Nat) :=
+section Sim
+set_option linter.unusedSectionVars false
+variable {K : Type} [DecidableEq K]
+
+def shadowNames (vo : ViewObj K (List Nat)) (l : K) : List (List Nat) :=
   (vo.shadows.filter (fun e => e.1 == l)).map (·.2)
 
-def visibleOrder (z : ZSession) (vo : ViewObj Nat (List Nat)) (l : Nat) : List SElem :=
-  (z.part l).order.filter (fun e => !(shadowNames vo l).contains e.name)
+def visibleOrder (part : K → SPart) (vo : ViewObj K (List Nat)) (l : K) : List SElem :=
+  (part l).order.filter (fun e => !(shadowNames vo l).contains e.name)
 
-def shadowPositions (z : ZSession) (vo : ViewObj Nat (List Nat)) (l : Nat) : List Nat :=
-  ((List.range (z.part l).order.length).filter (fun i =>
-    (shadowNames vo l).contains ((z.part l).order.getD i default).name)).mergeSort (fun a b => decide (a ≤ b))
+def shadowPositions (part : K → SPart) (vo : ViewObj K (List Nat)) (l : K) : List Nat :=
+  ((List.range (part l).order.length).filter (fun i =>
+    (shadowNames vo l).contains ((part l).order.getD i default).name)).mergeSort (fun a b => decide (a ≤ b))
 
-def viewBases (z : ZSession) (vo : ViewObj Nat (List Nat)) : List (Nat × Nat × Nat) :=
-  let rec go : List Nat → Nat → List (Nat × Nat × Nat)
+def viewBases (part : K → SPart) (vo : ViewObj K (List Nat)) : List (K × Nat × Nat) :=
+  let rec go : List K → Nat → List (K × Nat × Nat)
     | [], _ => []
     | l :: ls, b =>
-      let size := (z.part l).order.length - (shadowNames vo l).length
+      let size := (part l).order.length - (shadowNames vo l).length
       (l, b, size) :: go ls (b + size)
   go vo.labels 0
 
-def viewRefAt (z : ZSession) (vo : ViewObj Nat (List Nat)) (j : Nat) : SElem :=
-  let bases := viewBases z vo
+def viewRefAt (part : K → SPart) (vo : ViewObj K (List Nat)) (j : Nat) : SElem :=
+  let bases := viewBases part vo
   let cand := bases.filter (fun e => decide (e.2.1 ≤ j))
   match cand.getLast? with
   | none => default
   | some (l, b, _) =>
-    let x := skipShadows (shadowPositions z vo l) (j - b)
-    (z.part l).order.getD x default
+    let x := skipShadows (shadowPositions part vo l) (j - b)
+    (part l).order.getD x default
 
 def acceptFilter (filter : Option Nat) (e : SElem) : Bool :=
   match filter with
@@ -189,15 +193,15 @@ def acceptFilter (filter : Option Nat) (e : SElem) : Bool :=
     | some (some a) => decide (t ≤ a)
     | _ => false
 
-def ownResult (z : ZSession) (vo : ViewObj Nat (List Nat)) (q : Nat) (count : Nat) (filter : Option Nat)
-    (l : Nat) : List (Option Int × List Nat) :=
-  let p := z.part l
-  let hits := (visibleOrder z vo l).filter (acceptFilter filter) |>.map (fun e => (some (scoreOf q e.mask), e.name))
+def ownResult (part : K → SPart) (vo : ViewObj K (List Nat)) (q : Nat) (count : Nat) (filter : Option Nat)
+    (l : K) : List (Option Int × List Nat) :=
+  let p := part l
+  let hits := (visibleOrder part vo l).filter (acceptFilter filter) |>.map (fun e => (some (scoreOf q e.mask), e.name))
   topk hitLe (min count p.order.length) hits
 
-def viewSearch (z : ZSession) (vo : ViewObj Nat (List Nat)) (q : Nat) (count : Nat) (filter : Option Nat)
+def viewSearch (part : K → SPart) (vo : ViewObj K (List Nat)) (q : Nat) (count : Nat) (filter : Option Nat)
     (eps : Option Nat) : List (Option Int × List Nat) :=
-  let merged := mergeTop hitLe count (vo.labels.map (ownResult z vo q count filter))
+  let merged := mergeTop hitLe count (vo.labels.map (ownResult part vo q count filter))
   match eps with
   | none => merged
   | some k => merged.filter (fun h => decide ((64 - (k : Int)) ≤ (h.1.getD 0)))
@@ -222,7 +226,7 @@ def showMode (m : PMode) : String :=
 
 def boolBit (b : Bool) : String := if b then "1" else "0"
 
-def randomDistinct (z : ZSession) (vo : ViewObj Nat (List Nat)) (count : Nat) (st : Nat) :
+def randomDistinct (part : K → SPart) (vo : ViewObj K (List Nat)) (count : Nat) (st : Nat) :
     List SElem × Nat :=
   let n := vo.size
   if n = 0 ∨ count = 0 then ([], st) else
@@ -237,15 +241,15 @@ def randomDistinct (z : ZSession) (vo : ViewObj Nat (List Nat)) (count : Nat) (s
     let (a, s) := go (refs.length - 1) arr st
     (a.toList, s)
   if n ≤ count then
-    shuffle ((List.range n).map (viewRefAt z vo)) st
+    shuffle ((List.range n).map (viewRefAt part vo)) st
   else if count * 4 ≤ n then
     let rec floyd : Nat → Nat → List Nat → List SElem → Nat → List SElem × Nat
       | 0, _, _, acc, s => (acc, s)
       | fuel + 1, j, picks, acc, s =>
         if j < n then
           let (t, s') := streamBelow s (j + 1)
-          if picks.contains t then floyd fuel (j + 1) (j :: picks) (acc ++ [viewRefAt z vo j]) s'
-          else floyd fuel (j + 1) (t :: picks) (acc ++ [viewRefAt z vo t]) s'
+          if picks.contains t then floyd fuel (j + 1) (j :: picks) (acc ++ [viewRefAt part vo j]) s'
+          else floyd fuel (j + 1) (t :: picks) (acc ++ [viewRefAt part vo t]) s'
         else (acc, s)
     let (refs, s) := floyd count (n - count) [] [] st
     shuffle refs s
@@ -258,19 +262,21 @@ def randomDistinct (z : ZSession) (vo : ViewObj Nat (List Nat)) (count : Nat) (s
           pool fuel (i + 1) (a.swapIfInBounds i (i + r)) s'
         else (a, s)
     let (a, s) := pool count 0 (List.range n).toArray st
-    ((a.toList.take count).map (viewRefAt z vo), s)
+    ((a.toList.take count).map (viewRefAt part vo), s)
 
-def randomRepeats (z : ZSession) (vo : ViewObj Nat (List Nat)) (count : Nat) (st : Nat) : List SElem × Nat :=
+def randomRepeats (part : K → SPart) (vo : ViewObj K (List Nat)) (count : Nat) (st : Nat) : List SElem × Nat :=
   let rec go : Nat → List SElem → Nat → List SElem × Nat
     | 0, acc, s => (acc, s)
     | k + 1, acc, s =>
       let (j, s') := streamBelow s vo.size
-      go k (acc ++ [viewRefAt z vo j]) s'
+      go k (acc ++ [viewRefAt part vo j]) s'
   if vo.size = 0 then ([], st) else go count [] st
 
-def flatLinks (z : ZSession) (vo : ViewObj Nat (List Nat)) (l : Nat) (self : SElem) : List (Option Int × List Nat) :=
-  let others := (visibleOrder z vo l).filter (fun e => e.name != self.name)
+def flatLinks (part : K → SPart) (vo : ViewObj K (List Nat)) (l : K) (self : SElem) : List (Option Int × List Nat) :=
+  let others := (visibleOrder part vo l).filter (fun e => e.name != self.name)
   topk hitLe 32 (others.map (fun e => (some (scoreOf self.mask e.mask), e.name)))
+
+end Sim
 
 def plainHits (p : SPart) (q : Nat) (filter : Option Nat) : List PlainHit :=
   (p.order.filter (acceptFilter filter)).map (fun e => ⟨some (scoreOf q e.mask), e.name, e.seq⟩)

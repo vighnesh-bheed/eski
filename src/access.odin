@@ -1,6 +1,7 @@
 package main
 
 import lb "label"
+import ow "owner"
 
 ERR_LABEL_INVALID :: "ERR invalid label"
 ERR_LABELS_OFF :: "ERR labels are not configured on this server"
@@ -17,45 +18,91 @@ ERR_LABEL_CONTEXT_MISMATCH :: "ERR the label differs from the context's label"
 ERR_LABEL_TOP :: "ERR this command needs a label that dominates the whole label scheme"
 ERR_LABEL_PERSISTENCE :: "ERR persistence is off while a label scheme is configured"
 ERR_LABEL_SCRIPT :: "ERR this command needs a label that dominates the running script's label"
+ERR_OWNER_INVALID :: "ERR invalid owner"
+ERR_OWNERS_OFF :: "ERR owners are not enabled on this server"
+ERR_OWNER_REQUIRED :: "ERR this login must name an owner with every command"
+ERR_OWNER_CONTEXT :: "ERR the owner differs from the context's owner"
+ERR_OWNER_BOUND :: "ERR this connection is bound to another owner"
+ERR_OWNER_TRANSACTION :: ERR_LABEL_TRANSACTION
 
 Access :: struct {
-	label: lb.Label,
-	id:    lb.Id,
-	vis:   ^lb.Visibility,
-	top:   bool,
-	ctx:   ^Label_Context,
+	label:       lb.Label,
+	id:          lb.Id,
+	vis:         ^lb.Visibility,
+	top:         bool,
+	label_top:   bool,
+	operator:    bool,
+	ctx:         ^Label_Context,
+	owner:       ow.Owner,
+	owner_entry: ^Owner_Entry,
 }
 
 Access_Conn :: struct {
-	session:  lb.Label,
-	explicit: bool,
-	bound:    lb.Label,
+	session:        lb.Label,
+	explicit:       bool,
+	owner_pinned:   bool,
+	pin_owner:      ow.Owner,
+	bound:          lb.Label,
 	bound_prefixed: bool,
-	implicit: lb.Label,
-	monitor:  lb.Label,
-	watched:  lb.Label,
-	watching: bool,
-	watch_mixed: bool,
-	ran:      bool,
-	accounted: int,
+	owner:          ow.Owner,
+	implicit:       lb.Label,
+	monitor:        lb.Label,
+	watched:        lb.Label,
+	watching:       bool,
+	watch_mixed:    bool,
+	ran:            bool,
+	watched_owner:  ow.Owner,
+	accounted:      int,
+}
+
+#assert(size_of(Access_Conn) == 232)
+
+Owner_Kind :: enum u8 {
+	None,
+	Any,
+	Fixed,
 }
 
 Acl_Label_Rules :: struct {
-	clearance:     lb.Label,
-	clearance_set: bool,
-	clearance_top: bool,
-	trust:         u8,
-	trust_set:     bool,
-	trust_top:     bool,
-	per_command:   bool,
-	require_token: bool,
-	keys:          [dynamic][32]u8,
+	clearance:      lb.Label,
+	clearance_set:  bool,
+	clearance_top:  bool,
+	trust:          u8,
+	trust_set:      bool,
+	trust_top:      bool,
+	per_command:    bool,
+	require_token:  bool,
+	keys:           [dynamic][32]u8,
+	owners:         Owner_Kind,
+	owner_shared:   bool,
+	owner_operator: bool,
+	owner_len:      u8,
+	owner_id:       [ow.TEXT_MAX]u8,
+}
+
+Owner_Pick :: enum u8 {
+	None,
+	Text,
+	Shared,
+}
+
+Access_Arrival :: struct {
+	pick:       Owner_Pick,
+	text:       []u8,
+	owner_only: bool,
+	token:      bool,
+	pin:        bool,
+	token_pick: Owner_Pick,
+	token_len:  u8,
+	token_buf:  [ow.TEXT_MAX]u8,
 }
 
 labels_on: bool
+owners_on: bool
 label_scheme: lb.Config
 label_table: lb.Table
 access: Access
+access_arrival: Access_Arrival
 
 @(private = "file")
 ACCESS_VIS_SLOTS :: 64
@@ -123,6 +170,38 @@ access_compare :: proc "contextless" (a, b: lb.Id) -> int {
 	first, _ := lb.table_label(&label_table, a)
 	second, _ := lb.table_label(&label_table, b)
 	return lb.resolution_compare(first, second)
+}
+
+scope_sees :: proc "contextless" (reader, data: ow.Scope) -> bool {
+	return access_dominates(reader.label, data.label) && ow.sees(reader.owner, data.owner)
+}
+
+scope_compare :: proc "contextless" (reader_owner: ow.Owner, a, b: ow.Scope) -> int {
+	if r := access_compare(a.label, b.label); r != 0 {
+		return r
+	}
+	return ow.rank(reader_owner, a.owner, b.owner)
+}
+
+scope_format :: proc(b: ^[dynamic]u8, scope: ow.Scope) {
+	if !owners_on {
+		return
+	}
+	if scope.owner == ow.SHARED {
+		sb_str(b, " SHARED")
+		return
+	}
+	text, _ := owner_text(scope.owner)
+	sb_str(b, " OWNER ")
+	sb_str(b, text)
+}
+
+access_scope :: #force_inline proc "contextless" () -> ow.Scope {
+	return ow.Scope{access.id, access.owner}
+}
+
+access_view_owner :: #force_inline proc "contextless" () -> ow.Owner {
+	return ow.EVERY if access.operator else access.owner
 }
 
 access_intern :: proc(l: lb.Label) -> (lb.Id, bool) {
@@ -226,6 +305,8 @@ access_user_changed :: proc(c: ^Conn) {
 		c.label.explicit = false
 		c.label.session = {}
 		c.label.ran = false
+		c.label.owner_pinned = false
+		c.label.pin_owner = ow.SHARED
 	}
 }
 
@@ -233,11 +314,72 @@ access_holds_push :: proc(c: ^Conn) -> bool {
 	return .Tracking in c.ps || ps_total(c) + ps_count(c, .Shard) > 0
 }
 
+access_rules :: #force_inline proc(c: ^Conn) -> ^Acl_Label_Rules {
+	return &c.user.labels if c.user != nil else nil
+}
+
+access_fixed_id :: #force_inline proc(r: ^Acl_Label_Rules) -> []u8 {
+	return r.owner_id[:r.owner_len]
+}
+
+access_is_operator :: proc(r: ^Acl_Label_Rules) -> bool {
+	return r == nil || r.owner_operator
+}
+
+access_may_act_text :: proc(r: ^Acl_Label_Rules, text: []u8) -> bool {
+	if r == nil {
+		return false
+	}
+	switch r.owners {
+	case .Any:
+		return true
+	case .Fixed:
+		return bytes_eq(access_fixed_id(r), text)
+	case .None:
+	}
+	return false
+}
+
+access_may_act :: proc(r: ^Acl_Label_Rules, o: ow.Owner) -> bool {
+	switch {
+	case o == ow.EVERY:
+		return false
+	case o == ow.SHARED:
+		return r == nil || r.owners == .None || r.owner_shared
+	}
+	text, known := owner_text(o)
+	return known && access_may_act_text(r, transmute([]u8)text)
+}
+
+access_may_pin :: proc(r: ^Acl_Label_Rules, o: ow.Owner) -> bool {
+	if o == ow.EVERY {
+		return r != nil && r.owner_operator && r.owners == .Any
+	}
+	return access_may_act(r, o)
+}
+
+access_implicit_pin :: proc(r: ^Acl_Label_Rules) -> (ow.Owner, bool) {
+	if r == nil || r.owners == .None {
+		return ow.SHARED, true
+	}
+	if r.owners == .Fixed {
+		e, err := owner_intern(access_fixed_id(r))
+		if err != .None {
+			return ow.SHARED, false
+		}
+		return e.number, true
+	}
+	if r.owner_operator {
+		return ow.EVERY, true
+	}
+	return ow.SHARED, false
+}
+
 access_user_settled :: proc(c: ^Conn) {
 	if !labels_on || !access_holds_push(c) {
 		return
 	}
-	rules := &c.user.labels if c.user != nil else nil
+	rules := access_rules(c)
 	if rules != nil && (rules.per_command || rules.require_token) {
 		c.close_after = true
 		return
@@ -247,9 +389,22 @@ access_user_settled :: proc(c: ^Conn) {
 		c.close_after = true
 		return
 	}
+	pin := ow.SHARED
+	if owners_on {
+		o, ok := access_implicit_pin(rules)
+		if !ok {
+			c.close_after = true
+			return
+		}
+		pin = o
+	}
 	a := access_conn(c)
 	a.session = l
 	a.explicit = true
+	if owners_on {
+		a.owner_pinned = true
+		a.pin_owner = pin
+	}
 }
 
 access_pin_bound :: proc(c: ^Conn) {
@@ -258,25 +413,30 @@ access_pin_bound :: proc(c: ^Conn) {
 		a.session = a.bound
 		a.explicit = true
 	}
+	if owners_on && !a.owner_pinned {
+		a.owner_pinned = true
+		a.pin_owner = a.owner
+	}
 }
 
-access_watch_note_label :: proc(c: ^Conn, l: lb.Label) {
+access_watch_note_label :: proc(c: ^Conn, l: lb.Label, o: ow.Owner = ow.SHARED) {
 	a := access_conn(c)
 	if !a.watching {
 		a.watched = l
+		a.watched_owner = o
 		a.watching = true
-	} else if a.watched != l {
+	} else if a.watched != l || a.watched_owner != o {
 		a.watch_mixed = true
 	}
 }
 
 access_watch_note :: proc(c: ^Conn) {
-	access_watch_note_label(c, access.label)
+	access_watch_note_label(c, access.label, access.owner)
 }
 
 access_watch_differs :: proc(c: ^Conn) -> bool {
 	a := c.label
-	return a != nil && a.watching && (a.watch_mixed || a.watched != a.bound)
+	return a != nil && a.watching && (a.watch_mixed || a.watched != a.bound || a.watched_owner != a.owner)
 }
 
 access_watch_clear :: proc(c: ^Conn) {
@@ -323,11 +483,37 @@ access_conn_session :: proc(c: ^Conn) -> lb.Label {
 	return lb.ceiling_session(access_ceiling(c.user))
 }
 
+access_conn_owner :: proc(c: ^Conn) -> ow.Owner {
+	if !owners_on {
+		return ow.SHARED
+	}
+	if c.label != nil && c.label.owner_pinned {
+		return c.label.pin_owner
+	}
+	r := access_rules(c)
+	if r == nil || r.owners == .None {
+		return ow.SHARED
+	}
+	if r.owners == .Fixed {
+		if e := owner_lookup(access_fixed_id(r)); e != nil {
+			return e.number
+		}
+	}
+	return ow.EVERY
+}
+
+access_conn_scope :: proc(c: ^Conn) -> (lb.Label, ow.Owner) {
+	return access_conn_session(c), access_conn_owner(c)
+}
+
 access_sees_conn :: proc(other: ^Conn) -> bool {
 	if !labels_on || access.top {
 		return true
 	}
-	return lb.dominates(access.label, access_conn_session(other))
+	if !lb.dominates(access.label, access_conn_session(other)) {
+		return false
+	}
+	return !owners_on || ow.sees(access_view_owner(), access_conn_owner(other))
 }
 
 access_acl_changed :: proc(self: ^Conn) {
@@ -354,10 +540,36 @@ access_acl_changed :: proc(self: ^Conn) {
 		if .Monitor in c.flags && !lb.ceiling_admits(ceiling, a.monitor) {
 			stale = true
 		}
+		if owners_on && !stale {
+			stale = access_owner_stale(c)
+		}
 		if stale {
 			acl_evict_conn(c, self)
 		}
 	}
+}
+
+@(private = "file")
+access_owner_stale :: proc(c: ^Conn) -> bool {
+	a := c.label
+	r := access_rules(c)
+	if a.owner_pinned && !access_may_pin(r, a.pin_owner) {
+		return true
+	}
+	if .Multi in c.txf && !access_may_act(r, a.owner) {
+		return true
+	}
+	if a.watching && !access_may_act(r, a.watched_owner) {
+		return true
+	}
+	if c.tx != nil {
+		for w in c.tx.watched {
+			if !access_may_act(r, w.owner) {
+				return true
+			}
+		}
+	}
+	return .Monitor in c.flags && !access_is_operator(r)
 }
 
 @(private = "file")
@@ -379,6 +591,8 @@ access_housekeeping :: proc(slot: ^Cmd_Slot, argv: [][]u8) -> bool {
 		return access_word(argv, 1, "help")
 	case h == cmd_client:
 		return access_word(argv, 1, "setname") || access_word(argv, 1, "setinfo") || access_word(argv, 1, "id")
+	case h == cmd_owners:
+		return access_word(argv, 1, "help")
 	}
 	return false
 }
@@ -404,6 +618,8 @@ access_top_only :: proc(cmd: ^Command, argv: [][]u8) -> bool {
 		return access_word(argv, 1, "reset")
 	case h == cmd_config:
 		return access_word(argv, 1, "resetstat")
+	case h == cmd_owners:
+		return owners_on && !access_word(argv, 1, "help")
 	}
 	return false
 }
@@ -461,7 +677,7 @@ access_refuse :: proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8, msg: string) {
 }
 
 @(private = "file")
-access_set :: proc(l: lb.Label, ctx: ^Label_Context) -> bool {
+access_set :: proc(l: lb.Label, ctx: ^Label_Context, operator: bool) -> bool {
 	if !lb.config_valid(&label_scheme, l) {
 		return false
 	}
@@ -472,17 +688,22 @@ access_set :: proc(l: lb.Label, ctx: ^Label_Context) -> bool {
 	access.label = l
 	access.id = id
 	access.vis = access_visibility(id)
-	access.top = lb.dominates(l, access_scheme_top())
+	access.label_top = lb.dominates(l, access_scheme_top())
+	access.operator = operator
+	access.top = access.label_top && (operator || !owners_on)
 	access.ctx = ctx
+	access.owner = ow.SHARED
+	access.owner_entry = nil
 	return true
 }
 
 access_reset_to_bottom :: proc() {
-	access_set({}, nil)
+	access_set({}, nil, false)
 }
 
 @(cold)
 access_enter :: #force_no_inline proc(c: ^Conn, argv: [][]u8, slot: ^Cmd_Slot) -> ([][]u8, ^Cmd_Slot, bool) {
+	access_arrival = {}
 	if acl_auth_required(c) {
 		access_reset_to_bottom()
 		return argv, slot, true
@@ -493,7 +714,7 @@ access_enter :: #force_no_inline proc(c: ^Conn, argv: [][]u8, slot: ^Cmd_Slot) -
 	l: lb.Label
 	ctx: ^Label_Context
 	prefixed := false
-	rules := &c.user.labels if c.user != nil else nil
+	rules := access_rules(c)
 	if s != nil && s.cmd.handler == cmd_label && len(args) >= 2 && eq_nocase(args[1], "as") {
 		used, msg := label_as_parse(c, args, &l, &ctx)
 		if msg != "" {
@@ -508,8 +729,9 @@ access_enter :: #force_no_inline proc(c: ^Conn, argv: [][]u8, slot: ^Cmd_Slot) -
 		}
 		args = inner
 		s = next
-		prefixed = true
-	} else {
+		prefixed = !access_arrival.owner_only
+	}
+	if !prefixed {
 		if rules != nil && (rules.per_command || rules.require_token) && .Multi not_in c.txf && !access_housekeeping(s, args) {
 			access_refuse(c, s, args, ERR_LABEL_TOKEN_ONLY if rules.require_token else ERR_LABEL_PER_COMMAND)
 			return args, s, false
@@ -530,31 +752,181 @@ access_enter :: #force_no_inline proc(c: ^Conn, argv: [][]u8, slot: ^Cmd_Slot) -
 		a.bound = l
 		a.bound_prefixed = prefixed
 	}
-	if !lb.ceiling_admits(access_ceiling(c.user), l) || !access_set(l, ctx) {
+	if !lb.ceiling_admits(access_ceiling(c.user), l) || !access_set(l, ctx, access_is_operator(rules)) {
 		access_refuse(c, s, args, ERR_LABEL_INVALID)
 		return args, s, false
 	}
 	if s == nil {
 		return args, s, true
 	}
-	if msg := access_command_refusal(s.cmd, args); msg != "" {
-		access_refuse(c, s, args, msg)
-		return args, s, false
-	}
 	if access_needs_session(s.cmd, args) && !a.explicit {
 		if prefixed || (.Multi in c.txf && a.bound_prefixed) || (rules != nil && (rules.per_command || rules.require_token)) {
 			access_refuse(c, s, args, ERR_LABEL_SESSION_NEEDED)
 			return args, s, false
 		}
-		if .Multi not_in c.txf {
-			a.session = l
-			a.explicit = true
-		}
-	}
-	if s.cmd.handler == cmd_monitor {
-		a.monitor = l
+		access_arrival.pin = .Multi not_in c.txf
 	}
 	return args, s, true
+}
+
+access_admit :: proc(c: ^Conn, s: ^Cmd_Slot, args: [][]u8) -> bool {
+	if s == nil || acl_auth_required(c) {
+		return true
+	}
+	if msg := access_command_refusal(s.cmd, args); msg != "" {
+		access_refuse(c, s, args, msg)
+		return false
+	}
+	if owners_on {
+		if msg := access_owner_arrive(c, s, args); msg != "" {
+			access_refuse(c, s, args, msg)
+			return false
+		}
+	}
+	if access_arrival.pin {
+		a := access_conn(c)
+		a.session = access.label
+		a.explicit = true
+	}
+	if s.cmd.handler == cmd_monitor {
+		access_conn(c).monitor = access.label
+	}
+	return true
+}
+
+@(private = "file")
+access_token_owner :: proc(r: ^Acl_Label_Rules) -> (o: ow.Owner, named: bool, msg: string) {
+	arr := &access_arrival
+	switch arr.token_pick {
+	case .None:
+		if r != nil && r.owners == .Any {
+			return ow.SHARED, false, ERR_LABEL_TOKEN
+		}
+		return ow.SHARED, false, ""
+	case .Shared:
+		if !access_may_act(r, ow.SHARED) {
+			return ow.SHARED, false, ERR_LABEL_TOKEN
+		}
+		return ow.SHARED, true, ""
+	case .Text:
+		text := arr.token_buf[:arr.token_len]
+		if !ow.text_valid(text) || !access_may_act_text(r, text) {
+			return ow.SHARED, false, ERR_LABEL_TOKEN
+		}
+		e, err := owner_intern(text)
+		if err != .None {
+			return ow.SHARED, false, ERR_OWNER_INVALID
+		}
+		return e.number, true, ""
+	}
+	return ow.SHARED, false, ERR_LABEL_TOKEN
+}
+
+@(private = "file")
+access_explicit_owner :: proc(r: ^Acl_Label_Rules) -> (ow.Owner, string) {
+	arr := &access_arrival
+	if arr.pick == .Shared {
+		if !access_may_act(r, ow.SHARED) {
+			return ow.SHARED, ERR_OWNER_INVALID
+		}
+		return ow.SHARED, ""
+	}
+	if !ow.text_valid(arr.text) || !access_may_act_text(r, arr.text) {
+		return ow.SHARED, ERR_OWNER_INVALID
+	}
+	e, err := owner_intern(arr.text)
+	if err != .None {
+		return ow.SHARED, ERR_OWNER_INVALID
+	}
+	return e.number, ""
+}
+
+@(private = "file")
+access_owner_arrive :: proc(c: ^Conn, s: ^Cmd_Slot, args: [][]u8) -> string {
+	a := access_conn(c)
+	r := access_rules(c)
+	arr := &access_arrival
+	in_multi := .Multi in c.txf
+	ctx := access.ctx
+	o := ow.SHARED
+	named := false
+	switch {
+	case arr.token:
+		token_owner, token_named, msg := access_token_owner(r)
+		if msg != "" {
+			return msg
+		}
+		if ctx != nil {
+			effective := token_owner
+			if !token_named {
+				implicit, ok := access_implicit_pin(r)
+				if !ok || implicit == ow.EVERY {
+					return ERR_LABEL_TOKEN
+				}
+				effective = implicit
+			}
+			if ctx.owner != effective {
+				return ERR_LABEL_TOKEN
+			}
+		}
+		o, named = token_owner, token_named
+	case ctx != nil:
+		if !access_may_act(r, ctx.owner) {
+			return ERR_LABEL_CONTEXT
+		}
+		if arr.pick == .Shared && ctx.owner != ow.SHARED {
+			return ERR_OWNER_CONTEXT
+		}
+		if arr.pick == .Text {
+			e := owner_lookup(arr.text)
+			if e == nil || e.number != ctx.owner {
+				return ERR_OWNER_CONTEXT
+			}
+		}
+		o, named = ctx.owner, true
+	case arr.pick != .None:
+		explicit, msg := access_explicit_owner(r)
+		if msg != "" {
+			return msg
+		}
+		o, named = explicit, true
+	}
+	if !named {
+		switch {
+		case in_multi:
+			o = a.owner
+		case r == nil || r.owners == .None:
+			o = ow.SHARED
+		case r.owners == .Fixed:
+			e, err := owner_intern(access_fixed_id(r))
+			if err != .None {
+				return ERR_OWNER_INVALID
+			}
+			o = e.number
+		case access_housekeeping(s, args):
+			o = ow.SHARED
+		case r.owner_operator && access_needs_session(s.cmd, args):
+			o = ow.EVERY
+		case:
+			return ERR_OWNER_REQUIRED
+		}
+	}
+	if named && a.owner_pinned && o != a.pin_owner {
+		return ERR_OWNER_BOUND
+	}
+	if named && in_multi && o != a.owner {
+		return ERR_OWNER_TRANSACTION
+	}
+	access.owner = o
+	access.owner_entry = owner_entry(o)
+	if !in_multi {
+		a.owner = o
+		if access_needs_session(s.cmd, args) && !a.owner_pinned {
+			a.owner_pinned = true
+			a.pin_owner = o
+		}
+	}
+	return ""
 }
 
 access_monitor_sees :: proc(m: ^Conn) -> bool {
@@ -564,29 +936,40 @@ access_monitor_sees :: proc(m: ^Conn) -> bool {
 	if m.label == nil {
 		return false
 	}
+	if owners_on && !access_is_operator(access_rules(m)) {
+		return false
+	}
 	return lb.dominates(m.label.monitor, access.label)
 }
 
-access_publish_label :: proc() -> lb.Id {
+access_publish_scope :: proc() -> ow.Scope {
 	if !labels_on {
-		return lb.BOTTOM_ID
+		return ow.SHARED_BOTTOM
 	}
-	return access.id
+	return access_scope()
 }
 
-access_subscriber_sees :: #force_inline proc(t: ^Conn, msg: lb.Label) -> bool {
-	return lb.dominates(access_conn_session(t), msg)
+access_subscriber_sees :: #force_inline proc(t: ^Conn, msg: lb.Label, owner: ow.Owner) -> bool {
+	return lb.dominates(access_conn_session(t), msg) && (!owners_on || ow.sees(access_conn_owner(t), owner))
 }
 
 access_counts_subscriber :: #force_inline proc(t: ^Conn) -> bool {
-	return lb.dominates(access.label, access_conn_session(t))
+	return lb.dominates(access.label, access_conn_session(t)) && (!owners_on || ow.sees(access_view_owner(), access_conn_owner(t)))
+}
+
+access_receiver_exact :: #force_inline proc(t: ^Conn) -> bool {
+	return access_conn_session(t) == access.label && (!owners_on || access_conn_owner(t) == access.owner)
 }
 
 access_busy_script: Access
 
 access_busy_dispatch :: proc(c: ^Conn, argv: [][]u8) {
 	access_busy_script = access
-	defer access = access_busy_script
+	saved_arrival := access_arrival
+	defer {
+		access = access_busy_script
+		access_arrival = saved_arrival
+	}
 	if len(argv) == 0 {
 		return
 	}
@@ -597,5 +980,11 @@ access_busy_dispatch :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 access_busy_sees_script :: proc() -> bool {
-	return !labels_on || access.top || lb.dominates(access.label, access_busy_script.label)
+	if !labels_on || access.top {
+		return true
+	}
+	if !lb.dominates(access.label, access_busy_script.label) {
+		return false
+	}
+	return !owners_on || access.operator || access.owner == access_busy_script.owner
 }

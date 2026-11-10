@@ -14,12 +14,15 @@ Scheme :: struct {
 	stream: [dynamic]u64,
 }
 
-scheme_init :: proc(sc: ^Scheme, r: ^Test_Rng, levels: int, compartments: int, want: int) {
+scheme_init :: proc(sc: ^Scheme, r: ^Test_Rng, levels: int, compartments: int, want: int, trusts := 1) {
 	lbl.table_init(&sc.table)
 	append(&sc.ids, lbl.BOTTOM_ID)
 	for tries := 0; len(sc.ids) < want && tries < 1000; tries += 1 {
 		l: lbl.Label
 		l.level = u8(test_below(r, levels))
+		if trusts > 1 {
+			l.trust = u8(test_below(r, trusts))
+		}
 		for c in 0 ..< compartments {
 			if test_below(r, 3) == 0 {
 				lbl.compartment_add(&l, c)
@@ -89,7 +92,7 @@ check_labelled :: proc(t: ^testing.T, s: Vset) -> bool {
 	}
 	total := 0
 	live := 0
-	for id in 0 ..< lab.id_high {
+	for id in 0 ..< u32(lab.id_high) {
 		p := lab.by_id[id]
 		if p == nil {
 			continue
@@ -101,7 +104,7 @@ check_labelled :: proc(t: ^testing.T, s: Vset) -> bool {
 		if p.count == 0 {
 			fail(t, &ok, fmt.tprintf("partition %d is empty but kept", id))
 		}
-		if part_at_label(s, p.label) != p {
+		if part_at_label(s, p.label) != p || p.owner != SHARED || p.kind != .Block {
 			fail(t, &ok, fmt.tprintf("partition %d is not found by its label %d", id, p.label))
 		}
 		total += p.count
@@ -116,9 +119,6 @@ check_labelled :: proc(t: ^testing.T, s: Vset) -> bool {
 		if lab.sorted[i - 1].label >= lab.sorted[i].label {
 			fail(t, &ok, "sorted partitions out of order")
 		}
-	}
-	if total != lab.total {
-		fail(t, &ok, fmt.tprintf("partitions hold %d, total says %d", total, lab.total))
 	}
 	copies := 0
 	multis := 0
@@ -160,39 +160,61 @@ check_labelled :: proc(t: ^testing.T, s: Vset) -> bool {
 	if copies != total {
 		fail(t, &ok, fmt.tprintf("name map holds %d copies, partitions %d", copies, total))
 	}
+	owned := 0
+	if lab.owners != nil {
+		owned = check_owners(t, s)
+		if owned < 0 {
+			ok = false
+			owned = 0
+		}
+	}
+	if total + owned != lab.total {
+		fail(t, &ok, fmt.tprintf("partitions hold %d shared and %d owned, total says %d", total, owned, lab.total))
+	}
 	if ledger_balance(s) != 0 {
 		fail(t, &ok, fmt.tprintf("ledger is off by %d bytes", ledger_balance(s)))
 	}
 	return ok
 }
 
-check_partition :: proc(t: ^testing.T, s: Vset, p: ^Partition) -> bool {
+check_partition :: proc(t: ^testing.T, s: Vset, p: ^Part_Head) -> bool {
 	ok := true
 	if int(p.arena.live) != p.count {
 		testing.expectf(t, false, "partition %d arena %d count %d", p.id, p.arena.live, p.count)
 		ok = false
 	}
-	switch p.mode {
-	case .Flat:
-		if p.graph.slots != 0 || p.graph.cap != 0 {
-			testing.expectf(t, false, "flat partition %d holds graph slots", p.id)
-			ok = false
-		}
-	case .Graph, .Pinned:
-		if hnsw.size(&p.graph) != p.count || int(p.arena.high) != p.graph.slots {
-			testing.expectf(t, false, "partition %d graph %d slots %d high %d count %d", p.id, hnsw.size(&p.graph), p.graph.slots, p.arena.high, p.count)
-			ok = false
-		}
-		a := p.arena.free
-		g := p.graph.free_head
-		for a != vmath.NIL_SLOT || g != hnsw.NONE {
-			if a != g {
-				testing.expectf(t, false, "partition %d free lists diverge at %d against %d", p.id, a, g)
-				return false
+	if p.kind == .Compact && p.mode != .Flat {
+		testing.expectf(t, false, "compact partition %d is in mode %v", p.id, p.mode)
+		ok = false
+	}
+	if p.owner != SHARED && p.kind == .Block && p.mode == .Flat {
+		testing.expectf(t, false, "owner partition %d is a flat full block", p.id)
+		ok = false
+	}
+	if full := part_full(p); full != nil {
+		switch p.mode {
+		case .Flat:
+			if full.graph.slots != 0 || full.graph.cap != 0 {
+				testing.expectf(t, false, "flat partition %d holds graph slots", p.id)
+				ok = false
 			}
-			a = vmath.free_next(p.arena.norms[a])
-			next := hnsw.word_get(p.graph.links0[int(g) * p.graph.row:], 0, p.graph.width)
-			g = hnsw.NONE if next == hnsw.width_none(p.graph.width) else next
+		case .Graph, .Pinned:
+			g := &full.graph
+			if hnsw.size(g) != p.count || int(p.arena.high) != g.slots {
+				testing.expectf(t, false, "partition %d graph %d slots %d high %d count %d", p.id, hnsw.size(g), g.slots, p.arena.high, p.count)
+				ok = false
+			}
+			a := p.arena.free
+			n := g.free_head
+			for a != vmath.NIL_SLOT || n != hnsw.NONE {
+				if a != n {
+					testing.expectf(t, false, "partition %d free lists diverge at %d against %d", p.id, a, n)
+					return false
+				}
+				a = vmath.free_next(p.arena.norms[a])
+				next := hnsw.word_get(g.links0[int(n) * g.row:], 0, g.width)
+				n = hnsw.NONE if next == hnsw.width_none(g.width) else next
+			}
 		}
 	}
 	attrs := 0
@@ -208,7 +230,8 @@ check_partition :: proc(t: ^testing.T, s: Vset, p: ^Partition) -> bool {
 		}
 		one: Ref
 		found := false
-		for r in names_lookup(s, e.name[:e.len], &one) {
+		ni := part_index(s, p)
+		for r in tree_lookup(ni.tree, e.name[:e.len], &one) {
 			found = found || r == Ref{slot = slot, part = p.id}
 		}
 		if !found {

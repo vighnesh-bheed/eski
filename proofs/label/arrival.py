@@ -4,7 +4,8 @@ FIXED = b'0123456789abcdef0123456789abcdef'
 HEX = set(b'0123456789abcdefABCDEF')
 KNOWN = {b'get', b'set', b'ping', b'echo', b'select', b'auth', b'hello', b'quit', b'reset', b'client', b'label', b'context',
          b'multi', b'exec', b'discard', b'watch', b'unwatch', b'subscribe', b'psubscribe', b'ssubscribe', b'save', b'bgsave',
-         b'bgrewriteaof', b'dump', b'restore', b'migrate', b'debug', b'monitor', b'swapdb', b'latency', b'memory', b'slowlog', b'config', b'shutdown', b'eval', b'publish'}
+         b'bgrewriteaof', b'dump', b'restore', b'migrate', b'debug', b'monitor', b'swapdb', b'latency', b'memory', b'slowlog', b'config', b'shutdown', b'eval', b'publish',
+         b'script', b'function'}
 PERSISTENCE = {b'save', b'bgsave', b'bgrewriteaof', b'dump', b'restore', b'migrate'}
 INVALID = 'ERR invalid label'
 CONTEXT = 'ERR invalid context'
@@ -28,17 +29,26 @@ REFUSALS = {PER_COMMAND: 'refused_per_command', TOKEN_ONLY: 'refused_token_only'
             TOKEN: 'refused_token'}
 
 
+MUTANTS = ('pin_before_acl', 'kill_by_dominance')
+ACL_POOL = [b'subscribe', b'psubscribe', b'ssubscribe', b'client|tracking', b'get', b'swapdb', b'monitor', b'bgrewriteaof']
+
+
 def wrong(name):
     return f"ERR wrong number of arguments for '{name}' command"
 
 
+def noperm(login, target):
+    return f"NOPERM User {login.decode()} has no permissions to run the '{target.decode()}' command"
+
+
 class Arrival:
-    def __init__(self, helpers):
+    def __init__(self, helpers, mutant=None):
         self.h = helpers
         self.cfg = None
         self.now = 0
         self.notes = {}
         self.events = []
+        self.mutant = mutant
 
     def note(self, key):
         self.notes[key] = self.notes.get(key, 0) + 1
@@ -47,6 +57,7 @@ class Arrival:
     def reset(self, cfg, audience, idle, cap):
         self.cfg, self.audience, self.idle, self.cap = cfg, audience, idle, cap
         self.users, self.conns, self.ctxs, self.next, self.cache, self.tokens = {}, {}, [], 0, {}, {}
+        self.denied, self.busy = {}, None
 
     def lit(self, a):
         return a[1] if a[0] == 'x' else (FIXED if a[0] == 'o' else None)
@@ -323,8 +334,33 @@ class Arrival:
         return n in (b'subscribe', b'psubscribe', b'ssubscribe') or \
             (n == b'client' and self.arg_is(args, 1, b'tracking') and self.arg_is(args, 2, b'on'))
 
+    def acl_target(self, args):
+        n = self.name(args)
+        if n == b'client' and len(args) > 1 and args[1][0] == 'x':
+            return n + b'|' + args[1][1].lower()
+        return n
+
+    def acl_refusal(self, c, args):
+        target = self.acl_target(args)
+        if target in self.denied.get(c['login'], ()):
+            return noperm(c['login'], target)
+        return None
+
     def refusal(self, args, label, c, prefixed):
         n = self.name(args)
+        r = self.rules(c['login'])
+        kept = prefixed or (c['multi'] and c['bprefixed']) or r['pc'] or r['rt']
+        if self.subscribing(args) and not c['explicit'] and kept:
+            return SESSION_NEEDED
+        if self.mutant == 'pin_before_acl' and self.subscribing(args) and not c['explicit'] and not c['multi']:
+            c['explicit'], c['session'] = True, label
+        msg = self.acl_refusal(c, args)
+        if msg:
+            event = 'owner_noperm' if isinstance(self, Owners) else 'refused_noperm'
+            self.note(event)
+            if self.subscribing(args) and not c['explicit'] and not c['multi']:
+                self.note(event + '_push')
+            return msg
         if n in PERSISTENCE or (n == b'debug' and (self.arg_is(args, 1, b'reload') or self.arg_is(args, 1, b'loadaof'))) \
                 or (n == b'shutdown' and any(self.word(a, b'save') for a in args[1:])):
             return PERSIST
@@ -334,10 +370,6 @@ class Arrival:
             (n == b'slowlog' and self.arg_is(args, 1, b'reset')) or (n == b'config' and self.arg_is(args, 1, b'resetstat'))
         if top_only and not self.top(label):
             return TOP
-        r = self.rules(c['login'])
-        kept = prefixed or (c['multi'] and c['bprefixed']) or r['pc'] or r['rt']
-        if self.subscribing(args) and not c['explicit'] and kept:
-            return SESSION_NEEDED
         return None
 
     def arrive(self, c, args):
@@ -516,6 +548,45 @@ class Arrival:
             self.note('marked_keeps_watches')
         return f'{kind}|{arrival}|{reply}|{self.state(c)}|{len(self.ctxs)}'
 
+    def deny(self, login, names):
+        self.denied[login] = set(names)
+        self.cache = {}
+        return f'{len(names)}'
+
+    def kill_ok(self, label, owner, top, operator, script):
+        if top:
+            return True
+        if not self.dominates(label, script[0]):
+            return False
+        if not isinstance(self, Owners):
+            return True
+        if self.mutant == 'kill_by_dominance':
+            return operator or owner == script[1] or script[1] == 's'
+        return operator or owner == script[1]
+
+    def busy_start(self, kind, cid, args):
+        c = self.conns[cid]
+        arrival, ok = self.arrive(c, args)
+        reply = self.handle(c, ok[0], ok[1]) if ok else '-'
+        self.busy = (ok[0], 's') if ok and not c['multi'] else None
+        return f'{kind}|{arrival}|{reply}|{self.state(c)}|{len(self.ctxs)}'
+
+    def busy_call(self, kind, cid, args):
+        c = self.conns[cid]
+        script = self.busy
+        arrival, ok = self.arrive(c, args)
+        if not ok:
+            verdict = '-'
+        elif script is None:
+            verdict = 'nobusy'
+        elif c['multi']:
+            verdict = 'queued'
+        else:
+            allowed = self.kill_ok(ok[0], 's', self.top(ok[0]), False, script)
+            self.note('kill_allowed' if allowed else 'kill_refused')
+            verdict = str(int(allowed))
+        return f'{kind}|{arrival}|{verdict}|{self.state(c)}|{len(self.ctxs)}'
+
     def sweep(self):
         before = len(self.ctxs)
         self.ctxs = [x for x in self.ctxs if not self.expired(x)]
@@ -538,6 +609,426 @@ class Arrival:
         return False
 
 
+INVALID_OWNER = 'ERR invalid owner'
+OWNER_REQUIRED = 'ERR this login must name an owner with every command'
+OWNER_CONTEXT = "ERR the owner differs from the context's owner"
+OWNER_BOUND = 'ERR this connection is bound to another owner'
+OWNER_REFUSALS = {INVALID_OWNER: 'refused_invalid_owner', OWNER_REQUIRED: 'refused_owner_required',
+                  OWNER_CONTEXT: 'refused_owner_context', OWNER_BOUND: 'refused_owner_bound'}
+
+
+def owner_text(o):
+    if o == 's':
+        return 's'
+    if o == 'e':
+        return 'e'
+    return o.hex() if o else '-'
+
+
+class Owners(Arrival):
+    def reset(self, cfg, audience, idle, cap):
+        super().reset(cfg, audience, idle, cap)
+        self.orules, self.oconns, self.cowners, self.towners = {}, {}, {}, {}
+
+    def text_valid(self, t):
+        return t is not None and 0 < len(t) <= 128 and all(33 <= b <= 126 for b in t)
+
+    def rule_of(self, login):
+        return self.orules.get(login, {'kind': '-', 'id': None, 'shared': False, 'op': False})
+
+    def act_text(self, r, t):
+        if r['kind'] == '*':
+            return True
+        if r['kind'] == 'f':
+            return t == r['id']
+        return False
+
+    def act(self, r, o):
+        if o == 'e':
+            return False
+        if o == 's':
+            return r['kind'] == '-' or r['shared']
+        return self.act_text(r, o)
+
+    def hk(self, args):
+        if self.is_cmd(args, b'owners'):
+            return self.arg_is(args, 1, b'help')
+        return self.housekeeping(args)
+
+    def owner_top(self, args):
+        n = self.name(args)
+        if n == b'owners':
+            return not self.arg_is(args, 1, b'help')
+        return n in (b'monitor', b'swapdb', b'debug', b'latency') or \
+            (n == b'client' and (self.arg_is(args, 1, b'pause') or self.arg_is(args, 1, b'unpause'))) or \
+            (n == b'memory' and any(self.arg_is(args, 1, w) for w in (b'stats', b'doctor', b'malloc-stats', b'purge'))) or \
+            (n == b'slowlog' and self.arg_is(args, 1, b'reset')) or (n == b'config' and self.arg_is(args, 1, b'resetstat'))
+
+    def pick_at(self, args, i):
+        if i + 2 < len(args) and self.word(args[i], b'owner'):
+            return ('text', self.lit(args[i + 1]) or b''), i + 2
+        if i + 1 < len(args) and self.word(args[i], b'shared'):
+            return ('shared',), i + 1
+        return None, i
+
+    def label_as_o(self, c, args):
+        login = c['login']
+        if len(args) <= 2:
+            return WRONG_AS, None
+        if self.word(args[2], b'token') and len(args) > 4:
+            sp = self.tokens.get(args[3][1]) if args[3][0] == 't' else None
+            v = self.token_verify(login, sp) if sp is not None else None
+            if v is None:
+                return TOKEN, None
+            self.note('form_token')
+            return None, {'used': 4, 'label': v[0], 'ctx': v[1], 'pick': None, 'tok': self.towners.get(args[3][1], '-')}
+        if self.word(args[2], b'owner') and len(args) > 4:
+            return self.owner_only(c, args, ('text', self.lit(args[3]) or b''), 4)
+        if self.word(args[2], b'shared') and len(args) > 3:
+            return self.owner_only(c, args, ('shared',), 3)
+        if self.rules(login)['rt']:
+            return TOKEN_ONLY, None
+        if self.word(args[2], b'context') and len(args) > 4 and self.shaped(args[3]):
+            x = self.find(login, self.href(args[3]))
+            if x is None:
+                return CONTEXT, None
+            self.note('form_context')
+            return None, {'used': 4, 'label': x['label'], 'ctx': x, 'pick': None, 'tok': None}
+        marking, i, trust, has = self.lit(args[2]), 3, None, False
+        if len(args) > 5 and self.word(args[3], b'trust'):
+            trust, has, i = self.lit(args[4]), True, 5
+        label = self.with_trust(marking, trust, has)
+        if label is None or not self.admits(self.ceiling(login), label):
+            return INVALID, None
+        pick, i = self.pick_at(args, i)
+        ctx = None
+        if i + 2 < len(args) and self.word(args[i], b'context') and self.shaped(args[i + 1]):
+            ctx = self.find(login, self.href(args[i + 1]))
+            if ctx is None:
+                return CONTEXT, None
+            if ctx['label'] != label:
+                return MISMATCH, None
+            i += 2
+        if i >= len(args):
+            return WRONG_AS, None
+        self.note('form_marking_owner' if pick else 'form_marking')
+        return None, {'used': i, 'label': label, 'ctx': ctx, 'pick': pick, 'tok': None}
+
+    def owner_only(self, c, args, pick, i):
+        self.note('form_owner_only')
+        if i + 2 < len(args) and self.word(args[i], b'context') and self.shaped(args[i + 1]):
+            if self.rules(c['login'])['rt']:
+                return TOKEN_ONLY, None
+            label = self.session(c)
+            x = self.find(c['login'], self.href(args[i + 1]))
+            if x is None:
+                return CONTEXT, None
+            if x['label'] != label:
+                return MISMATCH, None
+            return None, {'used': i + 2, 'label': label, 'ctx': x, 'pick': pick, 'tok': None}
+        return None, {'used': i, 'label': None, 'ctx': None, 'pick': pick, 'tok': None}
+
+    def owner_refuse(self, c, oc, slot, msg):
+        if msg in OWNER_REFUSALS:
+            self.note(OWNER_REFUSALS[msg])
+        out = self.refuse(c, slot, msg)
+        if out.startswith('no:EXECABORT'):
+            oc['wany'] = oc['wmixed'] = False
+        return out
+
+    def owner_phase(self, c, oc, inner, label, pick, ctx, tok):
+        r = self.rule_of(c['login'])
+        if self.owner_top(inner) and not (self.top(label) and r['op']):
+            self.note('refused_owner_top')
+            return TOP, None
+        named = None
+        if tok is not None:
+            if tok == '-':
+                if r['kind'] == '*':
+                    self.note('refused_token_owner')
+                    return TOKEN, None
+                token_owner, token_named = 's', False
+            elif tok == 's':
+                if not self.act(r, 's'):
+                    self.note('refused_token_owner')
+                    return TOKEN, None
+                token_owner, token_named = 's', True
+            else:
+                if not (self.text_valid(tok) and self.act_text(r, tok)):
+                    self.note('refused_token_owner')
+                    return TOKEN, None
+                token_owner, token_named = tok, True
+            if ctx is not None:
+                effective = token_owner if token_named else ('s' if r['kind'] == '-' else r['id'])
+                if self.cowners.get(ctx['handle'], 's') != effective:
+                    self.note('refused_token_owner')
+                    return TOKEN, None
+            if token_named:
+                named = token_owner
+                self.note('owner_token')
+        elif ctx is not None:
+            co = self.cowners.get(ctx['handle'], 's')
+            if not self.act(r, co):
+                self.note('refused_context_owner')
+                return CONTEXT, None
+            if pick is not None:
+                want = 's' if pick[0] == 'shared' else pick[1]
+                if co != want:
+                    return OWNER_CONTEXT, None
+            named = co
+            self.note('owner_context')
+        elif pick is not None:
+            if pick[0] == 'shared':
+                if not self.act(r, 's'):
+                    return INVALID_OWNER, None
+                named = 's'
+            else:
+                if not (self.text_valid(pick[1]) and self.act_text(r, pick[1])):
+                    return INVALID_OWNER, None
+                named = pick[1]
+            self.note('owner_named')
+        if named is not None:
+            o = named
+        elif c['multi']:
+            o = oc['owner']
+        elif r['kind'] == '-':
+            o = 's'
+        elif r['kind'] == 'f':
+            o = r['id']
+        elif self.hk(inner):
+            o = 's'
+            self.note('owner_housekeeping')
+        elif r['op'] and self.subscribing(inner):
+            o = 'e'
+        else:
+            return OWNER_REQUIRED, None
+        if named is not None and oc['pinned'] and o != oc['pin']:
+            return OWNER_BOUND, None
+        if named is not None and c['multi'] and o != oc['owner']:
+            self.note('refused_owner_transaction')
+            return TRANSACTION, None
+        if c['multi']:
+            self.note('owner_multi')
+        else:
+            oc['owner'] = o
+            if self.subscribing(inner) and not oc['pinned']:
+                oc['pinned'], oc['pin'] = True, o
+                self.note('owner_pinned_every' if o == 'e' else 'owner_pinned')
+        return None, o
+
+    def arrive_o(self, cid, args):
+        c, oc = self.conns[cid], self.oconns[cid]
+        login = c['login']
+        prefixed, ctx, pick, tok = False, None, None, None
+        if self.is_cmd(args, b'label') and self.arg_is(args, 1, b'as'):
+            msg, parsed = self.label_as_o(c, args)
+            if msg:
+                return self.owner_refuse(c, oc, args, msg), None
+            inner = args[parsed['used']:]
+            if self.nested(inner):
+                return self.owner_refuse(c, oc, args, NESTED), None
+            pick, tok = parsed['pick'], parsed['tok']
+            if parsed['label'] is None:
+                label = None
+            else:
+                label, ctx, prefixed = parsed['label'], parsed['ctx'], True
+        else:
+            inner, label = args, None
+        if label is None:
+            r = self.rules(login)
+            if (r['pc'] or r['rt']) and not c['multi'] and not self.hk(inner):
+                return self.owner_refuse(c, oc, inner, TOKEN_ONLY if r['rt'] else PER_COMMAND), None
+            label = self.session(c)
+        if c['multi']:
+            if prefixed and label != c['bound']:
+                return self.owner_refuse(c, oc, inner, TRANSACTION), None
+            label = c['bound']
+        elif self.is_cmd(inner, b'multi'):
+            c['bound'], c['bprefixed'] = label, prefixed
+        if not self.admits(self.ceiling(login), label) or not self.cfg.valid(label):
+            return self.owner_refuse(c, oc, inner, INVALID), None
+        pin = False
+        if self.known(inner):
+            msg = self.refusal(inner, label, c, prefixed)
+            if msg:
+                return self.owner_refuse(c, oc, inner, msg), None
+            pin = self.subscribing(inner) and not c['explicit'] and not c['multi']
+        if not (self.known(inner) or self.is_cmd(inner, b'owners')):
+            handle = f"h{ctx['handle']}" if ctx else '-'
+            return f"ok:{self.h['label_text'](label)}:s:{len(inner)}:{handle}", (label, 's', inner)
+        msg, o = self.owner_phase(c, oc, inner, label, pick, ctx, tok)
+        if msg:
+            if pin:
+                self.note('owner_refused_unpinned')
+            return self.owner_refuse(c, oc, inner, msg), None
+        if pin:
+            c['explicit'], c['session'] = True, label
+        handle = f"h{ctx['handle']}" if ctx else '-'
+        return f"ok:{self.h['label_text'](label)}:{owner_text(o)}:{len(inner)}:{handle}", (label, o, inner)
+
+    def ostate(self, c, oc):
+        lt = self.h['label_text']
+        ws = f"{int(oc['wmixed'])}/{lt(oc['wlabel'])}/{owner_text(oc['wowner'])}" if oc['wany'] else '-'
+        return f"{int(c['multi'])}{int(c['dirty'])}{int(c['explicit'])}{int(c['cas'])}:" \
+               f"{lt(c['session']) if c['explicit'] else '-'}:{lt(c['bound'])}:{len(c['watched'])}:" \
+               f"{int(oc['pinned'])}:{owner_text(oc['pin']) if oc['pinned'] else '-'}:{owner_text(oc['owner'])}:{ws}"
+
+    def create_o(self, c, base, owner, opts):
+        lv = tr = pick = None
+        i = 0
+        while i < len(opts):
+            a = opts[i]
+            if pick is None and self.word(a, b'shared'):
+                pick, i = ('shared',), i + 1
+                continue
+            if i + 1 >= len(opts):
+                return SYNTAX
+            v = opts[i + 1]
+            if self.word(a, b'level') and lv is None:
+                lv = self.lit(v) if self.lit(v) is not None else bytes([255])
+            elif self.word(a, b'trust') and tr is None:
+                tr = self.lit(v) if self.lit(v) is not None else bytes([255])
+            elif pick is None and self.word(a, b'owner'):
+                pick = ('text', self.lit(v) or b'')
+            else:
+                return SYNTAX
+            i += 2
+        label = base
+        if lv is not None:
+            parsed = self.with_trust(lv, tr, tr is not None)
+            if parsed is None:
+                return INVALID
+            label = parsed if tr is not None or b';' in lv else parsed[:2] + (base[2],)
+        elif tr is not None:
+            k = self.h['lookup'](self.cfg.trusts, tr)
+            if k < 0:
+                return INVALID
+            label = base[:2] + (k,)
+        if not self.cfg.valid(label) or not self.admits(self.ceiling(c['login']), label):
+            return INVALID
+        r = self.rule_of(c['login'])
+        if pick is not None:
+            if pick[0] == 'shared':
+                if not self.act(r, 's'):
+                    return INVALID_OWNER
+                owner = 's'
+            else:
+                if not (self.text_valid(pick[1]) and self.act_text(r, pick[1])):
+                    return INVALID_OWNER
+                owner = pick[1]
+        if sum(1 for x in self.ctxs if x['owner'] == c['login'] and not self.expired(x)) >= self.cap:
+            self.note('create_full')
+            return CAP
+        x = {'handle': self.next, 'owner': c['login'], 'label': label, 'last': self.now}
+        self.ctxs.append(x)
+        self.cowners[self.next] = owner
+        self.next += 1
+        self.note('created_owner')
+        return f"h{x['handle']}"
+
+    def handle_o(self, cid, label, owner, inner):
+        c, oc = self.conns[cid], self.oconns[cid]
+        if c['multi'] and self.name(inner) not in (b'exec', b'discard', b'multi', b'watch', b'quit', b'reset'):
+            self.note('queued')
+            return 'queued'
+        if self.is_cmd(inner, b'exec') and c['multi']:
+            dirty, cas, bound = c['dirty'], c['cas'], c['bound']
+            differs = oc['wany'] and (oc['wmixed'] or oc['wlabel'] != bound or oc['wowner'] != oc['owner'])
+            owner_differs = oc['wany'] and not oc['wmixed'] and oc['wlabel'] == bound and oc['wowner'] != oc['owner']
+            self.end_tx(c)
+            oc['wany'] = oc['wmixed'] = False
+            if dirty:
+                return 'EXECABORT Transaction discarded because of previous errors.'
+            if differs:
+                self.note('exec_owner_watch_refused' if owner_differs else 'exec_scope_watch_refused')
+                return EXEC_WATCH
+            return 'nil' if cas else 'exec'
+        if self.is_cmd(inner, b'discard') and c['multi']:
+            self.end_tx(c)
+            oc['wany'] = oc['wmixed'] = False
+            return 'OK'
+        if self.is_cmd(inner, b'watch') and not c['multi']:
+            if not oc['wany']:
+                oc['wany'], oc['wlabel'], oc['wowner'] = True, label, owner
+            elif oc['wlabel'] != label or oc['wowner'] != owner:
+                oc['wmixed'] = True
+                self.note('watch_owner_mixed' if oc['wlabel'] == label else 'watch_scope_mixed')
+            c['wlabels'].append(label)
+            for a in inner[1:]:
+                key = self.lit(a)
+                if key is not None and not any(k == key for k, _ in c['watched']):
+                    c['watched'].append((key, label))
+            return 'OK'
+        if self.is_cmd(inner, b'unwatch'):
+            self.clear_watch(c)
+            oc['wany'] = oc['wmixed'] = False
+            return 'OK'
+        if self.is_cmd(inner, b'context') and self.arg_is(inner, 1, b'create'):
+            return self.create_o(c, label, owner, inner[2:])
+        if self.is_cmd(inner, b'context') and (self.arg_is(inner, 1, b'info') or self.arg_is(inner, 1, b'drop')):
+            if len(inner) != 3:
+                return wrong('context|info' if self.arg_is(inner, 1, b'info') else 'context|drop')
+            x = self.find(c['login'], self.href(inner[2]))
+            if x is None:
+                return CONTEXT
+            if self.arg_is(inner, 1, b'drop'):
+                self.ctxs = [y for y in self.ctxs if y['handle'] != x['handle']]
+                return 'OK'
+            cfg = self.cfg
+            marking = cfg.format(x['label'][:2] + (0,))
+            trust = cfg.trusts[x['label'][2]] if x['label'][2] < len(cfg.trusts) else b''
+            return f"info:{self.h['hexs'](marking)}:{self.h['hexs'](trust)}:{owner_text(self.cowners.get(x['handle'], 's'))}"
+        return self.handle(c, label, inner)
+
+    def request_o(self, cid, args):
+        c, oc = self.conns[cid], self.oconns[cid]
+        arrival, ok = self.arrive_o(cid, args)
+        reply = self.handle_o(cid, ok[0], ok[1], ok[2]) if ok else '-'
+        return f'OR|{arrival}|{reply}|{self.ostate(c, oc)}|{len(self.ctxs)}'
+
+    def auth_o(self, cid, login):
+        c, oc = self.conns[cid], self.oconns[cid]
+        if c['login'] != login:
+            c['login'], c['explicit'], c['session'] = login, False, (0, frozenset(), 0)
+            oc['pinned'], oc['pin'] = False, 's'
+            self.note('owner_auth_cleared')
+        return 'OA|' + self.ostate(c, oc)
+
+    def busy_start_o(self, cid, args):
+        c, oc = self.conns[cid], self.oconns[cid]
+        arrival, ok = self.arrive_o(cid, args)
+        reply = self.handle_o(cid, ok[0], ok[1], ok[2]) if ok else '-'
+        self.busy = (ok[0], ok[1]) if ok and not c['multi'] else None
+        return f'OS|{arrival}|{reply}|{self.ostate(c, oc)}|{len(self.ctxs)}'
+
+    def busy_call_o(self, cid, args):
+        c, oc = self.conns[cid], self.oconns[cid]
+        script = self.busy
+        arrival, ok = self.arrive_o(cid, args)
+        if not ok:
+            verdict = '-'
+        elif script is None:
+            verdict = 'nobusy'
+        elif c['multi']:
+            verdict = 'queued'
+        else:
+            label, owner = ok[0], ok[1]
+            operator = self.rule_of(c['login'])['op']
+            allowed = self.kill_ok(label, owner, self.top(label) and operator, operator, script)
+            if operator and not self.top(label):
+                self.note('owner_kill_operator' if allowed else 'owner_kill_operator_refused')
+            elif allowed and owner == script[1]:
+                self.note('owner_kill_same')
+            elif not allowed and self.dominates(label, script[0]) and script[1] == 's' and owner not in ('s', 'e'):
+                self.note('owner_kill_refused_shared')
+            elif not allowed and self.dominates(label, script[0]) and script[1] not in ('s', 'e') and owner not in ('s', 'e', script[1]):
+                self.note('owner_kill_refused_user')
+            elif not allowed and not self.dominates(label, script[0]) and owner == script[1]:
+                self.note('owner_kill_refused_label')
+            verdict = str(int(allowed))
+        return f'OB|{arrival}|{verdict}|{self.ostate(c, oc)}|{len(self.ctxs)}'
+
+
 WRONG_AS = wrong('label|as')
 LEVEL_POOL = [b'U', b'C', b'S', b'TS', b'TOKEN', b'CONTEXT']
 COMP_POOL = [b'A', b'B', b'NAVY', b'K9']
@@ -545,19 +1036,34 @@ TRUST_POOL = [b'WEB', b'VETTED', b'ROOT']
 LOGINS = [b'app', b'batch', b'ops', b'reader']
 
 
-def corpus(helpers, seed, sessions=64, steps=160, watch_sessions=32, episodes=30):
-    rng = random.Random(seed)
-    m = Arrival(helpers)
+OWNER_IDS = [b'u1', b'u2', b'auth0|5f3c', b'u42', b'U1']
+BAD_IDS = [b'a b', b'', b'x' * 129, bytes([0xe9]), b'tab\tx', b'-']
+
+
+OWNER_NOTES = ('form_owner_only', 'form_marking_owner', 'owner_named', 'owner_context', 'owner_token', 'owner_multi',
+               'owner_pinned', 'owner_pinned_every', 'owner_housekeeping', 'refused_owner_required', 'refused_invalid_owner',
+               'refused_owner_bound', 'refused_owner_context', 'refused_owner_transaction', 'refused_owner_top',
+               'refused_token_owner', 'refused_context_owner', 'exec_owner_watch_refused', 'exec_scope_watch_refused',
+               'watch_owner_mixed', 'watch_scope_mixed', 'created_owner', 'owner_auth_cleared', 'owner_refused_unpinned',
+               'owner_kill_same', 'owner_kill_operator', 'owner_kill_operator_refused', 'owner_kill_refused_shared',
+               'owner_kill_refused_user', 'owner_kill_refused_label', 'owner_noperm', 'owner_noperm_push')
+
+
+def corpus(helpers, seed, sessions=64, steps=160, watch_sessions=32, episodes=30, owner_sessions=48, owner_steps=150,
+           acl_sessions=40, acl_steps=60, owner_acl_sessions=48, owner_acl_steps=60, mutant=None):
+    rng = random.Random(seed ^ 0x0E115)
+    m = Owners(helpers, mutant)
     hexs = helpers['hexs']
-    trace, expected, stats, marks = [], [], {}, {}
+    trace, expected, stats, marks, owner_marks = [], [], {}, {}, {}
 
     def emit(line, row):
         trace.append(line)
         expected.append(row)
         kind = row.split('|')[0]
         stats[kind] = stats.get(kind, 0) + 1
+        target = owner_marks if isinstance(m, Owners) else marks
         for event in m.events:
-            marks.setdefault(event, len(expected) - 1)
+            target.setdefault(event, len(expected) - 1)
         m.events = []
 
     def x(b):
@@ -781,6 +1287,225 @@ def corpus(helpers, seed, sessions=64, steps=160, watch_sessions=32, episodes=30
             emit(f'AC {cid} {login.hex()}', f'AC|{cid}')
         return logins
 
+    def owner_id():
+        roll = rng.random()
+        if roll < 0.9:
+            return rng.choice(OWNER_IDS)
+        return rng.choice(BAD_IDS)
+
+    def set_owner_user(login):
+        r, line = rules_for(login)
+        roll = rng.random()
+        kind = '-' if roll < 0.3 else ('*' if roll < 0.75 else 'f')
+        oid = rng.choice(OWNER_IDS) if kind == 'f' else None
+        shared, op = rng.random() < 0.4, rng.random() < 0.3
+        texts = []
+        if kind == '*':
+            texts.append(b'owners:*')
+        elif kind == 'f':
+            texts.append(b'owner:' + oid)
+        if shared:
+            texts.append(b'owner-shared')
+        if op:
+            texts.append(b'owner-operator')
+        base = line.split(' ')
+        rule_texts = base[7].split(',') if base[7] != '-' else []
+        rule_texts += [t.hex() for t in texts]
+        base[0] = 'OU'
+        base[7] = ','.join(rule_texts) if rule_texts else '-'
+        line = ' '.join(base) + f" {kind} {oid.hex() if oid else '-'} {int(shared)} {int(op)}"
+        m.users[login] = r
+        m.orules[login] = {'kind': kind, 'id': oid, 'shared': shared, 'op': op}
+        m.cache = {}
+        ceil = m.ceiling(login)
+        emit(line, f"OU|{helpers['label_text'](ceil)}|{int(r['pc'])}|{int(r['rt'])}|{len(r['keys'])}|{kind}|{int(shared)}|{int(op)}")
+
+    def new_owner_token():
+        before = len(trace)
+        new_token()
+        line = trace[before]
+        n = len(m.tokens) - 1
+        roll = rng.random()
+        if roll < 0.3:
+            spec = '-'
+        elif roll < 0.45:
+            spec = 's'
+        elif roll < 0.9:
+            spec = 'x:' + hexs(owner_id())
+        else:
+            spec = rng.choice(['B', 'D', 'L'])
+        if spec in ('B', 'D', 'L') and m.tokens[n]['flaw'] == 0:
+            m.tokens[n]['flaw'] = 4
+        m.towners[n] = '-' if spec == '-' else ('s' if spec == 's' else (bytes.fromhex(spec[2:]) if spec.startswith('x:') and spec != 'x:-' else (b'' if spec == 'x:-' else None)))
+        trace[before] = 'OO' + line[2:] + ' ' + spec
+        expected[before] = f'OO|{n}'
+        stats['AO'] -= 1
+        stats['OO'] = stats.get('OO', 0) + 1
+
+    def open_owner_session():
+        cfg = helpers['Config']()
+        levels = rng.sample(LEVEL_POOL[:4], rng.choice([1, 2, 3, 3, 4]))
+        comps = rng.sample(COMP_POOL, rng.randint(0, 2)) if len(levels) > 1 else []
+        trusts = rng.sample(TRUST_POOL, rng.choice([0, 2, 2])) if len(levels) > 1 else []
+        for kind, names in (('CL', levels), ('CC', comps), ('CT', trusts)):
+            for n in names:
+                assert cfg.add(kind, n) == 'ok'
+        audience = b'node' if rng.random() < 0.9 else b''
+        idle, cap = rng.randint(1, 4), rng.randint(1, 3)
+        m.reset(cfg, audience, idle, cap)
+        emit(f'OX {names_text(levels)} {names_text(comps)} {names_text(trusts)} {hexs(audience)} {idle} {cap}',
+             f'OX|{len(levels)}|{len(comps)}|{len(trusts)}')
+        logins = rng.sample(LOGINS, rng.randint(2, 4))
+        for login in logins:
+            set_owner_user(login)
+        for cid in range(rng.randint(2, 5)):
+            login = rng.choice(logins)
+            m.conns[cid] = {'login': login, 'explicit': False, 'session': (0, frozenset(), 0), 'multi': False,
+                            'dirty': False, 'bound': (0, frozenset(), 0), 'bprefixed': False, 'cas': False,
+                            'watched': [], 'wlabels': []}
+            m.oconns[cid] = {'pinned': False, 'pin': 's', 'owner': 's', 'wany': False, 'wmixed': False,
+                             'wlabel': (0, frozenset(), 0), 'wowner': 's'}
+            emit(f'OC {cid} {login.hex()}', f'OC|{cid}')
+        return logins
+
+    def owner_clause(c):
+        roll = rng.random()
+        if roll < 0.55:
+            return [x(b'OWNER'), x(owner_id())]
+        if roll < 0.8:
+            return [x(rng.choice([b'SHARED', b'shared']))]
+        return []
+
+    def owner_prefix(c):
+        roll = rng.random()
+        mine = owned(c)
+        if roll < 0.3:
+            parts = [x(b'LABEL'), x(b'AS'), x(marking_of(known_label(c), True))] + owner_clause(c)
+            if mine and rng.random() < 0.2:
+                ctx = rng.choice(mine)
+                parts = [x(b'LABEL'), x(b'AS'), x(marking_of(ctx['label']))] + owner_clause(c) + [x(b'CONTEXT'), ('h', ctx['handle'])]
+            return parts
+        if roll < 0.6:
+            parts = [x(b'LABEL'), x(b'AS')] + (owner_clause(c) or [x(b'OWNER'), x(owner_id())])
+            if mine and rng.random() < 0.15:
+                parts += [x(b'CONTEXT'), ('h', rng.choice(mine)['handle'])]
+            return parts
+        if roll < 0.72:
+            return [x(b'LABEL'), x(b'AS'), x(b'CONTEXT'), handle_arg(c)]
+        if m.tokens and roll < 0.9:
+            fitting = [n for n, sp in m.tokens.items() if sp['secret'] in m.rules(c['login'])['keys'] and sp['flaw'] == 0]
+            pool = fitting if fitting and rng.random() < 0.8 else list(m.tokens)
+            return [x(b'LABEL'), x(b'AS'), x(b'TOKEN'), ('t', rng.choice(pool))]
+        return []
+
+    def owner_inner(c):
+        roll = rng.random()
+        if roll < 0.2:
+            return [x(b'GET'), x(b'k')]
+        if roll < 0.3:
+            return rng.choice([[x(b'PING')], [x(b'ECHO'), x(b'hi')], [x(b'LABEL'), x(b'WHOAMI')], [x(b'CLIENT'), x(b'ID')],
+                               [x(b'OWNERS'), x(b'HELP')], [x(b'FOO')], [x(b'SELECT'), x(b'0')]])
+        if roll < 0.42:
+            return rng.choice([[x(b'SUBSCRIBE'), x(b'ch')], [x(b'PSUBSCRIBE'), x(b'c*')], [x(b'SSUBSCRIBE'), x(b'ch')],
+                               [x(b'CLIENT'), x(b'TRACKING'), x(b'on')]])
+        if roll < 0.52:
+            opts = []
+            if rng.random() < 0.3:
+                opts += [x(b'LEVEL'), x(marking_of(known_label(c)))]
+            r2 = rng.random()
+            if r2 < 0.35:
+                opts += [x(b'OWNER'), x(owner_id())]
+            elif r2 < 0.55:
+                opts += [x(b'SHARED')]
+            if rng.random() < 0.05:
+                opts += [x(b'OWNER')]
+            rng.shuffle(opts) if rng.random() < 0.1 else None
+            return [x(b'CONTEXT'), x(b'CREATE')] + opts
+        if roll < 0.58:
+            return [x(b'CONTEXT'), x(rng.choice([b'INFO', b'DROP', b'INFO']))] + [handle_arg(c)]
+        if roll < 0.68:
+            return rng.choice([[x(b'DEBUG'), x(b'SLEEP'), x(b'0')], [x(b'MONITOR')], [x(b'OWNERS'), x(b'INFO'), x(b'u1')],
+                               [x(b'OWNERS'), x(b'FORGET'), x(b'u2')], [x(b'SAVE')], [x(b'CONFIG'), x(b'RESETSTAT')],
+                               [x(b'SLOWLOG'), x(b'RESET')]])
+        if roll < 0.74:
+            parts = [x(b'LABEL'), x(b'SESSION'), x(marking_of(known_label(c)[:2] + (0,)))]
+            return parts + ([x(b'OWNER'), x(b'u1')] if rng.random() < 0.1 else [])
+        if roll < 0.8:
+            return [x(b'PUBLISH'), x(b'ch'), x(b'm')]
+        return [x(b'SET'), x(b'k'), x(b'v')]
+
+    def owner_request(cid, args):
+        emit(f'OR {cid} ' + ' '.join(map(arg_text, args)), m.request_o(cid, args))
+
+    def owned_prefix(c, scope):
+        label, owner = scope
+        parts = [x(b'LABEL'), x(b'AS')]
+        if label is not None:
+            parts.append(x(marking_of(label)))
+        if owner == 's':
+            parts.append(x(b'SHARED'))
+        elif owner is not None:
+            parts += [x(b'OWNER'), x(owner)]
+        return parts if len(parts) > 2 else []
+
+    def random_scope(c):
+        label = known_label(c) if rng.random() < 0.4 else None
+        roll = rng.random()
+        owner = rng.choice(OWNER_IDS[:3]) if roll < 0.6 else ('s' if roll < 0.8 else None)
+        return label, owner
+
+    for session in range(owner_sessions):
+        logins = open_owner_session()
+        for _ in range(owner_steps):
+            roll = rng.random()
+            if roll < 0.04:
+                m.now += rng.choice([0, 100, 700, 1500, m.idle * 1000])
+                emit(f'OT {m.now}', f'OT|{m.now}')
+                continue
+            if roll < 0.09:
+                new_owner_token()
+                continue
+            if roll < 0.11:
+                set_owner_user(rng.choice(logins))
+                continue
+            cid = rng.choice(list(m.conns))
+            c = m.conns[cid]
+            if roll < 0.13:
+                login = rng.choice(logins)
+                emit(f'OA {cid} {login.hex()}', m.auth_o(cid, login))
+                continue
+            if roll < 0.25 and not c['multi']:
+                scope = random_scope(c)
+                for _ in range(rng.choice([0, 1, 1, 2])):
+                    watch = scope if rng.random() < 0.6 else random_scope(c)
+                    owner_request(cid, owned_prefix(c, watch) + [x(b'WATCH'), x(rng.choice([b'w0', b'w1']))])
+                owner_request(cid, owned_prefix(c, scope) + [x(b'MULTI')])
+                for _ in range(rng.randint(0, 3)):
+                    body = owner_inner(c) if rng.random() < 0.3 else [x(b'GET'), x(b'k')]
+                    if c['multi'] and rng.random() < 0.5:
+                        body = owned_prefix(c, scope if rng.random() < 0.6 else random_scope(c)) + body
+                    owner_request(cid, body)
+                end = [x(rng.choice([b'EXEC', b'EXEC', b'DISCARD']))]
+                if rng.random() < 0.3:
+                    end = owned_prefix(c, scope if rng.random() < 0.5 else random_scope(c)) + end
+                owner_request(cid, end)
+                continue
+            if roll < 0.3:
+                owner_request(cid, owned_prefix(c, random_scope(c)) + [x(b'UNWATCH')])
+                continue
+            pre = owner_prefix(c) if rng.random() < 0.8 else []
+            args = pre + owner_inner(c)
+            if rng.random() < 0.03:
+                args = rng.choice([[x(b'LABEL'), x(b'AS'), x(b'OWNER'), x(b'u1')], [x(b'LABEL'), x(b'AS'), x(b'SHARED')],
+                                   [x(b'LABEL'), x(b'AS'), x(b'OWNER'), x(b'u1'), x(b'LABEL'), x(b'AS'), x(b'C'), x(b'GET'), x(b'k')],
+                                   [x(b'LABEL'), x(b'AS'), x(marking_of(known_label(c))), x(b'OWNER'), x(b'u1')],
+                                   [x(b'LABEL'), x(b'AS'), x(marking_of(known_label(c))), x(b'OWNER'), x(b'u1'), x(b'TRUST'), x(b'WEB'), x(b'GET')]])
+            owner_request(cid, args)
+
+    owner_model = m
+    m = Arrival(helpers, mutant)
+    rng = random.Random(seed)
+    emit('OT 0', 'OT|0')
     for session in range(sessions):
         logins = open_session()
         for _ in range(steps):
@@ -915,4 +1640,116 @@ def corpus(helpers, seed, sessions=64, steps=160, watch_sessions=32, episodes=30
             elif roll < 0.25:
                 end = labelled(random_label(), end)
             request(cid, end)
-    return '\n'.join(trace) + '\n', expected, stats, dict(sorted(m.notes.items())), marks
+    def acl_prefix(c):
+        return [x(b'LABEL'), x(b'AS'), x(marking_of(known_label(c)))] if rng.random() < 0.4 else []
+
+    def acl_inner(c):
+        roll = rng.random()
+        if roll < 0.35:
+            return rng.choice([[x(b'SUBSCRIBE'), x(b'ch')], [x(b'CLIENT'), x(b'TRACKING'), x(b'on')]])
+        if roll < 0.6:
+            return rng.choice([[x(b'GET'), x(b'k')], [x(b'SWAPDB'), x(b'0'), x(b'1')], [x(b'MONITOR')], [x(b'BGREWRITEAOF')]])
+        if roll < 0.7:
+            return [x(b'LABEL'), x(b'SESSION'), x(marking_of(known_label(c)[:2] + (0,)))]
+        return rng.choice([[x(b'PING')], [x(b'SAVE')], [x(b'DEBUG'), x(b'SLEEP'), x(b'0')], [x(b'CLIENT'), x(b'ID')],
+                           [x(b'SET'), x(b'k'), x(b'v')], [x(b'PUBLISH'), x(b'ch'), x(b'm')]])
+
+    def deny_line(kind, login):
+        names = sorted(rng.sample(ACL_POOL, rng.randint(0, 4)))
+        emit(f'{kind} {login.hex()} {names_text(names)}', f'{kind}|{m.deny(login, names)}')
+
+    def kill_body():
+        return rng.choice([[x(b'SCRIPT'), x(b'KILL')], [x(b'FUNCTION'), x(b'KILL')], [x(b'FUNCTION'), x(b'STATS')]])
+
+    rng = random.Random(seed ^ 0xAC1)
+    for session in range(acl_sessions):
+        logins = open_session()
+        for login in logins:
+            if rng.random() < 0.8:
+                deny_line('AP', login)
+        for _ in range(acl_steps):
+            roll = rng.random()
+            if roll < 0.04:
+                set_user(rng.choice(logins))
+                continue
+            if roll < 0.1:
+                deny_line('AP', rng.choice(logins))
+                continue
+            cid = rng.choice(list(m.conns))
+            c = m.conns[cid]
+            if roll < 0.13:
+                login = rng.choice(logins)
+                emit(f'AA {cid} {login.hex()}', m.auth(cid, login))
+                continue
+            if roll < 0.3 and not c['multi'] and len(m.conns) > 1:
+                args = acl_prefix(c) + [x(b'EVAL'), x(b'while true do end'), x(b'0')]
+                emit(f'AE {cid} ' + ' '.join(map(arg_text, args)), m.busy_start('AE', cid, args))
+                if m.busy is not None:
+                    for _ in range(rng.randint(1, 3)):
+                        other = rng.choice([k for k in m.conns if k != cid])
+                        args = acl_prefix(m.conns[other]) + kill_body()
+                        emit(f'AB {other} ' + ' '.join(map(arg_text, args)), m.busy_call('AB', other, args))
+                continue
+            if roll < 0.4 and not c['multi']:
+                args = acl_prefix(c) + [x(b'MULTI')]
+                emit(f'AR {cid} ' + ' '.join(map(arg_text, args)), m.request('AR', cid, args))
+                for _ in range(rng.randint(0, 2)):
+                    body = acl_inner(c)
+                    emit(f'AR {cid} ' + ' '.join(map(arg_text, body)), m.request('AR', cid, body))
+                end = [x(rng.choice([b'EXEC', b'DISCARD']))]
+                emit(f'AR {cid} ' + ' '.join(map(arg_text, end)), m.request('AR', cid, end))
+                continue
+            args = acl_prefix(c) + acl_inner(c)
+            emit(f'AR {cid} ' + ' '.join(map(arg_text, args)), m.request('AR', cid, args))
+
+    label_model = m
+    m = Owners(helpers, mutant)
+    rng = random.Random(seed ^ 0x0AC1)
+    emit('OT 0', 'OT|0')
+    for session in range(owner_acl_sessions):
+        logins = open_owner_session()
+        for login in logins:
+            if rng.random() < 0.8:
+                deny_line('OP', login)
+        for _ in range(owner_acl_steps):
+            roll = rng.random()
+            if roll < 0.04:
+                set_owner_user(rng.choice(logins))
+                continue
+            if roll < 0.1:
+                deny_line('OP', rng.choice(logins))
+                continue
+            cid = rng.choice(list(m.conns))
+            c = m.conns[cid]
+            if roll < 0.13:
+                login = rng.choice(logins)
+                emit(f'OA {cid} {login.hex()}', m.auth_o(cid, login))
+                continue
+            if roll < 0.4 and not c['multi'] and len(m.conns) > 1:
+                args = owned_prefix(c, random_scope(c)) + [x(b'EVAL'), x(b'while true do end'), x(b'0')]
+                emit(f'OS {cid} ' + ' '.join(map(arg_text, args)), m.busy_start_o(cid, args))
+                if m.busy is not None:
+                    for _ in range(rng.randint(1, 3)):
+                        other = rng.choice([k for k in m.conns if k != cid])
+                        args = owned_prefix(m.conns[other], random_scope(m.conns[other])) + kill_body()
+                        emit(f'OB {other} ' + ' '.join(map(arg_text, args)), m.busy_call_o(other, args))
+                continue
+            if roll < 0.48 and not c['multi']:
+                scope = random_scope(c)
+                owner_request(cid, owned_prefix(c, scope) + [x(b'MULTI')])
+                for _ in range(rng.randint(0, 2)):
+                    owner_request(cid, acl_inner(c))
+                owner_request(cid, [x(rng.choice([b'EXEC', b'DISCARD']))])
+                continue
+            pre = owned_prefix(c, random_scope(c)) if rng.random() < 0.6 else []
+            owner_request(cid, pre + acl_inner(c))
+
+    notes = dict(label_model.notes)
+    for key in OWNER_NOTES:
+        count = owner_model.notes.get(key, 0) + m.notes.get(key, 0)
+        if count:
+            notes[key] = count
+    for key, at in owner_marks.items():
+        if key in OWNER_NOTES:
+            marks.setdefault(key, at)
+    return '\n'.join(trace) + '\n', expected, stats, dict(sorted(notes.items())), marks

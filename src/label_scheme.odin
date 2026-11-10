@@ -6,6 +6,9 @@ import lb "label"
 LABEL_SCHEME_PERSISTENCE :: "a label scheme needs persistence off: set save \"\", appendonly no and no save in shutdown-on-sigterm or shutdown-on-sigint first"
 LABEL_PERSISTENCE_ON :: "persistence stays off while a label scheme is configured"
 LABEL_SCHEME_MEMCACHED :: "a label scheme needs the memcached endpoint off, because its requests carry no label"
+OWNERS_RESERVED_LEVEL :: "owner mode needs a label scheme without a level named OWNER or SHARED"
+OWNERS_LEVEL_RESERVED :: "OWNER and SHARED are reserved and cannot name a level while owner mode is on"
+OWNERS_STAY_ON :: "owner mode cannot be turned off"
 
 Label_Name_Kind :: enum u8 {
 	Level,
@@ -18,6 +21,7 @@ label_token_audience: string
 label_context_idle: i64 = 3600
 label_context_cap: i64 = 1000
 label_scheme_runtime: bool
+owners_wanted: bool
 
 @(private = "file")
 label_audit_fd: linux.Fd = -1
@@ -28,9 +32,56 @@ label_checkpoint: [Label_Name_Kind][dynamic]string
 @(private = "file")
 label_checkpoint_taken: bool
 
+@(private = "file")
+owners_checkpoint: bool
+
 special_label_levels := Config_Special{label_levels_set, label_levels_get, label_levels_rewrite}
 special_label_compartments := Config_Special{label_compartments_set, label_compartments_get, label_compartments_rewrite}
 special_label_trusts := Config_Special{label_trusts_set, label_trusts_get, label_trusts_rewrite}
+special_owners := Config_Special{owners_setting_set, owners_setting_get, owners_setting_rewrite}
+
+owners_setting_set :: proc(args: [][]u8) -> (bool, string) {
+	if len(args) != 1 {
+		return false, "wrong number of arguments"
+	}
+	v: bool
+	switch {
+	case eq_nocase(args[0], "yes"):
+		v = true
+	case eq_nocase(args[0], "no"):
+		v = false
+	case:
+		return false, "argument must be 'yes' or 'no'"
+	}
+	if !v && owners_on && (!label_checkpoint_taken || owners_checkpoint) {
+		return false, OWNERS_STAY_ON
+	}
+	changed := v != owners_wanted
+	owners_wanted = v
+	return changed, ""
+}
+
+owners_setting_get :: proc(b: ^[dynamic]u8) {
+	sb_str(b, "yes" if owners_wanted else "no")
+}
+
+owners_setting_rewrite :: proc(rs: ^Rewrite_State, cf: ^Config) {
+	line := rewrite_line_buf(rs)
+	sb_str(&line, cf.name)
+	sb_str(&line, " yes" if owners_wanted else " no")
+	config_rewrite_line(rs, cf.name, string(line[:]), owners_wanted)
+}
+
+@(private = "file")
+owners_reserved :: proc() -> bool {
+	for n in label_scheme.levels {
+		name := transmute([]u8)lb.config_name(&label_scheme, n)
+		if eq_nocase(name, "owner") || eq_nocase(name, "shared") {
+			return true
+		}
+	}
+	return false
+}
 
 @(private = "file")
 label_kind_names :: proc(c: ^lb.Config, kind: Label_Name_Kind) -> []lb.Name {
@@ -265,20 +316,29 @@ label_trusts_rewrite :: proc(rs: ^Rewrite_State, cf: ^Config) {
 
 label_scheme_apply :: proc() -> string {
 	labelled := lb.config_labelled(&label_scheme)
-	if label_scheme_runtime && labelled && label_persistence_on() {
+	guarded := labelled || owners_wanted
+	if label_scheme_runtime && guarded && label_persistence_on() {
 		return LABEL_SCHEME_PERSISTENCE
 	}
-	if label_scheme_runtime && labelled && mc_port != 0 {
+	if label_scheme_runtime && guarded && mc_port != 0 {
 		return LABEL_SCHEME_MEMCACHED
 	}
+	if label_scheme_runtime && owners_wanted && owners_reserved() {
+		return OWNERS_LEVEL_RESERVED if owners_on else OWNERS_RESERVED_LEVEL
+	}
 	was := labels_on
-	labels_on = labelled
+	was_owners := owners_on
+	labels_on = guarded
+	owners_on = owners_wanted
 	access_scheme_changed()
-	if labelled {
+	if guarded {
 		keyspace_labels_enable()
 		if !was {
 			access_watch_adopt()
 		}
+	}
+	if owners_on && !was_owners {
+		owners_enabled()
 	}
 	return ""
 }
@@ -291,6 +351,7 @@ label_persistence_refusal :: proc(enabling: bool) -> string {
 }
 
 label_scheme_checkpoint :: proc() {
+	owners_checkpoint = owners_on
 	for k in Label_Name_Kind {
 		for s in label_checkpoint[k] {
 			delete(s)
@@ -308,6 +369,9 @@ label_scheme_committed :: proc(c: ^Conn) {
 		return
 	}
 	label_checkpoint_taken = false
+	if owners_on && !owners_checkpoint {
+		label_audit(c, "owners-on")
+	}
 	now := make([dynamic]string, context.temp_allocator)
 	kinds := [Label_Name_Kind]string {
 		.Level       = "levels",
@@ -349,13 +413,18 @@ label_scheme_abandon :: proc() {
 
 label_scheme_startup :: proc() {
 	access_init()
-	labels_on = lb.config_labelled(&label_scheme)
+	labelled := lb.config_labelled(&label_scheme)
+	labels_on = labelled || owners_wanted
+	owners_on = owners_wanted
 	access_scheme_changed()
 	if labels_on && label_persistence_on() {
 		config_fatal(0, "", LABEL_SCHEME_PERSISTENCE)
 	}
 	if labels_on && mc_port != 0 {
 		config_fatal(0, "", LABEL_SCHEME_MEMCACHED)
+	}
+	if owners_on && owners_reserved() {
+		config_fatal(0, "", OWNERS_RESERVED_LEVEL)
 	}
 	if label_audit_file != "" {
 		buf: [4096]u8
@@ -367,7 +436,7 @@ label_scheme_startup :: proc() {
 		label_audit_fd = fd
 	}
 	label_scheme_runtime = true
-	if labels_on {
+	if labelled {
 		levels := make([dynamic]u8, context.temp_allocator)
 		comps := make([dynamic]u8, context.temp_allocator)
 		trusts := make([dynamic]u8, context.temp_allocator)
@@ -375,6 +444,9 @@ label_scheme_startup :: proc() {
 		label_get_kind(.Compartment, &comps)
 		label_get_kind(.Trust, &trusts)
 		label_audit(nil, "scheme-load", "levels", string(levels[:]), "compartments", string(comps[:]), "trust-levels", string(trusts[:]))
+	}
+	if owners_on {
+		label_audit(nil, "owners-on")
 	}
 }
 

@@ -16,6 +16,12 @@ import Vectors.Plain
 import Vectors.Relabel
 import Vectors.Commands
 import Vectors.LabelSim
+import Vectors.Owner
+import Vectors.OwnerMerge
+import Vectors.OwnerPartition
+import Vectors.OwnerPlain
+import Vectors.OwnerFootprint
+import Vectors.OwnerSim
 
 #print axioms Vectors.hadamardSign_mul
 #print axioms Vectors.rowDot_self
@@ -330,3 +336,90 @@ import Vectors.LabelSim
 #print axioms Vectors.single_level_plain
 #print axioms Vectors.single_label_found
 #print axioms Vectors.single_label_wreply
+#print axioms Vectors.ownerLe_refl
+#print axioms Vectors.ownerLe_trans
+#print axioms Vectors.ownerLe_antisymm
+#print axioms Vectors.shared_bottom
+#print axioms Vectors.every_top
+#print axioms Vectors.users_incomparable
+#print axioms Vectors.ownerSees_le
+#print axioms Vectors.access_every
+#print axioms Vectors.access_shared
+#print axioms Vectors.access_user
+#print axioms Vectors.seesP_iff
+#print axioms Vectors.seesP_hidden
+#print axioms Vectors.seesP_product
+#print axioms Vectors.seesP_sees
+#print axioms Vectors.gtP_order
+#print axioms Vectors.resolveScoped_eq
+#print axioms Vectors.refusal_eq
+#print axioms Vectors.refusal_iff
+#print axioms Vectors.inuse_names_resolved
+#print axioms Vectors.gtX_order
+#print axioms Vectors.resolve_shared_exact
+#print axioms Vectors.resolve_falls_to_rank
+#print axioms Vectors.resolve_owner_result
+#print axioms Vectors.resolve_rank_max
+#print axioms Vectors.resolve_own_tie
+#print axioms Vectors.resolve_scope_older
+#print axioms Vectors.resolve_other_owners
+#print axioms Vectors.owner_viewOpen_restrict
+#print axioms Vectors.owner_viewFind_restrict
+#print axioms Vectors.owner_viewRange_restrict
+#print axioms Vectors.one_label_own_then_shared
+#print axioms Vectors.no_own_resolves_shared
+#print axioms Vectors.no_own_find_shared
+#print axioms Vectors.no_own_view_shared
+#print axioms Vectors.no_own_range_shared
+#print axioms Vectors.indexInv_step
+#print axioms Vectors.indexInv_run
+#print axioms Vectors.unshadowed_unique
+#print axioms Vectors.view_names_unique
+#print axioms Vectors.view_merge_exact
+#print axioms Vectors.topk_perm
+#print axioms Vectors.merge_order_free
+#print axioms Vectors.owner_view_scopes
+#print axioms Vectors.owner_merge_exact
+#print axioms Vectors.reachable_view_unique
+#print axioms Vectors.owner_step_local
+#print axioms Vectors.other_owner_step
+#print axioms Vectors.owner_step_consistent
+#print axioms Vectors.owner_run_purge
+#print axioms Vectors.purge_keeps
+#print axioms Vectors.run_filter_hidden
+#print axioms Vectors.owner_isolation
+#print axioms Vectors.shared_isolation
+#print axioms Vectors.owner_isolation_view
+#print axioms Vectors.owner_isolation_find
+#print axioms Vectors.owner_isolation_range
+#print axioms Vectors.owner_isolation_stream
+#print axioms Vectors.owner_partition_history
+#print axioms Vectors.forget_gone
+#print axioms Vectors.forget_keeps
+#print axioms Vectors.forget_local
+#print axioms Vectors.forget_history
+#print axioms Vectors.forget_leaves_shared
+#print axioms Vectors.forget_find_shared
+#print axioms Vectors.forget_view_shared
+#print axioms Vectors.forget_range_shared
+#print axioms Vectors.graduate_books
+#print axioms Vectors.graduate_fail_books
+#print axioms Vectors.flatten_books
+#print axioms Vectors.replace_isolates
+#print axioms Vectors.graduate_isolates
+#print axioms Vectors.graduate_fail_unchanged
+#print axioms Vectors.flatten_isolates
+#print axioms Vectors.graduate_footprint
+#print axioms Vectors.flatten_footprint
+#print axioms Vectors.memory_identity
+#print axioms Vectors.embed_step
+#print axioms Vectors.embed_run
+#print axioms Vectors.embed_resolve
+#print axioms Vectors.embed_viewFind
+#print axioms Vectors.embed_viewRange
+#print axioms Vectors.embed_viewOpen
+#print axioms Vectors.owners_off_run
+#print axioms Vectors.owners_off_view
+#print axioms Vectors.single_owner_view
+#print axioms Vectors.single_owner_find
+#print axioms Vectors.single_owner_range

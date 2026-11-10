@@ -41,7 +41,7 @@ Filter :: struct {
 }
 
 Accept_Context :: struct {
-	part:   ^Partition,
+	part:   ^Part_Head,
 	filter: ^Filter,
 	shadow: []u32,
 }
@@ -61,7 +61,7 @@ hit_better :: proc(a, b: Hit) -> bool {
 	return a.slot < b.slot
 }
 
-make_hit :: #force_inline proc "contextless" (p: ^Partition, q: vmath.Query, slot: u32) -> Hit {
+make_hit :: #force_inline proc "contextless" (p: ^Part_Head, q: vmath.Query, slot: u32) -> Hit {
 	return Hit{score = vmath.arena_query_score(&p.arena, q, slot), seq = p.elements[slot].seq, slot = slot, part = p.id}
 }
 
@@ -210,7 +210,7 @@ exact_scan :: proc(s: Vset, q: vmath.Query, k: int, accept: ^Accept_Context, sc:
 	return part_exact_scan(&s.core, q, k, accept, sc, out)
 }
 
-part_exact_scan :: proc(p: ^Partition, q: vmath.Query, k: int, accept: ^Accept_Context, sc: ^Scratch, out: ^[dynamic]Hit) -> Failure {
+part_exact_scan :: proc(p: ^Part_Head, q: vmath.Query, k: int, accept: ^Accept_Context, sc: ^Scratch, out: ^[dynamic]Hit) -> Failure {
 	heap := &sc.hits
 	clear(heap)
 	if reserve(heap, k) != nil {

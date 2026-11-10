@@ -180,21 +180,26 @@ charge_allocator :: proc "contextless" (c: ^Charge) -> runtime.Allocator {
 	return runtime.Allocator{procedure = charge_allocator_proc, data = c}
 }
 
-part_charge :: #force_inline proc "contextless" (s: Vset, p: ^Partition) -> ^Charge {
-	if s.lab == nil || p == &s.core {
+part_charge :: #force_inline proc "contextless" (s: Vset, p: ^Part_Head) -> ^Charge {
+	switch p.kind {
+	case .Core:
 		return nil
+	case .Block:
+		return &(^Part_Block)(p).charge
+	case .Compact:
+		return &(^Compact_Block)(p).charge
 	}
-	return &(^Part_Block)(p).charge
+	return nil
 }
 
-part_alloc :: proc "contextless" (s: Vset, p: ^Partition, size: int, alignment: int, zero: bool) -> rawptr {
+part_alloc :: proc "contextless" (s: Vset, p: ^Part_Head, size: int, alignment: int, zero: bool) -> rawptr {
 	if c := part_charge(s, p); c != nil {
 		return charge_alloc(c, size, alignment, zero)
 	}
 	return block_alloc(&s.ledger, size, alignment, zero)
 }
 
-part_free :: proc "contextless" (s: Vset, p: ^Partition, ptr: rawptr) {
+part_free :: proc "contextless" (s: Vset, p: ^Part_Head, ptr: rawptr) {
 	if c := part_charge(s, p); c != nil {
 		charge_free(c, ptr)
 		return
@@ -202,14 +207,14 @@ part_free :: proc "contextless" (s: Vset, p: ^Partition, ptr: rawptr) {
 	block_free(&s.ledger, ptr)
 }
 
-part_resize :: proc "contextless" (s: Vset, p: ^Partition, ptr: rawptr, old_size: int, size: int, alignment: int, zero: bool) -> rawptr {
+part_resize :: proc "contextless" (s: Vset, p: ^Part_Head, ptr: rawptr, old_size: int, size: int, alignment: int, zero: bool) -> rawptr {
 	if c := part_charge(s, p); c != nil {
 		return charge_resize(c, ptr, old_size, size, alignment, zero)
 	}
 	return block_resize(&s.ledger, ptr, old_size, size, alignment, zero)
 }
 
-part_allocator :: proc "contextless" (s: Vset, p: ^Partition) -> runtime.Allocator {
+part_allocator :: proc "contextless" (s: Vset, p: ^Part_Head) -> runtime.Allocator {
 	if c := part_charge(s, p); c != nil {
 		return charge_allocator(c)
 	}

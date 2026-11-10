@@ -13,9 +13,9 @@
   "src/hnsw/scratch.odin": "7cb92f3818cd25f378636abe1f4d5568730c8f0106e3a6e9a160e474da93602c",
   "src/hnsw/heap.odin": "c6e30aeceb58b6e4d6beb54c6c8595f7e26114ef5905bd3e144470f53e87259d",
   "src/vfilter/evaluate.odin": "7b98d9309022dde6000e7b1f6bc9015cd4d570a358ae0e59d3ec45ae55541b85",
-  "src/access.odin": "f42d60bbe586871723db2f514ae07cd3b5cd380572934ba1576f551fb2ee127e",
-  "src/cmd_label.odin": "7309ef4d6b98eede91bd3dfe0bf8283ef5681d8ac35ec069b1776484b7060819",
-  "src/multi.odin": "13de5280906cd8904cd7aad61d170c4cf7d8f96155c9a9b416e750964a2a0438",
+  "src/access.odin": "ae306fa93fe5448f26ad72de196b03efc1557a9d8ba5d3f9c4ef278a2c2b0d73",
+  "src/cmd_label.odin": "d4cf075a3b5f1bff9de54662c54c810fd00d2b16fc50130a064e0ec662508309",
+  "src/multi.odin": "40097af0da33539f7b14665b7968383a9e864b039613b28f37e4151f7bb24760",
   "src/keyspace_labels.odin": "8bf42a3ec5a6475f21f46d11368b2f6d14782be1dfce1bf5fb2a3acaaff34546",
   "src/keyspace_labels_scan.odin": "b9e0ca9387fdc7d66fec83cc91c54bce746c65e6d24a2cf970d338628e5c359d",
   "src/keyspace_labels_cmd.odin": "848955f4c113971508d6ea208030682ac7f1b3e3f1e2310b27066cd551fb54f5",
@@ -23,6 +23,6 @@
   "src/cmd_generic.odin": "c4173701ca5d269d5499b3deddfa7ab07a557faa3e99c60d31699c97d9439400",
   "src/cmd_copy.odin": "fb4e44ba0e0a2fae7f750c711e9d12c28ca5e36e0d5abb69ae825d3def43a377",
   "src/cmd_string.odin": "5f3331baa186aef24cbc108a0b63efd8bac0ea6416414cc18c05f3cb69df93be",
-  "src/dispatch.odin": "35d6c01704e4c7bc24f6fbc2418a703e5f7230cf8dc7d38b3062ab902078387b",
-  "src/keyspec.odin": "68f4b53c9fac393bdb157b06052f498d1015c09ab35c72b19a29dd3a8f9930c4"
+  "src/dispatch.odin": "a3118ce634388d51a12a2895bef9e8e0acafd5e1a53d36e3880520e7d2e2e9cf",
+  "src/keyspec.odin": "14859c4179d0e28d16f31e63808fd3546ac339db427d46ab5abfe67cb6a6de85"
 }

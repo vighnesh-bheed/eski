@@ -23,6 +23,12 @@ View :: struct {
 	parts:  []View_Part,
 	size:   int,
 	attrs:  int,
+	scope:  ^Owner_Scope,
+}
+
+Own_View :: struct {
+	id:   u32,
+	view: i32,
 }
 
 Shadow :: struct {
@@ -58,6 +64,17 @@ shadow_less :: proc(a, b: Shadow) -> bool {
 	return a.slot < b.slot
 }
 
+view_part_less :: #force_inline proc "contextless" (a: ^Access, x: ^View_Part, y: ^View_Part) -> bool {
+	return scope_order_less(a, Scope{label = x.part.label, owner = x.part.owner}, Scope{label = y.part.label, owner = y.part.owner})
+}
+
+view_head :: #force_inline proc "contextless" (v: ^View, vp: ^View_Part) -> ^Part_Head {
+	if vp.part.kind == .Compact {
+		return part_by_id(v.set, vp.part.id)
+	}
+	return vp.part
+}
+
 view_open :: proc(s: Vset, a: ^Access, sc: ^Scratch) -> (v: View, err: Error) {
 	v.set = s
 	v.access = a^
@@ -68,6 +85,9 @@ view_open :: proc(s: Vset, a: ^Access, sc: ^Scratch) -> (v: View, err: Error) {
 	if s == nil {
 		return v, .None
 	}
+	if !access_valid(a) {
+		return v, .Invalid_Parameter
+	}
 	if s.lab == nil {
 		if s.count > 0 && sees(a, lbl.BOTTOM_ID) {
 			if _, e := append(&sc.view_parts, View_Part{part = &s.core}); e != nil {
@@ -76,6 +96,19 @@ view_open :: proc(s: Vset, a: ^Access, sc: ^Scratch) -> (v: View, err: Error) {
 		}
 	} else {
 		lab := s.lab
+		scope := owner_scope(s, a.owner) if a.owner != SHARED else nil
+		v.scope = scope
+		if scope != nil {
+			compact := 0
+			for i in 0 ..< scope.part_len {
+				if p := scope.parts[i]; p.kind == .Compact && sees(a, p.label) {
+					compact += 1
+				}
+			}
+			if resize(&sc.proxies, compact) != nil {
+				return v, .Out_Of_Memory
+			}
+		}
 		for i in 0 ..< lab.sorted_len {
 			p := lab.sorted[i]
 			if sees(a, p.label) {
@@ -84,18 +117,36 @@ view_open :: proc(s: Vset, a: ^Access, sc: ^Scratch) -> (v: View, err: Error) {
 				}
 			}
 		}
+		if scope != nil {
+			k := 0
+			for i in 0 ..< scope.part_len {
+				p := scope.parts[i]
+				if !sees(a, p.label) {
+					continue
+				}
+				full := part_full(p)
+				if full == nil {
+					full = &sc.proxies[k]
+					k += 1
+					proxy_fill(s, full, (^Compact_Block)(p))
+				}
+				if _, e := append(&sc.view_parts, View_Part{part = full}); e != nil {
+					return v, .Out_Of_Memory
+				}
+			}
+		}
 		parts := sc.view_parts[:]
 		for i in 1 ..< len(parts) {
 			x := parts[i]
 			j := i
-			for j > 0 && label_order_less(a, x.part.label, parts[j - 1].part.label) {
+			for j > 0 && view_part_less(a, &x, &parts[j - 1]) {
 				parts[j] = parts[j - 1]
 				j -= 1
 			}
 			parts[j] = x
 		}
-		if lab.multi_len > 0 && len(parts) > 1 {
-			if err = view_shadows(s, a, sc); err != .None {
+		if len(parts) > 1 && (lab.multi_len > 0 || scope != nil) {
+			if err = view_shadows(s, a, sc, scope); err != .None {
 				return v, err
 			}
 		}
@@ -120,7 +171,56 @@ view_open :: proc(s: Vset, a: ^Access, sc: ^Scratch) -> (v: View, err: Error) {
 	return v, .None
 }
 
-view_shadows :: proc(s: Vset, a: ^Access, sc: ^Scratch) -> Error {
+view_of :: proc "contextless" (sc: ^Scratch, id: u32) -> i32 {
+	if id < OWNER_PART_BASE {
+		return sc.part_view[id] if int(id) < len(sc.part_view) else -1
+	}
+	for ov in sc.own_view {
+		if ov.id == id {
+			return ov.view
+		}
+	}
+	return -1
+}
+
+shadow_copies :: proc(s: Vset, a: ^Access, sc: ^Scratch, own: []Ref, shared: []Ref) -> Error {
+	visible := 0
+	for r in own {
+		if view_of(sc, r.part) >= 0 {
+			visible += 1
+		}
+	}
+	for r in shared {
+		if view_of(sc, r.part) >= 0 {
+			visible += 1
+		}
+	}
+	if visible < 2 {
+		return .None
+	}
+	parts := sc.view_parts[:]
+	in_own, best := resolve_scoped(a, s, own, shared)
+	for list, side in ([2][]Ref{own, shared}) {
+		for r, i in list {
+			vi := view_of(sc, r.part)
+			if vi < 0 || (i == best && in_own == (side == 0)) {
+				continue
+			}
+			p := parts[vi].part
+			el := &p.elements[r.slot]
+			if _, err := append(&sc.shadows, Shadow{view = u32(vi), slot = r.slot, pos = el.pos, attr = el.attr.blob != nil}); err != nil {
+				return .Out_Of_Memory
+			}
+		}
+	}
+	return .None
+}
+
+owner_scan_due :: proc "contextless" (s: Vset, scope: ^Owner_Scope) -> bool {
+	return scope.seen_shared != s.lab.owners.shared_gen || scope.collide
+}
+
+view_shadows :: proc(s: Vset, a: ^Access, sc: ^Scratch, scope: ^Owner_Scope) -> Error {
 	lab := s.lab
 	parts := sc.view_parts[:]
 	if resize(&sc.part_view, int(lab.id_high)) != nil {
@@ -129,31 +229,56 @@ view_shadows :: proc(s: Vset, a: ^Access, sc: ^Scratch) -> Error {
 	for &x in sc.part_view {
 		x = -1
 	}
+	clear(&sc.own_view)
 	for vp, i in parts {
-		sc.part_view[vp.part.id] = i32(i)
+		if vp.part.owner == SHARED {
+			sc.part_view[vp.part.id] = i32(i)
+		} else if _, err := append(&sc.own_view, Own_View{id = vp.part.id, view = i32(i)}); err != nil {
+			return .Out_Of_Memory
+		}
 	}
+	scan := scope != nil && owner_scan_due(s, scope)
 	for m in 0 ..< lab.multi_len {
 		c := lab.multis[m]
 		e := copies_entries(c)[:c.count]
-		visible := 0
-		for r in e {
-			if sc.part_view[r.part] >= 0 {
-				visible += 1
-			}
-		}
-		if visible < 2 {
-			continue
-		}
-		best := resolve(a, s, e)
-		for r, i in e {
-			vi := sc.part_view[r.part]
-			if i == best || vi < 0 {
+		if scan {
+			if _, mine := rax.find(scope.names, ref_name(s, e[0])); mine {
 				continue
 			}
-			p := parts[vi].part
-			el := &p.elements[r.slot]
-			if _, err := append(&sc.shadows, Shadow{view = u32(vi), slot = r.slot, pos = el.pos, attr = el.attr.blob != nil}); err != nil {
-				return .Out_Of_Memory
+		}
+		if err := shadow_copies(s, a, sc, nil, e); err != .None {
+			return err
+		}
+	}
+	if scope != nil {
+		if scan {
+			collide := false
+			it: rax.Iterator
+			rax.start(&it, scope.names)
+			defer rax.stop(&it)
+			rax.seek(&it, "^")
+			for rax.next(&it) {
+				one, other: Ref
+				own := name_decode(it.data, &one)
+				shared := names_lookup(s, rax.key(&it), &other)
+				if shared != nil {
+					collide = true
+				}
+				if len(own) + len(shared) < 2 {
+					continue
+				}
+				if err := shadow_copies(s, a, sc, own, shared); err != .None {
+					return err
+				}
+			}
+			scope.collide = collide
+			scope.seen_shared = lab.owners.shared_gen
+		} else {
+			for m in 0 ..< scope.multi_len {
+				c := scope.multis[m]
+				if err := shadow_copies(s, a, sc, copies_entries(c)[:c.count], nil); err != .None {
+					return err
+				}
 			}
 		}
 	}
@@ -219,16 +344,20 @@ view_find :: proc "contextless" (v: ^View, name: []u8) -> (r: Ref, ok: bool) {
 	if v.size == 0 {
 		return REF_NONE, false
 	}
-	one: Ref
-	copies := names_lookup(v.set, name, &one)
-	if copies == nil {
+	one, mine: Ref
+	shared := names_lookup(v.set, name, &one)
+	own: []Ref
+	if v.scope != nil {
+		own = tree_lookup(v.scope.names, name, &mine)
+	}
+	if shared == nil && own == nil {
 		return REF_NONE, false
 	}
-	i := resolve(&v.access, v.set, copies)
+	in_own, i := resolve_scoped(&v.access, v.set, own, shared)
 	if i < 0 {
 		return REF_NONE, false
 	}
-	r = copies[i]
+	r = own[i] if in_own else shared[i]
 	if view_part_of(v, r.part) == nil {
 		return REF_NONE, false
 	}
@@ -339,7 +468,7 @@ named_push_bounded :: proc(h: ^[dynamic]Named_Hit, x: Named_Hit, k: int) {
 	}
 }
 
-named_hit :: #force_inline proc "contextless" (p: ^Partition, score: f64, slot: u32) -> Named_Hit {
+named_hit :: #force_inline proc "contextless" (p: ^Part_Head, score: f64, slot: u32) -> Named_Hit {
 	e := &p.elements[slot]
 	return Named_Hit{score = score, name = e.name[:e.len], seq = e.seq, slot = slot, part = p.id}
 }
@@ -355,7 +484,7 @@ view_accept_hook :: proc(ctx: rawptr, slot: u32) -> bool {
 	return true
 }
 
-named_scan :: proc(p: ^Partition, q: vmath.Query, k: int, accept: ^Accept_Context, sc: ^Scratch) -> Failure {
+named_scan :: proc(p: ^Part_Head, q: vmath.Query, k: int, accept: ^Accept_Context, sc: ^Scratch) -> Failure {
 	heap := &sc.named_heap
 	clear(heap)
 	if reserve(heap, k) != nil {
@@ -501,7 +630,7 @@ view_search :: proc(v: ^View, req: ^Search_Request, scratch: ^Scratch, out: ^[dy
 view_info :: proc "contextless" (v: ^View) -> Info {
 	s := v.set
 	info := Info {
-		quant = elem_quant(s.quant),
+		quant = elem_quant(s.arena.elem),
 		m = s.graph.m,
 		dim = s.dim,
 		projection_input_dim = s.input_dim,
@@ -515,34 +644,45 @@ view_info :: proc "contextless" (v: ^View) -> Info {
 	return info
 }
 
+range_seek :: proc "contextless" (it: ^rax.Iterator, start: Lex_Bound) {
+	switch start.kind {
+	case .Min, .Max:
+		rax.seek(it, "^")
+	case .Inclusive:
+		rax.seek(it, ">=", start.value)
+	case .Exclusive:
+		rax.seek(it, ">", start.value)
+	}
+}
+
+range_past :: proc "contextless" (key: []u8, end: Lex_Bound) -> bool {
+	#partial switch end.kind {
+	case .Inclusive:
+		return lex_compare(key, end.value) > 0
+	case .Exclusive:
+		return lex_compare(key, end.value) >= 0
+	}
+	return false
+}
+
 view_range :: proc(v: ^View, start: Lex_Bound, end: Lex_Bound, count: int, out: ^[dynamic]Ref) {
 	s := v.set
 	if v.size == 0 || count == 0 || start.kind == .Max || end.kind == .Min {
 		return
 	}
+	if v.scope != nil {
+		view_range_scoped(v, start, end, count, out)
+		return
+	}
 	it: rax.Iterator
 	rax.start(&it, s.names)
 	defer rax.stop(&it)
-	switch start.kind {
-	case .Min, .Max:
-		rax.seek(&it, "^")
-	case .Inclusive:
-		rax.seek(&it, ">=", start.value)
-	case .Exclusive:
-		rax.seek(&it, ">", start.value)
-	}
+	range_seek(&it, start)
 	taken := 0
 	for rax.next(&it) {
 		key := rax.key(&it)
-		#partial switch end.kind {
-		case .Inclusive:
-			if lex_compare(key, end.value) > 0 {
-				return
-			}
-		case .Exclusive:
-			if lex_compare(key, end.value) >= 0 {
-				return
-			}
+		if range_past(key, end) {
+			return
 		}
 		one: Ref
 		copies := name_decode(it.data, &one)
@@ -554,6 +694,60 @@ view_range :: proc(v: ^View, start: Lex_Bound, end: Lex_Bound, count: int, out: 
 		taken += 1
 		if count > 0 && taken >= count {
 			return
+		}
+	}
+}
+
+view_range_scoped :: proc(v: ^View, start: Lex_Bound, end: Lex_Bound, count: int, out: ^[dynamic]Ref) {
+	s := v.set
+	shared, own: rax.Iterator
+	rax.start(&shared, s.names)
+	defer rax.stop(&shared)
+	rax.start(&own, v.scope.names)
+	defer rax.stop(&own)
+	range_seek(&shared, start)
+	range_seek(&own, start)
+	has_shared := rax.next(&shared)
+	has_own := rax.next(&own)
+	taken := 0
+	for has_shared || has_own {
+		order := 0
+		if has_shared && has_own {
+			order = lex_compare(rax.key(&shared), rax.key(&own))
+		} else if has_own {
+			order = 1
+		} else {
+			order = -1
+		}
+		key := rax.key(&shared) if order <= 0 else rax.key(&own)
+		if range_past(key, end) {
+			return
+		}
+		one, mine: Ref
+		sc: []Ref
+		oc: []Ref
+		if order <= 0 {
+			sc = name_decode(shared.data, &one)
+		}
+		if order >= 0 {
+			oc = name_decode(own.data, &mine)
+		}
+		in_own, i := resolve_scoped(&v.access, s, oc, sc)
+		if i >= 0 {
+			r := oc[i] if in_own else sc[i]
+			if view_part_of(v, r.part) != nil {
+				append(out, r)
+				taken += 1
+				if count > 0 && taken >= count {
+					return
+				}
+			}
+		}
+		if order <= 0 {
+			has_shared = rax.next(&shared)
+		}
+		if order >= 0 {
+			has_own = rax.next(&own)
 		}
 	}
 }
@@ -759,16 +953,16 @@ view_memory :: proc "contextless" (v: ^View) -> int {
 		return 0
 	}
 	n := VIEW_BASE_BYTES
-	for vp in v.parts {
-		n += part_footprint(s, vp.part) + vp.part.count * NAME_INDEX_BYTES
+	for &vp in v.parts {
+		n += part_footprint(s, view_head(v, &vp)) + vp.part.count * NAME_INDEX_BYTES
 	}
 	return n
 }
 
-part_element_encoded_size :: proc "contextless" (p: ^Partition, slot: u32) -> int {
+part_element_encoded_size :: proc "contextless" (p: ^Part_Head, slot: u32) -> int {
 	e := &p.elements[slot]
 	n := varint_size(e.seq) + varint_size(u64(e.len)) + int(e.len) + p.arena.stride + 4
-	if p.quant == .Int8 {
+	if p.arena.elem == .Int8 {
 		n += 4
 	}
 	if e.attr.blob == nil {

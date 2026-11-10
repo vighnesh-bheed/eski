@@ -40,6 +40,7 @@ AREAS = {
     'counters': ['Counters'],
     'contexts': ['Contexts'],
     'arrival': ['Arrival'],
+    'owners': ['Owner', 'OwnerArrival'],
     'resolution': ['KeyModel'],
     'confinement': ['KeyReads'],
     'placement': ['KeyWrites'],
@@ -53,6 +54,9 @@ ROW_AREAS = {'L': 'lattice', 'CR': 'marking', 'CL': 'marking', 'CC': 'marking', 
              'SM': 'rules', 'SD': 'rules', 'NR': 'counters', 'NA': 'counters', 'NS': 'counters', 'NV': 'counters',
              'AH': 'contexts', 'AQ': 'contexts', 'AW': 'contexts', 'AX': 'arrival', 'AU': 'arrival', 'AC': 'arrival',
              'AT': 'arrival', 'AO': 'arrival', 'AR': 'arrival', 'AS': 'arrival', 'AK': 'arrival', 'AA': 'arrival',
+             'AP': 'arrival', 'AE': 'arrival', 'AB': 'arrival',
+             'OX': 'owners', 'OU': 'owners', 'OC': 'owners', 'OO': 'owners', 'OR': 'owners', 'OA': 'owners', 'OT': 'owners',
+             'OP': 'owners', 'OS': 'owners', 'OB': 'owners',
              'KO': 'resolution', 'KR': 'confinement', 'KW': 'placement', 'KH': 'purge', 'KP': 'plain'}
 KEY_SEED = 0x6B3E7
 ARRIVAL_SEED = 0xA2217
@@ -65,7 +69,14 @@ ARRIVAL_NOTES = ['created', 'create_full', 'dropped', 'swept', 'find_ok', 'find_
                  'watch_noted_marked', 'watch_in_multi', 'unwatched', 'touch_marked', 'touch_unseen', 'exec_watch_refused',
                  'exec_watch_refused_marked', 'exec_watch_refused_clean', 'exec_watch_mixed', 'exec_watch_aborted',
                  'exec_watch_same', 'auth_switched', 'auth_kept_watches', 'exec_abort_arrival_watched', 'touch_marked_again',
-                 'watch_added_marked', 'marked_keeps_watches']
+                 'watch_added_marked', 'marked_keeps_watches', 'form_owner_only', 'form_marking_owner', 'owner_named',
+                 'owner_context', 'owner_token', 'owner_multi', 'owner_pinned', 'owner_pinned_every', 'owner_housekeeping',
+                 'refused_owner_required', 'refused_invalid_owner', 'refused_owner_bound', 'refused_owner_context',
+                 'refused_owner_transaction', 'refused_owner_top', 'refused_token_owner', 'refused_context_owner',
+                 'exec_owner_watch_refused', 'watch_owner_mixed', 'created_owner', 'owner_auth_cleared', 'refused_noperm',
+                 'refused_noperm_push', 'kill_allowed', 'kill_refused', 'owner_refused_unpinned', 'owner_noperm',
+                 'owner_noperm_push', 'owner_kill_same', 'owner_kill_operator', 'owner_kill_refused_shared',
+                 'owner_kill_refused_user', 'owner_kill_refused_label']
 ARRIVAL_SEMANTIC = {'expired_handle_used': 'find_expired', 'other_login_handle_used': 'find_other_login',
                     'handle_above_clearance_used': 'find_outside_ceiling', 'expired_token_used': 'token_expired',
                     'token_above_clearance_used': 'token_outside_ceiling', 'token_context_mismatch_used': 'token_context_refused',
@@ -76,8 +87,20 @@ ARRIVAL_SEMANTIC = {'expired_handle_used': 'find_expired', 'other_login_handle_u
                     'label_above_clearance_accepted': 'refused_invalid', 'session_for_per_command_login': 'session_denied',
                     'context_cap_ignored': 'create_full', 'cron_keeps_expired': 'swept_several', 'dirty_exec_runs': 'exec_dirty',
                     'boundary_handle_used': 'find_expired_boundary', 'boundary_token_used': 'token_expired_boundary',
-                    'watch_label_ignored': 'exec_watch_refused_marked', 'watch_mark_ignored': 'exec_watch_aborted'}
+                    'watch_label_ignored': 'exec_watch_refused_marked', 'watch_mark_ignored': 'exec_watch_aborted',
+                    'owner_required_bypassed': 'refused_owner_required', 'invalid_owner_accepted': 'refused_invalid_owner',
+                    'pinned_owner_bypassed': 'refused_owner_bound', 'context_owner_mismatch_accepted': 'refused_owner_context',
+                    'transaction_owner_ignored': 'refused_owner_transaction', 'operator_top_skipped': 'refused_owner_top',
+                    'token_owner_unchecked': 'refused_token_owner', 'context_owner_unchecked': 'refused_context_owner',
+                    'owner_watch_ignored': 'exec_owner_watch_refused', 'acl_refusal_skipped': 'refused_noperm',
+                    'owner_acl_refusal_skipped': 'owner_noperm'}
 ARRIVAL_COUNT_SEMANTIC = {'mark_drops_watches': 'marked_keeps_watches', 'marked_watch_adds_nothing': 'watch_added_marked'}
+ARRIVAL_VERDICT_SEMANTIC = {'label_kill_rule_skipped': 'kill_refused', 'shared_script_killed_by_user': 'owner_kill_refused_shared',
+                            'other_user_script_killed': 'owner_kill_refused_user',
+                            'script_killed_below_its_label': 'owner_kill_refused_label',
+                            'same_owner_kill_refused': 'owner_kill_same', 'operator_kill_refused': 'owner_kill_operator'}
+ARRIVAL_PIN_SEMANTIC = {'noperm_push_pins': 'refused_noperm_push', 'owner_noperm_push_pins': 'owner_noperm_push',
+                        'owner_refusal_pins': 'owner_refused_unpinned'}
 NAME_PATTERN = re.compile(rb'[A-Z0-9][A-Z0-9_-]*( [A-Z0-9][A-Z0-9_-]*)*')
 
 
@@ -386,7 +409,7 @@ def label_token(label):
 def corpus():
     rng = random.Random(SEED)
     lines, expected = [], []
-    stats = {kind: 0 for kind, area in ROW_AREAS.items() if area not in ('contexts', 'arrival') + KEY_AREAS}
+    stats = {kind: 0 for kind, area in ROW_AREAS.items() if area not in ('contexts', 'arrival', 'owners') + KEY_AREAS}
     extra = {'config_rejections': 0, 'parse_accepted': 0, 'parse_errors': {}, 'decode_errors': {}, 'decode_accepted': 0,
              'intern_repeats': 0, 'refresh_growths': 0, 'stale_slots': 0, 'gate_slots': 0, 'brute_cases_with_hidden': 0,
              'write_verdicts': {}, 'counter_overflows': 0, 'counter_underflows': 0, 'long_markings': 0}
@@ -1115,6 +1138,16 @@ def arrival_controls(expected, marks):
         if mutated[i] == expected[i]:
             raise AssertionError('semantic negative control does not change its row: ' + name)
         cases['arrival_semantic_' + name] = '\n'.join(mutated) + '\n'
+    for table, change in ((ARRIVAL_VERDICT_SEMANTIC, verdict_flipped), (ARRIVAL_PIN_SEMANTIC, session_pinned)):
+        for name, event in table.items():
+            if event not in marks:
+                raise AssertionError('no row for semantic negative control ' + name)
+            i = marks[event]
+            mutated = list(expected)
+            mutated[i] = change(expected[i])
+            if mutated[i] == expected[i]:
+                raise AssertionError('semantic negative control does not change its row: ' + name)
+            cases['arrival_semantic_' + name] = '\n'.join(mutated) + '\n'
     rejected = []
     for name, mutant in cases.items():
         try:
@@ -1130,6 +1163,41 @@ def watches_dropped(row):
     cells = row.split('|')
     cells[-2] = cells[-2].rsplit(':', 1)[0] + ':0'
     return '|'.join(cells)
+
+
+def verdict_flipped(row):
+    cells = row.split('|')
+    if cells[0] not in ('AB', 'OB') or cells[2] not in ('0', '1'):
+        raise AssertionError('verdict control needs a busy row: ' + row[:200])
+    cells[2] = '1' if cells[2] == '0' else '0'
+    return '|'.join(cells)
+
+
+def session_pinned(row):
+    cells = row.split('|')
+    if not cells[1].startswith('no:') or cells[-2][2] != '0':
+        raise AssertionError('pin control needs a refused row without a session: ' + row[:200])
+    cells[-2] = cells[-2][:2] + '1' + cells[-2][3:]
+    return '|'.join(cells)
+
+
+def arrival_mutants(helpers, trace, rows, bridge, output):
+    found = {}
+    for name in arrival.MUTANTS:
+        mtrace, mexpected, _, _, _ = arrival.corpus(helpers, ARRIVAL_SEED, mutant=name)
+        got = rows
+        if mtrace != trace:
+            path = output / f'arrival-mutant-{name}.txt'
+            path.write_text(mtrace)
+            result = subprocess.run([str(bridge.resolve()), str(path)], text=True, capture_output=True)
+            if result.returncode or result.stderr:
+                raise AssertionError(f'arrival mutant {name}: exit {result.returncode}, stderr: {result.stderr[-2000:]}')
+            got = result.stdout.splitlines()
+        differing = sum(1 for a, b in zip(got, mexpected) if a != b) + abs(len(got) - len(mexpected))
+        if not differing:
+            raise AssertionError('arrival model mutant accepted: ' + name)
+        found['arrival_mutant_' + name] = {'differing_rows': differing, 'same_trace': mtrace == trace}
+    return found
 
 
 def twin_runs(trace):
@@ -1465,16 +1533,19 @@ def run():
     if results['arrival_twins_lean'] != results['arrival_twins_odin']:
         raise AssertionError('Lean oracle and Odin twin rows differ')
     twin_rejected = twin_controls(tlines, trows, pairs)
-    if set(stats) & set(astats) or set(astats) != {k for k, a in ROW_AREAS.items() if a in ('contexts', 'arrival')}:
+    amutants = arrival_mutants(helpers, atrace, (output / 'arrival-odin-results.txt').read_text().splitlines(), arrival_bridge,
+                               output)
+    if set(stats) & set(astats) or set(astats) != {k for k, a in ROW_AREAS.items() if a in ('contexts', 'arrival', 'owners')}:
         raise AssertionError('arrival row kinds overlap the label rows or miss a kind')
     stats.update(astats)
     extra['arrival'] = anotes
     extra['arrival_twins'] = twins
+    extra['arrival_mutants'] = amutants
     kstats, kdetail, kmutants = key_evidence(key_bridge, lean_model, output)
     stats.update(kstats)
     extra['keys'] = kdetail
     extra['key_mutants'] = kmutants
-    rejected = negative_controls(expected) + arrival_controls(aexpected, marks) + twin_rejected + sorted(kmutants)
+    rejected = negative_controls(expected) + arrival_controls(aexpected, marks) + twin_rejected + sorted(amutants) + sorted(kmutants)
     modules = {module: set(re.findall(r'^theorem\s+(\w+)', (PACKAGE / f'Labels/{module}.lean').read_text(), re.M))
                for files in AREAS.values() for module in files}
     comparisons = {area: sum(count for kind, count in stats.items() if ROW_AREAS[kind] == area) for area in AREAS}

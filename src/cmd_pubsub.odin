@@ -89,11 +89,11 @@ cmd_sunsubscribe :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 cmd_publish :: proc(c: ^Conn, argv: [][]u8) {
-	reply_int(c, i64(ps_publish(argv[1], argv[2], .Channel, access_publish_label())))
+	reply_int(c, i64(ps_publish(argv[1], argv[2], .Channel, access_publish_scope())))
 }
 
 cmd_spublish :: proc(c: ^Conn, argv: [][]u8) {
-	reply_int(c, i64(ps_publish(argv[1], argv[2], .Shard, access_publish_label())))
+	reply_int(c, i64(ps_publish(argv[1], argv[2], .Shard, access_publish_scope())))
 }
 
 reply_pubsub_pong :: proc(c: ^Conn, argv: [][]u8) {

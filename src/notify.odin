@@ -1,6 +1,7 @@
 package main
 
 import lb "label"
+import ow "owner"
 
 Notify_Class :: enum u16 {
 	Keyspace,
@@ -67,13 +68,13 @@ notify_chan: [dynamic]u8
 
 notify :: #force_inline proc(class: Notify_Class, event: string, key: []u8) {
 	if class in notify_active {
-		notify_publish(event, key, cur_db().id, cur_db().label)
+		notify_publish(event, key, cur_db().id, ow.Scope{cur_db().label, ow.SHARED})
 	}
 }
 
 notify_in :: #force_inline proc(class: Notify_Class, event: string, key: []u8, db: ^Db) {
 	if class in notify_active {
-		notify_publish(event, key, db.id, db.label)
+		notify_publish(event, key, db.id, ow.Scope{db.label, ow.SHARED})
 	}
 }
 
@@ -122,7 +123,7 @@ notify_put_db :: proc(b: ^[dynamic]u8, dbid: int) {
 }
 
 @(cold)
-notify_publish :: #force_no_inline proc(event: string, key: []u8, dbid: int, key_label := lb.BOTTOM_ID) {
+notify_publish :: #force_no_inline proc(event: string, key: []u8, dbid: int, key_scope := ow.SHARED_BOTTOM) {
 	if len(ps_maps[.Channel]) == 0 && len(ps_patterns) == 0 {
 		return
 	}
@@ -133,7 +134,7 @@ notify_publish :: #force_no_inline proc(event: string, key: []u8, dbid: int, key
 		notify_put_db(b, dbid)
 		append(b, "__:")
 		append(b, ..key)
-		ps_publish(b[:], transmute([]u8)event, .Channel, key_label)
+		ps_publish(b[:], transmute([]u8)event, .Channel, key_scope)
 	}
 	if .Keyevent in notify_config {
 		clear(b)
@@ -141,7 +142,7 @@ notify_publish :: #force_no_inline proc(event: string, key: []u8, dbid: int, key
 		notify_put_db(b, dbid)
 		append(b, "__:")
 		append(b, event)
-		ps_publish(b[:], key, .Channel, key_label)
+		ps_publish(b[:], key, .Channel, key_scope)
 	}
 	if cap(b) > NOTIFY_CHAN_KEEP {
 		delete(b^)

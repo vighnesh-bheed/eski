@@ -564,6 +564,38 @@ class Labelled(unittest.TestCase):
         pool.call('LABEL', 'AS', 'C', 'MULTI')
         self.assertEqual(error_of(pool, 'SUBSCRIBE', 'ch'), needed)
 
+    def test_a_push_command_the_acl_refuses_pins_nothing(self):
+        self.admin.call('ACL', 'SETUSER', 'nosub', 'on', 'nopass', '+@all', '-subscribe', '-psubscribe', '-ssubscribe',
+                        '-client|tracking', '~*', '&*', 'clearance:S//A')
+        sub = self.connect('nosub')
+        for command, name in ((('SUBSCRIBE', 'news'), 'subscribe'), (('PSUBSCRIBE', 'n*'), 'psubscribe'),
+                              (('SSUBSCRIBE', 'news'), 'ssubscribe'), (('CLIENT', 'TRACKING', 'ON'), 'client|tracking')):
+            self.assertEqual(error_of(sub, *command), "NOPERM User nosub has no permissions to run the '%s' command" % name)
+            self.assertEqual(self.whoami(sub)[b'session'], 0)
+        self.assertEqual(error_of(sub, 'SUBSCRIBE'), "ERR wrong number of arguments for 'subscribe' command")
+        self.assertEqual(self.whoami(sub)[b'session'], 0)
+        objects = [as_map(e)[b'object'] for e in self.admin.call('ACL', 'LOG') if as_map(e)[b'username'] == b'nosub']
+        self.assertEqual(sorted(objects), [b'client|tracking', b'psubscribe', b'ssubscribe', b'subscribe'])
+        self.admin.call('ACL', 'SETUSER', 'nochan', 'on', 'nopass', '+@all', '~*', 'resetchannels', '&other', 'clearance:S//A')
+        channel = self.connect('nochan')
+        self.assertEqual(error_of(channel, 'SUBSCRIBE', 'news'), 'NOPERM No permissions to access a channel')
+        self.assertEqual(self.whoami(channel)[b'session'], 0)
+        self.assertEqual(self.admin.call('ACL', 'SETUSER', 'nosub', '+subscribe'), 'OK')
+        self.assertFalse(closed(sub))
+        self.assertEqual(self.whoami(sub)[b'session'], 0)
+        listener = self.connect('nosub', protocol=3)
+        push_of(listener, 'SUBSCRIBE', 'news')
+        who = self.whoami(listener)
+        self.assertEqual((who[b'label'], who[b'session']), (b'S//A', 1))
+        self.assertEqual(self.admin.call('LABEL', 'AS', 'S//A', 'PUBLISH', 'news', 'at'), 1)
+        self.assertEqual(self.pushed(listener), [(b'message', b'at')])
+        queued = self.connect('nosub')
+        self.assertEqual(queued.call('MULTI'), 'OK')
+        self.assertEqual(queued.call('SUBSCRIBE', 'more'), 'QUEUED')
+        self.assertEqual(queued.call('EXEC'), [[b'subscribe', b'more', 1]])
+        push_of(queued, 'UNSUBSCRIBE', 'more')
+        self.assertEqual(self.whoami(queued)[b'session'], 1)
+
     def test_client_tracking_pins_the_login_label(self):
         tracker = self.connect('peer', protocol=3)
         self.assertEqual(tracker.call('CLIENT', 'TRACKING', 'ON'), 'OK')

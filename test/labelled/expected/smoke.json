@@ -153,15 +153,6 @@
    ]
   },
   {
-   "id": "logins",
-   "reason": "A login created without a clearance rule runs at the lowest label (owner item A1), so the permissions scenario's login lim gets the top-only refusal for DEBUG SLEEP, which the label layer gives on arrival, before the ACL's NOPERM.",
-   "doc": "docs/labels.md#logins",
-   "entries": [
-    "acl raw socket bytes for permissions (resp3) differ from redis",
-    "acl raw socket bytes for permissions differ from redis"
-   ]
-  },
-  {
    "id": "watches",
    "reason": "A labelled server keeps the watched keys of a transaction that a write has marked until the watches are cleared, adds the keys of a WATCH sent after the mark and keeps queueing the commands of a marked transaction, so that the watch count, the transaction fields and the client memory of a connection do not depend on whether a watched key was written; the 7.4 server forgets the keys, ignores the WATCH and stops queueing. The introspection scenario writes keys its connections watch and then reads the watch, multi and multi-mem fields of CLIENT LIST and the watching_clients and total_watched_keys of INFO, which therefore differ after each such write.",
    "doc": "docs/labels.md#transactions-and-scripts",

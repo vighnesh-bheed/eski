@@ -20,18 +20,25 @@ part_graph_reset :: proc(s: Vset, p: ^Partition, rng: u64, uid: u64) {
 	hnsw.destroy(&p.graph)
 	hnsw.init(&p.graph, graph_params(m, rng), graph_distance, p, part_allocator(s, p))
 	p.graph.node_uid = uid
-	p.prefetch = false
 }
 
-part_maybe_graduate :: proc(s: Vset, p: ^Partition, sc: ^Scratch) {
+part_maybe_graduate :: proc(s: Vset, p: ^Part_Head, sc: ^Scratch) {
 	if p.mode == .Flat && p.count > flat_limit {
-		part_graduate(s, p, sc)
+		if p.kind == .Compact {
+			owner_graduate(s, p, sc)
+		} else {
+			part_graduate(s, (^Partition)(p), sc)
+		}
 	}
 }
 
-part_maybe_flatten :: proc(s: Vset, p: ^Partition) {
+part_maybe_flatten :: proc(s: Vset, p: ^Part_Head) {
 	if p.mode == .Graph && p.count <= shrink_limit {
-		part_flatten(s, p)
+		if p.owner != SHARED {
+			owner_flatten(s, p)
+		} else {
+			part_flatten(s, (^Partition)(p))
+		}
 	}
 }
 

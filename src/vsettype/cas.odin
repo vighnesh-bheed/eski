@@ -208,6 +208,7 @@ Cas_Plan :: struct {
 	cache:     Distance_Cache,
 	allocator: runtime.Allocator,
 	label:     lbl.Id,
+	owner:     Owner,
 	part:      u32,
 	ready:     bool,
 }
@@ -319,19 +320,24 @@ cas_commit :: proc(s: Vset, plan: ^Cas_Plan, scratch: ^Scratch = nil) -> (added:
 }
 
 cas_prepare_at :: proc(s: Vset, a: ^Access, req: ^Add_Request, plan: ^Cas_Plan, scratch: ^Scratch = nil, allocator := context.allocator) -> Failure {
+	if !access_valid(a) {
+		cas_discard(plan)
+		return failure(.Invalid_Parameter)
+	}
 	if f := cas_prepare(s, req, plan, scratch, allocator); f.err != .None || !plan.ready {
 		return f
 	}
 	plan.label = a.label
+	plan.owner = a.owner
 	plan.part = PART_NONE
-	if s.lab == nil && a.label != lbl.BOTTOM_ID {
+	if s.lab == nil && (a.label != lbl.BOTTOM_ID || a.owner != SHARED) {
 		return {}
 	}
 	if s.lab == nil {
 		plan.part = 0
 		return {}
 	}
-	p := part_at_label(s, a.label)
+	p := part_at_scope(s, a.label, a.owner)
 	if p == nil || p.mode == .Flat {
 		return {}
 	}
@@ -339,12 +345,12 @@ cas_prepare_at :: proc(s: Vset, a: ^Access, req: ^Add_Request, plan: ^Cas_Plan, 
 	guard: Scratch_Guard
 	sc := guard_begin(&guard, scratch)
 	defer guard_end(&guard)
-	cas_record(p, plan, plan.stored, request_ef(req), sc)
+	cas_record(part_full(p), plan, plan.stored, request_ef(req), sc)
 	return {}
 }
 
 cas_commit_at :: proc(s: Vset, a: ^Access, plan: ^Cas_Plan, scratch: ^Scratch = nil) -> (ch: Change, f: Failure) {
-	if !plan.ready {
+	if !plan.ready || !access_valid(a) {
 		return ch, failure(.Invalid_Parameter)
 	}
 	req := &plan.request
@@ -367,6 +373,6 @@ cas_commit_at :: proc(s: Vset, a: ^Access, plan: ^Cas_Plan, scratch: ^Scratch = 
 		}
 		stored = projected
 	}
-	part := plan.part if plan.set == s && plan.label == a.label else PART_NONE
+	part := plan.part if plan.set == s && plan.label == a.label && plan.owner == a.owner else PART_NONE
 	return apply_add_at(s, a, req, stored, sc, &plan.cache, part)
 }

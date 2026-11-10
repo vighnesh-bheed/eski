@@ -11,6 +11,8 @@ import Labels.Marking
 import Labels.Codec
 import Labels.Contexts
 import Labels.Arrival
+import Labels.Owner
+import Labels.OwnerArrival
 import Labels.KeyModel
 import Labels.KeyReads
 import Labels.KeyWrites
@@ -393,6 +395,15 @@ import Labels.KeyPlain
 #print axioms Labels.quiet_unmarkAll
 #print axioms Labels.writes_change_only_marks
 #print axioms Labels.watch_count_write_free
+#print axioms Labels.core_spec
+#print axioms Labels.gate_acl
+#print axioms Labels.gate_none_acl
+#print axioms Labels.refuse_sess
+#print axioms Labels.core_refused_sess
+#print axioms Labels.finish_refused_sess
+#print axioms Labels.arrive_refused_keeps_session
+#print axioms Labels.arrive_ok_acl
+#print axioms Labels.session_change_needs_admission
 #print axioms Labels.rcmp_pos_trans
 #print axioms Labels.rcmp_pos_of_le
 #print axioms Labels.rcmp_pos_asymm
@@ -529,3 +540,89 @@ import Labels.KeyPlain
 #print axioms Labels.kstep_single
 #print axioms Labels.scan_single
 #print axioms Labels.plain_history
+#print axioms Labels.odom_refl
+#print axioms Labels.odom_shared
+#print axioms Labels.odom_every
+#print axioms Labels.odom_shared_iff
+#print axioms Labels.odom_to_every_iff
+#print axioms Labels.odom_users
+#print axioms Labels.odom_trans
+#print axioms Labels.odom_antisymm
+#print axioms Labels.odom_user_iff
+#print axioms Labels.users_incomparable
+#print axioms Labels.seesP_iff
+#print axioms Labels.seesP_refl
+#print axioms Labels.seesP_trans
+#print axioms Labels.seesP_antisymm
+#print axioms Labels.seesP_user_iff
+#print axioms Labels.seesP_shared_data
+#print axioms Labels.seesP_plain
+#print axioms Labels.owner_isolation
+#print axioms Labels.shared_reader_sees_only_shared
+#print axioms Labels.orank_antisymm
+#print axioms Labels.orank_visible
+#print axioms Labels.scmp_antisymm
+#print axioms Labels.scmp_label_first
+#print axioms Labels.scmp_own_before_shared
+#print axioms Labels.scmp_shared_reader
+#print axioms Labels.scmp_all_shared
+#print axioms Labels.scmp_tie_visible
+#print axioms Labels.mayAct_never_every
+#print axioms Labels.mayAct_no_rule
+#print axioms Labels.mayAct_fixed
+#print axioms Labels.mayAct_any_users
+#print axioms Labels.mayPin_every_iff
+#print axioms Labels.mayPin_of_mayAct
+#print axioms Labels.tokenOwner_named
+#print axioms Labels.explicitOwner_within
+#print axioms Labels.credTok_some
+#print axioms Labels.credCtx_owner
+#print axioms Labels.credPick_some
+#print axioms Labels.credential_within
+#print axioms Labels.resolve_free
+#print axioms Labels.resolve_multi
+#print axioms Labels.ownerPhase_ok
+#print axioms Labels.owner_arrival_within
+#print axioms Labels.owner_required
+#print axioms Labels.tokenOwner_owner
+#print axioms Labels.tokenOwner_shared
+#print axioms Labels.credTok_named
+#print axioms Labels.owner_of_context
+#print axioms Labels.owner_of_token
+#print axioms Labels.owner_of_shared_token
+#print axioms Labels.pinned_owner_fixed
+#print axioms Labels.pin_stable
+#print axioms Labels.push_pins_owner
+#print axioms Labels.multi_binds_owner
+#print axioms Labels.owner_top_needs_operator
+#print axioms Labels.never_every_unless_operator_pin
+#print axioms Labels.exec_owner_watch_refused
+#print axioms Labels.exec_owner_watch_data_free
+#print axioms Labels.exec_same_scope
+#print axioms Labels.onote_scope
+#print axioms Labels.onote_mixed_owner
+#print axioms Labels.script_denies_owner_prefix
+#print axioms Labels.refuse_arrival_not_ok
+#print axioms Labels.core_arrival_within
+#print axioms Labels.labelStepO_within
+#print axioms Labels.arriveO_ok
+#print axioms Labels.arriveO_label_within
+#print axioms Labels.arriveO_owner_within
+#print axioms Labels.arriveO_multi_owner
+#print axioms Labels.arriveO_context_owner
+#print axioms Labels.kill_owners_off
+#print axioms Labels.kill_needs_label
+#print axioms Labels.kill_user_shared_refused
+#print axioms Labels.kill_other_user_refused
+#print axioms Labels.kill_same_owner
+#print axioms Labels.kill_operator
+#print axioms Labels.kill_within_dominance
+#print axioms Labels.kill_stronger_than_dominance
+#print axioms Labels.labelAsParseO_conns
+#print axioms Labels.labelStepO_step
+#print axioms Labels.labelStepO_sess
+#print axioms Labels.oconnOf_setOConn
+#print axioms Labels.afterRefusal_pin
+#print axioms Labels.arriveO_refused_keeps_pins
+#print axioms Labels.labelStepO_ok_conn
+#print axioms Labels.arriveO_pins_push

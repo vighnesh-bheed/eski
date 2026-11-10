@@ -2,26 +2,73 @@ package vsettype
 
 import "../vfilter"
 
-visible_other :: proc "contextless" (a: ^Access, s: Vset, copies: []Ref) -> int {
-	best := -1
-	for r, i in copies {
+writer_copies :: proc "contextless" (s: Vset, a: ^Access, name: []u8, one_own: ^Ref, one_other: ^Ref) -> (own: []Ref, other: []Ref) {
+	if a.owner == SHARED {
+		return names_lookup(s, name, one_own), nil
+	}
+	other = names_lookup(s, name, one_other)
+	if scope := owner_scope(s, a.owner); scope != nil {
+		own = tree_lookup(scope.names, name, one_own)
+	}
+	return
+}
+
+visible_other_scoped :: proc "contextless" (a: ^Access, s: Vset, own: []Ref, other: []Ref) -> (in_own: bool, at: int) {
+	if a.owner != SHARED {
+		for r, i in other {
+			if ref_label(s, r) == a.label {
+				return false, i
+			}
+		}
+	}
+	at = -1
+	best: Scope
+	for r, i in own {
 		l := ref_label(s, r)
 		if l == a.label || !sees(a, l) {
 			continue
 		}
-		if best < 0 || resolution_compare(a, l, ref_label(s, copies[best])) > 0 {
-			best = i
+		if at < 0 || resolution_compare(a, l, best.label) > 0 {
+			at = i
+			in_own = true
+			best.label = l
 		}
 	}
-	return best
+	for r, i in other {
+		l := ref_label(s, r)
+		if !sees(a, l) {
+			continue
+		}
+		if at < 0 || resolution_compare(a, l, best.label) > 0 {
+			at = i
+			in_own = false
+			best.label = l
+		}
+	}
+	return
+}
+
+visible_other :: proc "contextless" (a: ^Access, s: Vset, copies: []Ref) -> int {
+	_, at := visible_other_scoped(a, s, copies, nil)
+	return at
 }
 
 in_use :: proc "contextless" (s: Vset, r: Ref) -> Failure {
-	return Failure{err = .Name_In_Use, label = ref_label(s, r)}
+	p := ref_part(s, r)
+	return Failure{err = .Name_In_Use, label = p.label, owner = p.owner}
 }
 
-drop_ref :: proc(s: Vset, p: ^Partition, slot: u32, ch: ^Change) {
-	names_remove(s, part_element_name(p, slot), Ref{slot = slot, part = p.id})
+refuse_visible :: proc "contextless" (a: ^Access, s: Vset, own: []Ref, other: []Ref) -> (f: Failure, refused: bool) {
+	in_own, vi := visible_other_scoped(a, s, own, other)
+	if vi < 0 {
+		return {}, false
+	}
+	return in_use(s, own[vi] if in_own else other[vi]), true
+}
+
+drop_ref :: proc(s: Vset, p: ^Part_Head, slot: u32, ch: ^Change) {
+	ni := part_index(s, p)
+	index_remove(s, &ni, part_element_name(p, slot), Ref{slot = slot, part = p.id})
 	part_drop(s, p, slot)
 	if s.lab != nil {
 		s.lab.total -= 1
@@ -38,6 +85,9 @@ drop_ref :: proc(s: Vset, p: ^Partition, slot: u32, ch: ^Change) {
 }
 
 add_at :: proc(s: Vset, a: ^Access, req: ^Add_Request, scratch: ^Scratch = nil) -> (ch: Change, f: Failure) {
+	if !access_valid(a) {
+		return ch, failure(.Invalid_Parameter)
+	}
 	if f = check_add(s, req); f.err != .None {
 		return
 	}
@@ -53,10 +103,10 @@ add_at :: proc(s: Vset, a: ^Access, req: ^Add_Request, scratch: ^Scratch = nil) 
 
 apply_add_at :: proc(s: Vset, a: ^Access, req: ^Add_Request, vector: []f32, sc: ^Scratch, cache: ^Distance_Cache, cache_part: u32) -> (ch: Change, f: Failure) {
 	ef := request_ef(req)
-	one: Ref
-	copies := names_lookup(s, req.name, &one)
-	if at := exact_copy(a, s, copies); at >= 0 {
-		r := copies[at]
+	one_own, one_other: Ref
+	own, other := writer_copies(s, a, req.name, &one_own, &one_other)
+	if at := exact_copy(a, s, own); at >= 0 {
+		r := own[at]
 		p := ref_part(s, r)
 		c := cache if r.part == cache_part && p.mode != .Flat else nil
 		if c != nil {
@@ -83,8 +133,8 @@ apply_add_at :: proc(s: Vset, a: ^Access, req: ^Add_Request, vector: []f32, sc: 
 		}
 		return ch, {}
 	}
-	if vi := visible_other(a, s, copies); vi >= 0 {
-		return ch, in_use(s, copies[vi])
+	if refusal, refused := refuse_visible(a, s, own, other); refused {
+		return ch, refusal
 	}
 	p, created, err := part_for_write(s, a)
 	if err != .None {
@@ -109,7 +159,8 @@ apply_add_at :: proc(s: Vset, a: ^Access, req: ^Add_Request, vector: []f32, sc: 
 		}
 		return ch, f
 	}
-	if !names_add(s, req.name, Ref{slot = slot, part = p.id}) {
+	ni := part_index(s, p)
+	if !index_add(s, &ni, req.name, Ref{slot = slot, part = p.id}) {
 		part_graph_remove(p, slot, sc)
 		part_drop(s, p, slot)
 		if created {
@@ -127,16 +178,19 @@ apply_add_at :: proc(s: Vset, a: ^Access, req: ^Add_Request, vector: []f32, sc: 
 }
 
 remove_at :: proc(s: Vset, a: ^Access, name: []u8, scratch: ^Scratch = nil) -> (ch: Change, f: Failure) {
-	one: Ref
-	copies := names_lookup(s, name, &one)
-	at := exact_copy(a, s, copies)
+	if !access_valid(a) {
+		return ch, failure(.Invalid_Parameter)
+	}
+	one_own, one_other: Ref
+	own, other := writer_copies(s, a, name, &one_own, &one_other)
+	at := exact_copy(a, s, own)
 	if at < 0 {
-		if vi := visible_other(a, s, copies); vi >= 0 {
-			return ch, in_use(s, copies[vi])
+		if refusal, refused := refuse_visible(a, s, own, other); refused {
+			return ch, refusal
 		}
 		return ch, {}
 	}
-	r := copies[at]
+	r := own[at]
 	p := ref_part(s, r)
 	guard: Scratch_Guard
 	sc := guard_begin(&guard, scratch)
@@ -150,16 +204,19 @@ remove_at :: proc(s: Vset, a: ^Access, name: []u8, scratch: ^Scratch = nil) -> (
 }
 
 set_attribute_at :: proc(s: Vset, a: ^Access, name: []u8, text: []u8) -> (ch: Change, f: Failure) {
-	one: Ref
-	copies := names_lookup(s, name, &one)
-	at := exact_copy(a, s, copies)
+	if !access_valid(a) {
+		return ch, failure(.Invalid_Parameter)
+	}
+	one_own, one_other: Ref
+	own, other := writer_copies(s, a, name, &one_own, &one_other)
+	at := exact_copy(a, s, own)
 	if at < 0 {
-		if vi := visible_other(a, s, copies); vi >= 0 {
-			return ch, in_use(s, copies[vi])
+		if refusal, refused := refuse_visible(a, s, own, other); refused {
+			return ch, refusal
 		}
 		return ch, {}
 	}
-	r := copies[at]
+	r := own[at]
 	p := ref_part(s, r)
 	ch.found = true
 	attr, made := part_make_attribute(s, p, text)

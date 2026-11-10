@@ -55,7 +55,7 @@ create_for :: proc(req: ^Add_Request) -> (s: Vset, f: Failure) {
 
 check_add :: proc "contextless" (s: Vset, req: ^Add_Request) -> Failure {
 	n := len(req.vector)
-	if quant_elem(req.quant) != s.quant {
+	if quant_elem(req.quant) != s.arena.elem {
 		return failure(.Quantization_Mismatch)
 	}
 	if request_m(req) != s.graph.m {
@@ -128,7 +128,7 @@ copy_name :: proc(s: Vset, name: []u8) -> (p: [^]u8, ok: bool) {
 	return part_copy_name(s, &s.core, name)
 }
 
-part_copy_name :: proc(s: Vset, p: ^Partition, name: []u8) -> (out: [^]u8, ok: bool) {
+part_copy_name :: proc(s: Vset, p: ^Part_Head, name: []u8) -> (out: [^]u8, ok: bool) {
 	if len(name) == 0 {
 		return nil, true
 	}
@@ -144,7 +144,7 @@ make_attribute :: proc(s: Vset, text: []u8, keep_empty := false) -> (a: vfilter.
 	return part_make_attribute(s, &s.core, text, keep_empty)
 }
 
-part_make_attribute :: proc(s: Vset, p: ^Partition, text: []u8, keep_empty := false) -> (a: vfilter.Attribute, ok: bool) {
+part_make_attribute :: proc(s: Vset, p: ^Part_Head, text: []u8, keep_empty := false) -> (a: vfilter.Attribute, ok: bool) {
 	if len(text) == 0 && !keep_empty {
 		return {}, true
 	}
@@ -159,7 +159,7 @@ replace_attribute :: proc(s: Vset, e: ^Element, a: vfilter.Attribute) {
 	part_replace_attribute(s, &s.core, e, a)
 }
 
-part_replace_attribute :: proc(s: Vset, p: ^Partition, e: ^Element, a: vfilter.Attribute) {
+part_replace_attribute :: proc(s: Vset, p: ^Part_Head, e: ^Element, a: vfilter.Attribute) {
 	if e.attr.blob != nil {
 		vfilter.attribute_destroy(&e.attr, part_allocator(s, p))
 		p.attributes -= 1
@@ -170,7 +170,7 @@ part_replace_attribute :: proc(s: Vset, p: ^Partition, e: ^Element, a: vfilter.A
 	}
 }
 
-part_discard_attribute :: proc(s: Vset, p: ^Partition, a: ^vfilter.Attribute) {
+part_discard_attribute :: proc(s: Vset, p: ^Part_Head, a: ^vfilter.Attribute) {
 	if a.blob != nil {
 		vfilter.attribute_destroy(a, part_allocator(s, p))
 	}
@@ -184,7 +184,7 @@ insert_element :: proc(s: Vset, name: []u8, vector: []f32, attr: vfilter.Attribu
 	return
 }
 
-part_insert :: proc(s: Vset, p: ^Partition, name: []u8, vector: []f32, attr: vfilter.Attribute, ef: int, sc: ^Scratch, cache: ^Distance_Cache = nil) -> (slot: u32, f: Failure) {
+part_insert :: proc(s: Vset, p: ^Part_Head, name: []u8, vector: []f32, attr: vfilter.Attribute, ef: int, sc: ^Scratch, cache: ^Distance_Cache = nil) -> (slot: u32, f: Failure) {
 	if err := part_ensure_slot(s, p); err != .None {
 		return NIL_SLOT, failure(err)
 	}
@@ -197,11 +197,12 @@ part_insert :: proc(s: Vset, p: ^Partition, name: []u8, vector: []f32, attr: vfi
 		part_free(s, p, name_copy)
 		return NIL_SLOT, failure(.Out_Of_Memory)
 	}
-	if p.mode != .Flat {
-		gslot, gerr := hnsw.reserve(&p.graph)
+	full := (^Partition)(p) if p.mode != .Flat else nil
+	if full != nil {
+		gslot, gerr := hnsw.reserve(&full.graph)
 		if gerr != .None || gslot != aslot {
 			if gerr == .None {
-				hnsw.release(&p.graph, gslot)
+				hnsw.release(&full.graph, gslot)
 			}
 			vmath.arena_free(&p.arena, aslot)
 			part_free(s, p, name_copy)
@@ -210,21 +211,25 @@ part_insert :: proc(s: Vset, p: ^Partition, name: []u8, vector: []f32, attr: vfi
 	}
 	slot = aslot
 	vmath.arena_set(&p.arena, slot, vector)
-	if p.mode != .Flat {
-		if err := part_insert_node(p, slot, ef, sc, cache); err != .None {
+	seq: u64
+	if full != nil {
+		if err := part_insert_node(full, slot, ef, sc, cache); err != .None {
 			vmath.arena_free(&p.arena, slot)
 			part_free(s, p, name_copy)
 			return NIL_SLOT, failure(err)
 		}
+		seq = full.graph.node_uid
 	} else {
-		p.graph.node_uid += 1
+		seq = part_uid_bump(p)
 	}
 	e := &p.elements[slot]
-	e^ = Element{name = name_copy, len = u32(len(name)), seq = p.graph.node_uid}
+	e^ = Element{name = name_copy, len = u32(len(name)), seq = seq}
 	part_replace_attribute(s, p, e, attr)
 	order_append(p, slot)
 	s.version += 1
-	part_refresh_prefetch(p)
+	if full != nil {
+		part_refresh_prefetch(full)
+	}
 	return slot, {}
 }
 
@@ -234,7 +239,7 @@ drop_element :: proc(s: Vset, slot: u32) {
 	part_drop(s, &s.core, slot)
 }
 
-part_drop :: proc(s: Vset, p: ^Partition, slot: u32) {
+part_drop :: proc(s: Vset, p: ^Part_Head, slot: u32) {
 	vmath.arena_free(&p.arena, slot)
 	order_remove(p, slot)
 	part_element_release(s, p, &p.elements[slot])
@@ -245,12 +250,13 @@ graph_remove :: proc(s: Vset, slot: u32, sc: ^Scratch) -> Error {
 	return part_graph_remove(&s.core, slot, sc)
 }
 
-part_graph_remove :: proc(p: ^Partition, slot: u32, sc: ^Scratch) -> Error {
+part_graph_remove :: proc(p: ^Part_Head, slot: u32, sc: ^Scratch) -> Error {
 	if p.mode == .Flat {
 		return .None
 	}
-	hnsw.remove(&p.graph, &sc.graph, slot)
-	if hnsw.is_live(&p.graph, slot) {
+	g := part_graph(p)
+	hnsw.remove(g, &sc.graph, slot)
+	if hnsw.is_live(g, slot) {
 		return .Out_Of_Memory
 	}
 	return .None
@@ -264,28 +270,28 @@ update_element :: proc(s: Vset, slot: u32, vector: []f32, ef: int, sc: ^Scratch,
 	return f
 }
 
-part_update :: proc(s: Vset, p: ^Partition, slot: u32, vector: []f32, ef: int, sc: ^Scratch, cache: ^Distance_Cache = nil) -> (f: Failure, dropped: bool) {
+part_update :: proc(s: Vset, p: ^Part_Head, slot: u32, vector: []f32, ef: int, sc: ^Scratch, cache: ^Distance_Cache = nil) -> (f: Failure, dropped: bool) {
 	if err := part_graph_remove(p, slot, sc); err != .None {
 		return failure(err), false
 	}
 	s.version += 1
 	vmath.arena_set(&p.arena, slot, vector)
 	if p.mode == .Flat {
-		p.graph.node_uid += 1
-		p.elements[slot].seq = p.graph.node_uid
+		p.elements[slot].seq = part_uid_bump(p)
 		return {}, false
 	}
-	gslot, gerr := hnsw.reserve(&p.graph)
+	full := (^Partition)(p)
+	gslot, gerr := hnsw.reserve(&full.graph)
 	if gerr != .None || gslot != slot {
 		if gerr == .None {
-			hnsw.release(&p.graph, gslot)
+			hnsw.release(&full.graph, gslot)
 		}
 		return failure(.Out_Of_Memory), true
 	}
-	if err := part_insert_node(p, slot, ef, sc, cache); err != .None {
+	if err := part_insert_node(full, slot, ef, sc, cache); err != .None {
 		return failure(err), true
 	}
-	p.elements[slot].seq = p.graph.node_uid
+	p.elements[slot].seq = full.graph.node_uid
 	return {}, false
 }
 

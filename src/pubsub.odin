@@ -1,6 +1,6 @@
 package main
 
-import lb "label"
+import ow "owner"
 
 PS_REJECT_TAIL :: "': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"
 
@@ -249,7 +249,7 @@ ps_reply_notice :: proc(c: ^Conn, kind: Ps_Kind, sub: bool, name: []u8, has_name
 }
 
 @(private = "file")
-ps_deliver :: proc(e: ^Ps_Entry, frame: []u8, msg: lb.Id) -> int {
+ps_deliver :: proc(e: ^Ps_Entry, frame: []u8, msg: ow.Scope) -> int {
 	if labels_on {
 		return ps_deliver_labelled(e, frame, msg)
 	}
@@ -260,18 +260,18 @@ ps_deliver :: proc(e: ^Ps_Entry, frame: []u8, msg: lb.Id) -> int {
 }
 
 @(private = "file")
-ps_deliver_labelled :: #force_no_inline proc(e: ^Ps_Entry, frame: []u8, msg: lb.Id) -> int {
-	l, ok := access_label_of(msg)
+ps_deliver_labelled :: #force_no_inline proc(e: ^Ps_Entry, frame: []u8, msg: ow.Scope) -> int {
+	l, ok := access_label_of(msg.label)
 	if !ok {
 		return 0
 	}
 	counted := 0
 	for t in e.subs {
-		if !access_subscriber_sees(t, l) {
+		if !access_subscriber_sees(t, l, msg.owner) {
 			continue
 		}
 		ps_emit(t, frame)
-		if access_conn_session(t) == access.label {
+		if access_receiver_exact(t) {
 			counted += 1
 		}
 	}
@@ -296,7 +296,7 @@ ps_build :: proc(kind: Ps_Kind, pattern: []u8, channel: []u8, message: []u8) -> 
 	return b[:]
 }
 
-ps_publish :: proc(channel: []u8, message: []u8, kind: Ps_Kind, msg: lb.Id = lb.BOTTOM_ID) -> int {
+ps_publish :: proc(channel: []u8, message: []u8, kind: Ps_Kind, msg: ow.Scope = ow.SHARED_BOTTOM) -> int {
 	receivers := 0
 	if kind == .Shard {
 		if e := ps_maps[.Shard][string(channel)]; e != nil {
@@ -323,7 +323,7 @@ ps_publish :: proc(channel: []u8, message: []u8, kind: Ps_Kind, msg: lb.Id = lb.
 	return receivers
 }
 
-pubsub_publish :: proc(channel: []u8, message: []u8, msg: lb.Id = lb.BOTTOM_ID) -> int {
+pubsub_publish :: proc(channel: []u8, message: []u8, msg: ow.Scope = ow.SHARED_BOTTOM) -> int {
 	return ps_publish(channel, message, .Channel, msg)
 }
 

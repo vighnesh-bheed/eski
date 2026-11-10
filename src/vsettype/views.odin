@@ -16,7 +16,7 @@ embedding :: proc "contextless" (s: Vset, slot: u32, out: []f32) -> []f32 {
 	return part_embedding(&s.core, slot, out)
 }
 
-part_embedding :: proc "contextless" (p: ^Partition, slot: u32, out: []f32) -> []f32 {
+part_embedding :: proc "contextless" (p: ^Part_Head, slot: u32, out: []f32) -> []f32 {
 	values := out[:p.arena.dim]
 	vmath.arena_decode(&p.arena, slot, values)
 	return values
@@ -26,13 +26,13 @@ raw_embedding :: proc "contextless" (s: Vset, slot: u32) -> Raw_Embedding {
 	return part_raw_embedding(&s.core, slot)
 }
 
-part_raw_embedding :: proc "contextless" (p: ^Partition, slot: u32) -> Raw_Embedding {
+part_raw_embedding :: proc "contextless" (p: ^Part_Head, slot: u32) -> Raw_Embedding {
 	return Raw_Embedding {
-		quant = elem_quant(p.quant),
+		quant = elem_quant(p.arena.elem),
 		data = vmath.arena_bytes(&p.arena, slot),
 		norm = vmath.arena_norm(&p.arena, slot),
 		range = vmath.arena_range(&p.arena, slot),
-		has_range = p.quant == .Int8,
+		has_range = p.arena.elem == .Int8,
 	}
 }
 
@@ -70,7 +70,7 @@ link_score :: proc "contextless" (s: Vset, a: u32, b: u32) -> f32 {
 	return part_link_score(&s.core, a, b)
 }
 
-part_link_score :: proc "contextless" (p: ^Partition, a: u32, b: u32) -> f32 {
+part_link_score :: proc "contextless" (p: ^Part_Head, a: u32, b: u32) -> f32 {
 	return vmath.edge_score(vmath.arena_score(&p.arena, a, b))
 }
 

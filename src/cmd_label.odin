@@ -4,6 +4,7 @@ import "core:crypto/ed25519"
 import "core:crypto/sha2"
 import "core:sys/linux"
 import lb "label"
+import ow "owner"
 
 LABEL_HANDLE_BYTES :: 16
 LABEL_TOKEN_MAX :: 8192
@@ -15,8 +16,9 @@ ERR_LABEL_CONTEXT_CAP :: "ERR this login already holds the maximum number of con
 
 Label_Context :: struct {
 	handle:  [LABEL_HANDLE_BYTES]u8,
-	owner:   []u8,
+	login:   []u8,
 	label:   lb.Label,
+	owner:   ow.Owner,
 	last_ms: i64,
 	slot:    int,
 }
@@ -27,6 +29,9 @@ Label_Token_Entry :: struct {
 	expires_ms:  i64,
 	has_context: bool,
 	handle:      [LABEL_HANDLE_BYTES]u8,
+	owner_pick:  Owner_Pick,
+	owner_len:   u8,
+	owner_buf:   [ow.TEXT_MAX]u8,
 }
 
 label_contexts: [dynamic]^Label_Context
@@ -61,6 +66,46 @@ label_help_lines := [?]string {
 	"    List the names held at more than one label, or every copy of a key.",
 	"QUOTA <marking> [TRUST <trust>] [LIMIT <bytes>]",
 	"    Show or set the memory quota of a label.",
+	"HELP",
+	"    Print this help.",
+}
+
+@(private = "file")
+label_owner_help_lines := [?]string {
+	"LABEL <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+	"AS <marking> [TRUST <trust>] [OWNER <id>|SHARED] [CONTEXT <handle>] <command> [<arg> ...]",
+	"    Run one command at the given label, for the given owner.",
+	"AS OWNER <id>|SHARED [CONTEXT <handle>] <command> [<arg> ...]",
+	"    Run one command for the given owner at the session label.",
+	"AS CONTEXT <handle> <command> [<arg> ...]",
+	"    Run one command at the label and for the owner of a context.",
+	"AS TOKEN <token> <command> [<arg> ...]",
+	"    Run one command at the label and for the owner of a signed label token.",
+	"SESSION <marking> [TRUST <trust>]",
+	"    Set the label of this connection's later commands.",
+	"WHOAMI",
+	"    Show the login, its clearance, its owner rules and the label and owner of this command.",
+	"OF <key> [<element>]",
+	"    Show the label of the copy that a read of the key or element resolves to.",
+	"DECLASSIFY <key> <marking> [TRUST <trust>] [ELEMENT <element>]",
+	"    Move the copy at this command's label to a label it dominates.",
+	"COPIES [<key>]",
+	"    List the names held at more than one label, or every copy of a key.",
+	"QUOTA <marking> [TRUST <trust>] [LIMIT <bytes>]",
+	"    Show or set the memory quota of a label.",
+	"HELP",
+	"    Print this help.",
+}
+
+@(private = "file")
+context_owner_help_lines := [?]string {
+	"CONTEXT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+	"CREATE [LEVEL <marking>] [TRUST <trust>] [OWNER <id>|SHARED]",
+	"    Create a context with a fixed label and owner and return its handle.",
+	"INFO <handle>",
+	"    Show the marking, trust and owner of a context.",
+	"DROP <handle>",
+	"    End a context.",
 	"HELP",
 	"    Print this help.",
 }
@@ -120,7 +165,7 @@ label_handle_shaped :: proc(text: []u8) -> bool {
 }
 
 @(private = "file")
-label_owner_of :: proc(c: ^Conn) -> []u8 {
+label_login_of :: proc(c: ^Conn) -> []u8 {
 	if c.user == nil {
 		return nil
 	}
@@ -139,7 +184,7 @@ label_context_remove :: proc(x: ^Label_Context) {
 	label_contexts[x.slot] = last
 	last.slot = x.slot
 	pop(&label_contexts)
-	delete(x.owner)
+	delete(x.login)
 	free(x)
 }
 
@@ -156,7 +201,7 @@ label_context_find :: proc(c: ^Conn, text: []u8) -> ^Label_Context {
 		label_context_remove(x)
 		return nil
 	}
-	if !bytes_eq(x.owner, label_owner_of(c)) || c.user == nil {
+	if !bytes_eq(x.login, label_login_of(c)) || c.user == nil {
 		return nil
 	}
 	if !lb.ceiling_admits(access_ceiling(c.user), x.label) {
@@ -167,10 +212,10 @@ label_context_find :: proc(c: ^Conn, text: []u8) -> ^Label_Context {
 }
 
 @(private = "file")
-label_context_count :: proc(owner: []u8) -> i64 {
+label_context_count :: proc(login: []u8) -> i64 {
 	n: i64 = 0
 	for x in label_contexts {
-		if bytes_eq(x.owner, owner) && !label_context_expired(x) {
+		if bytes_eq(x.login, login) && !label_context_expired(x) {
 			n += 1
 		}
 	}
@@ -179,18 +224,42 @@ label_context_count :: proc(owner: []u8) -> i64 {
 
 label_contexts_prune :: proc() {
 	for i := len(label_contexts) - 1; i >= 0; i -= 1 {
-		if i < len(label_contexts) && acl_user_find(label_contexts[i].owner) == nil {
+		if i < len(label_contexts) && acl_user_find(label_contexts[i].login) == nil {
 			label_context_remove(label_contexts[i])
 		}
 	}
 }
 
-label_contexts_drop_owner :: proc(owner: []u8) {
+label_contexts_drop_login :: proc(login: []u8) {
 	for i := len(label_contexts) - 1; i >= 0; i -= 1 {
-		if bytes_eq(label_contexts[i].owner, owner) {
+		if bytes_eq(label_contexts[i].login, login) {
 			label_context_remove(label_contexts[i])
 		}
 	}
+}
+
+label_contexts_drop_owner :: proc(o: ow.Owner) -> int {
+	n := 0
+	for i := len(label_contexts) - 1; i >= 0; i -= 1 {
+		if i < len(label_contexts) && label_contexts[i].owner == o {
+			label_context_remove(label_contexts[i])
+			n += 1
+		}
+	}
+	return n
+}
+
+label_token_cache_drop_owner :: proc(text: string) -> int {
+	doomed := make([dynamic][32]u8, context.temp_allocator)
+	for digest, &entry in label_token_cache {
+		if entry.owner_pick == .Text && string(entry.owner_buf[:entry.owner_len]) == text {
+			append(&doomed, digest)
+		}
+	}
+	for digest in doomed {
+		delete_key(&label_token_cache, digest)
+	}
+	return len(doomed)
 }
 
 label_context_cron :: proc() {
@@ -313,17 +382,28 @@ label_token_check :: proc(c: ^Conn, token: []u8) -> (entry: Label_Token_Entry, o
 	if len(lines) == 0 || string(lines[0]) != LABEL_TOKEN_HEADER {
 		return {}, false
 	}
-	marking, trust, expires, audience, handle: []u8
-	seen: [5]bool
-	keys := [5]string{"marking", "trust", "expires", "audience", "context"}
+	marking, trust, expires, audience, handle, owner_text: []u8
+	seen: [6]bool
+	shared := false
+	keys := [6]string{"marking", "trust", "expires", "audience", "context", "owner"}
 	for line in lines[1:] {
+		if owners_on && string(line) == "shared" {
+			if shared || seen[5] {
+				return {}, false
+			}
+			shared = true
+			continue
+		}
 		matched := false
 		for key, k in keys {
+			if k == 5 && !owners_on {
+				continue
+			}
 			value, hit := label_token_field(line, key)
 			if !hit {
 				continue
 			}
-			if seen[k] {
+			if seen[k] || (k == 5 && shared) {
 				return {}, false
 			}
 			seen[k] = true
@@ -339,11 +419,16 @@ label_token_check :: proc(c: ^Conn, token: []u8) -> (entry: Label_Token_Entry, o
 				audience = value
 			case 4:
 				handle = value
+			case 5:
+				owner_text = value
 			}
 		}
 		if !matched {
 			return {}, false
 		}
+	}
+	if seen[5] && len(owner_text) > ow.TEXT_MAX {
+		return {}, false
 	}
 	if !seen[0] || !seen[2] || !seen[3] || string(audience) != label_token_audience {
 		return {}, false
@@ -357,6 +442,12 @@ label_token_check :: proc(c: ^Conn, token: []u8) -> (entry: Label_Token_Entry, o
 		return {}, false
 	}
 	entry = Label_Token_Entry{label = l, expires_ms = deadline}
+	if shared {
+		entry.owner_pick = .Shared
+	} else if seen[5] {
+		entry.owner_pick = .Text
+		entry.owner_len = u8(copy(entry.owner_buf[:], owner_text))
+	}
 	if seen[4] {
 		if !label_hex_decode(handle, entry.handle[:]) {
 			return {}, false
@@ -406,6 +497,10 @@ label_token_verify :: proc(c: ^Conn, token: []u8) -> (l: lb.Label, ctx: ^Label_C
 		}
 		ctx = x
 	}
+	access_arrival.token = true
+	access_arrival.token_pick = entry.owner_pick
+	access_arrival.token_len = entry.owner_len
+	access_arrival.token_buf = entry.owner_buf
 	return entry.label, ctx, true
 }
 
@@ -424,6 +519,13 @@ label_as_parse :: proc(c: ^Conn, args: [][]u8, out: ^lb.Label, ctx: ^^Label_Cont
 		out^ = l
 		ctx^ = x
 		return i + 2, ""
+	case owners_on && eq_nocase(args[i], "owner") && i + 2 < len(args):
+		access_arrival.pick = .Text
+		access_arrival.text = args[i + 1]
+		return label_as_owner_only(c, args, i + 2, out, ctx)
+	case owners_on && eq_nocase(args[i], "shared") && i + 1 < len(args):
+		access_arrival.pick = .Shared
+		return label_as_owner_only(c, args, i + 1, out, ctx)
 	case rules != nil && rules.require_token:
 		return 0, ERR_LABEL_TOKEN_ONLY
 	case eq_nocase(args[i], "context") && i + 2 < len(args) && label_handle_shaped(args[i + 1]):
@@ -448,6 +550,14 @@ label_as_parse :: proc(c: ^Conn, args: [][]u8, out: ^lb.Label, ctx: ^^Label_Cont
 	if !ok || !lb.ceiling_admits(access_ceiling(c.user), l) {
 		return 0, ERR_LABEL_INVALID
 	}
+	if owners_on && i + 2 < len(args) && eq_nocase(args[i], "owner") {
+		access_arrival.pick = .Text
+		access_arrival.text = args[i + 1]
+		i += 2
+	} else if owners_on && i + 1 < len(args) && eq_nocase(args[i], "shared") {
+		access_arrival.pick = .Shared
+		i += 1
+	}
 	if i + 2 < len(args) && eq_nocase(args[i], "context") && label_handle_shaped(args[i + 1]) {
 		x := label_context_find(c, args[i + 1])
 		if x == nil {
@@ -467,6 +577,29 @@ label_as_parse :: proc(c: ^Conn, args: [][]u8, out: ^lb.Label, ctx: ^^Label_Cont
 }
 
 @(private = "file")
+label_as_owner_only :: proc(c: ^Conn, args: [][]u8, at: int, out: ^lb.Label, ctx: ^^Label_Context) -> (used: int, msg: string) {
+	i := at
+	if i + 2 < len(args) && eq_nocase(args[i], "context") && label_handle_shaped(args[i + 1]) {
+		if c.user != nil && c.user.labels.require_token {
+			return 0, ERR_LABEL_TOKEN_ONLY
+		}
+		l := access_conn_session(c)
+		x := label_context_find(c, args[i + 1])
+		if x == nil {
+			return 0, ERR_LABEL_CONTEXT
+		}
+		if x.label != l {
+			return 0, ERR_LABEL_CONTEXT_MISMATCH
+		}
+		ctx^ = x
+		out^ = l
+		return i + 2, ""
+	}
+	access_arrival.owner_only = true
+	return i, ""
+}
+
+@(private = "file")
 label_reply_text :: proc(c: ^Conn, l: lb.Label, marking_only: bool) {
 	b := make([dynamic]u8, context.temp_allocator)
 	if marking_only {
@@ -481,7 +614,7 @@ label_reply_text :: proc(c: ^Conn, l: lb.Label, marking_only: bool) {
 label_whoami :: proc(c: ^Conn) {
 	ceiling := access_ceiling(c.user)
 	rules := &c.user.labels if c.user != nil else nil
-	reply_map(c, 10)
+	reply_map(c, 15 if owners_on else 10)
 	reply_bulk_str(c, "login")
 	if c.user != nil {
 		reply_bulk(c, c.user.username)
@@ -506,6 +639,31 @@ label_whoami :: proc(c: ^Conn) {
 	reply_int(c, 1 if rules != nil && rules.require_token else 0)
 	reply_bulk_str(c, "top")
 	reply_int(c, 1 if access.top else 0)
+	if !owners_on {
+		return
+	}
+	reply_bulk_str(c, "owner")
+	owner_reply_text(c, access.owner)
+	reply_bulk_str(c, "owners")
+	kind := rules.owners if rules != nil else Owner_Kind.None
+	switch kind {
+	case .Any:
+		reply_bulk_str(c, "any")
+	case .Fixed:
+		reply_bulk_str(c, "fixed")
+	case .None:
+		reply_bulk_str(c, "none")
+	}
+	reply_bulk_str(c, "owner-shared")
+	reply_int(c, 1 if rules != nil && rules.owner_shared else 0)
+	reply_bulk_str(c, "owner-operator")
+	reply_int(c, 1 if access_is_operator(rules) else 0)
+	reply_bulk_str(c, "pinned-owner")
+	if c.label == nil || !c.label.owner_pinned {
+		reply_null(c)
+	} else {
+		owner_reply_pin(c, c.label.pin_owner)
+	}
 }
 
 @(private = "file")
@@ -554,8 +712,9 @@ cmd_label :: proc(c: ^Conn, argv: [][]u8) {
 			reply_wrong_args(c, "label|help")
 			return
 		}
-		reply_array(c, len(label_help_lines))
-		for line in label_help_lines {
+		lines := label_owner_help_lines[:] if owners_on else label_help_lines[:]
+		reply_array(c, len(lines))
+		for line in lines {
 			reply_simple(c, line)
 		}
 		return
@@ -603,9 +762,15 @@ cmd_label :: proc(c: ^Conn, argv: [][]u8) {
 @(private = "file")
 context_create :: proc(c: ^Conn, argv: [][]u8) {
 	l := access.label
-	marking, trust: []u8
+	marking, trust, owner_text: []u8
 	has_level, has_trust := false, false
-	for i := 2; i < len(argv); i += 2 {
+	owner_pick := Owner_Pick.None
+	for i := 2; i < len(argv); {
+		if owners_on && owner_pick == .None && eq_nocase(argv[i], "shared") {
+			owner_pick = .Shared
+			i += 1
+			continue
+		}
 		if i + 1 >= len(argv) {
 			reply_error(c, ERR_SYNTAX)
 			return
@@ -617,10 +782,14 @@ context_create :: proc(c: ^Conn, argv: [][]u8) {
 		case eq_nocase(argv[i], "trust") && !has_trust:
 			trust = argv[i + 1]
 			has_trust = true
+		case owners_on && owner_pick == .None && eq_nocase(argv[i], "owner"):
+			owner_text = argv[i + 1]
+			owner_pick = .Text
 		case:
 			reply_error(c, ERR_SYNTAX)
 			return
 		}
+		i += 2
 	}
 	if has_level {
 		parsed, ok := label_parse_with_trust(marking, trust, has_trust)
@@ -654,6 +823,27 @@ context_create :: proc(c: ^Conn, argv: [][]u8) {
 		reply_error(c, ERR_LABEL_INVALID)
 		return
 	}
+	owner := access.owner
+	switch owner_pick {
+	case .Shared:
+		if !access_may_act(&c.user.labels, ow.SHARED) {
+			reply_error(c, ERR_OWNER_INVALID)
+			return
+		}
+		owner = ow.SHARED
+	case .Text:
+		if !ow.text_valid(owner_text) || !access_may_act_text(&c.user.labels, owner_text) {
+			reply_error(c, ERR_OWNER_INVALID)
+			return
+		}
+		e, err := owner_intern(owner_text)
+		if err != .None {
+			reply_error(c, ERR_OWNER_INVALID)
+			return
+		}
+		owner = e.number
+	case .None:
+	}
 	if label_context_count(c.user.username) >= label_context_cap {
 		reply_error(c, ERR_LABEL_CONTEXT_CAP)
 		return
@@ -669,8 +859,9 @@ context_create :: proc(c: ^Conn, argv: [][]u8) {
 			break
 		}
 	}
-	x.owner = clone_bytes(c.user.username)
+	x.login = clone_bytes(c.user.username)
 	x.label = l
+	x.owner = owner
 	x.last_ms = srv.now_ms
 	x.slot = len(label_contexts)
 	append(&label_contexts, x)
@@ -689,8 +880,9 @@ cmd_context :: proc(c: ^Conn, argv: [][]u8) {
 			reply_wrong_args(c, "context|help")
 			return
 		}
-		reply_array(c, len(context_help_lines))
-		for line in context_help_lines {
+		lines := context_owner_help_lines[:] if owners_on else context_help_lines[:]
+		reply_array(c, len(lines))
+		for line in lines {
 			reply_simple(c, line)
 		}
 		return
@@ -725,11 +917,15 @@ cmd_context :: proc(c: ^Conn, argv: [][]u8) {
 		reply_ok(c)
 		return
 	}
-	reply_map(c, 2)
+	reply_map(c, 3 if owners_on else 2)
 	reply_bulk_str(c, "marking")
 	label_reply_text(c, x.label, true)
 	reply_bulk_str(c, "trust")
 	reply_bulk_str(c, access_trust_name(x.label))
+	if owners_on {
+		reply_bulk_str(c, "owner")
+		owner_reply_text(c, x.owner)
+	}
 }
 
 label_script_denied :: proc(cmd: ^Command, argv: [][]u8) -> bool {
@@ -759,7 +955,46 @@ acl_label_text :: proc(rule: []u8) -> []u8 {
 	return out
 }
 
+@(private = "file")
+acl_owner_rule :: proc(r: ^Acl_Label_Rules, rule: []u8) -> (e: Acl_Rule_Error, handled: bool) {
+	any_rule := len(rule) >= 7 && eq_nocase(rule[:7], "owners:")
+	fixed_rule := !any_rule && len(rule) >= 6 && eq_nocase(rule[:6], "owner:")
+	flag_rule := eq_nocase(rule, "owner-shared") || eq_nocase(rule, "owner-operator")
+	if !any_rule && !fixed_rule && !flag_rule {
+		return .None, false
+	}
+	if !label_scheme_runtime {
+		return .None, true
+	}
+	if !owners_on {
+		return .Owners_Off, true
+	}
+	switch {
+	case any_rule:
+		if string(rule[7:]) != "*" {
+			return .Bad_Owner, true
+		}
+		r.owners = .Any
+		r.owner_len = 0
+	case fixed_rule:
+		id := rule[6:]
+		if !ow.text_valid(id) {
+			return .Bad_Owner, true
+		}
+		r.owners = .Fixed
+		r.owner_len = u8(copy(r.owner_id[:], id))
+	case eq_nocase(rule, "owner-shared"):
+		r.owner_shared = true
+	case:
+		r.owner_operator = true
+	}
+	return .None, true
+}
+
 acl_label_rule :: proc(r: ^Acl_Label_Rules, rule: []u8) -> (e: Acl_Rule_Error, handled: bool) {
+	if owner_e, owner_handled := acl_owner_rule(r, rule); owner_handled {
+		return owner_e, true
+	}
 	words := [?]string{"label-per-command", "label-per-session", "require-token", "token-optional", "reset-token-keys"}
 	prefixed := len(rule) > 10 && eq_nocase(rule[:10], "clearance:") || len(rule) > 6 && eq_nocase(rule[:6], "trust:") || len(rule) > 10 && eq_nocase(rule[:10], "token-key:")
 	if !prefixed {
@@ -901,10 +1136,25 @@ acl_label_describe :: proc(b: ^[dynamic]u8, r: ^Acl_Label_Rules) {
 		label_hex_encode(b, k[:])
 		sb_byte(b, ' ')
 	}
+	switch r.owners {
+	case .Any:
+		sb_str(b, "owners:* ")
+	case .Fixed:
+		sb_str(b, "owner:")
+		sb_bytes(b, access_fixed_id(r))
+		sb_byte(b, ' ')
+	case .None:
+	}
+	if r.owner_shared {
+		sb_str(b, "owner-shared ")
+	}
+	if r.owner_operator {
+		sb_str(b, "owner-operator ")
+	}
 }
 
 acl_label_flag_count :: proc(r: ^Acl_Label_Rules) -> int {
-	return int(r.per_command) + int(r.require_token)
+	return int(r.per_command) + int(r.require_token) + int(r.owner_shared) + int(r.owner_operator)
 }
 
 acl_label_reply_flags :: proc(c: ^Conn, r: ^Acl_Label_Rules) {
@@ -913,6 +1163,12 @@ acl_label_reply_flags :: proc(c: ^Conn, r: ^Acl_Label_Rules) {
 	}
 	if r.require_token {
 		reply_bulk_str(c, "require-token")
+	}
+	if r.owner_shared {
+		reply_bulk_str(c, "owner-shared")
+	}
+	if r.owner_operator {
+		reply_bulk_str(c, "owner-operator")
 	}
 }
 
@@ -939,5 +1195,17 @@ acl_label_reply_fields :: proc(c: ^Conn, r: ^Acl_Label_Rules) {
 		b := make([dynamic]u8, context.temp_allocator)
 		label_hex_encode(&b, k[:])
 		reply_bulk(c, b[:])
+	}
+	if !owners_on {
+		return
+	}
+	reply_bulk_str(c, "owners")
+	switch r.owners {
+	case .Any:
+		reply_bulk_str(c, "*")
+	case .Fixed:
+		reply_bulk(c, access_fixed_id(r))
+	case .None:
+		reply_bulk_str(c, "")
 	}
 }
