@@ -1,0 +1,11 @@
+name = "eski-vector"
+version = "0.1.0"
+defaultTargets = ["Vectors", "vector_model"]
+moreLeanArgs = ["-j1"]
+
+[[lean_lib]]
+name = "Vectors"
+
+[[lean_exe]]
+name = "vector_model"
+root = "Main"

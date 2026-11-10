@@ -18,6 +18,9 @@ PROJECTS = {
     'effects': {'items': [2, 3], 'description': 'Worker rollback and expiry-aware persistence translations'},
     'encoding': {'items': [4, 5], 'description': 'Request parsing and packed codecs'},
     'bitfield': {'items': [9], 'description': 'Fixed-width arithmetic and mutation counts'},
+    'vector': {'areas': ['projection', 'quantisation', 'heaps', 'visited', 'graph', 'arena', 'filter'],
+               'proof_only': ['filter'], 'odin_option': True,
+               'description': 'Vector projection, quantisation, heaps, visited set, graph links and twins, arena free list and filter programs'},
 }
 ALLOWED_AXIOMS = {'propext', 'Classical.choice', 'Quot.sound'}
 
@@ -37,6 +40,16 @@ def inputs(selected):
         if path.suffix in {'.lean', '.odin', '.py', '.json', '.toml'} or path.name == 'lean-toolchain':
             result[str(path.relative_to(ROOT))] = digest(path)
     return result
+
+
+def area_names(name):
+    return [str(item) for item in PROJECTS[name].get('items', [])] + list(PROJECTS[name].get('areas', []))
+
+
+def project_label(name):
+    if 'items' in PROJECTS[name]:
+        return f'items {PROJECTS[name]["items"]}'
+    return f'areas {PROJECTS[name]["areas"]}'
 
 
 def validate_receipt(name, path):
@@ -89,14 +102,15 @@ def validate_receipt(name, path):
     evidence = receipt.get('area_evidence')
     if name == 'bitfield' and evidence is None:
         evidence = {'9': {'theorems': list(axioms), 'comparisons': receipt.get('programs', 0)}}
-    if not isinstance(evidence, dict) or set(evidence) != {str(item) for item in PROJECTS[name]['items']}:
+    if not isinstance(evidence, dict) or set(evidence) != set(area_names(name)):
         raise RuntimeError(f'{name}: incomplete area evidence')
+    proof_only = set(PROJECTS[name].get('proof_only', []))
     for item, area in evidence.items():
         names = area.get('theorems')
         count = area.get('comparisons')
         if not isinstance(names, list) or not names or not set(names) <= set(axioms):
             raise RuntimeError(f'{name}: area {item} lacks audited theorem evidence')
-        if type(count) is not int or count <= 0:
+        if type(count) is not int or count < 0 or (count == 0) != (item in proof_only):
             raise RuntimeError(f'{name}: area {item} lacks implementation comparisons')
     receipt['area_evidence'] = evidence
     return receipt
@@ -119,6 +133,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--project', nargs='+', choices=tuple(PROJECTS), default=list(PROJECTS))
     parser.add_argument('--lean-bin', type=Path, default=Path(os.environ['LEAN_BIN_DIR']) if 'LEAN_BIN_DIR' in os.environ else None)
+    parser.add_argument('--odin', type=Path, default=None)
     parser.add_argument('--output', type=Path, default=PROOFS / '.build' / 'phase-one')
     parser.add_argument('--clean', action='store_true')
     parser.add_argument('--list', action='store_true')
@@ -139,6 +154,11 @@ def main():
     if args.lean_bin is not None:
         args.lean_bin = args.lean_bin.resolve()
         env['PATH'] = str(args.lean_bin) + os.pathsep + env.get('PATH', '')
+    if args.odin is not None:
+        args.odin = args.odin.resolve()
+        if not args.odin.is_file() or not os.access(args.odin, os.X_OK):
+            parser.error('--odin must name an executable Odin compiler')
+        env['PATH'] = str(args.odin.parent) + os.pathsep + env.get('PATH', '')
     if hasattr(os, 'sched_getaffinity'):
         os.sched_setaffinity(0, {min(os.sched_getaffinity(0))})
     receipts = {}
@@ -153,7 +173,9 @@ def main():
         command = [sys.executable, '-I', str(project / 'verify.py'), '--output', str(output)]
         if args.lean_bin is not None:
             command.extend(['--lean-bin', str(args.lean_bin)])
-        print(f'Verifying {name}: items {PROJECTS[name]["items"]}', flush=True)
+        if args.odin is not None and PROJECTS[name].get('odin_option'):
+            command.extend(['--odin', str(args.odin)])
+        print(f'Verifying {name}: {project_label(name)}', flush=True)
         with (output / 'verify.log').open('w') as log:
             result = subprocess.run(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
         if result.returncode:
@@ -169,8 +191,9 @@ def main():
         }
         print(f'{name}: passed {receipts[name]["checked_theorems"]} checked theorems and project comparisons', flush=True)
     aggregate = {
-        'schema_version': 1,
-        'items': sorted({item for name in receipts for item in PROJECTS[name]['items']}),
+        'schema_version': 2,
+        'items': sorted({item for name in receipts for item in PROJECTS[name].get('items', [])}),
+        'areas': {name: PROJECTS[name]['areas'] for name in receipts if 'areas' in PROJECTS[name]},
         'projects': receipts,
         'checked_theorems': sum(value['checked_theorems'] for value in receipts.values()),
         'kernel_checked_theorems': sum(value['kernel_checked_theorems'] for value in receipts.values()),
