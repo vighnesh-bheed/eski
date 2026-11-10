@@ -30,6 +30,7 @@ MC_REF_CONTAINER="eski-smoke-mcref-$$"
 MC_REF_CLOCK_SETTLE_SECONDS=3
 LOG="$(mktemp -t eski-smoke.XXXXXX)"
 PERSIST_DIR="$(mktemp -d -t eski-smoke-rdb.XXXXXX)"
+FULL_DIR="${ESKI_SMOKE_FULL_DIR:-}"
 
 cleanup() {
 	if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -79,6 +80,18 @@ fail() {
 	echo "FAIL: $1"
 	echo "  expected: $(printf '%q' "$2")"
 	echo "  got:      $(printf '%q' "$3")"
+}
+
+keep_full() {
+	local file
+	if [ -z "$FULL_DIR" ]; then
+		FULL_DIR="$(mktemp -d -t eski-smoke-full.XXXXXX)" || return 0
+	fi
+	mkdir -p "$FULL_DIR" || return 0
+	file="$FULL_DIR/$(printf '%s' "$1" | tr -c 'A-Za-z0-9.-' '_')"
+	printf '%s\n' "$2" >"$file.expected"
+	printf '%s\n' "$3" >"$file.got"
+	echo "  full:     $file.expected $file.got"
 }
 
 expect() {
@@ -2196,12 +2209,46 @@ expect_same_migrate() {
 }
 
 PUBSUB_CASES_PY="$(cat <<'PY'
+import re
 import socket
 import sys
 import time
 
 SETTLE = 0.05
+WAIT = 10
+FLUSH = re.compile(r"(?im)^flush(all|db)\b")
 BIG = "x" * 20000
+
+
+def frame_end(buf, pos):
+    nl = buf.find(b"\r\n", pos)
+    if nl < 0:
+        return None
+    kind = buf[pos:pos + 1]
+    if kind not in (b"$", b"=", b"!", b"*", b"~", b">", b"%", b"|"):
+        return nl + 2
+    n = int(buf[pos + 1:nl])
+    if n < 0:
+        return nl + 2
+    if kind in (b"$", b"=", b"!"):
+        return nl + 4 + n if len(buf) >= nl + 4 + n else None
+    pos = nl + 2
+    for _ in range(2 * n if kind in (b"%", b"|") else n):
+        pos = frame_end(buf, pos)
+        if pos is None:
+            return None
+    return pos
+
+
+def replies(buf):
+    count = pos = 0
+    while True:
+        end = frame_end(buf, pos)
+        if end is None:
+            return count
+        if buf[pos:pos + 1] not in (b">", b"|"):
+            count += 1
+        pos = end
 
 
 class Conn:
@@ -2209,6 +2256,7 @@ class Conn:
         self.s = socket.create_connection(("127.0.0.1", port))
         self.s.setblocking(False)
         self.out = b""
+        self.sent = b""
         self.eof = False
         self.closed = False
 
@@ -2235,6 +2283,22 @@ class Conn:
             except BlockingIOError:
                 self.drain()
                 time.sleep(0.001)
+
+    def request(self, text):
+        self.send(text)
+        self.sent += text.encode("latin1")
+
+    def settle(self, port, notes):
+        want = self.sent.count(b"\r\n")
+        end = time.time() + WAIT
+        self.drain()
+        got = replies(self.out)
+        while got < want and not self.eof and time.time() < end:
+            time.sleep(0.002)
+            self.drain()
+            got = replies(self.out)
+        if got != want:
+            notes.append("flush step on port %d has %d replies for %d requests" % (port, got, want))
 
     def wait_for(self, marker):
         end = time.time() + 3
@@ -2288,15 +2352,18 @@ def run(port, steps):
             c.send("HELLO 3\r\n")
             c.wait_for(b"$7\r\nmodules\r\n*0\r\n")
             c.out = b""
+            c.sent = b""
         elif op == "send":
-            conns[step[1]].send(step[2])
+            conns[step[1]].request(step[2])
+            if FLUSH.search(step[2]):
+                conns[step[1]].settle(port, notes)
         elif op == "close":
             conns[step[1]].s.close()
             conns[step[1]].closed = True
         elif op == "redir":
             ident = conns[step[2]].bulk_int("CLIENT ID\r\n")
             ids.append(ident)
-            conns[step[1]].send("CLIENT TRACKING on REDIRECT %d%s\r\n" % (ident, step[3]))
+            conns[step[1]].request("CLIENT TRACKING on REDIRECT %d%s\r\n" % (ident, step[3]))
         elif op == "sleep":
             time.sleep(step[1])
         elif op == "info":
@@ -2620,7 +2687,7 @@ PY
 )"
 
 expect_same_pubsub() {
-	local mine theirs name proto want got n=0
+	local mine theirs name proto want got label n=0
 	mine="$(python3 -I -c "$PUBSUB_CASES_PY" "$PORT" 2>&1)"
 	theirs="$(python3 -I -c "$PUBSUB_CASES_PY" "$REF_PORT" 2>&1)"
 	while IFS=$'\t' read -r name proto want; do
@@ -2629,7 +2696,9 @@ expect_same_pubsub() {
 		if [ -n "$want" ] && [ "$got" == "$want" ]; then
 			pass
 		else
-			fail "$(proto_label "pubsub raw socket bytes for $name" "$proto") differ from redis" "${want:0:400}" "${got:0:400}"
+			label="$(proto_label "pubsub raw socket bytes for $name" "$proto") differ from redis"
+			fail "$label" "${want:0:400}" "${got:0:400}"
+			keep_full "$label" "$want" "$got"
 		fi
 	done <<<"$theirs"
 	if [ "$n" -ne 28 ]; then
@@ -2644,6 +2713,39 @@ import sys
 import time
 
 SETTLE = 0.04
+WAIT = 10
+FLUSH = re.compile(r"(?im)^flush(all|db)\b")
+
+
+def frame_end(buf, pos):
+    nl = buf.find(b"\r\n", pos)
+    if nl < 0:
+        return None
+    kind = buf[pos:pos + 1]
+    if kind not in (b"$", b"=", b"!", b"*", b"~", b">", b"%", b"|"):
+        return nl + 2
+    n = int(buf[pos + 1:nl])
+    if n < 0:
+        return nl + 2
+    if kind in (b"$", b"=", b"!"):
+        return nl + 4 + n if len(buf) >= nl + 4 + n else None
+    pos = nl + 2
+    for _ in range(2 * n if kind in (b"%", b"|") else n):
+        pos = frame_end(buf, pos)
+        if pos is None:
+            return None
+    return pos
+
+
+def replies(buf):
+    count = pos = 0
+    while True:
+        end = frame_end(buf, pos)
+        if end is None:
+            return count
+        if buf[pos:pos + 1] not in (b">", b"|"):
+            count += 1
+        pos = end
 
 
 class Conn:
@@ -2651,6 +2753,7 @@ class Conn:
         self.s = socket.create_connection(("127.0.0.1", port))
         self.s.setblocking(False)
         self.out = b""
+        self.sent = b""
         self.eof = False
         self.closed = False
         self.id = self.ask_int(b"CLIENT ID\r\n")
@@ -2677,6 +2780,22 @@ class Conn:
             except BlockingIOError:
                 self.drain()
                 time.sleep(0.001)
+
+    def request(self, data):
+        self.send(data)
+        self.sent += data
+
+    def settle(self, port, notes):
+        want = self.sent.count(b"\r\n")
+        end = time.time() + WAIT
+        self.drain()
+        got = replies(self.out)
+        while got < want and not self.eof and time.time() < end:
+            time.sleep(0.002)
+            self.drain()
+            got = replies(self.out)
+        if got != want:
+            notes.append("flush step on port %d has %d replies for %d requests" % (port, got, want))
 
     def wait_for(self, marker):
         end = time.time() + 3
@@ -2742,11 +2861,14 @@ def run(port, steps):
             c.send(b"HELLO 3\r\n")
             c.wait_for(b"$7\r\nmodules\r\n*0\r\n")
             c.out = b""
+            c.sent = b""
         elif op == "send":
             text = step[2]
             for name, c in conns.items():
                 text = text.replace("{id:%s}" % name, str(c.id))
-            conns[step[1]].send(text.replace("\n", "\r\n").encode("latin1"))
+            conns[step[1]].request(text.replace("\n", "\r\n").encode("latin1"))
+            if FLUSH.search(text):
+                conns[step[1]].settle(port, notes)
         elif op == "close":
             conns[step[1]].s.close()
             conns[step[1]].closed = True
@@ -3262,7 +3384,7 @@ PY
 )"
 
 expect_same_transactions() {
-	local mine theirs name proto want got n=0
+	local mine theirs name proto want got label n=0
 	mine="$(python3 -I -c "$TX_CASES_PY" "$PORT" 2>&1)"
 	theirs="$(python3 -I -c "$TX_CASES_PY" "$REF_PORT" 2>&1)"
 	while IFS=$'\t' read -r name proto want; do
@@ -3271,7 +3393,9 @@ expect_same_transactions() {
 		if [ -n "$want" ] && [ "$got" == "$want" ]; then
 			pass
 		else
-			fail "$(proto_label "transaction raw socket bytes for $name" "$proto") differ from redis" "${want:0:400}" "${got:0:400}"
+			label="$(proto_label "transaction raw socket bytes for $name" "$proto") differ from redis"
+			fail "$label" "${want:0:400}" "${got:0:400}"
+			keep_full "$label" "$want" "$got"
 		fi
 	done <<<"$theirs"
 	if [ "$n" -ne 26 ]; then
@@ -3287,6 +3411,39 @@ import sys
 import time
 
 SETTLE = 0.05
+WAIT = 10
+FLUSH = re.compile(r"(?im)^flush(all|db)\b")
+
+
+def frame_end(buf, pos):
+    nl = buf.find(b"\r\n", pos)
+    if nl < 0:
+        return None
+    kind = buf[pos:pos + 1]
+    if kind not in (b"$", b"=", b"!", b"*", b"~", b">", b"%", b"|"):
+        return nl + 2
+    n = int(buf[pos + 1:nl])
+    if n < 0:
+        return nl + 2
+    if kind in (b"$", b"=", b"!"):
+        return nl + 4 + n if len(buf) >= nl + 4 + n else None
+    pos = nl + 2
+    for _ in range(2 * n if kind in (b"%", b"|") else n):
+        pos = frame_end(buf, pos)
+        if pos is None:
+            return None
+    return pos
+
+
+def replies(buf):
+    count = pos = 0
+    while True:
+        end = frame_end(buf, pos)
+        if end is None:
+            return count
+        if buf[pos:pos + 1] not in (b">", b"|"):
+            count += 1
+        pos = end
 
 
 def resp(*args):
@@ -3311,6 +3468,7 @@ class Conn:
         self.s = socket.create_connection(("127.0.0.1", port))
         self.s.setblocking(False)
         self.out = b""
+        self.sent = b""
         self.eof = False
         self.closed = False
 
@@ -3340,6 +3498,22 @@ class Conn:
             except (BrokenPipeError, ConnectionResetError):
                 self.out += b"<SENDERR>"
                 return
+
+    def request(self, text):
+        self.send(text)
+        self.sent += text.encode("latin1")
+
+    def settle(self, port, notes):
+        want = self.sent.count(b"\r\n")
+        end = time.time() + WAIT
+        self.drain()
+        got = replies(self.out)
+        while got < want and not self.eof and time.time() < end:
+            time.sleep(0.002)
+            self.drain()
+            got = replies(self.out)
+        if got != want:
+            notes.append("flush step on port %d has %d replies for %d requests" % (port, got, want))
 
     def wait_for(self, marker):
         end = time.time() + 3
@@ -3441,8 +3615,11 @@ def run(port, steps):
             c.send("HELLO 3\r\n")
             c.wait_for(b"$7\r\nmodules\r\n*0\r\n")
             c.out = b""
+            c.sent = b""
         elif op == "send":
-            conns[step[1]].send(step[2])
+            conns[step[1]].request(step[2])
+            if FLUSH.search(step[2]):
+                conns[step[1]].settle(port, notes)
         elif op == "close":
             conns[step[1]].s.close()
             conns[step[1]].closed = True
@@ -3856,7 +4033,7 @@ PY
 )"
 
 expect_same_acl() {
-	local mine theirs name proto want got n=0
+	local mine theirs name proto want got label n=0
 	mine="$(python3 -I -c "$ACL_CASES_PY" "$PORT" 2>&1)"
 	theirs="$(python3 -I -c "$ACL_CASES_PY" "$REF_PORT" 2>&1)"
 	while IFS=$'\t' read -r name proto want; do
@@ -3865,7 +4042,9 @@ expect_same_acl() {
 		if [ -n "$want" ] && [ "$got" == "$want" ]; then
 			pass
 		else
-			fail "$(proto_label "acl raw socket bytes for $name" "$proto") differ from redis" "${want:0:400}" "${got:0:400}"
+			label="$(proto_label "acl raw socket bytes for $name" "$proto") differ from redis"
+			fail "$label" "${want:0:400}" "${got:0:400}"
+			keep_full "$label" "$want" "$got"
 		fi
 	done <<<"$theirs"
 	if [ "$n" -ne 18 ]; then
@@ -7343,6 +7522,39 @@ import sys
 import time
 
 SETTLE = 0.05
+WAIT = 10
+FLUSH = re.compile(r"(?im)^flush(all|db)\b")
+
+
+def frame_end(buf, pos):
+    nl = buf.find(b"\r\n", pos)
+    if nl < 0:
+        return None
+    kind = buf[pos:pos + 1]
+    if kind not in (b"$", b"=", b"!", b"*", b"~", b">", b"%", b"|"):
+        return nl + 2
+    n = int(buf[pos + 1:nl])
+    if n < 0:
+        return nl + 2
+    if kind in (b"$", b"=", b"!"):
+        return nl + 4 + n if len(buf) >= nl + 4 + n else None
+    pos = nl + 2
+    for _ in range(2 * n if kind in (b"%", b"|") else n):
+        pos = frame_end(buf, pos)
+        if pos is None:
+            return None
+    return pos
+
+
+def replies(buf):
+    count = pos = 0
+    while True:
+        end = frame_end(buf, pos)
+        if end is None:
+            return count
+        if buf[pos:pos + 1] not in (b">", b"|"):
+            count += 1
+        pos = end
 
 
 class Conn:
@@ -7350,6 +7562,7 @@ class Conn:
         self.s = socket.create_connection(("127.0.0.1", port))
         self.s.setblocking(False)
         self.out = b""
+        self.sent = b""
         self.eof = False
 
     def drain(self):
@@ -7368,6 +7581,22 @@ class Conn:
 
     def send(self, text):
         self.s.sendall(text.encode("latin1"))
+
+    def request(self, text):
+        self.send(text)
+        self.sent += text.encode("latin1")
+
+    def settle(self, port, notes):
+        want = self.sent.count(b"\r\n")
+        end = time.time() + WAIT
+        self.drain()
+        got = replies(self.out)
+        while got < want and not self.eof and time.time() < end:
+            time.sleep(0.002)
+            self.drain()
+            got = replies(self.out)
+        if got != want:
+            notes.append("flush step on port %d has %d replies for %d requests" % (port, got, want))
 
     def wait_for(self, marker):
         end = time.time() + 3
@@ -7394,16 +7623,21 @@ def run(port, steps):
             c.send("MONITOR\r\n")
             c.wait_for(b"+OK\r\n")
             c.out = b""
+            c.sent = b""
         elif op == "hello3":
             c = conns[step[1]]
             c.send("HELLO 3\r\n")
             c.wait_for(b"$7\r\nmodules\r\n*0\r\n")
             c.out = b""
+            c.sent = b""
         elif op == "send":
-            conns[step[1]].send(step[2])
+            conns[step[1]].request(step[2])
+            if FLUSH.search(step[2]):
+                conns[step[1]].settle(port, notes)
         elif op == "mute":
             conns[step[1]].drain()
             conns[step[1]].out = b""
+            conns[step[1]].sent = b""
         elif op == "sleep":
             time.sleep(step[1])
         elif op == "flags":
@@ -7414,6 +7648,7 @@ def run(port, steps):
             c.wait_for(b"\n\r\n")
             text = c.out.decode("latin1")
             c.out = b""
+            c.sent = b""
             for line in text.split("\n"):
                 fields = dict(kv.split("=", 1) for kv in line.split(" ") if "=" in kv)
                 if fields.get("name") == step[2]:
@@ -7553,6 +7788,7 @@ PY
 				pass
 			else
 				fail "monitor output for $mon_name differs from redis" "${mon_want:0:400}" "${mon_got:0:400}"
+				keep_full "monitor output for $mon_name differs from redis" "$mon_want" "$mon_got"
 			fi
 		done <<<"$mon_theirs"
 		if [ "$mon_n" -ne 6 ]; then
