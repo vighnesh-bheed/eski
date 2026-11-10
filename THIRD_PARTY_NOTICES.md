@@ -1511,6 +1511,85 @@ lawyers.
 
 As usual, this software is provided "as is", without any warranty.
 
+## Unicode Character Database
+
+third_party/unicode/ucd-17.0.0 holds unmodified copies of UnicodeData.txt and SpecialCasing.txt of the Unicode Character Database, version 17.0.0, from https://www.unicode.org/Public/17.0.0/ucd/ , with the licence below as license.txt. src/text/lower_table.odin is generated from those two files by tools/gen_lower_table.py, and proofs/text/verify.py compares the table and its Lean model with them. The data files are published by Unicode, Inc. under the Unicode License v3:
+
+UNICODE LICENSE V3
+
+COPYRIGHT AND PERMISSION NOTICE
+
+Copyright © 1991-2026 Unicode, Inc.
+
+NOTICE TO USER: Carefully read the following legal agreement. BY
+DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
+SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
+TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of data files and any associated documentation (the "Data Files") or
+software and any associated documentation (the "Software") to deal in the
+Data Files or Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, and/or sell
+copies of the Data Files or Software, and to permit persons to whom the
+Data Files or Software are furnished to do so, provided that either (a)
+this copyright and permission notice appear with all copies of the Data
+Files or Software, or (b) this copyright and permission notice appear in
+associated Documentation.
+
+THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+THIRD PARTY RIGHTS.
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
+BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
+OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
+FILES OR SOFTWARE.
+
+Except as contained in this notice, the name of a copyright holder shall
+not be used in advertising or otherwise to promote the sale, use or other
+dealings in these Data Files or Software without prior written
+authorization of the copyright holder.
+
+## Snowball English test vocabulary
+
+src/stem_english/testdata/voc.txt and src/stem_english/testdata/output.txt are unmodified copies of english/voc.txt and english/output.txt, the test vocabulary of 42,603 words of the Snowball English stemmer and the stems it expects, from the snowball-data repository of the Snowball project, https://github.com/snowballstem/snowball-data , at commit 4412ee8084eb986d03e9bbd5fc56557ca0d54403 of 4 October 2023. src/stem_english/testdata/COPYING is that repository's COPYING file at the same commit, unmodified; the english directory has no COPYING file of its own. src/stem_english/testdata/reference.txt holds 5,089 lines of a word and its stem: 5,011 of the words are taken from the same voc.txt, 37 from the revision of that file at commit ca1919d397e11f83ea08de2dbb4126679f592ca5 of 28 October 2025 in the same repository, whose COPYING is unchanged, and 41 were written for Eski, and every stem is the reply of the reference server, recorded by black box comparison. src/stem_english/vocabulary_test.odin and src/stem_english/bench_test.odin load the files into the package's tests; no build of the server contains them. The stemmer in src/stem_english/stem.odin is Eski code written from the published description of the Snowball English (Porter2) stemming algorithm and contains no Snowball code. The files are used under the terms of COPYING, reproduced below.
+
+Except where noted otherwise by a COPYING file in the subdirectory, the files
+in this distribution are licensed as follows:
+
+Copyright (c) 2001, Dr Martin Porter
+Copyright (c) 2004,2005, Richard Boulton
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+  1. Redistributions of source code must retain the above copyright notice,
+     this list of conditions and the following disclaimer.
+  2. Redistributions in binary form must reproduce the above copyright notice,
+     this list of conditions and the following disclaimer in the documentation
+     and/or other materials provided with the distribution.
+  3. Neither the name of the Snowball project nor the names of its contributors
+     may be used to endorse or promote products derived from this software
+     without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
 ## SplitMix64 and xoshiro256** generators
 
 Several Eski procedures draw pseudorandom numbers or mix hash values with the SplitMix64 generator of Guy L. Steele Jr., Doug Lea and Christine H. Flood, "Fast Splittable Pseudorandom Number Generators", OOPSLA 2014, in the form of Sebastiano Vigna's reference program, https://prng.di.unimi.it/splitmix.c : a state advanced by 0x9E3779B97F4A7C15 and an output function with the multipliers 0xBF58476D1CE4E5B9 and 0x94D049BB133111EB and the shifts 30, 27 and 31. In the vector set and label code these are rng_next in src/hnsw/rng.odin, splitmix64 in src/vmath/project.odin, label_hash in src/label/table.odin, which uses the first multiplier only, and the generators of the package tests; earlier code uses the same generator in src/settype/table.odin, src/memcached.odin, src/memory.odin, src/hll/selftest.odin, src/hdr/model_test.odin and the generators under test. rng_seed and rng_next in src/vmath/project.odin implement xoshiro256** of David Blackman and Sebastiano Vigna, "Scrambled Linear Pseudorandom Number Generators", ACM Transactions on Mathematical Software 47(4), 2021, following its reference program, https://prng.di.unimi.it/xoshiro256starstar.c , seeded through SplitMix64, and rng_gaussian draws normal variates from it with the polar method of Marsaglia and Bray, 1964. Both reference programs carry the terms below, the first written in 2015 by Sebastiano Vigna and the second in 2018 by David Blackman and Sebastiano Vigna.
