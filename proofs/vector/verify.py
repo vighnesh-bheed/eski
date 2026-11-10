@@ -17,6 +17,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from kernel_audit import audit as audit_kernel
+import commands as vcommands
+import labelled
 from labelled import labelled_corpus
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -37,7 +39,11 @@ AREAS = {
     'resolution': ['Resolve'],
     'independence': ['Partition'],
     'compatibility': ['Plain'],
+    'relabel': ['Relabel', 'LabelSim'],
+    'commands': ['Commands'],
 }
+LINK_INPUTS = ['.build/diagnostics/release/libeski-diagnostics.a', '.build/diagnostics/libunwind.so',
+               '.build/lua/release/libeslua-runtime.a']
 PROOF_ONLY = ('filter',)
 
 
@@ -1133,6 +1139,7 @@ def corpus():
     labelled_corpus(rng, emit, stats)
     assert stats['refusals'] > 0 and stats['forced_copies'] > 0 and stats['hidden_bursts'] > 0
     assert stats['trusted_labels'] > 0 and stats['own_rule_decisive'] > 0
+    assert stats['relabel_moves'] > 0 and stats['relabel_refusals'] > 0 and stats['relabel_bytes'] > 0
     assert stats['conversions'] > 0 and stats['graph_searches'] > 0 and stats['tied_results'] > 0
     stats['rows'] = len(expected)
     assert stats['non_orthogonal_shapes'] > 0 and stats['epoch_wraps'] > 0 and stats['dirty_padding_pairs'] > 0
@@ -1171,6 +1178,24 @@ def find_odin(env, explicit):
     raise AssertionError('Odin compiler not found; use --odin, ODIN, PATH or ~/odin/current/odin')
 
 
+def overlay(output):
+    root = output / 'overlay'
+    if root.exists():
+        shutil.rmtree(root)
+    shutil.copytree(ROOT / 'src', root / 'src')
+    (root / 'src/main.odin').unlink()
+    for path in (root / 'src').glob('*_test.odin'):
+        path.unlink()
+    shutil.copyfile(PACKAGE / 'command_bridge.odin', root / 'src/proof_bridge.odin')
+    (root / '.build').symlink_to(ROOT / '.build', target_is_directory=True)
+    copied = {str(p.relative_to(root)): digest(p) for p in sorted((root / 'src').rglob('*')) if p.is_file()}
+    for name, sha in copied.items():
+        if name != 'src/proof_bridge.odin' and sha != digest(ROOT / name):
+            raise AssertionError('overlay source identity failure')
+    (output / 'overlay-sha256.json').write_text(json.dumps(copied, indent=2) + '\n')
+    return root
+
+
 def build(output, lean_bin, odin_path):
     env = dict(os.environ, LEAN_NUM_THREADS='1')
     if lean_bin:
@@ -1184,8 +1209,15 @@ def build(output, lean_bin, odin_path):
     if not re.search(r'\bversion 4\.35\.0\b', version):
         raise AssertionError(f'expected pinned Lean 4.35.0: {version}')
     odin_version = subprocess.run([odin, 'version'], env=env, text=True, capture_output=True, check=True).stdout
+    for name in LINK_INPUTS:
+        if not (ROOT / name).is_file():
+            raise AssertionError(f'missing native link input {name}; run ./build.sh first')
+    link_hashes = {name: digest(ROOT / name) for name in LINK_INPUTS}
+    root = overlay(output)
     commands = [([lake, 'build'], PACKAGE),
                 ([odin, 'build', str(PACKAGE / 'bridge.odin'), '-file', '-out:' + str(output / 'odin_bridge'),
+                  '-thread-count:2', '-vet', '-strict-style'], ROOT),
+                ([odin, 'build', str(root / 'src'), '-out:' + str(output / 'command_bridge'),
                   '-thread-count:2', '-vet', '-strict-style'], ROOT)]
     lock = ROOT / '.build/proofs/compiler.lock'
     lock.parent.mkdir(parents=True, exist_ok=True)
@@ -1199,9 +1231,14 @@ def build(output, lean_bin, odin_path):
             if result.returncode:
                 raise AssertionError(f'build failed; see {output / "build.txt"}\n{logs[-1][-4000:]}')
         axioms, kernel = audit_kernel(Path(lake), PACKAGE, output, env, 'Vectors')
+    if {name: digest(ROOT / name) for name in LINK_INPUTS} != link_hashes:
+        raise AssertionError('native link inputs changed during the build')
+    tools_links = link_hashes
     versions = {'lean': version.strip(), 'odin': odin_version.strip()}
     tools = {name: digest(Path(path)) for name, path in (('lean', lean), ('lake', lake), ('odin', odin))}
-    return PACKAGE / '.lake/build/bin/vector_model', output / 'odin_bridge', axioms, kernel, versions, tools
+    tools.update({'link:' + name: sha for name, sha in tools_links.items()})
+    return (PACKAGE / '.lake/build/bin/vector_model', output / 'odin_bridge', output / 'command_bridge', axioms, kernel,
+            versions, tools)
 
 
 def tied_pair(row):
@@ -1264,6 +1301,13 @@ def negative_controls(expected):
         'resolved_label': ('ZF|', lambda r: r != 'ZF|-', lambda r: 'ZF|-'),
         'sample_order': ('ZM|', lambda r: r.count(',') > 0, lambda r: 'ZM|' + ','.join(reversed(r[3:].split(',')))),
         'plain_seq_order': ('ZO|sim|', lambda r: tied_pair(r[7:]) is not None, lambda r: 'ZO|sim|' + swap_tied(r[7:])),
+        'relabel_target_new': ('ZX|', lambda r: '|none|' in r,
+                               lambda r: '|'.join(r.split('|')[:2] + [str(1 - int(r.split('|')[2]))] + r.split('|')[3:])),
+        'relabel_source_gone': ('ZX|', lambda r: '|none|' in r,
+                                lambda r: '|'.join(r.split('|')[:1] + [str(1 - int(r.split('|')[1]))] + r.split('|')[2:])),
+        'relabel_refusal_label': ('ZX|0|0|inuse|', lambda r: True, lambda r: r[:-1] + str((int(r[-1]) + 1) % 10)),
+        'relabel_refusal_kind': ('ZX|0|0|notfound|', lambda r: True, lambda r: 'ZX|0|0|inuse|0'),
+        'relabel_bytes_differ': ('ZB|', lambda r: True, lambda r: r.replace('|1|', '|0|', 1)),
     }
     for name, (prefix, accept, mutate) in semantic.items():
         index = next((i for i, row in enumerate(expected) if row.startswith(prefix) and (accept(row) or
@@ -1284,6 +1328,138 @@ def negative_controls(expected):
     return rejected
 
 
+def run_bridge(binary, lines, path):
+    path.write_text('\n'.join(lines) + '\n')
+    result = subprocess.run([str(binary), str(path)], text=True, capture_output=True)
+    if result.returncode or result.stderr:
+        raise AssertionError(f'command bridge: exit {result.returncode}, stderr: {result.stderr[-2000:]}')
+    return result.stdout.splitlines()
+
+
+def command_evidence(bridge, output):
+    seed = 0x5EED
+    (lines, rows, cmds), pairs, stats = vcommands.corpus(random.Random(SEED ^ 0xC0DE), seed, 60, 40)
+    got = run_bridge(bridge, lines, output / 'command-cases.txt')
+    if got[0] != 'S|3|1':
+        raise AssertionError('command bridge did not start labelled: ' + got[0])
+    (output / 'command-results.txt').write_text('\n'.join(got) + '\n')
+    compare('command bridge', '\n'.join(got[1:]) + '\n', rows)
+    for k, (la, ra, lb, rb, observed) in enumerate(pairs):
+        oa = run_bridge(bridge, la, output / 'command-twin-a.txt')[1:]
+        ob = run_bridge(bridge, lb, output / 'command-twin-b.txt')[1:]
+        compare(f'twin {k} base', '\n'.join(oa) + '\n', ra)
+        compare(f'twin {k} hidden', '\n'.join(ob) + '\n', rb)
+        for i, j in observed:
+            if oa[i] != ob[j]:
+                raise AssertionError(f'twin {k}: hidden commands changed a visible reply at row {i}')
+    labelled_lines, single_lines, nwrites, reads = vcommands.p10_corpus(random.Random(SEED ^ 0x10), seed)
+    ol = run_bridge(bridge, labelled_lines, output / 'command-p10-labelled.txt')
+    os_ = run_bridge(bridge, single_lines, output / 'command-p10-single.txt')
+    n = len(reads)
+    if ol[0] != 'S|2|0' or os_[0] != 'S|1|0' or ol[1 + nwrites + n] != 'A|1':
+        raise AssertionError('P10 bridge runs did not configure the expected schemes')
+    plain = ol[1:1 + nwrites + n]
+    if os_[1:] != plain:
+        raise AssertionError('single-level scheme replies differ from the labels-off replies')
+    phase = ol[2 + nwrites + n:]
+    for key in ('p10_rows', 'p10_tie_rows', 'p10_uid_rows', 'p10_random_rows', 'p10_single_rows'):
+        stats[key] = 0
+    stats['p10_single_rows'] = len(plain)
+    for block in (phase[:n], phase[n:]):
+        for i, (_, cmd, args) in enumerate(reads):
+            ok, kind = vcommands.p10_agree(cmd, args, plain[nwrites + i], block[i])
+            if not ok:
+                raise AssertionError(f'P10 row {i} {cmd}: {plain[nwrites + i][:200]} != {block[i][:200]}')
+            stats['p10_rows'] += 1
+            if plain[nwrites + i] != block[i]:
+                stats['p10_' + {'ties': 'tie', 'uid': 'uid', 'random': 'random'}[kind] + '_rows'] += 1
+    if not (stats['p10_tie_rows'] and stats['p10_uid_rows'] and stats['p10_random_rows']):
+        raise AssertionError('P10 exceptions were not exercised')
+    expected_rows = got[1:]
+    mutants = {}
+    for name, (target, fn) in vcommands.model_mutants().items():
+        owner, attr = (vcommands.Obj, target[1]) if isinstance(target, tuple) else (vcommands.Model, target)
+        original = getattr(owner, attr)
+        setattr(owner, attr, fn)
+        try:
+            mutated = vcommands.simulate(seed, cmds)
+        finally:
+            setattr(owner, attr, original)
+        differing = sum(1 for a, b in zip(expected_rows, mutated) if a != b)
+        if not differing:
+            raise AssertionError('command model mutant accepted: ' + name)
+        mutants['command_' + name] = differing
+    kinds = {}
+    for i, (_, cmd, _) in enumerate(cmds):
+        kinds.setdefault(cmd, i)
+    for cmd, i in sorted(kinds.items()):
+        mutated = list(rows)
+        mutated[i] = 'E|-controlled-mutant^'
+        try:
+            compare('command control', '\n'.join(mutated) + '\n', rows)
+        except AssertionError:
+            mutants['command_row_' + cmd.lower()] = 1
+        else:
+            raise AssertionError('command row control accepted: ' + cmd)
+    if any(stats[k] == 0 for k in ('command_refusals', 'command_split_keys', 'p2_pairs', 'p2_observer_rows',
+                                   'p2_hidden_writes_accepted')):
+        raise AssertionError('command corpus lost coverage')
+    return stats, mutants
+
+
+def relabel_mutants():
+    original = labelled.LSet.relabel
+
+    def keeps_age(self, src, t, n):
+        ls = list(self.index.get(n, []))
+        row = original(self, src, t, n)
+        if '|none|' in row:
+            self.index[n].remove(t)
+            self.index[n].insert(ls.index(src), t)
+        return row
+
+    def drops_attribute(self, src, t, n):
+        if src in self.index.get(n, []) and t not in self.index.get(n, []):
+            self.elem(src, n)['attr'] = None
+        return original(self, src, t, n)
+
+    def refuses_visible_other(self, src, t, n):
+        ls = list(self.index.get(n, []))
+        if src in ls and t not in ls:
+            o = self.other(t, [l for l in ls if l != src])
+            if o is not None:
+                return f'ZX|0|0|inuse|{o}'
+        return original(self, src, t, n)
+
+    def keeps_source(self, src, t, n):
+        ls = list(self.index.get(n, []))
+        if src not in ls or t in ls:
+            return original(self, src, t, n)
+        to_new = t not in self.parts
+        e = self.elem(src, n)
+        self.insert(t, n, e['mask'], e['attr'])
+        return f'ZX|0|{int(to_new)}|none|-'
+
+    return {'keeps_age': keeps_age, 'drops_attribute': drops_attribute,
+            'refuses_visible_other': refuses_visible_other, 'keeps_source': keeps_source}
+
+
+def model_controls(rows):
+    original = labelled.LSet.relabel
+    rejected = {}
+    try:
+        for name, mutant in relabel_mutants().items():
+            labelled.LSet.relabel = mutant
+            _, expected, _ = corpus()
+            differing = sum(1 for a, b in zip(rows, expected) if a != b) + abs(len(rows) - len(expected))
+            if not differing:
+                raise AssertionError('model mutant accepted: relabel_' + name)
+            rejected['relabel_' + name] = differing
+    finally:
+        labelled.LSet.relabel = original
+    return rejected
+
+
 def run():
     parser = argparse.ArgumentParser()
     parser.add_argument('--lean-bin', type=Path, default=Path(os.environ['LEAN_BIN_DIR']) if 'LEAN_BIN_DIR' in os.environ else None)
@@ -1298,7 +1474,7 @@ def run():
     if hasattr(os, 'nice'):
         os.nice(10)
     fingerprints = check_fingerprints()
-    lean_model, odin_bridge, axioms, kernel, versions, tools = build(output, args.lean_bin, args.odin)
+    lean_model, odin_bridge, command_bridge, axioms, kernel, versions, tools = build(output, args.lean_bin, args.odin)
     trace, expected, stats = corpus()
     path = output / 'cases.txt'
     path.write_text(trace)
@@ -1313,6 +1489,10 @@ def run():
     if results['lean'] != results['odin']:
         raise AssertionError('Lean oracle and Odin rows differ')
     rejected = negative_controls(expected)
+    mutants = model_controls((output / 'odin-results.txt').read_text().splitlines())
+    command_stats, command_mutants = command_evidence(command_bridge, output)
+    stats.update(command_stats)
+    mutants.update(command_mutants)
     modules = {module: set(re.findall(r'^theorem\s+(\w+)', (PACKAGE / f'Vectors/{module}.lean').read_text(), re.M))
                for files in AREAS.values() for module in files}
     comparisons = {'projection': stats['projection_shapes'] + stats['projection_rejected_shapes'],
@@ -1322,7 +1502,9 @@ def run():
                    'graph': stats['sort_rows'] + stats['width_rows'] + stats['index_sessions'] + stats['index_operations'],
                    'arena': stats['live_norm_rows'] + stats['arena_sessions'] + stats['arena_operations'], 'filter': 0,
                    'merge': stats['merge_rows'], 'resolution': stats['resolution_rows'],
-                   'independence': stats['independence_rows'], 'compatibility': stats['compatibility_rows']}
+                   'independence': stats['independence_rows'], 'compatibility': stats['compatibility_rows'],
+                   'relabel': stats['relabel_rows'] + stats['relabel_bytes'],
+                   'commands': stats['command_rows'] + stats['p2_observer_rows'] + stats['p10_rows']}
     if any(comparisons[area] for area in PROOF_ONLY) or any(not comparisons[area] for area in AREAS if area not in PROOF_ONLY):
         raise AssertionError('comparison evidence does not match the proof-only areas')
     area_evidence = {area: {'theorems': sorted(name for name in axioms
@@ -1335,14 +1517,16 @@ def run():
                'kernel_checked_theorems': len(kernel['theorem_axioms']),
                'source_sha256': fingerprints, 'versions': versions, 'tool_sha256': tools,
                'trace_sha256': hashlib.sha256(trace.encode()).hexdigest(), 'results_sha256': results,
-               'executable_sha256': {'lean': digest(lean_model), 'odin': digest(odin_bridge)},
+               'executable_sha256': {'lean': digest(lean_model), 'odin': digest(odin_bridge),
+                                     'command': digest(command_bridge)},
+               'overlay_sha256': digest(output / 'overlay-sha256.json'),
                'proof_source_sha256': {str(p.relative_to(PACKAGE)): digest(p) for p in sorted(PACKAGE.rglob('*'))
                                        if p.is_file() and not {'.lake', '.build', '__pycache__'} & set(p.parts)},
-               'negative_controls_rejected': rejected,
+               'negative_controls_rejected': rejected, 'model_mutants_rejected': mutants,
                'odin_correspondence': 'finite implementation comparisons; no verified translation'}
     (output / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
     summary = {**stats, 'theorems': len(axioms), 'kernel_checked_theorems': receipt['kernel_checked_theorems'],
-               'negative_controls_rejected': len(rejected), 'receipt': str(output / 'receipt.json')}
+               'negative_controls_rejected': len(rejected), 'model_mutants_rejected': len(mutants), 'receipt': str(output / 'receipt.json')}
     print(json.dumps(summary, indent=2))
 
 

@@ -308,7 +308,7 @@ access_persistence_and_top_rules_are_central :: proc(t: ^testing.T) {
 	access.top = true
 	testing.expect_value(t, access_command_refusal(debug, words("DEBUG", "SLEEP", "0")), "")
 	testing.expect_value(t, access_command_refusal(save, words("SAVE")), ERR_LABEL_PERSISTENCE)
-	testing.expect(t, access_writes_refused())
+	testing.expect(t, access_persistence_off())
 	labels_on = false
 	testing.expect(t, !access_persistence_refuses(save, words("SAVE")))
 	labels_on = true

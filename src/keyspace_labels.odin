@@ -319,10 +319,26 @@ label_write_check :: proc(cmd: ^Command, spec: ^Cmd_Spec, argv: [][]u8) -> strin
 			continue
 		}
 		if l, found := label_write_conflict(db_cur, argv[ref.pos]); found {
+			if label_creates_only(cmd, argv, ref.pos) {
+				continue
+			}
 			return label_in_use_text(ERR_LABEL_NAME_IN_USE, l)
 		}
 	}
 	return ""
+}
+
+label_creates_only :: proc(cmd: ^Command, argv: [][]u8, pos: int) -> bool {
+	h := cmd.handler
+	switch {
+	case h == cmd_setnx, h == cmd_msetnx:
+		return true
+	case h == cmd_renamenx:
+		return pos == 2
+	case h == cmd_set:
+		return set_creates_only(argv)
+	}
+	return false
 }
 
 label_write_conflict :: proc(own: ^Db, key: []u8) -> (lb.Id, bool) {
@@ -381,14 +397,15 @@ label_locate_other :: proc(dbi: int, key: []u8, l: ^Lookup, reader: lb.Id, vis: 
 	ld := &label_dbs[dbi]
 	if len(ld.copies) > 0 {
 		if cp, ok := ld.copies[string(key)]; ok {
-			rejected: u64 = 0
-			for _ in 0 ..< len(cp.copies) {
+			floor: Label_Copy
+			bounded := false
+			for {
 				best := -1
 				for c, k in cp.copies {
-					if k < 64 && rejected & (u64(1) << u64(k)) != 0 {
+					if c.label == reader || !lb.visible(vis, c.label) {
 						continue
 					}
-					if c.label == reader || !lb.visible(vis, c.label) {
+					if bounded && !label_copy_better(floor, c) {
 						continue
 					}
 					if best < 0 || label_copy_better(c, cp.copies[best]) {
@@ -405,10 +422,8 @@ label_locate_other :: proc(dbi: int, key: []u8, l: ^Lookup, reader: lb.Id, vis: 
 						return q, tt, ii
 					}
 				}
-				if best >= 64 {
-					break
-				}
-				rejected |= u64(1) << u64(best)
+				floor = cp.copies[best]
+				bounded = true
 			}
 			return nil, nil, -1
 		}
@@ -715,19 +730,22 @@ label_vset_detach_key :: proc(db: ^Db, key: []u8) {
 	}
 }
 
-label_copy_target :: proc(dbi: int, key: []u8) -> (^Db, string) {
+label_copy_target :: proc(dbi: int, key: []u8, replace: bool) -> (target: ^Db, refusal: string, occupied: bool) {
 	l := lookup_make(key)
 	own := label_part(dbi, access.id)
 	if own == nil || !label_live_in(own, &l) {
 		if other, _, i := label_locate_other(dbi, key, &l, access.id, access.vis); i >= 0 {
-			return nil, label_in_use_text(ERR_LABEL_NAME_IN_USE, other.label)
+			if !replace {
+				return nil, "", true
+			}
+			return nil, label_in_use_text(ERR_LABEL_NAME_IN_USE, other.label), false
 		}
 	}
 	p, ok := label_part_make(dbi, access.id)
 	if !ok {
-		return nil, ERR_LABEL_PARTITIONS
+		return nil, ERR_LABEL_PARTITIONS, false
 	}
-	return p, ""
+	return p, "", false
 }
 
 label_flush :: proc(home: ^Db, all: bool, lazy: bool) -> i64 {

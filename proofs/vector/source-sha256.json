@@ -31,5 +31,16 @@
   "src/vsettype/random.odin": "3fa016b49bd2cf5c362856641c1313de23e0e33cdf5a7dc21f310747e75118fe",
   "src/vsettype/search.odin": "599679376e497030067a728b3f64abb5295d432d489f03bd4317a26b71e11c23",
   "src/vsettype/views.odin": "636f391f72766e1841d1975824b26f4333e2010ebf877b19eb76d5bd3f30ef9a",
-  "src/vsettype/alloc.odin": "7688b5480fd0725c51157fa673da8557c0336971f4ca2ab78d68e23ea0b7821e"
+  "src/vsettype/alloc.odin": "7688b5480fd0725c51157fa673da8557c0336971f4ca2ab78d68e23ea0b7821e",
+  "src/vsettype/relabel.odin": "68bd426db7fb16320293839ae2d0570df4efe065c9ba7d91570e0cfc564fb8f0",
+  "src/cmd_vset.odin": "da4d248e6ece644041e72585d85626562eac1cd8040b448e8e32d6eec85d2403",
+  "src/keyspace_labels.odin": "8bf42a3ec5a6475f21f46d11368b2f6d14782be1dfce1bf5fb2a3acaaff34546",
+  "src/access.odin": "93cbe5beeca7bbe599fb9a40764b3ed7fd20131399ee4b21e5dec60d34d6fc81",
+  "src/dispatch.odin": "35d6c01704e4c7bc24f6fbc2418a703e5f7230cf8dc7d38b3062ab902078387b",
+  "src/store.odin": "f35ff845e3ac29a14188a89d2fefc90b9cfb97ae3d67633c0e7f392a227e3822",
+  "src/label_scheme.odin": "a7704788163aa760b6211775580132c1ec3ca7b4e64343be6f434a53dc32f6c1",
+  "src/cmd_label.odin": "7309ef4d6b98eede91bd3dfe0bf8283ef5681d8ac35ec069b1776484b7060819",
+  "src/label/table.odin": "463a20b1ac1d02bb56159e0e2876d41cd9d24b491319b41ce3656140aef1c6ce",
+  "src/label/marking.odin": "5c2a4d0a04203f4e845dad9d24407f1c3871ff8768da4c8134364141e573a8e0",
+  "src/keyspace_labels_cmd.odin": "848955f4c113971508d6ea208030682ac7f1b3e3f1e2310b27066cd551fb54f5"
 }

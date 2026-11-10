@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from kernel_audit import audit as audit_kernel
 import arrival
+import keys
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = Path(__file__).resolve().parent
@@ -39,13 +40,21 @@ AREAS = {
     'counters': ['Counters'],
     'contexts': ['Contexts'],
     'arrival': ['Arrival'],
+    'resolution': ['KeyModel'],
+    'confinement': ['KeyReads'],
+    'placement': ['KeyWrites'],
+    'purge': ['KeyPurge'],
+    'plain': ['KeyPlain'],
 }
+KEY_AREAS = ('resolution', 'confinement', 'placement', 'purge', 'plain')
 ROW_AREAS = {'L': 'lattice', 'CR': 'marking', 'CL': 'marking', 'CC': 'marking', 'CT': 'marking', 'M': 'marking', 'F': 'marking',
              'TR': 'interning', 'TI': 'interning', 'TF': 'interning', 'E': 'persistence', 'D': 'persistence',
              'V': 'visibility', 'VR': 'visibility', 'G': 'admission', 'B': 'admission', 'SU': 'rules', 'SR': 'rules', 'SW': 'rules',
              'SM': 'rules', 'SD': 'rules', 'NR': 'counters', 'NA': 'counters', 'NS': 'counters', 'NV': 'counters',
              'AH': 'contexts', 'AQ': 'contexts', 'AW': 'contexts', 'AX': 'arrival', 'AU': 'arrival', 'AC': 'arrival',
-             'AT': 'arrival', 'AO': 'arrival', 'AR': 'arrival', 'AS': 'arrival'}
+             'AT': 'arrival', 'AO': 'arrival', 'AR': 'arrival', 'AS': 'arrival',
+             'KO': 'resolution', 'KR': 'confinement', 'KW': 'placement', 'KH': 'purge', 'KP': 'plain'}
+KEY_SEED = 0x6B3E7
 ARRIVAL_SEED = 0xA2217
 ARRIVAL_NOTES = ['created', 'create_full', 'dropped', 'swept', 'find_ok', 'find_expired', 'find_other_login',
                  'find_outside_ceiling', 'form_marking', 'form_marking_trust', 'form_marking_context', 'form_context',
@@ -371,7 +380,7 @@ def label_token(label):
 def corpus():
     rng = random.Random(SEED)
     lines, expected = [], []
-    stats = {kind: 0 for kind, area in ROW_AREAS.items() if area not in ('contexts', 'arrival')}
+    stats = {kind: 0 for kind, area in ROW_AREAS.items() if area not in ('contexts', 'arrival') + KEY_AREAS}
     extra = {'config_rejections': 0, 'parse_accepted': 0, 'parse_errors': {}, 'decode_errors': {}, 'decode_accepted': 0,
              'intern_repeats': 0, 'refresh_growths': 0, 'stale_slots': 0, 'gate_slots': 0, 'brute_cases_with_hidden': 0,
              'write_verdicts': {}, 'counter_overflows': 0, 'counter_underflows': 0, 'long_markings': 0}
@@ -898,21 +907,21 @@ LINK_INPUTS = ['.build/diagnostics/release/libeski-diagnostics.a', '.build/diagn
                '.build/lua/release/libeslua-runtime.a']
 
 
-def overlay(output):
-    root = output / 'overlay'
+def overlay(output, bridge='arrival_bridge.odin', name='overlay'):
+    root = output / name
     if root.exists():
         shutil.rmtree(root)
     shutil.copytree(ROOT / 'src', root / 'src')
     (root / 'src/main.odin').unlink()
     for path in (root / 'src').glob('*_test.odin'):
         path.unlink()
-    shutil.copyfile(PACKAGE / 'arrival_bridge.odin', root / 'src/proof_bridge.odin')
+    shutil.copyfile(PACKAGE / bridge, root / 'src/proof_bridge.odin')
     (root / '.build').symlink_to(ROOT / '.build', target_is_directory=True)
     copied = {str(p.relative_to(root)): digest(p) for p in sorted((root / 'src').rglob('*')) if p.is_file()}
-    for name, sha in copied.items():
-        if name != 'src/proof_bridge.odin' and sha != digest(ROOT / name):
+    for path, sha in copied.items():
+        if path != 'src/proof_bridge.odin' and sha != digest(ROOT / path):
             raise AssertionError('overlay source identity failure')
-    (output / 'overlay-sha256.json').write_text(json.dumps(copied, indent=2) + '\n')
+    (output / f'{name}-sha256.json').write_text(json.dumps(copied, indent=2) + '\n')
     return root
 
 
@@ -931,10 +940,13 @@ def build(output, lean_bin, odin_path):
     odin_version = subprocess.run([odin, 'version'], env=env, text=True, capture_output=True, check=True).stdout
     link_hashes = {name: digest(ROOT / name) for name in LINK_INPUTS}
     root = overlay(output)
+    key_root = overlay(output, 'key_bridge.odin', 'overlay-keys')
     commands = [([lake, 'build'], PACKAGE),
                 ([odin, 'build', str(PACKAGE / 'bridge.odin'), '-file', '-out:' + str(output / 'odin_bridge'),
                   '-thread-count:2', '-vet', '-strict-style'], ROOT),
                 ([odin, 'build', str(root / 'src'), '-out:' + str(output / 'arrival_bridge'),
+                  '-thread-count:2', '-vet', '-strict-style'], ROOT),
+                ([odin, 'build', str(key_root / 'src'), '-out:' + str(output / 'key_bridge'),
                   '-thread-count:2', '-vet', '-strict-style'], ROOT)]
     lock = ROOT / '.build/proofs/compiler.lock'
     lock.parent.mkdir(parents=True, exist_ok=True)
@@ -952,8 +964,8 @@ def build(output, lean_bin, odin_path):
         raise AssertionError('prebuilt native inputs changed during check')
     versions = {'lean': version.strip(), 'odin': odin_version.strip()}
     tools = {name: digest(Path(path)) for name, path in (('lean', lean), ('lake', lake), ('odin', odin))}
-    return (PACKAGE / '.lake/build/bin/label_model', output / 'odin_bridge', output / 'arrival_bridge', axioms, kernel,
-            versions, tools, link_hashes)
+    return (PACKAGE / '.lake/build/bin/label_model', output / 'odin_bridge', output / 'arrival_bridge',
+            output / 'key_bridge', axioms, kernel, versions, tools, link_hashes)
 
 
 def first_row(expected, prefix, accept):
@@ -1099,6 +1111,149 @@ def arrival_controls(expected, marks):
     return rejected
 
 
+def key_run(bridge, lines, path):
+    path.write_text('\n'.join(lines) + '\n')
+    result = subprocess.run([str(bridge), str(path)], text=True, capture_output=True)
+    if result.returncode or result.stderr:
+        raise AssertionError(f'key bridge: exit {result.returncode}, stderr: {result.stderr[-2000:]}')
+    return result.stdout.splitlines()
+
+
+def key_match(got, want):
+    return want is None or (got in want if isinstance(want, set) else got == want)
+
+
+def key_compare(label, got, want):
+    if len(got) != len(want):
+        raise AssertionError(f'{label}: {len(got)} rows, expected {len(want)}')
+    for i, (a, b) in enumerate(zip(got, want)):
+        if not key_match(a, b):
+            raise AssertionError(f'{label}: row {i}: {a[:200]!r} != {str(b)[:200]!r}')
+
+
+def key_evidence(bridge, lean_model, output):
+    rng = random.Random(KEY_SEED)
+    sessions = keys.corpus(rng, 77, 48, 170)
+    stats = {'KO': 0, 'KR': 0, 'KW': 0, 'KH': 0, 'KP': 0}
+    detail = {'sessions': 0, 'rows': 0, 'randomkey_rows': 0, 'notes': {}, 'commands': {}}
+    real = []
+    work = output / 'keys'
+    work.mkdir(exist_ok=True)
+    hashes = []
+    for k, (lines, rows, cmds, notes) in enumerate(sessions):
+        got = key_run(bridge, lines, work / f'session-{k}.txt')
+        if got[0] != 'S|3|1':
+            raise AssertionError('key bridge did not start labelled: ' + got[0])
+        key_compare(f'key session {k}', got[1:], rows)
+        hashes.append(hashlib.sha256('\n'.join(got).encode()).hexdigest())
+        real.append(got[1:])
+        detail['sessions'] += 1
+        for (lab, cmd, args), row in zip(cmds, rows):
+            if cmd == 'T':
+                continue
+            stats[keys.row_kind(cmd)] += 1
+            detail['rows'] += 1
+            detail['commands'][cmd] = detail['commands'].get(cmd, 0) + 1
+            if isinstance(row, set):
+                detail['randomkey_rows'] += 1
+        for name, n in notes.items():
+            detail['notes'][name] = detail['notes'].get(name, 0) + n
+    missing = [n for n in keys.NOTES if not detail['notes'].get(n)]
+    if missing:
+        raise AssertionError('key corpus misses ' + ', '.join(missing))
+    rlines, rrows = keys.resolution_trace(sessions)
+    rpath = work / 'resolution-cases.txt'
+    rpath.write_text('\n'.join(rlines) + '\n')
+    result = subprocess.run([str(lean_model.resolve()), str(rpath)], text=True, capture_output=True)
+    if result.returncode or result.stderr:
+        raise AssertionError(f'lean key resolution: exit {result.returncode}, stderr: {result.stderr[-2000:]}')
+    compare('lean key resolution', result.stdout, rrows)
+    queried = [r for r in rrows if r.startswith('KQ|')]
+    if len(queried) != stats['KO']:
+        raise AssertionError('Lean resolution rows do not cover every LABEL OF row')
+    detail['lean_resolution_rows'] = len(rrows)
+    detail['lean_resolution_queries'] = len(queried)
+    twins = keys.twin_corpus(random.Random(KEY_SEED ^ 0x7), 77, 30)
+    detail['twin_pairs'] = detail['twin_hidden'] = detail['twin_raw_rows'] = 0
+    for k, (base, twin, observer) in enumerate(twins):
+        la = [keys.scheme_line(77, True)] + [keys.raw_line(*c) for c in base]
+        lb = [keys.scheme_line(77, True)] + [keys.raw_line(*c) for c in twin]
+        oa = key_run(bridge, la, work / f'twin-{k}-base.txt')[1:]
+        ob = key_run(bridge, lb, work / f'twin-{k}-hidden.txt')[1:]
+        key_compare(f'twin {k} base', oa, keys.twin_rows(base))
+        key_compare(f'twin {k} hidden', ob, keys.twin_rows(twin))
+        j = 0
+        for i, c in enumerate(twin):
+            if j < len(base) and c is base[j]:
+                if c[0] is not None and keys.sees(observer, c[0]):
+                    if oa[j] != ob[i]:
+                        raise AssertionError(f'twin {k}: a hidden command changed a visible reply at row {j}')
+                    stats['KH'] += 1
+                    if c[1] in ('RAWSCAN', 'RANDOMKEY'):
+                        detail['twin_raw_rows'] += 1
+                j += 1
+        if j != len(base):
+            raise AssertionError('twin merge lost base commands')
+        detail['twin_pairs'] += 1
+        detail['twin_hidden'] += len(twin) - len(base)
+    p10 = random.Random(KEY_SEED ^ 0x10)
+    detail['p10_runs'] = 0
+    for k in range(6):
+        writes, reads = keys.p10_commands(p10)
+        plain_rows, _ = keys.simulate(writes + reads, labelled=False)
+        body = [keys.row_line(l, c, a, labelled=False) for l, c, a in writes + reads]
+        plain = key_run(bridge, [f'S L0,L1 - - 77 0'] + body, work / f'p10-{k}-plain.txt')
+        single = key_run(bridge, [f'S L0 - - 77 1'] + body, work / f'p10-{k}-single.txt')
+        if plain[0] != 'S|2|0' or single[0] != 'S|1|0':
+            raise AssertionError('P10 runs did not configure the expected schemes')
+        key_compare(f'p10 {k} plain', plain[1:], plain_rows)
+        if single[1:] != plain[1:]:
+            raise AssertionError('single-level scheme replies differ from labels-off replies')
+        n = len(reads)
+        bottom = [keys.row_line((0, 0, 0), c, a) for _, c, a in reads]
+        upper = [keys.row_line((1, 0, 0), c, a) for _, c, a in reads]
+        applied = key_run(bridge, [f'S L0,L1 - - 77 0'] + body + ['A'] + bottom + upper, work / f'p10-{k}-applied.txt')
+        if applied[1 + len(body)] != 'A|1':
+            raise AssertionError('P10 run did not switch labels on')
+        plain_reads = plain[1 + len(writes):]
+        names = {r for r in plain_reads}
+        for block in (applied[2 + len(body):2 + len(body) + n], applied[2 + len(body) + n:]):
+            for i, (_, cmd, _) in enumerate(reads):
+                if cmd == 'RANDOMKEY':
+                    if not key_match(block[i], plain_rows[len(writes) + i]):
+                        raise AssertionError(f'P10 RANDOMKEY row {i} returned an unknown name')
+                elif block[i] != plain_reads[i]:
+                    raise AssertionError(f'P10 row {i} {cmd}: {plain_reads[i][:200]} != {block[i][:200]}')
+        stats['KP'] += len(body) * 2 + 2 * n
+        detail['p10_runs'] += 1
+        del names
+    mutants = {}
+    for name, fn in keys.mutants().items():
+        differing = 0
+        for (lines, rows, cmds, _), got in zip(sessions, real):
+            mrows, _ = keys.simulate(cmds, mutant=fn)
+            differing += sum(1 for a, b in zip(got, mrows) if not key_match(a, b))
+        if not differing:
+            raise AssertionError('key model mutant accepted: ' + name)
+        mutants['key_' + name] = differing
+    seen = {}
+    for k, (lines, rows, cmds, _) in enumerate(sessions):
+        for i, (lab, cmd, args) in enumerate(cmds):
+            if cmd != 'T' and cmd not in seen:
+                seen[cmd] = (k, i)
+    for cmd, (k, i) in sorted(seen.items()):
+        mutated = list(real[k])
+        mutated[i] = mutated[i] + 'controlled-mutant'
+        try:
+            key_compare('key control', mutated, sessions[k][1])
+        except AssertionError:
+            mutants['key_row_' + cmd.lower()] = 1
+        else:
+            raise AssertionError('key row control accepted: ' + cmd)
+    detail['sessions_sha256'] = hashlib.sha256('\n'.join(hashes).encode()).hexdigest()
+    return stats, detail, mutants
+
+
 def run():
     parser = argparse.ArgumentParser()
     parser.add_argument('--lean-bin', type=Path, default=Path(os.environ['LEAN_BIN_DIR']) if 'LEAN_BIN_DIR' in os.environ else None)
@@ -1113,7 +1268,8 @@ def run():
     if hasattr(os, 'nice'):
         os.nice(10)
     fingerprints = check_fingerprints()
-    lean_model, odin_bridge, arrival_bridge, axioms, kernel, versions, tools, link_hashes = build(output, args.lean_bin, args.odin)
+    lean_model, odin_bridge, arrival_bridge, key_bridge, axioms, kernel, versions, tools, link_hashes = build(
+        output, args.lean_bin, args.odin)
     trace, expected, stats, extra = corpus()
     path = output / 'cases.txt'
     path.write_text(trace)
@@ -1147,7 +1303,11 @@ def run():
         raise AssertionError('arrival row kinds overlap the label rows or miss a kind')
     stats.update(astats)
     extra['arrival'] = anotes
-    rejected = negative_controls(expected) + arrival_controls(aexpected, marks)
+    kstats, kdetail, kmutants = key_evidence(key_bridge, lean_model, output)
+    stats.update(kstats)
+    extra['keys'] = kdetail
+    extra['key_mutants'] = kmutants
+    rejected = negative_controls(expected) + arrival_controls(aexpected, marks) + sorted(kmutants)
     modules = {module: set(re.findall(r'^theorem\s+(\w+)', (PACKAGE / f'Labels/{module}.lean').read_text(), re.M))
                for files in AREAS.values() for module in files}
     comparisons = {area: sum(count for kind, count in stats.items() if ROW_AREAS[kind] == area) for area in AREAS}
@@ -1159,9 +1319,10 @@ def run():
                      for area, files in AREAS.items()}
     if any(not evidence['theorems'] for evidence in area_evidence.values()):
         raise AssertionError('every area needs named theorems in the manifest')
-    receipt = {'rows': stats, 'details': extra, 'total_rows': len(expected) + len(aexpected), 'seed': hex(SEED),
+    receipt = {'rows': stats, 'details': extra, 'total_rows': len(expected) + len(aexpected) + sum(kstats.values()), 'seed': hex(SEED),
                'arrival_seed': hex(ARRIVAL_SEED), 'link_input_sha256': link_hashes,
                'overlay_manifest_sha256': digest(output / 'overlay-sha256.json'),
+               'key_overlay_manifest_sha256': digest(output / 'overlay-keys-sha256.json'), 'key_seed': hex(KEY_SEED),
                'toolchain': (PACKAGE / 'lean-toolchain').read_text().strip(),
                'area_evidence': area_evidence, 'checked_theorem_axioms': axioms,
                'kernel_inventory_sha256': digest(output / 'kernel-inventory.json'),
@@ -1170,13 +1331,13 @@ def run():
                'trace_sha256': hashlib.sha256(trace.encode()).hexdigest(),
                'arrival_trace_sha256': hashlib.sha256(atrace.encode()).hexdigest(), 'results_sha256': results,
                'executable_sha256': {'lean': digest(lean_model), 'odin': digest(odin_bridge),
-                                     'arrival_odin': digest(arrival_bridge)},
+                                     'arrival_odin': digest(arrival_bridge), 'key_odin': digest(key_bridge)},
                'proof_source_sha256': {str(p.relative_to(PACKAGE)): digest(p) for p in sorted(PACKAGE.rglob('*'))
                                        if p.is_file() and not {'.lake', '.build', '__pycache__'} & set(p.parts)},
                'negative_controls_rejected': rejected,
                'odin_correspondence': 'finite implementation comparisons; no verified translation'}
     (output / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
-    summary = {'rows': stats, 'details': extra, 'total_rows': len(expected) + len(aexpected), 'theorems': len(axioms),
+    summary = {'rows': stats, 'details': extra, 'total_rows': len(expected) + len(aexpected) + sum(kstats.values()), 'theorems': len(axioms),
                'kernel_checked_theorems': receipt['kernel_checked_theorems'],
                'negative_controls_rejected': len(rejected), 'receipt': str(output / 'receipt.json')}
     print(json.dumps(summary, indent=2))

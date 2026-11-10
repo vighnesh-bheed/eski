@@ -4584,7 +4584,7 @@ def run(proto):
     module = set(names_of(j.cmd("COMMAND", "LIST", "FILTERBY", "MODULE", "vectorset")))
     check(len(module) == 13, "resp%d COMMAND LIST FILTERBY MODULE vectorset lists %d commands" % (proto, len(module)))
     own = set(n for n in names_of(j.cmd("COMMAND", "LIST")) if n.split("|")[0] in ("label", "context"))
-    check(len(own) == 15, "resp%d COMMAND LIST lists %d label and context commands" % (proto, len(own)))
+    check(len(own) == 14, "resp%d COMMAND LIST lists %d label and context commands" % (proto, len(own)))
     extra = len(module) + len([n for n in own if "|" not in n])
     module = module | own
     jl = [n for n in names_of(j.cmd("COMMAND", "LIST")) if n not in module]

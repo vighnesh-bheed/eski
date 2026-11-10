@@ -1,4 +1,5 @@
 import argparse
+import itertools
 import json
 from pathlib import Path
 import random
@@ -19,6 +20,7 @@ SCHEME = ('--label-levels', 'U,C,S', '--label-compartments', 'A,B', '--label-tru
 LABELS_OFF = 'ERR labels are not configured on this server'
 INVALID = 'ERR invalid label'
 TOP_ERROR = 'ERR this command needs a label that dominates the whole label scheme'
+WRONGTYPE = 'WRONGTYPE Operation against a key holding the wrong kind of value'
 
 
 def AS(label):
@@ -72,7 +74,8 @@ class LabelsOff(unittest.TestCase):
         self.client = self.server.client()
 
     def test_key_subcommands_answer_labels_off(self):
-        for command in (('LABEL', 'OF', 'k'), ('LABEL', 'DECLASSIFY', 'k', 'U'), ('LABEL', 'RAISE', 'k', 'U'),
+        self.assertEqual(error_of(self.client, 'LABEL', 'RAISE', 'k', 'U'), "ERR unknown subcommand 'RAISE'. Try LABEL HELP.")
+        for command in (('LABEL', 'OF', 'k'), ('LABEL', 'DECLASSIFY', 'k', 'U'),
                         ('LABEL', 'COPIES'), ('LABEL', 'QUOTA', 'U')):
             self.assertEqual(error_of(self.client, *command), LABELS_OFF)
 
@@ -159,9 +162,10 @@ class Labelled(unittest.TestCase):
         self.at('U', 'RPUSH', 'l', 'a')
         expected = 'INUSE name in use at U'
         for command in (('SET', 'k', 'v'), ('APPEND', 'k', 'v'), ('INCR', 'k'), ('DEL', 'k'), ('UNLINK', 'k'),
-                        ('EXPIRE', 'k', 10), ('PERSIST', 'k'), ('RENAME', 'k', 'z'), ('SETNX', 'k', 'v'),
-                        ('SET', 'k', 'v', 'NX'), ('GETDEL', 'k'), ('LPUSH', 'l', 'b'), ('RPOP', 'l'),
-                        ('MSET', 'fresh', 1, 'k', 2), ('MSETNX', 'fresh', 1, 'k', 2), ('MOVE', 'k', 1),
+                        ('EXPIRE', 'k', 10), ('PERSIST', 'k'), ('RENAME', 'k', 'z'), ('RENAMENX', 'k', 'z'),
+                        ('SET', 'k', 'v', 'XX'), ('SET', 'k', 'v', 'GET'), ('SET', 'k', 'v', 'IFEQ', 'NX'),
+                        ('GETDEL', 'k'), ('LPUSH', 'l', 'b'), ('RPOP', 'l'), ('HSETNX', 'k', 'f', 'v'),
+                        ('MSET', 'fresh', 1, 'k', 2), ('MOVE', 'k', 1),
                         ('SORT', 'l', 'STORE', 'k'), ('LMOVE', 'l', 'dst', 'LEFT', 'LEFT')):
             self.assertEqual(self.refused('S', *command), expected, command)
         self.assertIsNone(self.at('S', 'GET', 'fresh'))
@@ -174,11 +178,82 @@ class Labelled(unittest.TestCase):
         self.assertEqual(self.at('S', 'LABEL', 'OF', 'su'), b'S')
         self.assertEqual(self.refused('S', 'SUNIONSTORE', 'us', 'us'), 'INUSE name in use at U')
         self.assertEqual(self.refused('S', 'RENAME', 'mine', 'k'), expected)
-        self.assertEqual(self.refused('S', 'COPY', 'mine', 'k'), expected)
+        self.assertEqual(self.refused('S', 'COPY', 'mine', 'k', 'REPLACE'), expected)
         self.assertEqual(self.at('S', 'COPY', 'mine', 'mine2'), 1)
         self.assertEqual(self.at('S', 'DEL', 'missing', 'mine2'), 1)
         self.assertEqual(self.at('S//A', 'SET', 'deep', 1), 'OK')
         self.assertEqual(self.refused('S//A/B', 'INCR', 'deep'), 'INUSE name in use at S//A')
+
+    def test_create_only_writes_answer_as_for_an_existing_name(self):
+        self.at('U', 'SET', 'k', 'u')
+        self.at('U', 'RPUSH', 'l', 'a')
+        self.assertEqual(self.at('S', 'SET', 'mine', 'm'), 'OK')
+        self.c.call('SELECT', 1)
+        self.at('U', 'SET', 'mine', 'other')
+        self.c.call('SELECT', 0)
+        self.c.call('CONFIG', 'SET', 'notify-keyspace-events', 'KEA')
+        watcher = self.connect()
+        watcher.call('LABEL', 'SESSION', 'S//A/B')
+        watcher.call('PSUBSCRIBE', '__key*@*__:*')
+        self.assertEqual(self.at('S', 'SETNX', 'k', 'v'), 0)
+        self.assertIsNone(self.at('S', 'SET', 'k', 'v', 'NX'))
+        self.assertIsNone(self.at('S', 'SET', 'k', 'v', 'NX', 'EX', 100))
+        self.assertEqual(self.at('S', 'SET', 'k', 'v', 'NX', 'GET'), b'u')
+        self.assertEqual(self.at('S', 'SET', 'k', 'v', 'GET', 'NX', 'KEEPTTL'), b'u')
+        self.assertEqual(self.refused('S', 'SET', 'l', 'v', 'NX', 'GET'), WRONGTYPE)
+        self.assertEqual(self.refused('S', 'SET', 'k', 'v', 'NX', 'EX', 0), "ERR invalid expire time in 'set' command")
+        self.assertEqual(self.refused('S', 'SET', 'k', 'v', 'NX', 'XX'), 'INUSE name in use at U')
+        self.assertEqual(self.at('S', 'MSETNX', 'fresh', 1, 'k', 2), 0)
+        self.assertEqual(self.at('S', 'MSETNX', 'k', 1, 'mine', 2), 0)
+        self.assertEqual(self.at('S', 'RENAMENX', 'mine', 'k'), 0)
+        self.assertEqual(self.refused('S', 'RENAMENX', 'missing', 'k'), 'ERR no such key')
+        self.assertEqual(self.at('S', 'COPY', 'mine', 'k'), 0)
+        self.assertEqual(self.at('S', 'COPY', 'missing', 'k'), 0)
+        self.assertEqual(self.at('S', 'COPY', 'mine', 'mine', 'DB', 1), 0)
+        self.assertEqual(self.refused('S', 'COPY', 'mine', 'mine', 'DB', 1, 'REPLACE'), 'INUSE name in use at U')
+        self.assertEqual(self.at('S', 'MOVE', 'mine', 1), 0)
+        self.assertEqual(self.refused('S', 'MOVE', 'k', 1), 'INUSE name in use at U')
+        self.assertEqual(self.refused('S', 'RENAMENX', 'k', 'z'), 'INUSE name in use at U')
+        self.assertEqual(self.refused('S', 'HSETNX', 'k', 'f', 'v'), 'INUSE name in use at U')
+        self.c.call(*AS('S'), 'MULTI')
+        self.c.call('SETNX', 'k', 'x')
+        self.c.call('SET', 'k', 'x', 'NX', 'GET')
+        self.c.call('SET', 'k', 'x')
+        result = self.c.call(*AS('S'), 'EXEC')
+        self.assertEqual(result[:2], [0, b'u'])
+        self.assertEqual(str(result[2]), 'INUSE name in use at U')
+        self.assertEqual(self.at('S', 'EVAL', "return redis.call('SETNX', KEYS[1], 'x')", 1, 'k'), 0)
+        self.assertEqual(self.at('S', 'EVAL', "return redis.call('MSETNX', KEYS[1], 'x', KEYS[2], 'y')", 2, 'k', 'fresh'), 0)
+        self.assertEqual(self.at('U', 'GET', 'k'), b'u')
+        self.assertEqual(self.at('U', 'TTL', 'k'), -1)
+        self.assertEqual(self.at('S', 'LABEL', 'OF', 'k'), b'U')
+        self.assertEqual(self.at('S', 'GET', 'mine'), b'm')
+        self.assertIsNone(self.at('S', 'GET', 'fresh'))
+        self.assertIsNone(self.at('S', 'GET', 'z'))
+        self.assertEqual(self.at('S', 'DBSIZE'), 3)
+        self.c.call('SELECT', 1)
+        self.assertEqual(self.at('S', 'GET', 'mine'), b'other')
+        self.assertEqual(self.at('S', 'LABEL', 'OF', 'mine'), b'U')
+        self.c.call('SELECT', 0)
+        self.at('U', 'SET', 'fence', 1)
+        events = []
+        while True:
+            message = watcher.reply()
+            if message[-1] == b'fence':
+                break
+            events.append(message)
+        self.assertEqual(events, [[b'pmessage', b'__key*@*__:*', b'__keyspace@0__:fence', b'set']])
+        self.at('S', 'SET', 'h', 'secret')
+        self.assertEqual(self.at('U', 'SETNX', 'h', 'low'), 1)
+        self.assertEqual(self.at('U', 'SET', 'h2', 'x', 'NX'), 'OK')
+        self.assertEqual(self.at('U', 'GET', 'h'), b'low')
+        self.assertEqual(self.at('S', 'GET', 'h'), b'secret')
+        self.c.call('DEBUG', 'SET-ACTIVE-EXPIRE', 0)
+        self.at('U', 'SET', 'gone', 'x', 'PX', 1)
+        time.sleep(0.05)
+        self.assertEqual(self.at('S', 'SETNX', 'gone', 'y'), 1)
+        self.assertEqual(self.at('S', 'LABEL', 'OF', 'gone'), b'S')
+        self.c.call('DEBUG', 'SET-ACTIVE-EXPIRE', 1)
 
     def test_sort_by_and_get_read_hidden_keys_as_missing(self):
         self.at('U', 'RPUSH', 'ids', 1, 2, 3)
@@ -477,17 +552,18 @@ class Labelled(unittest.TestCase):
         for round in range(1, 4):
             self.assertEqual(round_trip(round), settled)
 
-    def test_relabel_moves_one_copy_with_rights_and_audit(self):
+    def test_declassify_moves_one_copy_with_rights_and_audit(self):
         self.at('S', 'SET', 'k', 'secret', 'EX', 1000)
         self.assertEqual(self.at('S', 'LABEL', 'DECLASSIFY', 'k', 'U'), 'OK')
         self.assertEqual(self.at('U', 'GET', 'k'), b'secret')
         self.assertGreater(self.at('U', 'TTL', 'k'), 900)
         self.assertEqual(self.refused('U', 'LABEL', 'DECLASSIFY', 'k', 'S'), "ERR the target label must be below the copy's label")
-        self.assertEqual(self.refused('U', 'LABEL', 'RAISE', 'k', 'NOPE'), INVALID)
-        self.assertEqual(self.refused('S', 'LABEL', 'RAISE', 'k', 'S//A'), 'INUSE name in use at U')
-        self.assertEqual(self.at('U', 'LABEL', 'RAISE', 'k', 'C'), 'OK')
-        self.at('U', 'SET', 'k', 'again')
-        self.assertEqual(self.refused('U', 'LABEL', 'RAISE', 'k', 'C'), 'INUSE name in use at C')
+        self.assertEqual(self.refused('U', 'LABEL', 'DECLASSIFY', 'k', 'NOPE'), INVALID)
+        unknown = "ERR unknown subcommand 'RAISE'. Try LABEL HELP."
+        self.assertEqual(self.refused('U', 'LABEL', 'RAISE', 'k', 'C'), unknown)
+        self.assertEqual(self.refused('S', 'LABEL', 'RAISE', 'k', 'S//A', 'ELEMENT', 'e'), unknown)
+        self.assertNotIn(b'label|raise', self.c.call('COMMAND', 'LIST'))
+        self.assertFalse(any(b'RAISE' in line for line in (x if isinstance(x, bytes) else str(x).encode() for x in self.c.call('LABEL', 'HELP'))))
         self.c.call('ACL', 'SETUSER', 'agent', 'on', 'nopass', '+@all', '-label|declassify', '~*', 'clearance:S')
         agent = self.connect()
         agent.call('AUTH', 'agent', 'x')
@@ -502,8 +578,45 @@ class Labelled(unittest.TestCase):
         self.assertEqual(self.at('C', 'VCARD', 'v'), 2)
         records = [json.loads(line) for line in self.audit.read_text().splitlines()]
         events = [r['event'] for r in records]
-        self.assertGreaterEqual(events.count('declassify'), 2)
-        self.assertIn('raise', events)
+        self.assertEqual(events.count('declassify'), 2)
+        self.assertNotIn('raise', events)
+
+    def test_declassify_follows_the_write_rule_at_its_target(self):
+        self.at('S', 'SET', 'n', 'top')
+        self.at('U', 'SET', 'n', 'low')
+        self.assertEqual(self.refused('S', 'LABEL', 'DECLASSIFY', 'n', 'C'), 'INUSE name in use at U')
+        self.assertEqual(self.refused('S', 'LABEL', 'DECLASSIFY', 'n', 'U'), 'INUSE name in use at U')
+        self.assertEqual(self.at('S', 'GET', 'n'), b'top')
+        self.assertEqual(self.at('U', 'GET', 'n'), b'low')
+        self.at('S//A/B', 'SET', 'm', 'both')
+        self.at('S//B', 'SET', 'm', 'b')
+        self.assertEqual(self.at('S//A/B', 'LABEL', 'DECLASSIFY', 'm', 'S//A'), 'OK')
+        self.assertEqual(self.at('S//A', 'GET', 'm'), b'both')
+        self.assertEqual(self.at('S//B', 'GET', 'm'), b'b')
+        self.assertEqual(sorted(self.c.call('LABEL', 'COPIES', 'm')), [[b'S//A', 'string'], [b'S//B', 'string']])
+        self.at('S', 'SET', 'free', 'f')
+        self.assertEqual(self.at('S', 'LABEL', 'DECLASSIFY', 'free', 'C'), 'OK')
+        self.assertEqual(self.at('S', 'LABEL', 'OF', 'free'), b'C')
+        self.at('U', 'VADD', 'v', 'VALUES', 2, 1, 0, 'a')
+        self.at('S', 'VADD', 'v', 'VALUES', 2, 0, 1, 'x')
+        self.at('S', 'VADD', 'v', 'VALUES', 2, 1, 1, 'y')
+        self.at('U', 'VADD', 'v', 'VALUES', 2, 1, 2, 'x')
+        self.assertEqual(self.refused('S', 'LABEL', 'DECLASSIFY', 'v', 'C', 'ELEMENT', 'x'), 'INUSE element in use at U')
+        self.assertEqual(self.refused('S', 'LABEL', 'DECLASSIFY', 'v', 'U', 'ELEMENT', 'x'), 'INUSE element in use at U')
+        self.assertEqual(self.refused('S', 'LABEL', 'DECLASSIFY', 'v', 'C', 'ELEMENT', 'a'), 'INUSE element in use at U')
+        self.assertEqual(self.at('S', 'LABEL', 'DECLASSIFY', 'v', 'C', 'ELEMENT', 'y'), 'OK')
+        self.assertEqual(self.at('S', 'LABEL', 'OF', 'v', 'y'), b'C')
+        self.assertEqual(self.at('S', 'LABEL', 'OF', 'v', 'x'), b'S')
+        self.assertEqual(self.at('C', 'VCARD', 'v'), 3)
+        self.at('S', 'VADD', 'w', 'VALUES', 2, 1, 0, 'e')
+        self.at('U', 'SET', 'w', 'string')
+        self.assertEqual(self.refused('S', 'LABEL', 'DECLASSIFY', 'w', 'C', 'ELEMENT', 'e'), 'INUSE name in use at U')
+        self.at('S//A', 'VADD', 'z', 'VALUES', 2, 0, 1, 'e')
+        self.at('S', 'VADD', 'z', 'VALUES', 2, 1, 0, 'e')
+        self.assertEqual(self.at('S', 'LABEL', 'DECLASSIFY', 'z', 'C', 'ELEMENT', 'e'), 'OK')
+        self.assertEqual(self.at('S', 'LABEL', 'OF', 'z', 'e'), b'C')
+        self.assertEqual(self.at('C', 'VCARD', 'z'), 1)
+        self.assertEqual(self.at('S//A', 'LABEL', 'OF', 'z', 'e'), b'S//A')
 
     def test_label_of_and_copies(self):
         self.at('S//A', 'SET', 'n', 1)
@@ -512,6 +625,42 @@ class Labelled(unittest.TestCase):
         self.assertEqual(self.refused('S', 'LABEL', 'COPIES'), TOP_ERROR)
         self.assertEqual(self.c.call('LABEL', 'COPIES'), [b'n'])
         self.assertEqual(sorted(self.c.call('LABEL', 'COPIES', 'n')), [[b'S//A', 'string'], [b'S//B', 'string']])
+
+    def test_relabel_and_cleanup_subcommands_need_admin_or_dangerous_rights(self):
+        c = self.c
+        commands = {'label|declassify': ('LABEL', 'DECLASSIFY', 'k', 'U'), 'label|copies': ('LABEL', 'COPIES'),
+                    'label|quota': ('LABEL', 'QUOTA', 'U')}
+        for name, rules, allowed in (('all-but-dangerous', ('+@all', '-@dangerous'), False), ('all-but-admin', ('+@all', '-@admin'), False),
+                                     ('slow-only', ('+@slow',), False), ('write-only', ('+@write',), False),
+                                     ('keyspace-only', ('+@keyspace',), False), ('connection-only', ('+@connection',), False),
+                                     ('everything', ('+@all',), True), ('dangerous', ('+@dangerous',), True), ('admin', ('+@admin',), True)):
+            c.call('ACL', 'SETUSER', name, 'on', 'nopass', *rules, '~*', 'clearance:*', 'trust:*')
+            for sub, command in commands.items():
+                reply = c.call('ACL', 'DRYRUN', name, *command)
+                self.assertEqual(reply == 'OK', allowed, (name, sub, reply))
+        for sub, command in commands.items():
+            name = 'explicit-' + sub.split('|')[1]
+            c.call('ACL', 'SETUSER', name, 'on', 'nopass', '+' + sub, '~*', 'clearance:*', 'trust:*')
+            for other, other_command in commands.items():
+                reply = c.call('ACL', 'DRYRUN', name, *other_command)
+                self.assertEqual(reply == 'OK', other == sub, (name, other, reply))
+            self.assertIn(sub.encode(), c.call('ACL', 'CAT', 'dangerous'))
+            self.assertIn(sub.encode(), c.call('ACL', 'CAT', 'admin'))
+            for category in ('slow', 'fast', 'write', 'keyspace', 'connection'):
+                self.assertNotIn(sub.encode(), c.call('ACL', 'CAT', category), (sub, category))
+            info = c.call('COMMAND', 'INFO', sub)[0]
+            self.assertEqual(sorted(str(x) for x in info[6]), ['@admin', '@dangerous'])
+        self.assertEqual(c.call('ACL', 'DRYRUN', 'connection-only', 'LABEL', 'OF', 'k'), 'OK')
+        self.assertEqual(c.call('ACL', 'DRYRUN', 'all-but-dangerous', 'LABEL', 'OF', 'k'), 'OK')
+        self.assertEqual(sorted(str(x) for x in c.call('COMMAND', 'INFO', 'label|of')[0][6]), ['@connection', '@fast'])
+        agent = self.connect()
+        agent.call('AUTH', 'all-but-dangerous', 'x')
+        agent.call(*AS('S'), 'SET', 'mine', 1)
+        self.assertEqual(error_of(agent, *AS('S'), 'LABEL', 'DECLASSIFY', 'mine', 'U'),
+                         "NOPERM User all-but-dangerous has no permissions to run the 'label|declassify' command")
+        explicit = self.connect()
+        explicit.call('AUTH', 'explicit-copies', 'x')
+        self.assertEqual(explicit.call('LABEL', 'COPIES'), [])
 
     def test_quota_confines_eviction_to_the_label(self):
         self.c.call('CONFIG', 'SET', 'maxmemory-policy', 'allkeys-random')
@@ -558,6 +707,46 @@ class PartitionLimit(unittest.TestCase):
         self.assertEqual(error_of(c, *AS('S//A'), 'SET', 'k4', 1), 'ERR label partition limit reached')
         self.assertEqual(c.call(*AS('S//A'), 'GET', 'k3'), b'1')
         self.assertEqual(c.call(*AS('S'), 'SET', 'k5', 1), 'OK')
+
+
+class ManyCopies(unittest.TestCase):
+    COMPARTMENTS = ('A', 'B', 'D', 'E', 'F', 'G', 'H', 'I')
+
+    def test_reads_find_a_live_copy_among_more_than_64(self):
+        arguments = ('--keyspace-threads', str(KEYSPACE_THREADS), '--label-levels', 'U,C,S',
+                     '--label-compartments', ','.join(self.COMPARTMENTS))
+        server = Server(BINARY, workers=0, arguments=arguments)
+        self.addCleanup(server.close)
+        server.start()
+        c = Client(server.port)
+        self.addCleanup(c.close)
+        c.call('ACL', 'SETUSER', 'default', 'clearance:*')
+        subsets = list(itertools.combinations(self.COMPARTMENTS, 4))
+        labels = ['C//' + '/'.join(subset) for subset in subsets[:64]] + ['S//' + '/'.join(subsets[64])]
+        reader = 'S//' + '/'.join(self.COMPARTMENTS)
+        c.call('DEBUG', 'SET-ACTIVE-EXPIRE', 0)
+        for i, label in enumerate(labels):
+            if i == 40:
+                c.call(*AS(label), 'SET', 'n', 'v%d' % i)
+            else:
+                c.call(*AS(label), 'SET', 'n', 'v%d' % i, 'PX', 1)
+            c.call(*AS(label), 'SET', 'live', 'w%d' % i)
+        time.sleep(0.05)
+        self.assertEqual(len(c.call('LABEL', 'COPIES', 'live')), 65)
+        self.assertEqual(c.call('LABEL', 'COPIES', 'n'), [[labels[40].encode(), 'string']])
+        self.assertEqual(c.call(*AS(reader), 'GET', 'n'), b'v40')
+        self.assertEqual(c.call(*AS(reader), 'LABEL', 'OF', 'n'), labels[40].encode())
+        self.assertEqual(c.call(*AS(reader), 'EXISTS', 'n'), 1)
+        self.assertEqual(sorted(c.call(*AS(reader), 'KEYS', '*')), [b'live', b'n'])
+        self.assertEqual(c.call(*AS(reader), 'GET', 'live'), b'w64')
+        self.assertEqual(c.call(*AS(reader), 'DBSIZE'), 2)
+        self.assertEqual(c.call(*AS(labels[40]), 'DEL', 'n'), 1)
+        self.assertIsNone(c.call(*AS(reader), 'GET', 'n'))
+        self.assertEqual(c.call(*AS(reader), 'EXISTS', 'n'), 0)
+        self.assertEqual(c.call(*AS(reader), 'KEYS', '*'), [b'live'])
+        self.assertEqual(c.call(*AS(labels[64]), 'DEL', 'live'), 1)
+        self.assertEqual(c.call(*AS(reader), 'GET', 'live'), b'w0')
+        c.call('DEBUG', 'SET-ACTIVE-EXPIRE', 1)
 
 
 class RuntimeScheme(unittest.TestCase):

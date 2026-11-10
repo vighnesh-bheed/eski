@@ -175,6 +175,19 @@ class LSet:
             return f'ZE|0|inuse|{o}'
         return 'ZE|0|none|-'
 
+    def relabel(self, src, t, n):
+        ls = list(self.index.get(n, []))
+        if src not in ls:
+            o = self.other(src, ls)
+            return 'ZX|0|0|notfound|-' if o is None else f'ZX|0|0|inuse|{o}'
+        if t in ls:
+            return f'ZX|0|0|inuse|{t}'
+        e = self.elem(src, n)
+        to_new = t not in self.parts
+        self.insert(t, n, e['mask'], e['attr'])
+        from_gone = self.drop(src, n)
+        return f'ZX|{int(from_gone)}|{int(to_new)}|none|-'
+
     def remove_label(self, w):
         if w not in self.parts:
             return f'ZL|0|0|0|{int(self.total() == 0)}'
@@ -386,7 +399,7 @@ def spec_of(tok):
 STAT_KEYS = ('labelled_sessions', 'plain_sessions', 'labelled_writes', 'labelled_searches', 'graph_searches',
              'tied_results', 'refusals', 'forced_copies', 'samples', 'hidden_bursts', 'conversions',
              'merge_rows', 'resolution_rows', 'independence_rows', 'compatibility_rows', 'trusted_labels',
-             'own_rule_decisive')
+             'own_rule_decisive', 'relabel_rows', 'relabel_moves', 'relabel_refusals', 'relabel_bytes')
 
 
 def labelled_corpus(rng, emit, stats):
@@ -478,9 +491,29 @@ def labelled_corpus(rng, emit, stats):
                 used.add(m)
                 return m
 
-    def write(s, w, area):
-        op = rng.randrange(12)
+    def write(s, w, area, targets=None):
+        op = rng.randrange(14)
         n = rng.choice(names)
+        if op >= 12:
+            held = [m for m, ls in s.index.items() if w in ls]
+            if held and rng.randrange(4):
+                n = rng.choice(sorted(held))
+            t = rng.choice(targets if targets is not None else range(len(s.scheme.labels)))
+            ls = s.index.get(n, [])
+            if w in ls and t not in ls:
+                mask = s.elem(w, n)['mask']
+                if mask in s.used.setdefault(t, set()):
+                    return
+                s.used[t].add(mask)
+            row = s.relabel(w, t, n)
+            if row.startswith('ZX|0|0|inuse|'):
+                stats['relabel_refusals'] += 1
+            elif row.startswith('ZX|') and '|none|' in row:
+                stats['relabel_moves'] += 1
+            emit(f'ZX {w} {t} {name_token(n)}', row)
+            stats['relabel_rows'] += 1
+            stats[area] += 1
+            return
         if op < 7:
             mask = fresh_mask(s, w)
             if rng.randrange(6) == 0:
@@ -553,6 +586,11 @@ def labelled_corpus(rng, emit, stats):
         s.used = {}
         emit(f'ZN {flat} {shrink} {"plain" if plain else "lab"} {rng.randrange(len(labels))}', 'ZN|ok')
         stats['labelled_sessions'] += 1
+        src, dst = rng.sample(range(len(labels)), 2)
+        quant = ('q8', 'f32', 'bin')[session % 3]
+        emit(f'ZB {quant} {src} {dst}', f'ZB|{quant}|1|1|1')
+        stats['relabel_bytes'] += 1
+        stats['relabel_rows'] += 1
         if plain:
             stats['plain_sessions'] += 1
             for _ in range(rng.randrange(3, 16)):
@@ -617,7 +655,7 @@ def labelled_corpus(rng, emit, stats):
             if before is None:
                 continue
             for _ in range(rng.randrange(10, 40)):
-                write(s, rng.choice(hidden), 'independence_rows')
+                write(s, rng.choice(hidden), 'independence_rows', hidden)
             after = emit_digest(s, rd, 'independence_rows')
             if after is not None:
                 assert after == before

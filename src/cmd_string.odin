@@ -210,6 +210,11 @@ cmd_set :: proc(c: ^Conn, argv: [][]u8) {
 	set_with_plan(c, argv)
 }
 
+set_creates_only :: proc "contextless" (argv: [][]u8) -> bool {
+	plan, parsed := read_write_plan(argv, 3, true)
+	return parsed && .Nx in plan.rules
+}
+
 @(private = "file")
 set_with_plan :: proc(c: ^Conn, argv: [][]u8) {
 	plan, parsed := read_write_plan(argv, 3, true)

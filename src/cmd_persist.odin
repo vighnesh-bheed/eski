@@ -438,7 +438,7 @@ persist_child_progress :: proc(processed: i64) {
 
 @(private = "file")
 persist_save_internal :: proc(filename: string) -> bool {
-	if access_writes_refused() {
+	if access_persistence_off() {
 		plog(LOG_WARNING, "RDB save refused: ", LABEL_PERSISTENCE_ON)
 		return false
 	}
@@ -514,7 +514,7 @@ persist_rdb_save :: proc() -> bool {
 
 persist_bgsave :: proc() -> bool {
 	keyspace_fence()
-	if access_writes_refused() {
+	if access_persistence_off() {
 		plog(LOG_WARNING, "Background save refused: ", LABEL_PERSISTENCE_ON)
 		return false
 	}

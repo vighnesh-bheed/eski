@@ -1,8 +1,8 @@
 # Command inventory
 
-Generated from a temporary instance of the built executable using `COMMAND DOCS`, `COMMAND LIST` and `COMMAND COUNT`. The inventory contains 253 top-level commands and 367 names including subcommands. Metadata describes the protocol surface; the [command-group pages](README.md) and [conformance record](conformance.md) define implemented behavior and remaining gaps. Lua scripts, Function libraries and debugging have the scope documented in [scripting](scripting.md). Replication and clustering remain outside the node scope.
+Generated from a temporary instance of the built executable using `COMMAND DOCS`, `COMMAND LIST` and `COMMAND COUNT`. The inventory contains 253 top-level commands and 366 names including subcommands. Metadata describes the protocol surface; the [command-group pages](README.md) and [conformance record](conformance.md) define implemented behavior and remaining gaps. Lua scripts, Function libraries and debugging have the scope documented in [scripting](scripting.md). Replication and clustering remain outside the node scope.
 
-Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test/readme_tables.py --check`. Use `--server HOST:PORT` to inspect an existing instance without starting one. The canonical command-metadata SHA256 is `127db59e5e91bae791ec030a35c07b75cca9e2a15f1c1ee85f2658607fff6456`.
+Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test/readme_tables.py --check`. Use `--server HOST:PORT` to inspect an existing instance without starting one. The canonical command-metadata SHA256 is `1aca467285c767a69910555a490c7982c92d9f0c1f163b38da7105251336d16e`.
 
 ## Bitmap
 
@@ -54,7 +54,6 @@ Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test
 | `LABEL HELP` | — | Returns helpful text about the different subcommands. |
 | `LABEL OF` | `<key> [<element>]` | Returns the label of the copy that a read of the key, or of one vector set element, resolves to. |
 | `LABEL QUOTA` | `<marking> [TRUST <trust>] [LIMIT <bytes>]` | Returns or sets the memory quota of a label. |
-| `LABEL RAISE` | `<key> <marking> [TRUST <trust>] [ELEMENT <element>]` | Moves the copy at the command's label, or one of its vector set elements, to a label that dominates the command's label. |
 | `LABEL SESSION` | `<marking> [TRUST <trust>]` | Sets the label of the connection's later commands. |
 | `LABEL WHOAMI` | — | Returns the login, its clearance and the label of the current command. |
 | `PING` | `[<message>]` | Returns the server's liveliness response. |

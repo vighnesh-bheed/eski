@@ -105,6 +105,7 @@ structure St where
   subj : Subject := subjectMake tbottom
   aenv : AEnv := ⟨⟨⟨[], []⟩, []⟩, [], 3600, 1000, 0, [], []⟩
   adyn : ADyn := ⟨[], [], 0, []⟩
+  keys : List (KState (List Nat) Unit) := []
 
 def cfgCounts (c : TConfig) : String := s!"{c.base.levels.length}|{c.base.comps.length}|{c.trusts.length}"
 
@@ -321,6 +322,29 @@ def step (st : St) (f : List String) : Except String (St × String) := do
       let (x, D) := findIn st.aenv st.adyn c.login (hrefOf a)
       return ({ st with adyn := D }, s!"AQ|{ctxText x}|{D.ctxs.length}")
   | "AS" :: args => return (st, s!"AS|{bit (scriptDenied (← args.mapM parseArg))}")
+  | ["KX"] => return ({ st with keys := List.replicate 16 ⟨[], []⟩ }, "KX")
+  | ["KA", d, n, l] =>
+    let d ← parseNat d
+    let n ← unhex n
+    let l ← parseLabel l
+    let ks := st.keys.modify d fun s => ⟨s.copies ++ [⟨n, l, ()⟩], if l ∈ s.parts then s.parts else s.parts ++ [l]⟩
+    return ({ st with keys := ks }, "KA")
+  | ["KD", d, n, l] =>
+    let d ← parseNat d
+    let n ← unhex n
+    let l ← parseLabel l
+    let ks := st.keys.modify d fun s => delOwn s l n
+    return ({ st with keys := ks }, "KD")
+  | ["KQ", d, r, n] =>
+    let d ← parseNat d
+    let r ← parseLabel r
+    let n ← unhex n
+    match st.keys[d]? with
+    | none => throw "unknown database"
+    | some s =>
+      match resolve s r n with
+      | some c => return (st, s!"KQ|{showLabel c.label}")
+      | none => return (st, "KQ|-")
   | kind :: id :: args =>
     if kind == "AR" || kind == "AH" then do
       let id ← parseNat id

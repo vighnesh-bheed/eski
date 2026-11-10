@@ -4050,7 +4050,7 @@ aof_in_exec :: proc() -> bool {
 
 aof_rewrite_background :: proc() -> bool {
 	keyspace_fence()
-	if access_writes_refused() {
+	if access_persistence_off() {
 		plog(LOG_WARNING, "AOF rewrite refused: ", LABEL_PERSISTENCE_ON)
 		return false
 	}
@@ -4410,7 +4410,7 @@ aof_terminate_child :: proc(pid: linux.Pid) {
 
 aof_start :: proc() -> bool {
 	keyspace_fence()
-	if access_writes_refused() {
+	if access_persistence_off() {
 		plog(LOG_WARNING, "AOF start refused: ", LABEL_PERSISTENCE_ON)
 		return false
 	}

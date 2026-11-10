@@ -491,7 +491,6 @@ cmd_specs := [?]Cmd_Spec {
 	{"label|help", 2, {.Loading, .Stale}, .None, 0, 0, 0, nil},
 	{"label|of", -3, {.Readonly, .Fast}, .None, 2, 0, 1, {{.Index, 2, "", 0, .Range, 0, 1, 0, {.Ro}}}},
 	{"label|quota", -3, {.Admin, .Noscript}, .None, 0, 0, 0, nil},
-	{"label|raise", -4, {.Write}, .None, 2, 0, 1, {{.Index, 2, "", 0, .Range, 0, 1, 0, {.Rw, .Update}}}},
 	{"label|session", -3, {.Noscript, .Loading, .Stale, .Fast, .No_Multi}, .None, 0, 0, 0, nil},
 	{"label|whoami", 2, {.Loading, .Stale, .Fast}, .None, 0, 0, 0, nil},
 	{"lastsave", 1, {.Loading, .Stale, .Fast}, .None, 0, 0, 0, nil},

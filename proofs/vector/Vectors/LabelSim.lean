@@ -1,4 +1,5 @@
 import Vectors.Plain
+import Vectors.Relabel
 
 namespace Vectors
 
@@ -75,6 +76,30 @@ def simOps (flat shrink : Nat) : PartOps (List Nat) SVal SPart where
   empty := fun p => p.order.isEmpty
   advance := streamAdvance
   output := fun st => mix64 st ||| 1
+
+def simMoveOps (flat : Nat) : MoveOps (List Nat) SVal SPart where
+  extract := fun p n => match p.order.find? (fun e => e.name == n) with
+    | some e => ⟨e.mask, e.attr⟩
+    | none => ⟨0, none⟩
+  insertRaw := fun p n v =>
+    let uid := p.uid + 1
+    { p with uid := uid, order := p.order ++ [⟨n, v.mask, v.attr, uid⟩],
+             mode := modeAfterInsert flat p.mode (p.order.length + 1) }
+
+theorem simMove_exact (flat : Nat) (p : SPart) (n : List Nat) (v : SVal) (h : ∀ e ∈ p.order, e.name ≠ n) :
+    ∃ e, ((simMoveOps flat).insertRaw p n v).order.find? (fun e => e.name == n) = some e ∧
+      e.mask = v.mask ∧ e.attr = v.attr ∧ e.name = n := by
+  refine ⟨⟨n, v.mask, v.attr, p.uid + 1⟩, ?_, rfl, rfl, rfl⟩
+  simp only [simMoveOps]
+  rw [List.find?_append]
+  have : p.order.find? (fun e => e.name == n) = none := by
+    rw [List.find?_eq_none]
+    intro e he
+    simpa using h e he
+  rw [this]
+  simp
+
+theorem simMove_law (flat shrink : Nat) : (simMoveOps flat).insertRaw = (simOps flat shrink).insert := rfl
 
 def simNames (p : SPart) : List (List Nat) := p.order.map (·.name)
 

@@ -19,13 +19,13 @@ PROJECTS = {
     'encoding': {'items': [4, 5], 'description': 'Request parsing and packed codecs'},
     'bitfield': {'items': [9], 'description': 'Fixed-width arithmetic and mutation counts'},
     'vector': {'areas': ['projection', 'quantisation', 'heaps', 'visited', 'graph', 'arena', 'filter',
-                         'merge', 'resolution', 'independence', 'compatibility'],
+                         'merge', 'resolution', 'independence', 'compatibility', 'relabel', 'commands'],
                'proof_only': ['filter'], 'odin_option': True,
-               'description': 'Vector projection, quantisation, heaps, visited set, graph links and twins, arena free list and filter programs, and the labelled vector set: partition merge, name resolution and views, label independence and labels-off compatibility'},
+               'description': 'Vector projection, quantisation, heaps, visited set, graph links and twins, arena free list and filter programs, and the labelled vector set: partition merge, name resolution and views, label independence, labels-off compatibility, element relabelling and the labelled vector set commands'},
     'label': {'areas': ['lattice', 'marking', 'interning', 'persistence', 'visibility', 'admission', 'rules', 'counters',
-                        'contexts', 'arrival'],
+                        'contexts', 'arrival', 'resolution', 'confinement', 'placement', 'purge', 'plain'],
               'odin_option': True,
-              'description': 'Access label lattice, markings, interning, persistence, visibility bitsets, search admission, read and write rules, partitioned counters, context handles and command arrival'},
+              'description': 'Access label lattice, markings, interning, persistence, visibility bitsets, search admission, read and write rules, partitioned counters, context handles, command arrival and the labelled key commands'},
     'postings': {'areas': ['svbyte', 'sorted', 'roaring', 'cursors', 'phrases', 'statistics', 'scoring'],
                  'odin_option': True,
                  'description': 'Stream VByte codec, sorted-array kernels, Roaring bitmaps and their serialization, cursor algebra, phrase windows, label-partitioned term statistics and ranking formulas'},
@@ -113,6 +113,7 @@ def validate_receipt(name, path):
                    'odin': path.parent / 'odin_bridge'}
     if name == 'label':
         executables['arrival_odin'] = path.parent / 'arrival_bridge'
+        executables['key_odin'] = path.parent / 'key_bridge'
     if any(receipt['executable_sha256'].get(binary) != digest(executable) for binary, executable in executables.items()):
         raise RuntimeError(f'{name}: executable changed after comparisons')
     evidence = receipt.get('area_evidence')

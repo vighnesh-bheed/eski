@@ -3228,7 +3228,6 @@ cmd_docs := [?]Cmd_Doc {
 		since = "0.1.0",
 		group = .Connection,
 		complexity = "Depends on subcommand.",
-		acl = {.Slow},
 	},
 	{
 		name = "label|as",
@@ -3265,7 +3264,7 @@ cmd_docs := [?]Cmd_Doc {
 		since = "0.1.0",
 		group = .Connection,
 		complexity = "O(N) where N is the number of names with copies, or the number of labels holding the key.",
-		acl = {.Slow},
+		acl = {.Admin, .Dangerous},
 		args = {
 			{name = "key", kind = .String, flags = {.Optional}},
 		},
@@ -3276,7 +3275,7 @@ cmd_docs := [?]Cmd_Doc {
 		since = "0.1.0",
 		group = .Connection,
 		complexity = "O(1), or O(log N) for a vector set element.",
-		acl = {.Slow},
+		acl = {.Admin, .Dangerous},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
 			{name = "marking", kind = .String},
@@ -3310,25 +3309,11 @@ cmd_docs := [?]Cmd_Doc {
 		since = "0.1.0",
 		group = .Connection,
 		complexity = "O(1)",
-		acl = {.Slow},
+		acl = {.Admin, .Dangerous},
 		args = {
 			{name = "marking", kind = .String},
 			{name = "trust", kind = .String, token = "TRUST", flags = {.Optional}},
 			{name = "bytes", kind = .Integer, token = "LIMIT", flags = {.Optional}},
-		},
-	},
-	{
-		name = "label|raise",
-		summary = "Moves the copy at the command's label, or one of its vector set elements, to a label that dominates the command's label.",
-		since = "0.1.0",
-		group = .Connection,
-		complexity = "O(1), or O(log N) for a vector set element.",
-		acl = {.Slow},
-		args = {
-			{name = "key", kind = .Key, key_spec = 0},
-			{name = "marking", kind = .String},
-			{name = "trust", kind = .String, token = "TRUST", flags = {.Optional}},
-			{name = "element", kind = .String, token = "ELEMENT", flags = {.Optional}},
 		},
 	},
 	{

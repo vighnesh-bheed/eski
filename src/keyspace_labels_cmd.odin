@@ -5,7 +5,6 @@ import vt "vsettype"
 
 ERR_LABEL_NO_KEY :: "ERR no such key"
 ERR_LABEL_DECLASSIFY_DIRECTION :: "ERR the target label must be below the copy's label"
-ERR_LABEL_RAISE_DIRECTION :: "ERR the target label must be above the copy's label"
 ERR_LABEL_VSET_ELEMENT :: "ERR name an element to relabel a vector set"
 ERR_LABEL_NOT_VSET :: "ERR an element can only be named for a vector set"
 
@@ -15,8 +14,6 @@ label_key_subcommand :: proc(sub: []u8) -> string {
 		return "label|of"
 	case eq_nocase(sub, "declassify"):
 		return "label|declassify"
-	case eq_nocase(sub, "raise"):
-		return "label|raise"
 	case eq_nocase(sub, "copies"):
 		return "label|copies"
 	case eq_nocase(sub, "quota"):
@@ -31,9 +28,7 @@ label_key_command :: proc(c: ^Conn, argv: [][]u8) {
 	case eq_nocase(sub, "of"):
 		label_cmd_of(c, argv)
 	case eq_nocase(sub, "declassify"):
-		label_cmd_relabel(c, argv, true)
-	case eq_nocase(sub, "raise"):
-		label_cmd_relabel(c, argv, false)
+		label_cmd_declassify(c, argv)
 	case eq_nocase(sub, "copies"):
 		label_cmd_copies(c, argv)
 	case eq_nocase(sub, "quota"):
@@ -125,22 +120,10 @@ label_parse_target :: proc(c: ^Conn, argv: [][]u8, from: int) -> (t: Label_Targe
 	return t, true
 }
 
-label_audit_relabel :: proc(c: ^Conn, declassify: bool, key: []u8, element: []u8, from, to: lb.Id) {
-	if declassify {
-		label_audit_declassify(c, key, element, from, to)
-		return
-	}
-	before := make([dynamic]u8, context.temp_allocator)
-	after := make([dynamic]u8, context.temp_allocator)
-	access_format(&before, from)
-	access_format(&after, to)
-	label_audit(c, "raise", "key", string(key), "element", string(element), "from", string(before[:]), "to", string(after[:]))
-}
-
-label_cmd_relabel :: proc(c: ^Conn, argv: [][]u8, declassify: bool) {
+label_cmd_declassify :: proc(c: ^Conn, argv: [][]u8) {
 	pst.dirty_explicit = true
 	if len(argv) < 4 {
-		reply_wrong_args(c, "label|declassify" if declassify else "label|raise")
+		reply_wrong_args(c, "label|declassify")
 		return
 	}
 	target, ok := label_parse_target(c, argv, 3)
@@ -150,13 +133,12 @@ label_cmd_relabel :: proc(c: ^Conn, argv: [][]u8, declassify: bool) {
 	key := argv[2]
 	own := cur_db()
 	from := access.id
-	direction := ERR_LABEL_DECLASSIFY_DIRECTION if declassify else ERR_LABEL_RAISE_DIRECTION
-	if target.id == from || (declassify && !access_dominates(from, target.id)) || (!declassify && !access_dominates(target.id, from)) {
-		reply_error(c, direction)
+	if target.id == from || !access_dominates(from, target.id) {
+		reply_error(c, ERR_LABEL_DECLASSIFY_DIRECTION)
 		return
 	}
 	if target.has {
-		label_relabel_element(c, key, target, declassify)
+		label_declassify_element(c, key, target)
 		return
 	}
 	l := lookup_make(key)
@@ -177,8 +159,8 @@ label_cmd_relabel :: proc(c: ^Conn, argv: [][]u8, declassify: bool) {
 		reply_error(c, ERR_LABEL_VSET_ELEMENT)
 		return
 	}
-	if tp := label_part(own.id, target.id); tp != nil && label_live_in(tp, &l) {
-		reply_error(c, label_in_use_text(ERR_LABEL_NAME_IN_USE, target.id))
+	if seen, _, i := label_resolve(own.id, key, target.id, access_visibility(target.id)); i >= 0 {
+		reply_error(c, label_in_use_text(ERR_LABEL_NAME_IN_USE, seen.label))
 		return
 	}
 	made, made_ok := label_part_make(own.id, target.id)
@@ -197,11 +179,39 @@ label_cmd_relabel :: proc(c: ^Conn, argv: [][]u8, declassify: bool) {
 	signal_key_in(key, made)
 	notify_in(.Generic, "relabel_from", key, own)
 	notify_in(.Generic, "relabel_to", key, made)
-	label_audit_relabel(c, declassify, key, nil, from, target.id)
+	label_audit_declassify(c, key, nil, from, target.id)
 	reply_ok(c)
 }
 
-label_relabel_element :: proc(c: ^Conn, key: []u8, target: Label_Target, declassify: bool) {
+label_declassify_seen :: proc(s: vt.Vset, obj: rawptr, dbi: int, key: []u8, target: Label_Target) -> (msg: string, f: vt.Failure) {
+	a := label_vt_access()
+	v, err := vt.view_open(s, &a, vset_scratch_get())
+	if err != .None {
+		return "", vt.failure(err)
+	}
+	if r, found := vt.view_find(&v, target.element); !found || vt.ref_label(s, r) != access.id {
+		return "", {}
+	}
+	vis := access_visibility(target.id)
+	p, t, i := label_resolve(dbi, key, target.id, vis)
+	if i < 0 {
+		return "", {}
+	}
+	if entry_object(db_view_slot(p, t, i), .Vectorset) != obj {
+		return label_in_use_text(ERR_LABEL_NAME_IN_USE, p.label), {}
+	}
+	at := vt.Access{label = target.id, visibility = vis, table = &label_table, stream = &label_stream_of(target.id).vset}
+	tv, terr := vt.view_open(s, &at, vset_scratch_get())
+	if terr != .None {
+		return "", vt.failure(terr)
+	}
+	if r, found := vt.view_find(&tv, target.element); found {
+		return label_in_use_text(ERR_LABEL_ELEMENT_IN_USE, vt.ref_label(s, r)), {}
+	}
+	return "", {}
+}
+
+label_declassify_element :: proc(c: ^Conn, key: []u8, target: Label_Target) {
 	e := db_find_notouch(key)
 	if e == nil {
 		reply_error(c, ERR_LABEL_NO_KEY)
@@ -219,15 +229,13 @@ label_relabel_element :: proc(c: ^Conn, key: []u8, target: Label_Target, declass
 	s := cast(vt.Vset)obj
 	own := cur_db()
 	dbi := own.id
-	l := lookup_make(key)
-	if tp := label_part(dbi, target.id); tp != nil {
-		if t, i := db_locate_slot(tp, &l); i >= 0 && label_slot_live(tp, t, i) {
-			held := entry_object(db_view_slot(tp, t, i), .Vectorset)
-			if held != obj {
-				reply_error(c, label_in_use_text(ERR_LABEL_NAME_IN_USE, target.id))
-				return
-			}
+	if msg, seen_failed := label_declassify_seen(s, obj, dbi, key, target); msg != "" || seen_failed.err != .None {
+		if msg != "" {
+			reply_error(c, msg)
+		} else {
+			vset_reply_failure(c, seen_failed)
 		}
+		return
 	}
 	made, made_ok := label_part_make(dbi, target.id)
 	if !made_ok {
@@ -259,7 +267,7 @@ label_relabel_element :: proc(c: ^Conn, key: []u8, target: Label_Target, declass
 	signal_key_in(key, made)
 	notify_in(.Generic, "relabel_from", key, own)
 	notify_in(.Generic, "relabel_to", key, made)
-	label_audit_relabel(c, declassify, key, target.element, access.id, target.id)
+	label_audit_declassify(c, key, target.element, access.id, target.id)
 	reply_ok(c)
 }
 

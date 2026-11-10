@@ -13,6 +13,8 @@ import Vectors.Merge
 import Vectors.Resolve
 import Vectors.Partition
 import Vectors.Plain
+import Vectors.Relabel
+import Vectors.Commands
 import Vectors.LabelSim
 
 #print axioms Vectors.hadamardSign_mul
@@ -284,3 +286,47 @@ import Vectors.LabelSim
 #print axioms Vectors.scoreLe_total
 #print axioms Vectors.seqLe_total
 #print axioms Vectors.plain_tie_orders_agree_on_scores
+#print axioms Vectors.erase_append_of_mem
+#print axioms Vectors.rawAdd_parts
+#print axioms Vectors.rawAdd_index
+#print axioms Vectors.rawAdd_stream
+#print axioms Vectors.remStep_parts
+#print axioms Vectors.remStep_index
+#print axioms Vectors.remStep_stream
+#print axioms Vectors.relabel_as_remove_then_write
+#print axioms Vectors.relabel_age
+#print axioms Vectors.relabel_contents
+#print axioms Vectors.relabel_is_write
+#print axioms Vectors.relabel_hidden
+#print axioms Vectors.simMove_exact
+#print axioms Vectors.simMove_law
+#print axioms Vectors.unwinding
+#print axioms Vectors.find_filter_of
+#print axioms Vectors.resolve_filter_obs
+#print axioms Vectors.found_filter
+#print axioms Vectors.found_mem
+#print axioms Vectors.found_sees
+#print axioms Vectors.restrict_compose
+#print axioms Vectors.kview_restrict
+#print axioms Vectors.wreply_restrict
+#print axioms Vectors.kreply_restrict
+#print axioms Vectors.reply_confined
+#print axioms Vectors.kstate_eq
+#print axioms Vectors.wstep_stream_other
+#print axioms Vectors.normS_withStream
+#print axioms Vectors.normS_stream
+#print axioms Vectors.restrict_normS
+#print axioms Vectors.restrict_withStream
+#print axioms Vectors.step_congr
+#print axioms Vectors.syncC_mem
+#print axioms Vectors.syncC_hidden
+#print axioms Vectors.syncC_visible
+#print axioms Vectors.kinv_step
+#print axioms Vectors.kstep_local
+#print axioms Vectors.kstep_consistent
+#print axioms Vectors.command_history
+#print axioms Vectors.kempty_inv
+#print axioms Vectors.resolved_copy_visible
+#print axioms Vectors.single_level_plain
+#print axioms Vectors.single_label_found
+#print axioms Vectors.single_label_wreply

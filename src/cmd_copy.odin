@@ -26,7 +26,11 @@ cmd_copy :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	if labels_on {
-		labelled, refusal := label_copy_target(target.id, destination)
+		labelled, refusal, occupied := label_copy_target(target.id, destination, replace)
+		if occupied {
+			reply_int(c, 0)
+			return
+		}
 		if refusal != "" {
 			reply_error(c, refusal)
 			return

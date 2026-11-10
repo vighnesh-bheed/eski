@@ -355,14 +355,10 @@ access_persistence_refuses :: proc(cmd: ^Command, argv: [][]u8) -> bool {
 			}
 		}
 	}
-	switch cmd.name {
-	case "restore-asking", "sync", "psync", "replicaof", "slaveof":
-		return true
-	}
 	return false
 }
 
-access_writes_refused :: #force_inline proc "contextless" () -> bool {
+access_persistence_off :: #force_inline proc "contextless" () -> bool {
 	return labels_on
 }
 

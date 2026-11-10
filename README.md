@@ -203,12 +203,12 @@ The inventory below is generated from the running server's `COMMAND DOCS` metada
 
 <!-- BEGIN GENERATED COMMANDS -->
 
-The running executable registers **253 top-level commands** and **367 commands including subcommands**. Compatibility stubs remain subject to the exclusions above. [Arguments and metadata summaries](docs/commands.md) come from `COMMAND DOCS`; every name below is cross-checked against `COMMAND LIST`.
+The running executable registers **253 top-level commands** and **366 commands including subcommands**. Compatibility stubs remain subject to the exclusions above. [Arguments and metadata summaries](docs/commands.md) come from `COMMAND DOCS`; every name below is cross-checked against `COMMAND LIST`.
 
 | Group | Registered commands and subcommands |
 | --- | --- |
 | bitmap | `BITCOUNT`, `BITFIELD`, `BITFIELD_RO`, `BITOP`, `BITPOS`, `GETBIT`, `SETBIT` |
-| connection | `AUTH`, `CLIENT`, `CLIENT CACHING`, `CLIENT GETNAME`, `CLIENT GETREDIR`, `CLIENT HELP`, `CLIENT ID`, `CLIENT INFO`, `CLIENT KILL`, `CLIENT LIST`, `CLIENT NO-EVICT`, `CLIENT NO-TOUCH`, `CLIENT PAUSE`, `CLIENT REPLY`, `CLIENT SETINFO`, `CLIENT SETNAME`, `CLIENT TRACKING`, `CLIENT TRACKINGINFO`, `CLIENT UNBLOCK`, `CLIENT UNPAUSE`, `CONTEXT`, `CONTEXT CREATE`, `CONTEXT DROP`, `CONTEXT HELP`, `CONTEXT INFO`, `ECHO`, `HELLO`, `LABEL`, `LABEL AS`, `LABEL COPIES`, `LABEL DECLASSIFY`, `LABEL HELP`, `LABEL OF`, `LABEL QUOTA`, `LABEL RAISE`, `LABEL SESSION`, `LABEL WHOAMI`, `PING`, `QUIT`, `RESET`, `SELECT` |
+| connection | `AUTH`, `CLIENT`, `CLIENT CACHING`, `CLIENT GETNAME`, `CLIENT GETREDIR`, `CLIENT HELP`, `CLIENT ID`, `CLIENT INFO`, `CLIENT KILL`, `CLIENT LIST`, `CLIENT NO-EVICT`, `CLIENT NO-TOUCH`, `CLIENT PAUSE`, `CLIENT REPLY`, `CLIENT SETINFO`, `CLIENT SETNAME`, `CLIENT TRACKING`, `CLIENT TRACKINGINFO`, `CLIENT UNBLOCK`, `CLIENT UNPAUSE`, `CONTEXT`, `CONTEXT CREATE`, `CONTEXT DROP`, `CONTEXT HELP`, `CONTEXT INFO`, `ECHO`, `HELLO`, `LABEL`, `LABEL AS`, `LABEL COPIES`, `LABEL DECLASSIFY`, `LABEL HELP`, `LABEL OF`, `LABEL QUOTA`, `LABEL SESSION`, `LABEL WHOAMI`, `PING`, `QUIT`, `RESET`, `SELECT` |
 | generic | `COPY`, `DEL`, `DUMP`, `EXISTS`, `EXPIRE`, `EXPIREAT`, `EXPIRETIME`, `KEYS`, `MIGRATE`, `MOVE`, `OBJECT`, `OBJECT ENCODING`, `OBJECT FREQ`, `OBJECT HELP`, `OBJECT IDLETIME`, `OBJECT REFCOUNT`, `PERSIST`, `PEXPIRE`, `PEXPIREAT`, `PEXPIRETIME`, `PTTL`, `RANDOMKEY`, `RENAME`, `RENAMENX`, `RESTORE`, `SCAN`, `SORT`, `SORT_RO`, `TOUCH`, `TTL`, `TYPE`, `UNLINK`, `WAIT`, `WAITAOF` |
 | geo | `GEOADD`, `GEODIST`, `GEOHASH`, `GEOPOS`, `GEORADIUS`, `GEORADIUS_RO`, `GEORADIUSBYMEMBER`, `GEORADIUSBYMEMBER_RO`, `GEOSEARCH`, `GEOSEARCHSTORE` |
 | hash | `HDEL`, `HEXISTS`, `HEXPIRE`, `HEXPIREAT`, `HEXPIRETIME`, `HGET`, `HGETALL`, `HINCRBY`, `HINCRBYFLOAT`, `HKEYS`, `HLEN`, `HMGET`, `HMSET`, `HPERSIST`, `HPEXPIRE`, `HPEXPIREAT`, `HPEXPIRETIME`, `HPTTL`, `HRANDFIELD`, `HSCAN`, `HSET`, `HSETNX`, `HSTRLEN`, `HTTL`, `HVALS` |

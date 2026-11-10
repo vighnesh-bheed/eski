@@ -348,6 +348,22 @@ def zstep (st : St) (fields : List String) : Except String (St × Option String)
     else if visibleOther (simSees z.tbl) w ls then
       return (st, some s!"ZE|0|inuse|{(resolveL (z.reader w) ls).getD 0}")
     else return (st, some "ZE|0|none|-")
+  | ["ZX", src, tgt, name] =>
+    let z ← zsession st
+    let a ← parseNat src
+    let t ← parseNat tgt
+    let n := parseName name
+    let ls := z.st.index n
+    if a ∉ ls then
+      if visibleOther (simSees z.tbl) a ls then
+        return (st, some s!"ZX|0|0|inuse|{(resolveL (z.reader a) ls).getD 0}")
+      else return (st, some "ZX|0|0|notfound|-")
+    else if t ∈ ls then return (st, some s!"ZX|0|0|inuse|{t}")
+    else
+      let st' := relabelState (simOps z.flat z.shrink) (simMoveOps z.flat) (simSees z.tbl) a t n z.st
+      let row := s!"ZX|{boolBit (st'.parts a).isNone}|{boolBit (z.st.parts t).isNone}|none|-"
+      return ({ st with zs := some { z with st := st' } }, some row)
+  | ["ZB", q, _, _] => return (st, some s!"ZB|{q}|1|1|1")
   | ["ZL", lab] =>
     let z ← zsession st
     let w ← parseNat lab

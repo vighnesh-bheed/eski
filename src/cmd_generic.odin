@@ -461,8 +461,8 @@ move_labelled :: proc(c: ^Conn, key: []u8, target: int) {
 		reply_int(c, 0)
 		return
 	}
-	if other, _, i := label_locate_other(target, key, &l, access.id, access.vis); i >= 0 {
-		reply_error(c, label_in_use_text(ERR_LABEL_NAME_IN_USE, other.label))
+	if _, _, i := label_locate_other(target, key, &l, access.id, access.vis); i >= 0 {
+		reply_int(c, 0)
 		return
 	}
 	if !label_live_in(src, &l) {

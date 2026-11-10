@@ -13,7 +13,16 @@
   "src/hnsw/scratch.odin": "7cb92f3818cd25f378636abe1f4d5568730c8f0106e3a6e9a160e474da93602c",
   "src/hnsw/heap.odin": "c6e30aeceb58b6e4d6beb54c6c8595f7e26114ef5905bd3e144470f53e87259d",
   "src/vfilter/evaluate.odin": "7b98d9309022dde6000e7b1f6bc9015cd4d570a358ae0e59d3ec45ae55541b85",
-  "src/access.odin": "6389dbca3f6549eb4a4aa8e1f4fd912f0506d83ad028003ff0b0525ba7de32bc",
-  "src/cmd_label.odin": "82364fdcebfa1004e92770331d646d9e0bb62f47db15a22452edb9f9322dd9d4",
-  "src/multi.odin": "186254931946e4c3a2217aa5073e3fcca9dc2753ed7b2eb51b492957bddaff2e"
+  "src/access.odin": "93cbe5beeca7bbe599fb9a40764b3ed7fd20131399ee4b21e5dec60d34d6fc81",
+  "src/cmd_label.odin": "7309ef4d6b98eede91bd3dfe0bf8283ef5681d8ac35ec069b1776484b7060819",
+  "src/multi.odin": "186254931946e4c3a2217aa5073e3fcca9dc2753ed7b2eb51b492957bddaff2e",
+  "src/keyspace_labels.odin": "8bf42a3ec5a6475f21f46d11368b2f6d14782be1dfce1bf5fb2a3acaaff34546",
+  "src/keyspace_labels_scan.odin": "22ddfbaf27e873d8ab59846cf0154a48897d34c3c1a4396b1f407116e7fca29e",
+  "src/keyspace_labels_cmd.odin": "848955f4c113971508d6ea208030682ac7f1b3e3f1e2310b27066cd551fb54f5",
+  "src/store.odin": "f35ff845e3ac29a14188a89d2fefc90b9cfb97ae3d67633c0e7f392a227e3822",
+  "src/cmd_generic.odin": "c4173701ca5d269d5499b3deddfa7ab07a557faa3e99c60d31699c97d9439400",
+  "src/cmd_copy.odin": "fb4e44ba0e0a2fae7f750c711e9d12c28ca5e36e0d5abb69ae825d3def43a377",
+  "src/cmd_string.odin": "5f3331baa186aef24cbc108a0b63efd8bac0ea6416414cc18c05f3cb69df93be",
+  "src/dispatch.odin": "35d6c01704e4c7bc24f6fbc2418a703e5f7230cf8dc7d38b3062ab902078387b",
+  "src/keyspec.odin": "68f4b53c9fac393bdb157b06052f498d1015c09ab35c72b19a29dd3a8f9930c4"
 }

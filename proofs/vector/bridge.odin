@@ -519,6 +519,68 @@ z_mode :: proc(m: vt.Part_Mode) -> string {
 	return "?"
 }
 
+z_raw_same :: proc(a: vt.Raw_Embedding, b: vt.Raw_Embedding) -> bool {
+	if a.quant != b.quant || string(a.data) != string(b.data) || transmute(u32)a.norm != transmute(u32)b.norm {
+		return false
+	}
+	return !a.has_range || transmute(u32)a.range == transmute(u32)b.range
+}
+
+z_relabel_bytes :: proc(z: ^Z_State, b: ^strings.Builder, fields: []string) {
+	quant: vt.Quant
+	switch fields[1] {
+	case "q8":
+		quant = .Q8
+	case "f32":
+		quant = .NOQUANT
+	case:
+		quant = .BIN
+	}
+	src := z_access(z, nat(fields[2]))
+	src_stream := u64(1)
+	to_stream := u64(2)
+	src.stream = &src_stream
+	to := src
+	to.label = lbl.Id(nat(fields[3]))
+	to.stream = &to_stream
+	x: [12]f32
+	for i in 0 ..< 12 {
+		x[i] = f32(int(i * 37 % 23) - 11) / 8
+	}
+	req := vt.Add_Request{vector = x[:], quant = quant}
+	s, cf := vt.create_at(&req, &src)
+	assert(cf.err == .None)
+	defer vt.destroy(s)
+	text := `{"a":7,"t":"keep"}`
+	req = vt.Add_Request{name = transmute([]u8)string("b"), vector = x[:], quant = quant, attr = transmute([]u8)text, set_attr = true}
+	_, af := vt.add_at(s, &src, &req, &z.sc)
+	assert(af.err == .None)
+	v1, _ := vt.view_open(s, &src, &z.sc)
+	r1, ok1 := vt.view_find(&v1, transmute([]u8)string("b"))
+	assert(ok1)
+	before := vt.ref_raw_embedding(s, r1)
+	kept := make([]u8, len(before.data), context.temp_allocator)
+	copy(kept, before.data)
+	before.data = kept
+	from_gone, to_new, f := vt.relabel_at(s, &src, &to, transmute([]u8)string("b"), &z.sc)
+	assert(f.err == .None)
+	reader := z_access(z, nat(fields[3]))
+	reader_stream := u64(3)
+	reader.stream = &reader_stream
+	v2, _ := vt.view_open(s, &reader, &z.sc)
+	r2, ok2 := vt.view_find(&v2, transmute([]u8)string("b"))
+	assert(ok2 && vt.ref_label(s, r2) == to.label)
+	after := vt.ref_raw_embedding(s, r2)
+	t2, has2 := vt.ref_attribute(s, r2)
+	same := z_raw_same(before, after) && has2 && t2 == text
+	fmt.sbprintf(b, "ZB|%s|", fields[1])
+	z_bit(b, same)
+	strings.write_byte(b, '|')
+	z_bit(b, to_new)
+	strings.write_byte(b, '|')
+	z_bit(b, from_gone)
+}
+
 z_step :: proc(z: ^Z_State, fields: []string, b: ^strings.Builder) {
 	x: [64]f32
 	switch fields[0] {
@@ -598,6 +660,24 @@ z_step :: proc(z: ^Z_State, fields: []string, b: ^strings.Builder) {
 		z_bit(b, ch.found)
 		strings.write_byte(b, '|')
 		z_err(b, f)
+	case "ZX":
+		a := z_access(z, nat(fields[1]))
+		to := a
+		to.label = lbl.Id(nat(fields[2]))
+		to.stream = &z.streams[nat(fields[2])]
+		from_gone, to_new, f := vt.relabel_at(z.set, &a, &to, z_name(fields[3]), &z.sc)
+		strings.write_string(b, "ZX|")
+		z_bit(b, from_gone)
+		strings.write_byte(b, '|')
+		z_bit(b, to_new)
+		strings.write_byte(b, '|')
+		if f.err == .Element_Not_Found {
+			strings.write_string(b, "notfound|-")
+		} else {
+			z_err(b, f)
+		}
+	case "ZB":
+		z_relabel_bytes(z, b, fields)
 	case "ZL":
 		removed, ch := vt.remove_label(z.set, lbl.Id(nat(fields[1])))
 		fmt.sbprintf(b, "ZL|%d|", removed)

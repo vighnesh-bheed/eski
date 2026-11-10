@@ -57,8 +57,6 @@ label_help_lines := [?]string {
 	"    Show the label of the copy that a read of the key or element resolves to.",
 	"DECLASSIFY <key> <marking> [TRUST <trust>] [ELEMENT <element>]",
 	"    Move the copy at this command's label to a label it dominates.",
-	"RAISE <key> <marking> [TRUST <trust>] [ELEMENT <element>]",
-	"    Move the copy at this command's label to a label that dominates it.",
 	"COPIES [<key>]",
 	"    List the names held at more than one label, or every copy of a key.",
 	"QUOTA <marking> [TRUST <trust>] [LIMIT <bytes>]",
