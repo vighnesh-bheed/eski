@@ -404,6 +404,10 @@ import Labels.KeyPlain
 #print axioms Labels.arrive_refused_keeps_session
 #print axioms Labels.arrive_ok_acl
 #print axioms Labels.session_change_needs_admission
+#print axioms Labels.core_sess
+#print axioms Labels.arriveVeto_keeps_session
+#print axioms Labels.core_finish_verdict
+#print axioms Labels.arriveVeto_verdict
 #print axioms Labels.rcmp_pos_trans
 #print axioms Labels.rcmp_pos_of_le
 #print axioms Labels.rcmp_pos_asymm
@@ -626,3 +630,6 @@ import Labels.KeyPlain
 #print axioms Labels.arriveO_refused_keeps_pins
 #print axioms Labels.labelStepO_ok_conn
 #print axioms Labels.arriveO_pins_push
+#print axioms Labels.arriveOVeto_keeps_pins
+#print axioms Labels.exec_owner_only_text
+#print axioms Labels.exec_label_text_first

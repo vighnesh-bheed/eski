@@ -2,6 +2,7 @@ package main
 
 import "base:runtime"
 import "hnsw"
+import ow "owner"
 import "vfilter"
 import va "vsetargs"
 import vt "vsettype"
@@ -120,7 +121,7 @@ vset_reply_failure :: proc(c: ^Conn, f: vt.Failure) {
 	case .Filter_Syntax:
 		reply_error_parts(c, vfilter.SYNTAX_ERROR_PREFIX, vfilter.reply_near(f.near))
 	case .Name_In_Use:
-		reply_error(c, label_in_use_text(ERR_LABEL_ELEMENT_IN_USE, f.label))
+		reply_error(c, label_in_use_text(ERR_LABEL_ELEMENT_IN_USE, f.label, ow.Owner(f.owner)))
 	case .None:
 	case:
 		text, _ := vt.failure_text(f)
@@ -848,7 +849,7 @@ vset_refs: [dynamic]vt.Ref
 vset_wrong_label :: proc(c: ^Conn, e: ^Entry) {
 	pst.dirty_explicit = true
 	if label_entry_foreign(e) {
-		reply_error(c, label_in_use_text(ERR_LABEL_NAME_IN_USE, e.db.label))
+		reply_error(c, label_in_use_text(ERR_LABEL_NAME_IN_USE, e.db.label, e.db.owner))
 		return
 	}
 	reply_wrongtype(c)
@@ -881,7 +882,7 @@ vset_presence_drop :: proc(db: ^Db, key: []u8) {
 	db_remove_in(db, owned)
 }
 
-vset_apply_change :: proc(key: []u8, s: vt.Vset, ch: vt.Change, before: []Vset_Charge) {
+vset_apply_change :: proc(key: []u8, s: vt.Vset, ch: vt.Change, before: Vset_Snap) {
 	own := cur_db()
 	if ch.label_new {
 		vset_presence_add(key, s)
@@ -932,12 +933,12 @@ vadd_labelled :: proc(c: ^Conn, argv: [][]u8, req: ^va.Vadd_Request) {
 			return
 		}
 		vset_presence_add(key, created)
-		label_vset_settle(cur_db().id, nil, created)
+		label_vset_settle(cur_db().id, label_vset_none(), created)
 		vset_propagate(c, argv, true)
 		reply_bool(c, ch.added)
 		return
 	}
-	before := label_vset_snapshot(s)
+	before := label_vset_take(s)
 	ch, failed := vt.add_at(s, &a, &add, sc)
 	vset_apply_change(key, s, ch, before)
 	if failed.err != .None {
@@ -966,7 +967,7 @@ vrem_labelled :: proc(c: ^Conn, argv: [][]u8, key: []u8, element: []u8) {
 		return
 	}
 	a := label_vt_access()
-	before := label_vset_snapshot(s)
+	before := label_vset_take(s)
 	ch, failed := vt.remove_at(s, &a, element, vset_scratch_get())
 	vset_apply_change(key, s, ch, before)
 	if failed.err != .None {
@@ -991,7 +992,7 @@ vsetattr_labelled :: proc(c: ^Conn, argv: [][]u8, key: []u8, element: []u8, text
 		return
 	}
 	a := label_vt_access()
-	before := label_vset_snapshot(s)
+	before := label_vset_take(s)
 	ch, failed := vt.set_attribute_at(s, &a, element, text)
 	vset_apply_change(key, s, ch, before)
 	if failed.err != .None {

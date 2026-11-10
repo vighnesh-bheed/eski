@@ -283,19 +283,27 @@ hash_tick :: proc "contextless" () {
 			quiet += 1
 			continue
 		}
-		clear(&hash_expired)
-		expired := ht.active_expire(db.hreg, now, FIELD_SWEEP_BATCH, &hash_expired)
-		stat_expired_subkeys += i64(expired)
-		for item in hash_expired {
-			if item.emptied {
-				hash_drop_emptied(db, item.h, item.key)
-			} else {
-				hash_sync(db, item.h)
-				key := hash_key_ref_bytes(item.key)
-				notify_in(.Hash, "hexpired", key, db)
-				signal_key_expired(key, db)
-			}
-		}
+		expired := hash_expire_partition(db, now)
 		quiet = 0 if expired == FIELD_SWEEP_BATCH else quiet + 1
 	}
+	if owners_on && len(owner_active[.Field]) > 0 && now_ns() < deadline {
+		owner_field_tick(deadline, now)
+	}
+}
+
+hash_expire_partition :: proc(db: ^Db, now: u64) -> int {
+	clear(&hash_expired)
+	expired := ht.active_expire(db.hreg, now, FIELD_SWEEP_BATCH, &hash_expired)
+	stat_expired_subkeys += i64(expired)
+	for item in hash_expired {
+		if item.emptied {
+			hash_drop_emptied(db, item.h, item.key)
+		} else {
+			hash_sync(db, item.h)
+			key := hash_key_ref_bytes(item.key)
+			notify_in(.Hash, "hexpired", key, db)
+			signal_key_expired(key, db)
+		}
+	}
+	return expired
 }

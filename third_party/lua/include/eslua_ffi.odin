@@ -55,6 +55,7 @@ Options :: struct {
 	function_mode: i32,
 	debug_mode: i32,
 	enable_deprecated_api: i32,
+	isolate: i32,
 }
 
 Command_Fn :: #type proc "c" (opaque: rawptr, resp: i32, argc: c.size_t, args: [^]Arg, stats: ^Stats) -> Result
@@ -130,6 +131,7 @@ foreign runtime_library {
 	eval_stats :: proc() -> Stats ---
 	eval_active_stats :: proc() -> Stats ---
 	detached_memory :: proc() -> c.size_t ---
+	random_exchange :: proc(next: u64) -> u64 ---
 	set_number_format :: proc(format: Number_Fn) ---
 	set_load_log :: proc(log: Log_Fn) ---
 }

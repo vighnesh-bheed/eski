@@ -3,6 +3,7 @@ package main
 import "core:slice"
 import "core:sys/linux"
 import lb "label"
+import ow "owner"
 
 Track_Flag :: enum u8 {
 	On,
@@ -135,6 +136,7 @@ Trk_Batch_Key :: struct {
 	key:   string,
 	by:    i64,
 	label: lb.Id,
+	owner: ow.Owner,
 }
 
 @(private = "file")
@@ -519,7 +521,7 @@ trk_enable_prefix :: proc(c: ^Conn, st: ^Ps_State, p: []u8) {
 }
 
 @(private = "file")
-trk_remember_broadcast :: proc(key: []u8, by: ^Conn, label: lb.Id) {
+trk_remember_broadcast :: proc(key: []u8, by: ^Conn, label: lb.Id, owner: ow.Owner) {
 	by_id: i64 = 0
 	if by != nil {
 		by_id = by.id
@@ -533,7 +535,7 @@ trk_remember_broadcast :: proc(key: []u8, by: ^Conn, label: lb.Id) {
 			continue
 		}
 		if labels_on && label != lb.ID_NONE {
-			trk_remember_labelled(bs, key, by_id, label)
+			trk_remember_labelled(bs, key, by_id, label, owner)
 			continue
 		}
 		if at, seen := bs.seen[string(key)]; seen {
@@ -543,7 +545,7 @@ trk_remember_broadcast :: proc(key: []u8, by: ^Conn, label: lb.Id) {
 		trk_metadata_adjust(bs, -1)
 		k := string(trk_clone(key))
 		bs.seen[k] = len(bs.batch)
-		append(&bs.batch, Trk_Batch_Key{k, by_id, lb.ID_NONE})
+		append(&bs.batch, Trk_Batch_Key{k, by_id, lb.ID_NONE, ow.SHARED})
 		bs.batch_bytes += len(k)
 		trk_metadata_adjust(bs, 1)
 		trk_bcast_dirty = true
@@ -906,14 +908,14 @@ client_trackinginfo :: proc(c: ^Conn, argv: [][]u8) {
 	}
 }
 
-tracking_invalidate_key :: proc(key: []u8, attributed: bool, bcast := true, label := lb.ID_NONE) {
+tracking_invalidate_key :: proc(key: []u8, attributed: bool, bcast := true, label := lb.ID_NONE, owner := ow.SHARED) {
 	mem_registry_changed()
 	by: ^Conn = nil
 	if attributed {
 		by = ps_exec
 	}
 	if bcast && len(trk_prefixes) > 0 {
-		trk_remember_broadcast(key, by, label)
+		trk_remember_broadcast(key, by, label, owner)
 	}
 	if len(trk_table) == 0 {
 		return
@@ -923,7 +925,7 @@ tracking_invalidate_key :: proc(key: []u8, attributed: bool, bcast := true, labe
 		return
 	}
 	if labels_on && label != lb.ID_NONE {
-		trk_invalidate_labelled(e, by, label)
+		trk_invalidate_labelled(e, by, label, owner)
 		return
 	}
 	trk_unlink(e)
@@ -1084,10 +1086,14 @@ tracking_release_idle :: proc() {
 }
 
 @(private = "file")
-trk_remember_labelled :: proc(bs: ^Trk_Prefix, key: []u8, by_id: i64, label: lb.Id) {
+trk_remember_labelled :: proc(bs: ^Trk_Prefix, key: []u8, by_id: i64, label: lb.Id, owner: ow.Owner) {
 	clear(&trk_seen_key)
 	append(&trk_seen_key, ..key)
 	append(&trk_seen_key, u8(u16(label) >> 8), u8(u16(label) & 0xFF))
+	if owners_on {
+		o := u32(owner)
+		append(&trk_seen_key, u8(o >> 24), u8(o >> 16), u8(o >> 8), u8(o))
+	}
 	if at, seen := bs.seen[string(trk_seen_key[:])]; seen {
 		bs.batch[at].by = by_id
 		return
@@ -1097,15 +1103,33 @@ trk_remember_labelled :: proc(bs: ^Trk_Prefix, key: []u8, by_id: i64, label: lb.
 	k := string(trk_clone(key))
 	bs.seen[composite] = len(bs.batch)
 	bs.labelled_seen = true
-	append(&bs.batch, Trk_Batch_Key{k, by_id, label})
+	append(&bs.batch, Trk_Batch_Key{k, by_id, label, owner})
 	bs.batch_bytes += len(k) + len(composite)
 	trk_metadata_adjust(bs, 1)
 	trk_bcast_dirty = true
 }
 
 @(private = "file")
+trk_scope_sees :: proc(c: ^Conn, l: lb.Label, owner: ow.Owner) -> bool {
+	if !lb.dominates(access_conn_session(c), l) {
+		return false
+	}
+	if !owners_on {
+		return true
+	}
+	if !ow.sees(access_conn_owner(c), owner) {
+		return false
+	}
+	if c.pubsub != nil && c.pubsub.trk_redirect != 0 {
+		if t := trk_conn_lookup(c.pubsub.trk_redirect); t != nil {
+			return lb.dominates(access_conn_session(t), l) && ow.sees(access_conn_owner(t), owner)
+		}
+	}
+	return true
+}
+
+@(private = "file")
 trk_batch_payload_labelled :: proc(b: ^[dynamic]u8, bs: ^Trk_Prefix, c: ^Conn) -> int {
-	session := access_conn_session(c)
 	skip: i64 = c.id if .Noloop in c.pubsub.trk else 0
 	count := 0
 	last := ""
@@ -1115,7 +1139,7 @@ trk_batch_payload_labelled :: proc(b: ^[dynamic]u8, bs: ^Trk_Prefix, c: ^Conn) -
 			continue
 		}
 		l, ok := access_label_of(k.label)
-		if !ok || !lb.dominates(session, l) {
+		if !ok || !trk_scope_sees(c, l, k.owner) {
 			continue
 		}
 		if have_last && last == k.key {
@@ -1135,7 +1159,7 @@ trk_batch_payload_labelled :: proc(b: ^[dynamic]u8, bs: ^Trk_Prefix, c: ^Conn) -
 			continue
 		}
 		l, ok := access_label_of(k.label)
-		if !ok || !lb.dominates(session, l) {
+		if !ok || !trk_scope_sees(c, l, k.owner) {
 			continue
 		}
 		if have_last && last == k.key {
@@ -1149,7 +1173,7 @@ trk_batch_payload_labelled :: proc(b: ^[dynamic]u8, bs: ^Trk_Prefix, c: ^Conn) -
 }
 
 @(private = "file")
-trk_invalidate_labelled :: proc(e: ^Trk_Entry, by: ^Conn, label: lb.Id) {
+trk_invalidate_labelled :: proc(e: ^Trk_Entry, by: ^Conn, label: lb.Id, owner: ow.Owner) {
 	l, _ := access_label_of(label)
 	payload := trk_key_payload(&trk_payload, e.key)
 	kept := 0
@@ -1158,7 +1182,7 @@ trk_invalidate_labelled :: proc(e: ^Trk_Entry, by: ^Conn, label: lb.Id) {
 		if !ok {
 			continue
 		}
-		if !lb.dominates(access_conn_session(c), l) {
+		if !trk_scope_sees(c, l, owner) {
 			e.ids[kept] = id
 			kept += 1
 			continue
@@ -1181,7 +1205,7 @@ trk_invalidate_labelled :: proc(e: ^Trk_Entry, by: ^Conn, label: lb.Id) {
 	resize(&e.ids, kept)
 }
 
-label_tracking_flush :: proc(label: lb.Id) {
+label_tracking_flush :: proc(label: lb.Id, owner := ow.SHARED) {
 	if tracking_clients == 0 {
 		return
 	}
@@ -1189,7 +1213,7 @@ label_tracking_flush :: proc(label: lb.Id) {
 	targets := &trk_targets
 	clear(targets)
 	for _, c in trk_conns {
-		if lb.dominates(access_conn_session(c), l) {
+		if trk_scope_sees(c, l, owner) {
 			append(targets, c)
 		}
 	}

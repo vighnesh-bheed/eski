@@ -179,7 +179,7 @@ twin_digest :: proc(w: ^Twin, reader: int, o: Owner, names: []string, queries: [
 	if w.s == nil || !has_visible(w.s, &a) {
 		return "missing"
 	}
-	return strings.clone(strip_memory(view_digest(w.s, &a, names, queries, &w.sc, links)), context.temp_allocator)
+	return strings.clone(view_digest(w.s, &a, names, queries, &w.sc, links), context.temp_allocator)
 }
 
 twin_hidden :: proc(scheme: ^Scheme, reader: int, o: Owner, op: ^Twin_Op) -> bool {
@@ -289,6 +289,21 @@ other_owners_never_change_a_readers_replies :: proc(t: ^testing.T) {
 	log.infof("owner twins: %d digests compared between full and purged histories; a visible shared write changed all %d final digests", compared, sensitive)
 }
 
+digest_memory :: proc(text: string) -> int {
+	at := strings.index(text, " memory ")
+	if at < 0 {
+		return -1
+	}
+	n := 0
+	for ch in transmute([]u8)text[at + len(" memory "):] {
+		if ch < '0' || ch > '9' {
+			break
+		}
+		n = n * 10 + int(ch - '0')
+	}
+	return n
+}
+
 strip_memory :: proc(text: string) -> string {
 	b := strings.builder_make(context.temp_allocator)
 	for line in strings.split_lines(text, context.temp_allocator) {
@@ -373,10 +388,19 @@ one_owner_alone_reads_like_shared_data :: proc(t: ^testing.T) {
 	for reader in 1 ..< 3 {
 		sa := owner_access(&l, reader, SHARED)
 		oa := owner_access(&l, reader, 4)
-		a := strip_memory(view_digest(shared, &sa, names[:], queries, &sc, &links))
-		a = strings.clone(a, context.temp_allocator)
-		b := strip_memory(view_digest(owned, &oa, names[:], queries, &sc, &links))
+		full_a := strings.clone(view_digest(shared, &sa, names[:], queries, &sc, &links), context.temp_allocator)
+		full_b := view_digest(owned, &oa, names[:], queries, &sc, &links)
+		a := strings.clone(strip_memory(full_a), context.temp_allocator)
+		b := strip_memory(full_b)
 		testing.expectf(t, a == b, "reader %d: one owner alone differs from shared data\n%s", reader, digest_difference(a, b))
+		v, _ := view_open(owned, &oa, &sc)
+		compact := 0
+		for &vp in v.parts {
+			if view_head(&v, &vp).kind == .Compact {
+				compact += 1
+			}
+		}
+		testing.expectf(t, digest_memory(full_b) == digest_memory(full_a) - compact * (PART_FIXED_BYTES - COMPACT_FIXED_BYTES), "reader %d: owner memory %d, shared memory %d, %d compact blocks", reader, digest_memory(full_b), digest_memory(full_a), compact)
 	}
 	free_all(context.temp_allocator)
 }

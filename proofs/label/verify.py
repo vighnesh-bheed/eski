@@ -54,9 +54,9 @@ ROW_AREAS = {'L': 'lattice', 'CR': 'marking', 'CL': 'marking', 'CC': 'marking', 
              'SM': 'rules', 'SD': 'rules', 'NR': 'counters', 'NA': 'counters', 'NS': 'counters', 'NV': 'counters',
              'AH': 'contexts', 'AQ': 'contexts', 'AW': 'contexts', 'AX': 'arrival', 'AU': 'arrival', 'AC': 'arrival',
              'AT': 'arrival', 'AO': 'arrival', 'AR': 'arrival', 'AS': 'arrival', 'AK': 'arrival', 'AA': 'arrival',
-             'AP': 'arrival', 'AE': 'arrival', 'AB': 'arrival',
+             'AP': 'arrival', 'AE': 'arrival', 'AB': 'arrival', 'AV': 'arrival',
              'OX': 'owners', 'OU': 'owners', 'OC': 'owners', 'OO': 'owners', 'OR': 'owners', 'OA': 'owners', 'OT': 'owners',
-             'OP': 'owners', 'OS': 'owners', 'OB': 'owners',
+             'OP': 'owners', 'OS': 'owners', 'OB': 'owners', 'OV': 'owners',
              'KO': 'resolution', 'KR': 'confinement', 'KW': 'placement', 'KH': 'purge', 'KP': 'plain'}
 KEY_SEED = 0x6B3E7
 ARRIVAL_SEED = 0xA2217
@@ -76,7 +76,8 @@ ARRIVAL_NOTES = ['created', 'create_full', 'dropped', 'swept', 'find_ok', 'find_
                  'exec_owner_watch_refused', 'watch_owner_mixed', 'created_owner', 'owner_auth_cleared', 'refused_noperm',
                  'refused_noperm_push', 'kill_allowed', 'kill_refused', 'owner_refused_unpinned', 'owner_noperm',
                  'owner_noperm_push', 'owner_kill_same', 'owner_kill_operator', 'owner_kill_refused_shared',
-                 'owner_kill_refused_user', 'owner_kill_refused_label']
+                 'owner_kill_refused_user', 'owner_kill_refused_label', 'vetoed_unpinned', 'vetoed_owner_unpinned',
+                 'refused_operator', 'exec_owner_watch_text', 'refused_owner_persist']
 ARRIVAL_SEMANTIC = {'expired_handle_used': 'find_expired', 'other_login_handle_used': 'find_other_login',
                     'handle_above_clearance_used': 'find_outside_ceiling', 'expired_token_used': 'token_expired',
                     'token_above_clearance_used': 'token_outside_ceiling', 'token_context_mismatch_used': 'token_context_refused',

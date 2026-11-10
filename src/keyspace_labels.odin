@@ -6,6 +6,7 @@ import "core:sys/linux"
 import ht "hashtype"
 import lb "label"
 import lp "listpack"
+import ow "owner"
 import st "settype"
 import vt "vsettype"
 import zt "zsettype"
@@ -47,7 +48,15 @@ Label_Stream :: struct {
 
 Vset_Charge :: struct {
 	label: lb.Id,
+	owner: ow.Owner,
 	bytes: int,
+}
+
+Vset_Snap :: struct {
+	charges: []Vset_Charge,
+	global:  int,
+	owner:   ow.Owner,
+	shared:  bool,
 }
 
 label_dbs: []Label_Db
@@ -157,6 +166,7 @@ label_swap :: proc(a, b: int) {
 	if label_dbs == nil || a == b {
 		return
 	}
+	owner_swap(a, b)
 	label_dbs[a], label_dbs[b] = label_dbs[b], label_dbs[a]
 	for i in ([2]int{a, b}) {
 		ld := &label_dbs[i]
@@ -204,7 +214,9 @@ label_mix :: proc "contextless" (x: u64) -> u64 {
 
 label_stream_save :: proc() {
 	dst := &label_server_stream
-	if label_stream_owner >= 0 {
+	if owner_stream_cur != nil {
+		dst = owner_stream_cur
+	} else if label_stream_owner >= 0 {
 		dst = &label_streams[label_stream_owner]
 	}
 	dst.main = rng_state
@@ -223,32 +235,64 @@ label_stream_put :: proc(s: ^Label_Stream) {
 	zt.sl_rng = s.zset
 }
 
+label_stream_leave_cur :: proc() {
+	label_stream_save()
+	if owner_stream_cur == &owner_stream_pending {
+		owner_stream_commit()
+	}
+}
+
 label_stream_load :: proc(id: lb.Id) {
-	if label_stream_owner == int(id) {
+	if owner_stream_cur == nil && label_stream_owner == int(id) {
 		return
 	}
-	label_stream_save()
+	label_stream_leave_cur()
 	s := label_stream_of(id)
 	label_stream_put(s)
 	label_stream_owner = int(id)
+	owner_stream_cur = nil
+	owner_stream_cur_entry = nil
+}
+
+owner_stream_load :: proc(e: ^Owner_Entry, id: lb.Id) {
+	if owner_stream_cur != nil && owner_stream_cur_entry == e && owner_stream_cur_label == id {
+		return
+	}
+	label_stream_leave_cur()
+	s := owner_stream_lazy(e, id)
+	label_stream_put(s)
+	label_stream_owner = -2
+	owner_stream_cur = s
+	owner_stream_cur_entry = e
+	owner_stream_cur_label = id
 }
 
 label_stream_server :: proc() {
-	if label_stream_owner < 0 {
+	if label_stream_owner == -1 && owner_stream_cur == nil {
 		return
 	}
-	label_stream_save()
+	label_stream_leave_cur()
 	label_stream_put(&label_server_stream)
 	label_stream_owner = -1
+	owner_stream_cur = nil
+	owner_stream_cur_entry = nil
 }
 
 label_vt_access :: proc() -> vt.Access {
+	if owner_user() && access.owner_entry != nil {
+		s := owner_stream_current(access.owner_entry, access.id)
+		return vt.Access{label = access.id, owner = vt.Owner(access.owner), visibility = access.vis, table = &label_table, stream = &s.vset, top = access.top}
+	}
 	s := label_stream_of(access.id)
 	return vt.Access{label = access.id, visibility = access.vis, table = &label_table, stream = &s.vset, top = access.top}
 }
 
 keyspace_label_enter :: proc(c: ^Conn, cmd: ^Command, argv: [][]u8) -> string {
-	label_stream_load(access.id)
+	if owner_user() && access.owner_entry != nil {
+		owner_stream_load(access.owner_entry, access.id)
+	} else {
+		label_stream_load(access.id)
+	}
 	label_active = true
 	if c.db == nil {
 		return ""
@@ -258,6 +302,9 @@ keyspace_label_enter :: proc(c: ^Conn, cmd: ^Command, argv: [][]u8) -> string {
 
 keyspace_label_leave :: proc() {
 	label_active = false
+	if owners_on {
+		owner_settle()
+	}
 	label_stream_server()
 }
 
@@ -268,9 +315,19 @@ label_command_writes :: #force_inline proc(cmd: ^Command, spec: ^Cmd_Spec) -> bo
 label_step :: proc(home: ^Db, cmd: ^Command, argv: [][]u8) -> string {
 	dbi := home.id
 	ld := &label_dbs[dbi]
-	own := label_part(dbi, access.id)
+	user := owner_user()
+	own: ^Db
+	if user {
+		if op := owner_space_part(owner_space_of(access.owner_entry, dbi), access.id); op != nil {
+			own = &op.db
+			owner_touch(own)
+		}
+	} else {
+		own = label_part(dbi, access.id)
+	}
 	if own == nil {
 		ld.sentinel.label = access.id
+		ld.sentinel.owner = access.owner if user else ow.SHARED
 		own = ld.sentinel
 	}
 	db_cur = own
@@ -280,19 +337,38 @@ label_step :: proc(home: ^Db, cmd: ^Command, argv: [][]u8) -> string {
 	if !writes {
 		return ""
 	}
+	if owners_on && access.owner == ow.EVERY {
+		return ERR_OWNER_INVALID
+	}
 	if spec != nil {
 		if msg := label_write_check(cmd, spec, argv); msg != "" {
 			return msg
 		}
 	}
 	if own.role & LABEL_ROLE_SENTINEL != 0 {
-		p, ok := label_part_make(dbi, access.id)
-		if !ok {
-			return ERR_LABEL_PARTITIONS
+		if user {
+			if access.owner_entry == nil {
+				return ERR_OWNER_INVALID
+			}
+			p, ok := owner_part_make(access.owner_entry, dbi, access.id)
+			if !ok {
+				return ERR_OWNER_PARTITIONS
+			}
+			db_cur = &p.db
+			owner_touch(db_cur)
+		} else {
+			p, ok := label_part_make(dbi, access.id)
+			if !ok {
+				return ERR_LABEL_PARTITIONS
+			}
+			db_cur = p
 		}
-		db_cur = p
 	}
-	if label_quota_active() {
+	if user {
+		if msg := owner_quota_check(cmd, spec, access.owner_entry); msg != "" {
+			return msg
+		}
+	} else if label_quota_active() {
 		if msg := label_quota_check(cmd, spec); msg != "" {
 			return msg
 		}
@@ -318,11 +394,11 @@ label_write_check :: proc(cmd: ^Command, spec: ^Cmd_Spec, argv: [][]u8) -> strin
 		if !all_write && ref.flags != {} && ref.flags & LABEL_WRITE_FLAGS == {} {
 			continue
 		}
-		if l, found := label_write_conflict(db_cur, argv[ref.pos]); found {
+		if l, o, found := label_write_conflict(db_cur, argv[ref.pos]); found {
 			if label_creates_only(cmd, argv, ref.pos) {
 				continue
 			}
-			return label_in_use_text(ERR_LABEL_NAME_IN_USE, l)
+			return label_in_use_text(ERR_LABEL_NAME_IN_USE, l, o)
 		}
 	}
 	return ""
@@ -341,22 +417,29 @@ label_creates_only :: proc(cmd: ^Command, argv: [][]u8, pos: int) -> bool {
 	return false
 }
 
-label_write_conflict :: proc(own: ^Db, key: []u8) -> (lb.Id, bool) {
+label_write_conflict :: proc(own: ^Db, key: []u8) -> (lb.Id, ow.Owner, bool) {
 	l := lookup_make(key)
 	if label_live_in(own, &l) {
-		return lb.ID_NONE, false
+		return lb.ID_NONE, ow.SHARED, false
 	}
-	p, _, i := label_locate_other(own.id, key, &l, access.id, access.vis)
+	p: ^Db
+	i: int
+	if owner_user() {
+		p, _, i = owner_locate_other(own.id, key, &l, access.id, access.owner_entry, access.vis)
+	} else {
+		p, _, i = label_locate_other(own.id, key, &l, access.id, access.vis)
+	}
 	if i < 0 {
-		return lb.ID_NONE, false
+		return lb.ID_NONE, ow.SHARED, false
 	}
-	return p.label, true
+	return p.label, p.owner, true
 }
 
-label_in_use_text :: proc(head: string, l: lb.Id) -> string {
+label_in_use_text :: proc(head: string, l: lb.Id, o := ow.SHARED) -> string {
 	clear(&label_text)
 	sb_str(&label_text, head)
 	access_format(&label_text, l)
+	scope_format(&label_text, ow.Scope{l, o})
 	return string(label_text[:])
 }
 
@@ -450,29 +533,64 @@ label_find_miss :: proc(db: ^Db, key: []u8, l: ^Lookup) -> ^Entry {
 	saved := store_no_touch
 	store_no_touch = true
 	defer store_no_touch = saved
-	p, t, i := label_locate_other(db.id, key, l, access.id, access.vis)
+	p: ^Db
+	t: ^Table
+	i: int
+	if owner_user() {
+		p, t, i = owner_locate_other(db.id, key, l, access.id, access.owner_entry, access.vis)
+	} else {
+		p, t, i = label_locate_other(db.id, key, l, access.id, access.vis)
+	}
 	if i < 0 {
 		return nil
 	}
 	return db_view_slot(p, t, i)
 }
 
-label_resolve :: proc(dbi: int, key: []u8, reader: lb.Id, vis: ^lb.Visibility) -> (p: ^Db, t: ^Table, i: int) {
+label_scope_part :: proc(dbi: int, reader: lb.Id, o: ow.Owner) -> (own: ^Db, e: ^Owner_Entry) {
+	if owners_on && ow.is_user(o) {
+		e = owner_entry(o)
+		if op := owner_space_part(owner_space_of(e, dbi), reader); op != nil {
+			own = &op.db
+		}
+		return
+	}
+	return label_part(dbi, reader), nil
+}
+
+label_scope_other :: proc(dbi: int, key: []u8, l: ^Lookup) -> (p: ^Db, t: ^Table, i: int) {
+	if owner_user() {
+		return owner_locate_other(dbi, key, l, access.id, access.owner_entry, access.vis)
+	}
+	return label_locate_other(dbi, key, l, access.id, access.vis)
+}
+
+label_scope_find :: proc(dbi: int) -> ^Db {
+	own, _ := label_scope_part(dbi, access.id, vset_scope_owner())
+	return own
+}
+
+label_resolve :: proc(dbi: int, key: []u8, reader: lb.Id, vis: ^lb.Visibility, o := ow.SHARED) -> (p: ^Db, t: ^Table, i: int) {
 	l := lookup_make(key)
-	if own := label_part(dbi, reader); own != nil && db_size_of(own) > 0 {
+	own, e := label_scope_part(dbi, reader, o)
+	if own != nil && db_size_of(own) > 0 {
 		tt, ii := db_locate_slot(own, &l)
 		if ii >= 0 && label_slot_live(own, tt, ii) {
 			return own, tt, ii
 		}
 	}
+	if owners_on && ow.is_user(o) {
+		return owner_locate_other(dbi, key, &l, reader, e, vis)
+	}
 	return label_locate_other(dbi, key, &l, reader, vis)
 }
 
-label_key_state :: proc(dbi: int, key: []u8, reader: lb.Id) -> (exists: bool, expired: bool) {
+label_key_state :: proc(dbi: int, key: []u8, reader: lb.Id, o := ow.SHARED) -> (exists: bool, expired: bool) {
 	vis := access_visibility(reader)
 	l := lookup_make(key)
 	own_stale := false
-	if own := label_part(dbi, reader); own != nil && db_size_of(own) > 0 {
+	own, e := label_scope_part(dbi, reader, o)
+	if own != nil && db_size_of(own) > 0 {
 		t, i := db_locate_slot(own, &l)
 		if i >= 0 {
 			if label_slot_live(own, t, i) {
@@ -481,7 +599,13 @@ label_key_state :: proc(dbi: int, key: []u8, reader: lb.Id) -> (exists: bool, ex
 			own_stale = true
 		}
 	}
-	if _, _, j := label_locate_other(dbi, key, &l, reader, vis); j >= 0 {
+	j: int
+	if owners_on && ow.is_user(o) {
+		_, _, j = owner_locate_other(dbi, key, &l, reader, e, vis)
+	} else {
+		_, _, j = label_locate_other(dbi, key, &l, reader, vis)
+	}
+	if j >= 0 {
 		return true, false
 	}
 	return own_stale, own_stale
@@ -503,6 +627,13 @@ label_note_created :: proc "contextless" (db: ^Db, key: []u8) {
 	}
 	if label_dbs == nil {
 		return
+	}
+	if db.role & DB_ROLE_OWNER != 0 {
+		owner_note_created(db, key)
+		return
+	}
+	if owners_on {
+		owner_shared_changed(db.id)
 	}
 	ld := &label_dbs[db.id]
 	if db.role & LABEL_ROLE_ORDERED == 0 {
@@ -539,6 +670,14 @@ label_note_erased :: proc "contextless" (db: ^Db, key: []u8) {
 	if label_dbs == nil || db.role & LABEL_ROLE_SENTINEL != 0 {
 		return
 	}
+	if db.role & DB_ROLE_OWNER != 0 {
+		context = runtime.default_context()
+		owner_note_erased(db, key)
+		return
+	}
+	if owners_on {
+		owner_shared_changed(db.id)
+	}
 	ld := &label_dbs[db.id]
 	if len(ld.copies) == 0 {
 		return
@@ -567,6 +706,13 @@ label_copies_free :: proc(cp: ^Label_Copies) {
 }
 
 label_registry_purge :: proc(db: ^Db) {
+	if db.role & DB_ROLE_OWNER != 0 {
+		owner_registry_purge(db)
+		return
+	}
+	if owners_on {
+		owner_shared_changed(db.id)
+	}
 	ld := &label_dbs[db.id]
 	if len(ld.copies) == 0 {
 		return
@@ -598,6 +744,7 @@ label_flush_prepare :: proc(db: ^Db) {
 	if db.heap_objs == 0 {
 		return
 	}
+	owned := db.role & DB_ROLE_OWNER != 0
 	for k in 0 ..< 2 {
 		if k == 1 && db.rehash_idx < 0 {
 			break
@@ -612,80 +759,138 @@ label_flush_prepare :: proc(db: ^Db) {
 				vp := &t.slots[i].val
 				if kp.small.tag.val_form == FORM_OBJECT && vp.slab.info.type == .Vectorset {
 					label_vset_detach(db, vp)
+				} else if owned && kp.small.tag.val_form == FORM_OBJECT {
+					owner_object_unbind(vp)
 				}
 			}
 		}
 	}
 }
 
-label_vset_charges :: proc(s: vt.Vset, out: ^[dynamic]Vset_Charge) {
+vset_scope_owner :: #force_inline proc "contextless" () -> ow.Owner {
+	return access.owner if owner_user() else ow.SHARED
+}
+
+label_vset_charges :: proc(s: vt.Vset, out: ^[dynamic]Vset_Charge, o: ow.Owner, shared: bool) {
 	clear(out)
 	if s == nil {
 		return
 	}
-	clear(&label_ids)
-	vt.labels_present(s, &label_ids)
-	if len(label_ids) == 0 {
-		return
-	}
-	anchor := label_ids[0]
-	for id in label_ids[1:] {
-		if label_less(id, anchor) {
-			anchor = id
+	if shared {
+		clear(&label_ids)
+		vt.labels_present(s, &label_ids)
+		if len(label_ids) > 0 {
+			anchor := label_ids[0]
+			for id in label_ids[1:] {
+				if label_less(id, anchor) {
+					anchor = id
+				}
+			}
+			bytes_shared := vt.shared_memory(s)
+			for id in label_ids {
+				bytes := vt.label_memory(s, id)
+				if id == anchor {
+					bytes += bytes_shared
+				}
+				append(out, Vset_Charge{id, ow.SHARED, bytes})
+			}
 		}
 	}
-	shared := vt.shared_memory(s)
-	for id in label_ids {
-		bytes := vt.label_memory(s, id)
-		if id == anchor {
-			bytes += shared
+	if ow.is_user(o) {
+		clear(&label_ids)
+		vt.owner_labels(s, vt.Owner(o), &label_ids)
+		for id in label_ids {
+			append(out, Vset_Charge{id, o, vt.scope_memory(s, id, vt.Owner(o))})
 		}
-		append(out, Vset_Charge{id, bytes})
 	}
 }
 
-label_vset_settle :: proc(dbi: int, before: []Vset_Charge, s: vt.Vset) {
-	label_vset_charges(s, &label_charges_after)
-	for b in before {
+label_vset_global :: proc(s: vt.Vset) -> int {
+	if !owners_on || s == nil {
+		return 0
+	}
+	n := vt.index_bytes(s)
+	clear(&label_ids)
+	vt.labels_present(s, &label_ids)
+	if len(label_ids) == 0 {
+		n += vt.shared_memory(s)
+	}
+	return n
+}
+
+label_vset_part :: proc(dbi: int, id: lb.Id, o: ow.Owner) -> ^Db {
+	if ow.is_user(o) {
+		if p := owner_space_part(owner_space_of(owner_entry(o), dbi), id); p != nil {
+			owner_touch(&p.db)
+			return &p.db
+		}
+		return nil
+	}
+	return label_part(dbi, id)
+}
+
+label_vset_settle :: proc(dbi: int, before: Vset_Snap, s: vt.Vset) {
+	label_vset_charges(s, &label_charges_after, before.owner, before.shared)
+	for b in before.charges {
 		after := 0
 		for a in label_charges_after {
-			if a.label == b.label {
+			if a.label == b.label && a.owner == b.owner {
 				after = a.bytes
 				break
 			}
 		}
-		if p := label_part(dbi, b.label); p != nil && after != b.bytes {
-			object_account(p, after - b.bytes)
+		if after != b.bytes {
+			if p := label_vset_part(dbi, b.label, b.owner); p != nil {
+				object_account(p, after - b.bytes)
+			}
 		}
 	}
 	for a in label_charges_after {
 		seen := false
-		for b in before {
-			if b.label == a.label {
+		for b in before.charges {
+			if b.label == a.label && b.owner == a.owner {
 				seen = true
 				break
 			}
 		}
 		if !seen {
-			if p := label_part(dbi, a.label); p != nil {
+			if p := label_vset_part(dbi, a.label, a.owner); p != nil {
 				object_account(p, a.bytes)
 			}
 		}
 	}
+	if owners_on {
+		db_used_memory += label_vset_global(s) - before.global
+	}
 }
 
-label_vset_snapshot :: proc(s: vt.Vset) -> []Vset_Charge {
-	label_vset_charges(s, &label_charges_before)
+label_vset_take :: proc(s: vt.Vset) -> Vset_Snap {
+	return label_vset_snapshot(s, vset_scope_owner())
+}
+
+label_vset_snapshot :: proc(s: vt.Vset, o: ow.Owner) -> Vset_Snap {
+	shared := !ow.is_user(o) || !vt.labelled(s)
+	label_vset_charges(s, &label_charges_before, o, shared)
 	out := make([]Vset_Charge, len(label_charges_before), context.temp_allocator)
 	copy(out, label_charges_before[:])
-	return out
+	return Vset_Snap{charges = out, global = label_vset_global(s), owner = o, shared = shared}
+}
+
+label_vset_none :: proc() -> Vset_Snap {
+	o := vset_scope_owner()
+	return Vset_Snap{owner = o, shared = !ow.is_user(o)}
 }
 
 label_vset_release :: proc "contextless" (db: ^Db, obj: rawptr) {
 	context = runtime.default_context()
 	s := vt.Vset(obj)
-	before := label_vset_snapshot(s)
-	vt.remove_label(s, db.label)
+	o := db.owner if db.role & DB_ROLE_OWNER != 0 else ow.SHARED
+	before := label_vset_snapshot(s, o)
+	if ow.is_user(o) {
+		vt.remove_scope(s, db.label, vt.Owner(o))
+	} else {
+		vt.remove_label(s, db.label)
+	}
 	if vt.card(s) == 0 {
 		label_vset_settle(db.id, before, nil)
 		vt.destroy(s)
@@ -696,24 +901,43 @@ label_vset_release :: proc "contextless" (db: ^Db, obj: rawptr) {
 
 label_vset_detach :: proc(db: ^Db, vp: ^Val_Handle) {
 	s := vt.Vset(rawptr(vp.ref.addr))
-	clear(&label_ids)
-	vt.labels_present(s, &label_ids)
+	o := db.owner if db.role & DB_ROLE_OWNER != 0 else ow.SHARED
 	others := false
-	for id in label_ids {
-		if id != db.label {
+	if ow.is_user(o) {
+		others = vt.card(s) != vt.scope_card(s, db.label, vt.Owner(o))
+	} else {
+		clear(&label_ids)
+		vt.labels_present(s, &label_ids)
+		for id in label_ids {
+			if id != db.label {
+				others = true
+			}
+		}
+		if owners_on && vt.owner_count(s) > 0 {
 			others = true
 		}
 	}
 	if !others {
 		return
 	}
-	before := label_vset_snapshot(s)
-	fresh, _, err := vt.split_label(s, db.label)
+	before := label_vset_snapshot(s, o)
+	fresh: vt.Vset
+	err: vt.Error
+	if ow.is_user(o) {
+		fresh, _, err = vt.split_scope(s, db.label, vt.Owner(o))
+	} else {
+		fresh, _, err = vt.split_label(s, db.label)
+	}
 	if err != .None || fresh == nil {
 		return
 	}
 	label_vset_settle(db.id, before, s)
-	object_account(db, vt.memory_usage(fresh))
+	if ow.is_user(o) {
+		object_account(db, vt.scope_memory(fresh, db.label, vt.Owner(o)))
+		db_used_memory += label_vset_global(fresh)
+	} else {
+		object_account(db, vt.memory_usage(fresh))
+	}
 	vp.ref.addr = uintptr(rawptr(fresh))
 }
 
@@ -732,6 +956,27 @@ label_vset_detach_key :: proc(db: ^Db, key: []u8) {
 
 label_copy_target :: proc(dbi: int, key: []u8, replace: bool) -> (target: ^Db, refusal: string, occupied: bool) {
 	l := lookup_make(key)
+	if owner_user() {
+		e := access.owner_entry
+		if e == nil {
+			return nil, ERR_OWNER_INVALID, false
+		}
+		op := owner_space_part(owner_space_of(e, dbi), access.id)
+		if op == nil || !label_live_in(&op.db, &l) {
+			if other, _, i := owner_locate_other(dbi, key, &l, access.id, e, access.vis); i >= 0 {
+				if !replace {
+					return nil, "", true
+				}
+				return nil, label_in_use_text(ERR_LABEL_NAME_IN_USE, other.label, other.owner), false
+			}
+		}
+		made, ok := owner_part_make(e, dbi, access.id)
+		if !ok {
+			return nil, ERR_OWNER_PARTITIONS, false
+		}
+		owner_touch(&made.db)
+		return &made.db, "", false
+	}
 	own := label_part(dbi, access.id)
 	if own == nil || !label_live_in(own, &l) {
 		if other, _, i := label_locate_other(dbi, key, &l, access.id, access.vis); i >= 0 {
@@ -749,6 +994,9 @@ label_copy_target :: proc(dbi: int, key: []u8, replace: bool) -> (target: ^Db, r
 }
 
 label_flush :: proc(home: ^Db, all: bool, lazy: bool) -> i64 {
+	if owners_on {
+		return owner_flush(home, all, lazy)
+	}
 	removed: i64 = 0
 	n := len(db_parts)
 	for k in 0 ..< n {

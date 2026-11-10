@@ -50,6 +50,7 @@ fi
 mkdir -p "$out" || exit 2
 wrapper="$PWD/test/labelled/eski.sh"
 export ESKI_LABELLED_KEYSPACE_THREADS="$threads"
+mkdir -p "$out/server-dir" || exit 2
 status=0
 
 check() {
@@ -67,7 +68,7 @@ for runner in "${runners[@]}"; do
 				ref="$out/conformance-off.json"
 				ESKI_LABELLED_MODE=off ./test/conformance/run.sh --suite redis --server "$wrapper" --summary "$ref" >"$out/conformance-off.log" 2>&1
 			fi
-			./test/conformance/run.sh --suite redis --server "$wrapper" --summary "$out/conformance.json" >"$out/conformance.log" 2>&1
+			ESKI_LABELLED_DIR="$out/server-dir" ./test/conformance/run.sh --suite redis --server "$wrapper" --summary "$out/conformance.json" >"$out/conformance.log" 2>&1
 			check conformance --result "$out/conformance.json" --reference "$ref"
 			;;
 		vectorset)
@@ -76,15 +77,15 @@ for runner in "${runners[@]}"; do
 				ref="$out/vectorset-off.json"
 				ESKI_LABELLED_MODE=off ./test/conformance/run.sh --suite vectorset --server "$wrapper" --summary "$ref" >"$out/vectorset-off.log" 2>&1
 			fi
-			./test/conformance/run.sh --suite vectorset --server "$wrapper" --summary "$out/vectorset.json" >"$out/vectorset.log" 2>&1
+			ESKI_LABELLED_DIR="$out/server-dir" ./test/conformance/run.sh --suite vectorset --server "$wrapper" --summary "$out/vectorset.json" >"$out/vectorset.log" 2>&1
 			check vectorset --result "$out/vectorset.json" --reference "$ref"
 			;;
 		compare)
-			ESKI_VSET_SERVER="$wrapper" bash test/vectorset/compare.sh --quiet --summary "$out/compare.json" >"$out/compare.log" 2>&1
+			ESKI_LABELLED_DIR="$out/server-dir" ESKI_VSET_SERVER="$wrapper" bash test/vectorset/compare.sh --quiet --summary "$out/compare.json" >"$out/compare.log" 2>&1
 			check compare --result "$out/compare.json"
 			;;
 		smoke)
-			ESKI_SMOKE_BINARY="$wrapper" ESKI_SMOKE_KEYSPACE_THREADS="$threads" ESKI_SMOKE_FULL_DIR="$out/smoke-full" bash test/smoke.sh >"$out/smoke.log" 2>&1
+			ESKI_LABELLED_DIR="$out/server-dir" ESKI_SMOKE_BINARY="$wrapper" ESKI_SMOKE_KEYSPACE_THREADS="$threads" ESKI_SMOKE_FULL_DIR="$out/smoke-full" bash test/smoke.sh >"$out/smoke.log" 2>&1
 			check smoke --result "$out/smoke.log"
 			;;
 	esac

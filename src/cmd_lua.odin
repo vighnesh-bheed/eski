@@ -53,7 +53,25 @@ lua_options :: proc() -> lr.Options {
 		max_depth = 0,
 		hook_count = 1000,
 		enable_deprecated_api = 1 if lua_enable_deprecated_api else 0,
+		isolate = 1 if labels_on else 0,
 	}
+}
+
+lua_scope_load :: proc(client: ^Conn, body: []u8, pinned: bool) -> ^Lua_Source {
+	digest := lua_digest(body)
+	fresh := lua_cache_find(digest) == nil
+	if fresh && !lua_source_prepare(client, body, digest) {
+		return nil
+	}
+	entry := lua_cache_hold(body, digest, pinned)
+	if entry == nil {
+		if fresh {
+			key := lua_digest_key(digest[:])
+			lr.eval_forget(lua_arg(key[:]))
+		}
+		reply_error(client, "OOM Lua source cache limit exceeded")
+	}
+	return entry
 }
 
 lua_arg :: proc(bytes: []u8) -> lr.Arg {
@@ -82,7 +100,7 @@ lua_outer_readonly :: proc(cmd: ^Command, argv: [][]u8) -> bool {
 	if cmd.handler == cmd_evalsha {
 		digest, good := lua_digest_parse(argv[1])
 		if good {
-			if entry := lua_cache_find(digest); entry != nil {
+			if entry := lua_cache_lookup(digest); entry != nil {
 				_, flags, _, err := lua_source_plan(entry.body)
 				return err == "" && flags & LUA_FLAG_NO_WRITES != 0
 			}
@@ -107,7 +125,7 @@ lua_outer_persistence_write :: proc(cmd: ^Command, argv: [][]u8) -> bool {
 		if !good {
 			return false
 		}
-		entry := lua_cache_find(digest)
+		entry := lua_cache_lookup(digest)
 		if entry == nil {
 			return false
 		}
@@ -124,7 +142,7 @@ lua_memory_used :: proc "contextless" () -> int {
 }
 
 lua_host_memory_used :: #force_inline proc "contextless" () -> int {
-	total := lua_cache_bytes + lua_retired_bytes + lua_library_host_memory()
+	total := lua_cache_bytes + lua_retired_bytes + lua_scope_bytes + lua_library_host_memory()
 	if run := lua_active; run != nil {
 		total += size_of(Lua_Invocation) + run.host_bytes + run.temporary_bytes + run.capture.wcap + lua_busy_memory(&run.busy) + cap(run.debug.input) + cap(run.debug.frame) + len(run.debug.parser.args)*size_of([]u8)
 	}
@@ -596,10 +614,15 @@ lua_eval_common :: proc(client: ^Conn, argv: [][]u8, digest_only, readonly: bool
 	if digest_only {
 		digest, ok := lua_digest_parse(argv[1])
 		if ok {
-			entry = lua_cache_find(digest, true)
+			entry = lua_cache_lookup(digest, true)
 		}
 		if entry == nil {
 			reply_error(client, LUA_ERR_NOSCRIPT)
+			return
+		}
+	} else if labels_on {
+		entry = lua_scope_load(client, argv[1], false)
+		if entry == nil {
 			return
 		}
 	} else {
@@ -686,11 +709,20 @@ lua_invoke :: proc(client: ^Conn, argv: [][]u8, numkeys: int, text: []u8, readon
 	if debug_mode == 2 {
 		plog(LOG_NOTICE, "Eski synchronous debugging eval session started")
 	}
+	home: ^Lua_Scope
+	outer_random: u64
+	if labels_on {
+		home = lua_scope_of(access_scope(), true)
+		outer_random = lr.random_exchange(lua_scope_random(home))
+	}
 	if library == nil {
 		key := lua_digest_key(identifier)
 		result = lr.eval_cached(lua_arg(text), lua_arg(key[:]), c.size_t(numkeys), keys, c.size_t(argument_count), args, i32(client.resp), &options, &callbacks)
 	} else {
 		result = lr.library_call(library.handle, c.size_t(index), c.size_t(numkeys), keys, c.size_t(argument_count), args, i32(client.resp), &options, &callbacks)
+	}
+	if home != nil {
+		home.random = lr.random_exchange(outer_random)
 	}
 	defer lr.free_result(&result)
 	lua_note_runtime(&run, &result.stats)
@@ -809,6 +841,12 @@ cmd_script :: proc(client: ^Conn, argv: [][]u8) {
 			reply_wrong_args(client, "script|load")
 			return
 		}
+		if labels_on {
+			if entry := lua_scope_load(client, argv[2], true); entry != nil {
+				reply_bulk(client, entry.digest[:])
+			}
+			return
+		}
 		digest := lua_digest(argv[2])
 		if !lua_source_prepare(client, argv[2], digest) {
 			return
@@ -829,7 +867,7 @@ cmd_script :: proc(client: ^Conn, argv: [][]u8) {
 		reply_array(client, len(argv)-2)
 		for arg in argv[2:] {
 			digest, ok := lua_digest_parse(arg)
-			reply_int(client, 1 if ok && lua_cache_find(digest) != nil else 0)
+			reply_int(client, 1 if ok && lua_cache_lookup(digest) != nil else 0)
 		}
 	case eq_nocase(sub, "flush"):
 		asynchronous := cfg.lazyfree_lazy_user_flush

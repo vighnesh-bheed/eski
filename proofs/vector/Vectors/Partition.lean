@@ -436,6 +436,35 @@ theorem hidden_history_view (ops : PartOps N V P) (sees : L → L → Bool) (hs 
   unfold restrictTo at this
   rw [this]
 
+def viewMemory (acc : PartAcc N P) (bytes : P → Nat) (base : Nat) (le : L → L → Bool) (labelsU : List L)
+    (namesU : List N) (r : ReaderOf L) (s : LState L N P) : Nat :=
+  if (viewOpen acc le labelsU namesU r s).size = 0 then 0
+  else base + ((viewOpen acc le labelsU namesU r s).labels.map (fun l => ((s.parts l).map bytes).getD 0)).sum
+
+theorem viewMemory_restrict (acc : PartAcc N P) (bytes : P → Nat) (base : Nat) (le : L → L → Bool)
+    (labelsU : List L) (namesU : List N) (r : ReaderOf L) (hown : r.vis r.own = true) (s : LState L N P) :
+    viewMemory acc bytes base le labelsU namesU r (restrict r s) = viewMemory acc bytes base le labelsU namesU r s := by
+  unfold viewMemory
+  rw [viewOpen_restrict acc le labelsU namesU r hown s]
+  have h : (viewOpen acc le labelsU namesU r s).labels.map (fun l => (((restrict r s).parts l).map bytes).getD 0) =
+      (viewOpen acc le labelsU namesU r s).labels.map (fun l => ((s.parts l).map bytes).getD 0) := by
+    apply List.map_congr_left
+    intro l hl
+    rw [restrict_parts_view r s l (visibleLabels_vis le labelsU r s l hl)]
+  rw [h]
+
+theorem hidden_history_memory (ops : PartOps N V P) (sees : L → L → Bool) (hs : Sees sees) (gt : L → L → Bool)
+    (acc : PartAcc N P) (bytes : P → Nat) (base : Nat) (le : L → L → Bool) (labelsU : List L) (namesU : List N)
+    (R : L) (cs : List (Cmd L N V)) (s : LState L N P) :
+    viewMemory acc bytes base le labelsU namesU (writerOf sees gt R) (wrun ops sees cs s) =
+      viewMemory acc bytes base le labelsU namesU (writerOf sees gt R) (wrun ops sees (purge sees R cs) s) := by
+  have hown : (writerOf sees gt R).vis R = true := hs.refl R
+  rw [← viewMemory_restrict acc bytes base le labelsU namesU _ hown (wrun ops sees cs s),
+    ← viewMemory_restrict acc bytes base le labelsU namesU _ hown (wrun ops sees (purge sees R cs) s)]
+  have := run_purge ops sees hs gt R cs s
+  unfold restrictTo at this
+  rw [this]
+
 end Steps
 
 inductive PMode where

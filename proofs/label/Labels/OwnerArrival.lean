@@ -7,6 +7,8 @@ def errInvalidOwner : String := "ERR invalid owner"
 def errOwnerRequired : String := "ERR this login must name an owner with every command"
 def errOwnerContext : String := "ERR the owner differs from the context's owner"
 def errOwnerBound : String := "ERR this connection is bound to another owner"
+def errOwnerTransaction : String := "ERR the command's owner differs from the transaction's owner"
+def errOperator : String := "ERR this command needs a login with the owner-operator right"
 
 inductive Pick where
   | none
@@ -28,9 +30,10 @@ structure OConn where
   wmixed : Bool
   wlabel : TLabel
   wowner : Owner
+  wlmixed : Bool
 deriving DecidableEq, Repr
 
-def oconnFresh : OConn := ⟨false, .shared, .shared, false, false, tbottom, .shared⟩
+def oconnFresh : OConn := ⟨false, .shared, .shared, false, false, tbottom, .shared, false⟩
 
 structure OEnv where
   rules : List (List Nat × ORules)
@@ -121,7 +124,7 @@ def bindOwner (oc : OConn) (inMulti : Bool) (inner : List Arg) (o : Owner) : OCo
 
 def ownerPhase (r : ORules) (oc : OConn) (inMulti : Bool) (inner : List Arg) (topLabel : Bool)
     (pick : Pick) (ctx : Option Owner) (tok : Option TokOwner) : Except String (Owner × OConn) :=
-  if ownerTop inner && !(topLabel && r.operator) then .error errTop
+  if ownerTop inner && !(topLabel && r.operator) then .error (if topLabel then errOperator else errTop)
   else
     match credential r pick ctx tok with
     | .error m => .error m
@@ -130,7 +133,7 @@ def ownerPhase (r : ORules) (oc : OConn) (inMulti : Bool) (inner : List Arg) (to
       | .error m => .error m
       | .ok o =>
         if named.isSome && oc.pinned && o != oc.pin then .error errOwnerBound
-        else if named.isSome && inMulti && o != oc.owner then .error errTransaction
+        else if named.isSome && inMulti && o != oc.owner then .error errOwnerTransaction
         else .ok (o, bindOwner oc inMulti inner o)
 
 structure PO where
@@ -228,7 +231,7 @@ deriving DecidableEq, Repr
 def mayKill (ownersOn top : Bool) (r : TLabel) (operator : Bool) (o : Owner) (s : TLabel) (so : Owner) : Bool :=
   top || (domT r s && (!ownersOn || operator || o == so))
 
-def oclear (oc : OConn) : OConn := { oc with wany := false, wmixed := false }
+def oclear (oc : OConn) : OConn := { oc with wany := false, wmixed := false, wlmixed := false }
 
 def arrivalMsg : Arrival → String
   | .refused m => m
@@ -239,6 +242,13 @@ def afterRefusal (OD : ODyn) (id : Nat) (oc : OConn) (m : String) : ODyn :=
 
 def topLabelOf (E : AEnv) (l : TLabel) : Bool := domT l (ttop E.cfg.base.levels.length E.cfg.base.comps.length)
 
+def errOwnerPersistence : String := "ERR persistence is off while owner mode is on"
+
+def schemeLabelled (E : AEnv) : Bool :=
+  decide (1 < E.cfg.base.levels.length) || !E.cfg.base.comps.isEmpty || decide (1 < E.cfg.trusts.length)
+
+def ownerMsg (E : AEnv) (m : String) : String := if m == errPersistence && !schemeLabelled E then errOwnerPersistence else m
+
 def pinIn (D : ADyn) (id : Nat) (c : AConn) (inner : List Arg) (l : TLabel) : ADyn :=
   setConn D id (pinConn ((connOf D id).getD c) inner l)
 
@@ -247,7 +257,7 @@ def arriveO (E : AEnv) (OE : OEnv) (D : ADyn) (OD : ODyn) (id : Nat) (args : Lis
   | none => (.refused "no connection", D, OD)
   | some c =>
     match labelStepO E OE D id c args with
-    | ⟨.refused m, D1, _, _⟩ => (.refused m, D1, afterRefusal OD id (oconnOf OD id) m)
+    | ⟨.refused m, D1, _, _⟩ => (.refused (ownerMsg E m), D1, afterRefusal OD id (oconnOf OD id) m)
     | ⟨.ok l inner ctx, D1, pick, tok⟩ =>
       if !cmdExists inner then (.ok l .shared inner ctx, D1, OD) else
       match ownerPhase (orulesOf OE c.login) (oconnOf OD id) c.inMulti inner (topLabelOf E l) pick
@@ -320,15 +330,20 @@ def contextUseO (E : AEnv) (D : ADyn) (OD : ODyn) (c : AConn) (inner : List Arg)
         if argIs inner 1 "drop" then (.base .ok, { D1 with ctxs := ctxRemove D1.ctxs x.handle })
         else (.info x.label (ctxOwner OD x.handle), D1)
 
+def errExecWatchOwner : String := "EXECABORT Transaction discarded because of: " ++ stripErr errOwnerTransaction
+
+def watchText (c : AConn) (oc : OConn) : String := if oc.wlmixed || oc.wlabel != c.bound then errExecWatch else errExecWatchOwner
+
 def execReplyO (c : AConn) (oc : OConn) : Reply :=
   if c.dirty then .err errExecDirty
-  else if oc.wany && (oc.wmixed || oc.wlabel != c.bound || oc.wowner != oc.owner) then .err errExecWatch
+  else if oc.wany && (oc.wmixed || oc.wlabel != c.bound || oc.wowner != oc.owner) then .err (watchText c oc)
   else if c.cas then .nil
   else .exec
 
 def onote (oc : OConn) (l : TLabel) (o : Owner) : OConn :=
   if !oc.wany then { oc with wany := true, wlabel := l, wowner := o }
-  else if oc.wlabel != l || oc.wowner != o then { oc with wmixed := true }
+  else if oc.wlabel != l then { oc with wmixed := true, wlmixed := true }
+  else if oc.wowner != o then { oc with wmixed := true }
   else oc
 
 def handleO (E : AEnv) (OE : OEnv) (D : ADyn) (OD : ODyn) (id : Nat) (l : TLabel) (o : Owner) (inner : List Arg) :
@@ -675,14 +690,22 @@ theorem never_every_unless_operator_pin {r : ORules} {oc oc' : OConn} {inner : L
   · exact ⟨h3, h4, h5⟩
 
 theorem exec_owner_watch_refused {c : AConn} {oc : OConn} (hd : c.dirty = false) (hw : oc.wany = true)
-    (ho : oc.wowner ≠ oc.owner) : execReplyO c oc = .err errExecWatch := by
+    (ho : oc.wowner ≠ oc.owner) : execReplyO c oc = .err (watchText c oc) := by
   simp [execReplyO, hd, hw, ho]
+
+theorem exec_owner_only_text {c : AConn} {oc : OConn} (hl : oc.wlmixed = false) (hb : oc.wlabel = c.bound) :
+    watchText c oc = errExecWatchOwner := by
+  simp [watchText, hl, hb]
+
+theorem exec_label_text_first {c : AConn} {oc : OConn} (hl : (oc.wlmixed || oc.wlabel != c.bound) = true) :
+    watchText c oc = errExecWatch := by
+  simp only [watchText, hl, ↓reduceIte]
 
 theorem exec_owner_watch_data_free {c : AConn} {oc : OConn} (hd : c.dirty = false)
     (hw : (oc.wany && (oc.wmixed || oc.wlabel != c.bound || oc.wowner != oc.owner)) = true) (b : Bool) :
-    execReplyO c oc = .err errExecWatch ∧ execReplyO { c with cas := b } oc = .err errExecWatch := by
+    execReplyO c oc = .err (watchText c oc) ∧ execReplyO { c with cas := b } oc = .err (watchText c oc) := by
   simp only [execReplyO, hd, hw]
-  simp
+  simp [watchText]
 
 theorem exec_same_scope {c : AConn} {oc : OConn} (hd : c.dirty = false)
     (hw : (oc.wany && (oc.wmixed || oc.wlabel != c.bound || oc.wowner != oc.owner)) = false) :
@@ -694,18 +717,20 @@ theorem onote_scope (oc : OConn) (l : TLabel) (o : Owner) :
   unfold onote
   split
   · simp
-  · split
-    · rename_i h1 _
-      have hw : oc.wany = true := by simpa using h1
-      simp [hw]
-    · rename_i h1 h2
-      have hw : oc.wany = true := by simpa using h1
-      simp only [Bool.or_eq_true, bne_iff_ne, ne_eq, not_or, Decidable.not_not] at h2
-      exact ⟨hw, Or.inr ⟨h2.1, h2.2⟩⟩
+  · rename_i h1
+    have hw : oc.wany = true := by simpa using h1
+    split
+    · simp [hw]
+    · split
+      · simp [hw]
+      · rename_i h2 h3
+        have e2 : oc.wlabel = l := by simpa using h2
+        have e3 : oc.wowner = o := by simpa using h3
+        exact ⟨hw, Or.inr ⟨e2, e3⟩⟩
 
 theorem onote_mixed_owner {oc : OConn} {l : TLabel} {o : Owner} (hw : oc.wany = true) (ho : oc.wowner ≠ o) :
     (onote oc l o).wmixed = true := by
-  simp [onote, hw, ho]
+  by_cases hl : oc.wlabel = l <;> simp [onote, hw, ho, hl]
 
 theorem script_denies_owner_prefix {args : List Arg} (h1 : isCmd args "label" = true) (h2 : argIs args 1 "as" = true) :
     scriptDenied args = true := by
@@ -1085,6 +1110,57 @@ theorem arriveO_refused_keeps_pins {E : AEnv} {OE : OEnv} {D D' : ADyn} {OD OD' 
         rw [hc1] at h3
         exact ⟨⟨c2, h2, by rw [h3]; exact hs1⟩, afterRefusal_pin OD id _⟩
       · simp at h
+
+def unpinned (oc oc' : OConn) : OConn := { oc' with pinned := oc.pinned, pin := oc.pin }
+
+def arriveOVeto (E : AEnv) (OE : OEnv) (D : ADyn) (OD : ODyn) (id : Nat) (args : List Arg) : ArrivalO × ADyn × ODyn :=
+  match connOf D id with
+  | none => (.refused "no connection", D, OD)
+  | some c =>
+    match labelStepO E OE D id c args with
+    | ⟨.refused m, D1, _, _⟩ => (.refused (ownerMsg E m), D1, afterRefusal OD id (oconnOf OD id) m)
+    | ⟨.ok l inner ctx, D1, pick, tok⟩ =>
+      if !cmdExists inner then (.ok l .shared inner ctx, D1, OD) else
+      match ownerPhase (orulesOf OE c.login) (oconnOf OD id) c.inMulti inner (topLabelOf E l) pick
+          (ctx.map (fun x => ctxOwner OD x.handle)) tok with
+      | .error m =>
+        (.refused (arrivalMsg (refuse D1 id ((connOf D1 id).getD c) inner m).1), (refuse D1 id ((connOf D1 id).getD c) inner m).2,
+         afterRefusal OD id (oconnOf OD id) (arrivalMsg (refuse D1 id ((connOf D1 id).getD c) inner m).1))
+      | .ok (o, oc') => (.ok l o inner ctx, D1, setOConn OD id (unpinned (oconnOf OD id) oc'))
+
+theorem arriveOVeto_keeps_pins {E : AEnv} {OE : OEnv} {D D' : ADyn} {OD OD' : ODyn} {id : Nat} {args : List Arg}
+    {a : ArrivalO} {c : AConn} (hc : connOf D id = some c) (h : arriveOVeto E OE D OD id args = (a, D', OD')) :
+    (∃ c', connOf D' id = some c' ∧ sessOf c' = sessOf c) ∧
+      (oconnOf OD' id).pinned = (oconnOf OD id).pinned ∧ (oconnOf OD' id).pin = (oconnOf OD id).pin := by
+  obtain ⟨c1, hc1, hs1⟩ := labelStepO_sess (E := E) (OE := OE) (args := args) hc
+  unfold arriveOVeto at h
+  rw [hc] at h
+  simp only at h
+  split at h
+  · rename_i mm D1 pick tok hls
+    simp only [Prod.mk.injEq] at h
+    obtain ⟨_, rfl, rfl⟩ := h
+    rw [hls] at hc1
+    exact ⟨⟨c1, hc1, hs1⟩, afterRefusal_pin OD id mm⟩
+  · rename_i l inner ctx D1 pick tok hls
+    rw [hls] at hc1
+    simp only at hc1
+    split at h
+    · simp only [Prod.mk.injEq] at h
+      obtain ⟨_, rfl, rfl⟩ := h
+      exact ⟨⟨c1, hc1, hs1⟩, rfl, rfl⟩
+    · split at h
+      · rename_i mm hp
+        simp only [Prod.mk.injEq] at h
+        obtain ⟨_, rfl, rfl⟩ := h
+        obtain ⟨c2, h2, h3⟩ := refuse_sess hc1 inner mm (c := (connOf D1 id).getD c)
+        rw [hc1] at h3
+        exact ⟨⟨c2, h2, by rw [h3]; exact hs1⟩, afterRefusal_pin OD id _⟩
+      · simp only [Prod.mk.injEq] at h
+        obtain ⟨_, rfl, rfl⟩ := h
+        refine ⟨⟨c1, hc1, hs1⟩, ?_⟩
+        rw [oconnOf_setOConn]
+        exact ⟨rfl, rfl⟩
 
 theorem labelStepO_ok_conn {E : AEnv} {OE : OEnv} {D : ADyn} {id : Nat} {c : AConn} {args inner : List Arg}
     {l : TLabel} {ctx : Option ACtx} (hc : connOf D id = some c) (h : (labelStepO E OE D id c args).arrival = .ok l inner ctx) :

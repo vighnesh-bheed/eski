@@ -137,17 +137,22 @@ vset_tables_mirror_parser_metadata :: proc(t: ^testing.T) {
 		testing.expect_value(t, s.last, spec.last)
 		testing.expect_value(t, s.step, spec.step)
 		testing.expect_value(t, len(s.specs), len(spec.specs))
+		writes := .Write in s.flags
 		for k, i in spec.specs {
 			m := s.specs[i]
 			testing.expect(t, int(m.search) == int(k.search) && m.pos == k.pos && m.keyword == k.keyword && m.from == k.from)
-			testing.expect(t, int(m.find) == int(k.find) && m.a == k.a && m.b == k.b && m.c == k.c && transmute(u16)m.flags == transmute(u16)k.flags)
+			testing.expect(t, int(m.find) == int(k.find) && m.a == k.a && m.b == k.b && m.c == k.c)
+			testing.expect_value(t, transmute(u16)k.flags, transmute(u16)va.Key_Flags{.Rw, .Access, .Update})
+			testing.expectf(t, m.flags == (Key_Flags{.Rw, .Access, .Update} if writes else Key_Flags{.Ro, .Access}), "%s key flags %v", spec.name, m.flags)
 		}
 		d := cmd_docs[di]
 		testing.expect_value(t, d.summary, doc.summary)
 		testing.expect_value(t, d.since, doc.since)
 		testing.expect_value(t, d.module, doc.module)
 		testing.expect_value(t, d.group, Cmd_Group.Module)
-		testing.expect_value(t, d.acl, Acl_Cats{})
+		testing.expect_value(t, transmute(u32)doc.acl, u32(0))
+		want := Acl_Cats{.Write if writes else .Read, .Fast if .Fast in s.flags else .Slow}
+		testing.expectf(t, d.acl == want, "%s categories %v, want %v", spec.name, d.acl, want)
 		testing.expectf(t, vt_args_equal(doc.args, d.args), "%s arguments differ", doc.name)
 		slot := lookup_entry(transmute([]u8)strings.to_lower(spec.name, context.temp_allocator))
 		testing.expectf(t, slot != nil && slot.cmd.name == spec.name && slot.cmd.arity == int(spec.arity), "%s is not registered as written", spec.name)
@@ -156,6 +161,109 @@ vset_tables_mirror_parser_metadata :: proc(t: ^testing.T) {
 		testing.expect(t, cmd_docs[i - 1].name < cmd_docs[i].name)
 		testing.expect_value(t, cmd_specs[i].name, cmd_docs[i].name)
 	}
+}
+
+@(private = "file")
+Vset_Login :: struct {
+	user:    string,
+	rules:   []string,
+	allowed: []string,
+	denial:  Acl_Verdict,
+}
+
+@(private = "file")
+vt_probe :: proc(name: string) -> [][]u8 {
+	switch name {
+	case "VADD":
+		return vt_args("VADD", "v", "VALUES", "2", "1", "0", "x")
+	case "VCARD", "VDIM", "VINFO", "VRANDMEMBER":
+		return vt_args(name, "v")
+	case "VRANGE":
+		return vt_args("VRANGE", "v", "-", "+")
+	case "VSETATTR":
+		return vt_args("VSETATTR", "v", "a", "{}")
+	case "VSIM":
+		return vt_args("VSIM", "v", "VALUES", "2", "1", "0")
+	}
+	return vt_args(name, "v", "a")
+}
+
+@(private = "file")
+vt_has :: proc(list: []string, name: string) -> bool {
+	for n in list {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+@(private = "file")
+vt_listed :: proc(reply: string, name: string) -> bool {
+	return strings.contains(reply, strings.concatenate({"\r\n", name, "\r\n"}, context.temp_allocator))
+}
+
+@(test)
+vset_acl_categories_grant_reads_and_writes :: proc(t: ^testing.T) {
+	v: Vset_Test
+	vt_open(&v)
+	defer vt_close(&v)
+	context.allocator = runtime.heap_allocator()
+	acl_init()
+	all := []string{"VADD", "VCARD", "VDIM", "VEMB", "VGETATTR", "VINFO", "VISMEMBER", "VLINKS", "VRANDMEMBER", "VRANGE", "VREM", "VSETATTR", "VSIM"}
+	reads := []string{"VCARD", "VDIM", "VEMB", "VGETATTR", "VINFO", "VISMEMBER", "VLINKS", "VRANDMEMBER", "VRANGE", "VSIM"}
+	writes := []string{"VADD", "VREM", "VSETATTR"}
+	fast := []string{"VCARD", "VDIM", "VEMB", "VGETATTR", "VINFO", "VLINKS", "VSETATTR"}
+	slow := []string{"VADD", "VISMEMBER", "VRANDMEMBER", "VRANGE", "VREM", "VSIM"}
+	logins := []Vset_Login {
+		{"vt-read", {"~*", "+@read"}, reads, .Command_Denied},
+		{"vt-write", {"~*", "+@write"}, writes, .Command_Denied},
+		{"vt-nowrite", {"~*", "+@all", "-@write"}, reads, .Command_Denied},
+		{"vt-rokeys", {"%R~*", "+@all"}, reads, .Key_Denied},
+		{"vt-fast", {"~*", "+@fast"}, fast, .Command_Denied},
+		{"vt-named", {"~*", "-@all", "+vadd", "+VSIM", "+vcard"}, {"VADD", "VSIM", "VCARD"}, .Command_Denied},
+		{"vt-unnamed", {"~*", "+@all", "-vadd", "-vsim"}, {"VCARD", "VDIM", "VEMB", "VGETATTR", "VINFO", "VISMEMBER", "VLINKS", "VRANDMEMBER", "VRANGE", "VREM", "VSETATTR"}, .Command_Denied},
+		{"vt-mixed", {"~*", "+@read", "+vadd", "-vsim"}, {"VADD", "VCARD", "VDIM", "VEMB", "VGETATTR", "VINFO", "VISMEMBER", "VLINKS", "VRANDMEMBER", "VRANGE"}, .Command_Denied},
+	}
+	for l in logins {
+		args := make([dynamic]string, context.temp_allocator)
+		append(&args, "ACL", "SETUSER", l.user, "reset", "on", "nopass")
+		append(&args, ..l.rules)
+		testing.expect_value(t, vt_call(&v, cmd_acl, vt_args(..args[:])), "+OK\r\n")
+		u := acl_user_find(transmute([]u8)l.user)
+		if !testing.expectf(t, u != nil, "%s was not created", l.user) {
+			continue
+		}
+		for name in all {
+			verdict, _ := acl_check_user(u, int(acl_command_id(name)), vt_probe(name))
+			want := Acl_Verdict.Allowed if vt_has(l.allowed, name) else l.denial
+			testing.expectf(t, verdict == want, "%s running %s: %v, want %v", l.user, name, verdict, want)
+			dry := make([dynamic][]u8, context.temp_allocator)
+			append(&dry, transmute([]u8)string("ACL"), transmute([]u8)string("DRYRUN"), transmute([]u8)l.user)
+			append(&dry, ..vt_probe(name))
+			ran := vt_call(&v, cmd_acl, dry[:]) == "+OK\r\n"
+			testing.expectf(t, ran == (want == .Allowed), "%s ACL DRYRUN %s ran %v", l.user, name, ran)
+		}
+	}
+	cats := [?]struct {
+		name:  string,
+		names: []string,
+	}{{"read", reads}, {"write", writes}, {"fast", fast}, {"slow", slow}}
+	for cat in cats {
+		listing := vt_run(&v, cmd_acl, "ACL", "CAT", cat.name)
+		filtered := vt_run(&v, cmd_command, "COMMAND", "LIST", "FILTERBY", "ACLCAT", cat.name)
+		for name in all {
+			want := vt_has(cat.names, name)
+			testing.expectf(t, vt_listed(listing, name) == want, "ACL CAT %s lists %s: %v", cat.name, name, !want)
+			testing.expectf(t, vt_listed(filtered, name) == want, "COMMAND LIST FILTERBY ACLCAT %s lists %s: %v", cat.name, name, !want)
+		}
+	}
+	info := vt_run(&v, cmd_command, "COMMAND", "INFO", "VSIM", "VADD")
+	testing.expect(t, strings.contains(info, "*2\r\n+@read\r\n+@slow\r\n") && strings.contains(info, "*2\r\n+@write\r\n+@slow\r\n"))
+	testing.expect_value(t, vt_run(&v, cmd_command, "COMMAND", "GETKEYSANDFLAGS", "VSIM", "k", "VALUES", "2", "1", "0"), "*1\r\n*2\r\n$1\r\nk\r\n*2\r\n+RO\r\n+access\r\n")
+	testing.expect_value(t, vt_run(&v, cmd_command, "COMMAND", "GETKEYSANDFLAGS", "VADD", "k", "VALUES", "2", "1", "0", "e"), "*1\r\n*2\r\n$1\r\nk\r\n*3\r\n+RW\r\n+access\r\n+update\r\n")
+	testing.expect_value(t, vt_run(&v, cmd_acl, "ACL", "CAT", "vectorset"), "-ERR Unknown category 'vectorset'\r\n")
+	testing.expect_value(t, vt_run(&v, cmd_acl, "ACL", "DELUSER", "vt-read", "vt-write", "vt-nowrite", "vt-rokeys", "vt-fast", "vt-named", "vt-unnamed", "vt-mixed"), ":8\r\n")
 }
 
 @(test)

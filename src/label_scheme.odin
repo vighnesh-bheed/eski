@@ -9,6 +9,12 @@ LABEL_SCHEME_MEMCACHED :: "a label scheme needs the memcached endpoint off, beca
 OWNERS_RESERVED_LEVEL :: "owner mode needs a label scheme without a level named OWNER or SHARED"
 OWNERS_LEVEL_RESERVED :: "OWNER and SHARED are reserved and cannot name a level while owner mode is on"
 OWNERS_STAY_ON :: "owner mode cannot be turned off"
+LABEL_SCHEME_KEYS :: "a label scheme needs a server without keys, because existing keys carry no label"
+OWNERS_KEYS :: "owner mode needs a server without keys, because existing keys carry no owner"
+OWNERS_PERSISTENCE :: "owner mode needs persistence off: set save \"\", appendonly no and no save in shutdown-on-sigterm or shutdown-on-sigint first"
+OWNERS_PERSISTENCE_ON :: "persistence stays off while owner mode is on"
+OWNERS_MEMCACHED :: "owner mode needs the memcached endpoint off, because its requests carry no owner"
+LABEL_STARTUP_FILE :: "holds data that carries no labels or owners, and a server with a label scheme or owner mode never loads it. Start once without the label scheme and owner mode to move the data out, or move the file away, then start again."
 
 Label_Name_Kind :: enum u8 {
 	Level,
@@ -22,6 +28,7 @@ label_context_idle: i64 = 3600
 label_context_cap: i64 = 1000
 label_scheme_runtime: bool
 owners_wanted: bool
+label_scheme_labelled: bool
 
 @(private = "file")
 label_audit_fd: linux.Fd = -1
@@ -318,10 +325,16 @@ label_scheme_apply :: proc() -> string {
 	labelled := lb.config_labelled(&label_scheme)
 	guarded := labelled || owners_wanted
 	if label_scheme_runtime && guarded && label_persistence_on() {
-		return LABEL_SCHEME_PERSISTENCE
+		return LABEL_SCHEME_PERSISTENCE if labelled else OWNERS_PERSISTENCE
 	}
 	if label_scheme_runtime && guarded && mc_port != 0 {
-		return LABEL_SCHEME_MEMCACHED
+		return LABEL_SCHEME_MEMCACHED if labelled else OWNERS_MEMCACHED
+	}
+	if label_scheme_runtime && labelled && !label_scheme_labelled && label_keys_held() {
+		return LABEL_SCHEME_KEYS
+	}
+	if label_scheme_runtime && owners_wanted && !owners_on && label_keys_held() {
+		return OWNERS_KEYS
 	}
 	if label_scheme_runtime && owners_wanted && owners_reserved() {
 		return OWNERS_LEVEL_RESERVED if owners_on else OWNERS_RESERVED_LEVEL
@@ -330,6 +343,7 @@ label_scheme_apply :: proc() -> string {
 	was_owners := owners_on
 	labels_on = guarded
 	owners_on = owners_wanted
+	label_scheme_labelled = labelled
 	access_scheme_changed()
 	if guarded {
 		keyspace_labels_enable()
@@ -343,9 +357,33 @@ label_scheme_apply :: proc() -> string {
 	return ""
 }
 
+@(private = "file")
+label_keys_held :: proc() -> bool {
+	keyspace_fence()
+	if owners_on && keyspace_owners_totals().holding > 0 {
+		return true
+	}
+	if label_dbs == nil {
+		for &d in dbs {
+			if db_size_of(&d) > 0 {
+				return true
+			}
+		}
+		return false
+	}
+	for &ld in label_dbs {
+		for p in ld.by_id {
+			if p != nil && db_size_of(p) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 label_persistence_refusal :: proc(enabling: bool) -> string {
 	if enabling && label_scheme_runtime && labels_on {
-		return LABEL_PERSISTENCE_ON
+		return LABEL_PERSISTENCE_ON if label_scheme_labelled else OWNERS_PERSISTENCE_ON
 	}
 	return ""
 }
@@ -416,12 +454,13 @@ label_scheme_startup :: proc() {
 	labelled := lb.config_labelled(&label_scheme)
 	labels_on = labelled || owners_wanted
 	owners_on = owners_wanted
+	label_scheme_labelled = labelled
 	access_scheme_changed()
 	if labels_on && label_persistence_on() {
-		config_fatal(0, "", LABEL_SCHEME_PERSISTENCE)
+		config_fatal(0, "", LABEL_SCHEME_PERSISTENCE if labelled else OWNERS_PERSISTENCE)
 	}
 	if labels_on && mc_port != 0 {
-		config_fatal(0, "", LABEL_SCHEME_MEMCACHED)
+		config_fatal(0, "", LABEL_SCHEME_MEMCACHED if labelled else OWNERS_MEMCACHED)
 	}
 	if owners_on && owners_reserved() {
 		config_fatal(0, "", OWNERS_RESERVED_LEVEL)

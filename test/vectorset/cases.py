@@ -2,6 +2,14 @@ import random
 import struct
 
 COMMANDS = ["VADD", "VSIM", "VREM", "VCARD", "VDIM", "VEMB", "VLINKS", "VINFO", "VSETATTR", "VGETATTR", "VRANDMEMBER", "VISMEMBER", "VRANGE"]
+WRITE_COMMANDS = ["VADD", "VREM", "VSETATTR"]
+FAST_COMMANDS = ["VCARD", "VDIM", "VEMB", "VGETATTR", "VINFO", "VLINKS", "VSETATTR"]
+READ_COMMANDS = [c for c in COMMANDS if c not in WRITE_COMMANDS]
+ACL_CATEGORIES = {c: ("@write" if c in WRITE_COMMANDS else "@read", "@fast" if c in FAST_COMMANDS else "@slow") for c in COMMANDS}
+ACL_DIFFERENCE = ("Eski gives the vector set commands the ordinary ACL categories, @read or @write with @fast or @slow, and declares the key of the read commands "
+                  "RO access, a deliberate difference from the reference, which leaves them outside every category and declares every key RW access update, "
+                  "because operators build logins by category; see docs/vector-sets.md")
+ACL_LISTINGS = {"read": READ_COMMANDS, "write": WRITE_COMMANDS, "fast": FAST_COMMANDS, "slow": [c for c in COMMANDS if c not in FAST_COMMANDS]}
 SEED = 20261106
 LUA_VSIM_SCORES = "return redis.call('VSIM', KEYS[1], 'VALUES', '2', '1', '0', 'WITHSCORES')"
 
@@ -151,17 +159,17 @@ def sec_introspection(plan):
         plan.case(["COMMAND", "LIST", "FILTERBY", "PATTERN", "V*"], "vector set command names", p)
         plan.case(["COMMAND", "COUNT"], "", p)
         for name in COMMANDS:
-            plan.case(["COMMAND", "INFO", name], "arity, flags, first/last/step, ACL categories, tips, key specs, subcommands", p, command=name)
+            plan.case(["COMMAND", "INFO", name], "arity, flags, first/last/step, ACL categories, tips, key specs, subcommands", p, norm="acl-metadata", command=name)
         for name in COMMANDS:
             plan.case(["COMMAND", "DOCS", name], "since, group, module and arguments tree, with the summary in Eski's own words left out", p, norm="docs-summary", command=name)
         plan.case(["COMMAND", "GETKEYS", "VADD", "k", "VALUES", "2", "1", "0", "e"], "", p, command="VADD")
         plan.case(["COMMAND", "GETKEYS", "VSIM", "k", "VALUES", "2", "1", "0"], "", p, command="VSIM")
         plan.case(["COMMAND", "GETKEYSANDFLAGS", "VADD", "k", "VALUES", "2", "1", "0", "e"], "", p, command="VADD")
-        plan.case(["COMMAND", "GETKEYSANDFLAGS", "VSIM", "k", "VALUES", "2", "1", "0"], "", p, command="VSIM")
+        plan.case(["COMMAND", "GETKEYSANDFLAGS", "VSIM", "k", "VALUES", "2", "1", "0"], "", p, norm="acl-metadata", command="VSIM")
         plan.case(["ACL", "CAT", "vectorset"], "there is no vectorset ACL category", p)
-    plan.step("acl-scan", None, 2, "exact", "no ACL category lists a vector set command", command="ACL")
-    plan.case(["ACL", "CAT", "read"], "sample category listing: no vector set command appears", 2)
-    plan.case(["ACL", "CAT", "write"], "sample category listing: no vector set command appears", 2)
+    plan.step("acl-scan", None, 2, "acl-scan", "the categories that list a vector set command: none on the reference, read, write, fast and slow on Eski", command="ACL")
+    plan.case(["ACL", "CAT", "read"], "sample category listing: the ten read commands on Eski, none on the reference", 2)
+    plan.case(["ACL", "CAT", "write"], "sample category listing: VADD, VREM and VSETATTR on Eski, none on the reference", 2)
 
 
 def sec_variants(plan):
@@ -645,7 +653,51 @@ def sec_lua(plan):
         plan.case(["EXEC"], "transaction replies", p, norm="exec-vsim", command="EXEC", inner=[b"VSIM", b"lk", b"ELE", raw(name), b"WITHSCORES"], position=1)
 
 
-SECTIONS = [("introspection", sec_introspection), ("variants", sec_variants), ("errors", sec_errors), ("semantics", sec_semantics), ("notifications", sec_notifications), ("lua", sec_lua)]
+LOGIN_PROBES = [
+    ["VADD", "acl:v", "VALUES", "2", "0", "1", "x"],
+    ["VCARD", "acl:v"],
+    ["VDIM", "acl:v"],
+    ["VEMB", "acl:v", "a"],
+    ["VGETATTR", "acl:v", "a"],
+    ["VINFO", "acl:v"],
+    ["VISMEMBER", "acl:v", "a"],
+    ["VLINKS", "acl:v", "a"],
+    ["VRANDMEMBER", "acl:v"],
+    ["VRANGE", "acl:v", "-", "+"],
+    ["VREM", "acl:v", "x"],
+    ["VSETATTR", "acl:v", "a", "{}"],
+    ["VSIM", "acl:v", "VALUES", "2", "1", "0"],
+]
+
+
+def login_verdicts(allowed, denied="command"):
+    return ["ran" if argv[0] in allowed else "NOPERM " + denied for argv in LOGIN_PROBES]
+
+
+def sec_acl(plan):
+    plan.section = "acl"
+    plan.flush()
+    plan.setup(["VADD", "acl:v", "VALUES", "2", "1", "0", "a", "SETATTR", '{"k":1}'])
+    every = set(COMMANDS)
+    logins = [
+        ("vset-read", ["~*", "+@read"], READ_COMMANDS, (), "command"),
+        ("vset-write", ["~*", "+@write"], WRITE_COMMANDS, (), "command"),
+        ("vset-nowrite", ["~*", "+@all", "-@write"], READ_COMMANDS, every, "command"),
+        ("vset-rokeys", ["%R~*", "+@all"], READ_COMMANDS, (), "key"),
+        ("vset-fast", ["~*", "+@fast"], FAST_COMMANDS, (), "command"),
+        ("vset-mixed", ["~*", "+@read", "+vadd", "-vsim"], ["VADD"] + [c for c in READ_COMMANDS if c != "VSIM"], ["VADD"], "command"),
+        ("vset-named", ["~*", "-@all", "+vadd", "+vsim", "+vcard"], ["VADD", "VSIM", "VCARD"], ["VADD", "VSIM", "VCARD"], "command"),
+        ("vset-unnamed", ["~*", "+@all", "-vadd", "-vsim"], every - {"VADD", "VSIM"}, every - {"VADD", "VSIM"}, "command"),
+    ]
+    for user, rules, eski, reference, denied in logins:
+        plan.setup(["ACL", "SETUSER", user, "reset", "on", ">vset-pass"] + rules)
+        plan.step("login", None, 2, "acl-login", "%s login with %s runs the vector set commands of its rules" % (user, " ".join(rules)), command="ACL",
+                  user=user.encode(), password=b"vset-pass", commands=[[raw(a) for a in argv] for argv in LOGIN_PROBES],
+                  expect={"eski": login_verdicts(eski, denied), "reference": login_verdicts(reference, denied)})
+    plan.setup(["ACL", "DELUSER"] + [user for user, _, _, _, _ in logins])
+
+
+SECTIONS = [("introspection", sec_introspection), ("variants", sec_variants), ("errors", sec_errors), ("semantics", sec_semantics), ("notifications", sec_notifications), ("lua", sec_lua), ("acl", sec_acl)]
 
 
 def sec_prepare(plan):

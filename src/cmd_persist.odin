@@ -1308,6 +1308,18 @@ persist_ll_hex16 :: proc "contextless" (l: ^Log_Line, v: u64) {
 	ll_str(l, string(tmp[:]))
 }
 
+persist_refuse_unlabelled_file :: proc() {
+	name := persist_filename()
+	pbuf: [PERSIST_PATH_MAX]u8
+	st: linux.Stat
+	if linux.stat(persist_cstr(name, pbuf[:]), &st) == .ENOENT {
+		return
+	}
+	cwd: [PERSIST_PATH_MAX]u8
+	plog(LOG_WARNING, "Refusing to start: the data file ", name, " in ", persist_cwd(cwd[:]), " ", LABEL_STARTUP_FILE)
+	linux.exit_group(1)
+}
+
 persist_rdb_load :: proc(merge: bool, at_startup: bool, preserve_libraries: bool = false) -> Load_Result {
 	keyspace_fence()
 	name := persist_filename()
@@ -1315,6 +1327,13 @@ persist_rdb_load :: proc(merge: bool, at_startup: bool, preserve_libraries: bool
 	fd, err := linux.open(persist_cstr(name, pbuf[:]), {.CLOEXEC})
 	if err == .ENOENT {
 		return .Not_Exist
+	}
+	if labels_on {
+		if err == .NONE {
+			linux.close(fd)
+		}
+		plog(LOG_WARNING, "Refusing to load ", name, ": a server with a label scheme or owner mode never loads data that carries no labels or owners")
+		return .Failed
 	}
 	if err != .NONE {
 		plog(LOG_WARNING, "Fatal error loading the DB, check server logs. Exiting.")
@@ -1506,6 +1525,9 @@ persist_startup :: proc() {
 	persist_install_signals()
 	pst.lastsave = persist_unix_now()
 	persist_update_gate()
+	if labels_on {
+		persist_refuse_unlabelled_file()
+	}
 	if !aof.started && !aof_startup() {
 		plog(LOG_WARNING, "Fatal error loading the DB, check server logs. Exiting.")
 		linux.exit_group(1)
@@ -1836,6 +1858,9 @@ digest_vset :: proc(h: ^blake2b.Context, s: vt.Vset) {
 	total: Digest
 	if labels_on {
 		a := label_vt_access()
+		if digest_owner_db != nil {
+			a = owner_scope_access(digest_owner_db)
+		}
 		v, err := vt.view_open(s, &a, vset_scratch_get())
 		if err == .None {
 			for j in 0 ..< vt.view_size(&v) {
@@ -1960,12 +1985,23 @@ digest_db :: proc(total: ^Digest, db: ^Db) {
 	}
 }
 
+digest_owner_db: ^Db
+
 persist_dataset_digest :: proc(final: ^[20]u8) {
 	total: Digest
 	if labels_on {
 		for p in db_parts {
 			digest_db(&total, p)
 		}
+		for od in owner_dbs {
+			for sp in od.spaces {
+				for k in 0 ..< int(sp.nparts) {
+					digest_owner_db = &owner_space_at(sp, k).db
+					digest_db(&total, digest_owner_db)
+				}
+			}
+		}
+		digest_owner_db = nil
 	} else {
 		for &db in dbs {
 			digest_db(&total, &db)
@@ -2021,7 +2057,7 @@ persist_raw_digest_value :: proc(c: ^Conn, keys: [][]u8) {
 		t, i := persist_raw_locate(db, key)
 		if i < 0 && labels_on {
 			l := lookup_make(key)
-			db, t, i = label_locate_other(db.id, key, &l, access.id, access.vis)
+			db, t, i = label_scope_other(db.id, key, &l)
 		}
 		if i >= 0 {
 			d = digest_of_value(persist_slot_value(db, &t.slots[i].key, &t.slots[i].val))
@@ -2036,6 +2072,8 @@ persist_debug :: proc(c: ^Conn, argv: [][]u8) -> bool {
 	}
 	sub := argv[1]
 	switch {
+	case labels_on && (eq_nocase(sub, "reload") || eq_nocase(sub, "loadaof")):
+		reply_error(c, access_persistence_text())
 	case eq_nocase(sub, "reload"):
 		persist_debug_reload(c, argv)
 	case eq_nocase(sub, "digest") && len(argv) == 2:

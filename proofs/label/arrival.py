@@ -23,13 +23,17 @@ SYNTAX = 'ERR syntax error'
 CAP = 'ERR this login already holds the maximum number of contexts'
 WATCH_IN_MULTI = 'ERR WATCH inside MULTI is not allowed'
 EXEC_WATCH = 'EXECABORT Transaction discarded because of: ' + TRANSACTION[len('ERR '):]
+OWNER_TRANSACTION = "ERR the command's owner differs from the transaction's owner"
+EXEC_WATCH_OWNER = 'EXECABORT Transaction discarded because of: ' + OWNER_TRANSACTION[len('ERR '):]
+OPERATOR = 'ERR this command needs a login with the owner-operator right'
+OWNER_PERSIST = 'ERR persistence is off while owner mode is on'
 REFUSALS = {PER_COMMAND: 'refused_per_command', TOKEN_ONLY: 'refused_token_only', TRANSACTION: 'refused_transaction',
             NESTED: 'refused_nested', MISMATCH: 'refused_mismatch', TOP: 'refused_top', PERSIST: 'refused_persist',
             SESSION_NEEDED: 'refused_session_needed', INVALID: 'refused_invalid', CONTEXT: 'refused_context',
             TOKEN: 'refused_token'}
 
 
-MUTANTS = ('pin_before_acl', 'kill_by_dominance')
+MUTANTS = ('pin_before_acl', 'kill_by_dominance', 'pin_at_admission')
 ACL_POOL = [b'subscribe', b'psubscribe', b'ssubscribe', b'client|tracking', b'get', b'swapdb', b'monitor', b'bgrewriteaof']
 
 
@@ -367,12 +371,14 @@ class Arrival:
         top_only = n in (b'monitor', b'swapdb', b'debug', b'latency') or \
             (n == b'client' and (self.arg_is(args, 1, b'pause') or self.arg_is(args, 1, b'unpause'))) or \
             (n == b'memory' and any(self.arg_is(args, 1, w) for w in (b'stats', b'doctor', b'malloc-stats', b'purge'))) or \
-            (n == b'slowlog' and self.arg_is(args, 1, b'reset')) or (n == b'config' and self.arg_is(args, 1, b'resetstat'))
+            (n == b'slowlog' and self.arg_is(args, 1, b'reset')) or (n == b'config' and self.arg_is(args, 1, b'resetstat')) or \
+            (n == b'function' and any(self.arg_is(args, 1, w) for w in (b'load', b'delete', b'flush', b'restore'))) or \
+            (n == b'script' and self.arg_is(args, 1, b'flush'))
         if top_only and not self.top(label):
             return TOP
         return None
 
-    def arrive(self, c, args):
+    def arrive(self, c, args, run=True):
         login = c['login']
         prefixed, ctx = False, None
         if self.is_cmd(args, b'label') and self.arg_is(args, 1, b'as'):
@@ -401,8 +407,11 @@ class Arrival:
             if msg:
                 return self.refuse(c, inner, msg), None
             if self.subscribing(inner) and not c['explicit'] and not c['multi']:
-                c['explicit'], c['session'] = True, label
-                self.note('session_pinned')
+                if run or self.mutant == 'pin_at_admission':
+                    c['explicit'], c['session'] = True, label
+                    self.note('session_pinned')
+                else:
+                    self.note('vetoed_unpinned')
         self.note('arrived_prefixed' if prefixed else 'arrived_session')
         if c['multi']:
             self.note('arrived_in_multi')
@@ -540,6 +549,11 @@ class Arrival:
             return self.context_cmd(c, label, inner)
         return '-'
 
+    def veto(self, cid, args):
+        c = self.conns[cid]
+        arrival, _ = self.arrive(c, args, False)
+        return f'AV|{arrival}|-|{self.state(c)}|{len(self.ctxs)}'
+
     def request(self, kind, cid, args):
         c = self.conns[cid]
         arrival, ok = self.arrive(c, args)
@@ -629,9 +643,10 @@ class Owners(Arrival):
     def reset(self, cfg, audience, idle, cap):
         super().reset(cfg, audience, idle, cap)
         self.orules, self.oconns, self.cowners, self.towners = {}, {}, {}, {}
+        self.run = True
 
     def text_valid(self, t):
-        return t is not None and 0 < len(t) <= 128 and all(33 <= b <= 126 for b in t)
+        return t is not None and 0 < len(t) <= 128 and all(33 <= b <= 126 for b in t) and t != b'*'
 
     def rule_of(self, login):
         return self.orules.get(login, {'kind': '-', 'id': None, 'shared': False, 'op': False})
@@ -662,7 +677,9 @@ class Owners(Arrival):
         return n in (b'monitor', b'swapdb', b'debug', b'latency') or \
             (n == b'client' and (self.arg_is(args, 1, b'pause') or self.arg_is(args, 1, b'unpause'))) or \
             (n == b'memory' and any(self.arg_is(args, 1, w) for w in (b'stats', b'doctor', b'malloc-stats', b'purge'))) or \
-            (n == b'slowlog' and self.arg_is(args, 1, b'reset')) or (n == b'config' and self.arg_is(args, 1, b'resetstat'))
+            (n == b'slowlog' and self.arg_is(args, 1, b'reset')) or (n == b'config' and self.arg_is(args, 1, b'resetstat')) or \
+            (n == b'function' and any(self.arg_is(args, 1, w) for w in (b'load', b'delete', b'flush', b'restore'))) or \
+            (n == b'script' and self.arg_is(args, 1, b'flush'))
 
     def pick_at(self, args, i):
         if i + 2 < len(args) and self.word(args[i], b'owner'):
@@ -731,16 +748,21 @@ class Owners(Arrival):
     def owner_refuse(self, c, oc, slot, msg):
         if msg in OWNER_REFUSALS:
             self.note(OWNER_REFUSALS[msg])
+        if msg == PERSIST and not (len(self.cfg.levels) > 1 or self.cfg.comps or len(self.cfg.trusts) > 1):
+            self.note('refused_owner_persist')
+            msg = OWNER_PERSIST
         out = self.refuse(c, slot, msg)
         if out.startswith('no:EXECABORT'):
-            oc['wany'] = oc['wmixed'] = False
+            oc['wany'] = oc['wmixed'] = oc['wlmixed'] = False
         return out
 
     def owner_phase(self, c, oc, inner, label, pick, ctx, tok):
         r = self.rule_of(c['login'])
         if self.owner_top(inner) and not (self.top(label) and r['op']):
             self.note('refused_owner_top')
-            return TOP, None
+            if self.top(label):
+                self.note('refused_operator')
+            return (OPERATOR if self.top(label) else TOP), None
         named = None
         if tok is not None:
             if tok == '-':
@@ -806,17 +828,21 @@ class Owners(Arrival):
             return OWNER_BOUND, None
         if named is not None and c['multi'] and o != oc['owner']:
             self.note('refused_owner_transaction')
-            return TRANSACTION, None
+            return OWNER_TRANSACTION, None
         if c['multi']:
             self.note('owner_multi')
         else:
             oc['owner'] = o
             if self.subscribing(inner) and not oc['pinned']:
-                oc['pinned'], oc['pin'] = True, o
-                self.note('owner_pinned_every' if o == 'e' else 'owner_pinned')
+                if self.run or self.mutant == 'pin_at_admission':
+                    oc['pinned'], oc['pin'] = True, o
+                    self.note('owner_pinned_every' if o == 'e' else 'owner_pinned')
+                else:
+                    self.note('vetoed_owner_unpinned')
         return None, o
 
-    def arrive_o(self, cid, args):
+    def arrive_o(self, cid, args, run=True):
+        self.run = run
         c, oc = self.conns[cid], self.oconns[cid]
         login = c['login']
         prefixed, ctx, pick, tok = False, None, None, None
@@ -861,7 +887,7 @@ class Owners(Arrival):
             if pin:
                 self.note('owner_refused_unpinned')
             return self.owner_refuse(c, oc, inner, msg), None
-        if pin:
+        if pin and (run or self.mutant == 'pin_at_admission'):
             c['explicit'], c['session'] = True, label
         handle = f"h{ctx['handle']}" if ctx else '-'
         return f"ok:{self.h['label_text'](label)}:{owner_text(o)}:{len(inner)}:{handle}", (label, o, inner)
@@ -935,23 +961,28 @@ class Owners(Arrival):
             dirty, cas, bound = c['dirty'], c['cas'], c['bound']
             differs = oc['wany'] and (oc['wmixed'] or oc['wlabel'] != bound or oc['wowner'] != oc['owner'])
             owner_differs = oc['wany'] and not oc['wmixed'] and oc['wlabel'] == bound and oc['wowner'] != oc['owner']
+            label_differs = oc['wlmixed'] or oc['wlabel'] != bound
             self.end_tx(c)
-            oc['wany'] = oc['wmixed'] = False
+            oc['wany'] = oc['wmixed'] = oc['wlmixed'] = False
             if dirty:
                 return 'EXECABORT Transaction discarded because of previous errors.'
             if differs:
                 self.note('exec_owner_watch_refused' if owner_differs else 'exec_scope_watch_refused')
-                return EXEC_WATCH
+                if not label_differs:
+                    self.note('exec_owner_watch_text')
+                return EXEC_WATCH if label_differs else EXEC_WATCH_OWNER
             return 'nil' if cas else 'exec'
         if self.is_cmd(inner, b'discard') and c['multi']:
             self.end_tx(c)
-            oc['wany'] = oc['wmixed'] = False
+            oc['wany'] = oc['wmixed'] = oc['wlmixed'] = False
             return 'OK'
         if self.is_cmd(inner, b'watch') and not c['multi']:
             if not oc['wany']:
                 oc['wany'], oc['wlabel'], oc['wowner'] = True, label, owner
             elif oc['wlabel'] != label or oc['wowner'] != owner:
                 oc['wmixed'] = True
+                if oc['wlabel'] != label:
+                    oc['wlmixed'] = True
                 self.note('watch_owner_mixed' if oc['wlabel'] == label else 'watch_scope_mixed')
             c['wlabels'].append(label)
             for a in inner[1:]:
@@ -961,7 +992,7 @@ class Owners(Arrival):
             return 'OK'
         if self.is_cmd(inner, b'unwatch'):
             self.clear_watch(c)
-            oc['wany'] = oc['wmixed'] = False
+            oc['wany'] = oc['wmixed'] = oc['wlmixed'] = False
             return 'OK'
         if self.is_cmd(inner, b'context') and self.arg_is(inner, 1, b'create'):
             return self.create_o(c, label, owner, inner[2:])
@@ -979,6 +1010,12 @@ class Owners(Arrival):
             trust = cfg.trusts[x['label'][2]] if x['label'][2] < len(cfg.trusts) else b''
             return f"info:{self.h['hexs'](marking)}:{self.h['hexs'](trust)}:{owner_text(self.cowners.get(x['handle'], 's'))}"
         return self.handle(c, label, inner)
+
+    def veto_o(self, cid, args):
+        c, oc = self.conns[cid], self.oconns[cid]
+        arrival, _ = self.arrive_o(cid, args, False)
+        self.run = True
+        return f'OV|{arrival}|-|{self.ostate(c, oc)}|{len(self.ctxs)}'
 
     def request_o(self, cid, args):
         c, oc = self.conns[cid], self.oconns[cid]
@@ -1046,11 +1083,12 @@ OWNER_NOTES = ('form_owner_only', 'form_marking_owner', 'owner_named', 'owner_co
                'refused_token_owner', 'refused_context_owner', 'exec_owner_watch_refused', 'exec_scope_watch_refused',
                'watch_owner_mixed', 'watch_scope_mixed', 'created_owner', 'owner_auth_cleared', 'owner_refused_unpinned',
                'owner_kill_same', 'owner_kill_operator', 'owner_kill_operator_refused', 'owner_kill_refused_shared',
-               'owner_kill_refused_user', 'owner_kill_refused_label', 'owner_noperm', 'owner_noperm_push')
+               'owner_kill_refused_user', 'owner_kill_refused_label', 'owner_noperm', 'owner_noperm_push',
+               'vetoed_owner_unpinned', 'refused_operator', 'exec_owner_watch_text', 'refused_owner_persist')
 
 
 def corpus(helpers, seed, sessions=64, steps=160, watch_sessions=32, episodes=30, owner_sessions=48, owner_steps=150,
-           acl_sessions=40, acl_steps=60, owner_acl_sessions=48, owner_acl_steps=60, mutant=None):
+           acl_sessions=40, acl_steps=60, owner_acl_sessions=48, owner_acl_steps=60, veto_sessions=24, veto_steps=50, mutant=None):
     rng = random.Random(seed ^ 0x0E115)
     m = Owners(helpers, mutant)
     hexs = helpers['hexs']
@@ -1364,7 +1402,7 @@ def corpus(helpers, seed, sessions=64, steps=160, watch_sessions=32, episodes=30
                             'dirty': False, 'bound': (0, frozenset(), 0), 'bprefixed': False, 'cas': False,
                             'watched': [], 'wlabels': []}
             m.oconns[cid] = {'pinned': False, 'pin': 's', 'owner': 's', 'wany': False, 'wmixed': False,
-                             'wlabel': (0, frozenset(), 0), 'wowner': 's'}
+                             'wlabel': (0, frozenset(), 0), 'wowner': 's', 'wlmixed': False}
             emit(f'OC {cid} {login.hex()}', f'OC|{cid}')
         return logins
 
@@ -1744,9 +1782,61 @@ def corpus(helpers, seed, sessions=64, steps=160, watch_sessions=32, episodes=30
             pre = owned_prefix(c, random_scope(c)) if rng.random() < 0.6 else []
             owner_request(cid, pre + acl_inner(c))
 
+    def veto_body():
+        return rng.choice([[x(b'SUBSCRIBE'), x(b'ch')], [x(b'PSUBSCRIBE'), x(b'c*')], [x(b'SSUBSCRIBE'), x(b'sh')],
+                           [x(b'CLIENT'), x(b'TRACKING'), x(b'on')], [x(b'CLIENT'), x(b'TRACKING'), x(b'on')], [x(b'GET'), x(b'k')],
+                           [x(b'FUNCTION'), x(b'LOAD'), x(b'lib')], [x(b'SCRIPT'), x(b'FLUSH')], [x(b'FUNCTION'), x(b'FLUSH')],
+                           [x(b'PING')], [x(b'SAVE')]])
+
+    owner_veto_model = m
+    m = label_model
+    rng = random.Random(seed ^ 0x7E70)
+    for session in range(veto_sessions):
+        logins = open_session()
+        for _ in range(veto_steps):
+            roll = rng.random()
+            cid = rng.choice(list(m.conns))
+            c = m.conns[cid]
+            if roll < 0.08:
+                login = rng.choice(logins)
+                emit(f'AA {cid} {login.hex()}', m.auth(cid, login))
+                continue
+            if roll < 0.16:
+                args = [x(b'LABEL'), x(b'SESSION'), x(marking_of(known_label(c)[:2] + (0,)))]
+                emit(f'AR {cid} ' + ' '.join(map(arg_text, args)), m.request('AR', cid, args))
+                continue
+            args = acl_prefix(c) + veto_body()
+            kind = 'AV' if roll < 0.7 else 'AR'
+            line = m.veto(cid, args) if kind == 'AV' else m.request('AR', cid, args)
+            emit(f'{kind} {cid} ' + ' '.join(map(arg_text, args)), line)
+
+    label_model = m
+    m = Owners(helpers, mutant)
+    rng = random.Random(seed ^ 0x7E71)
+    emit('OT 0', 'OT|0')
+    for session in range(veto_sessions):
+        logins = open_owner_session()
+        for _ in range(veto_steps):
+            roll = rng.random()
+            cid = rng.choice(list(m.conns))
+            c = m.conns[cid]
+            if roll < 0.08:
+                login = rng.choice(logins)
+                emit(f'OA {cid} {login.hex()}', m.auth_o(cid, login))
+                continue
+            scope = random_scope(c)
+            if rng.random() < 0.15:
+                scope = (scope[0], b'*')
+            pre = owned_prefix(c, scope) if rng.random() < 0.7 else []
+            args = pre + veto_body()
+            if roll < 0.7:
+                emit(f'OV {cid} ' + ' '.join(map(arg_text, args)), m.veto_o(cid, args))
+            else:
+                owner_request(cid, args)
+
     notes = dict(label_model.notes)
     for key in OWNER_NOTES:
-        count = owner_model.notes.get(key, 0) + m.notes.get(key, 0)
+        count = owner_model.notes.get(key, 0) + owner_veto_model.notes.get(key, 0) + m.notes.get(key, 0)
         if count:
             notes[key] = count
     for key, at in owner_marks.items():

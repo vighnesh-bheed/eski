@@ -389,6 +389,62 @@ static int es_random(lua_State *L) {
     }
     return 1;
 }
+uint64_t eslua_random_exchange(uint64_t next) {
+    uint64_t previous = es_random_initialized ? (es_random_state | (UINT64_C(1) << 63)) : 0;
+    es_random_initialized = (int)(next >> 63);
+    es_random_state = next & UINT64_C(0xffffffffffff);
+    return previous;
+}
+static const char *const es_cjson_settings[] = {"encode_sparse_array", "encode_max_depth", "decode_max_depth", "encode_number_precision",
+                                                 "encode_keep_buffer", "encode_invalid_numbers", "decode_invalid_numbers", NULL};
+static void es_isolation_snapshot(lua_State *L) {
+    es_context *ctx = es_context_of(L);
+    ctx->gc_pause = lua_gc(L, LUA_GCSETPAUSE, 200); lua_gc(L, LUA_GCSETPAUSE, ctx->gc_pause);
+    ctx->gc_stepmul = lua_gc(L, LUA_GCSETSTEPMUL, 200); lua_gc(L, LUA_GCSETSTEPMUL, ctx->gc_stepmul);
+    lua_getglobal(L, "cjson");
+    if (lua_type(L, -1) != LUA_TTABLE) { lua_pop(L, 1); return; }
+    int module = lua_gettop(L);
+    lua_newtable(L);
+    int saved = lua_gettop(L);
+    lua_pushvalue(L, module); lua_rawseti(L, saved, 1);
+    for (int i = 0; es_cjson_settings[i]; i++) {
+        int top = lua_gettop(L);
+        lua_getfield(L, module, es_cjson_settings[i]);
+        lua_call(L, 0, LUA_MULTRET);
+        int count = lua_gettop(L) - top;
+        lua_createtable(L, count, 1);
+        lua_insert(L, top + 1);
+        for (int j = count; j >= 1; j--) lua_rawseti(L, top + 1, j);
+        lua_pushliteral(L, "n"); lua_pushinteger(L, count); lua_rawset(L, top + 1);
+        lua_rawseti(L, saved, i + 2);
+    }
+    ctx->cjson_reference = luaL_ref(L, LUA_REGISTRYINDEX);
+    lua_pop(L, 1);
+}
+static void es_isolate(lua_State *L) {
+    es_context *ctx = es_context_of(L);
+    if (ctx->globals_reference) { lua_rawgeti(L, LUA_REGISTRYINDEX, ctx->globals_reference); lua_replace(L, LUA_GLOBALSINDEX); }
+    if (ctx->gc_pause) lua_gc(L, LUA_GCSETPAUSE, ctx->gc_pause);
+    if (ctx->gc_stepmul) lua_gc(L, LUA_GCSETSTEPMUL, ctx->gc_stepmul);
+    if (!ctx->cjson_reference) return;
+    int base = lua_gettop(L);
+    lua_rawgeti(L, LUA_REGISTRYINDEX, ctx->cjson_reference);
+    int saved = lua_gettop(L);
+    lua_rawgeti(L, saved, 1);
+    int module = lua_gettop(L);
+    for (int i = 0; es_cjson_settings[i]; i++) {
+        lua_getfield(L, module, es_cjson_settings[i]);
+        lua_rawgeti(L, saved, i + 2);
+        int values = lua_gettop(L);
+        lua_pushliteral(L, "n"); lua_rawget(L, values);
+        int count = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        for (int j = 1; j <= count; j++) lua_rawgeti(L, values, j);
+        lua_remove(L, values);
+        lua_call(L, count, 0);
+    }
+    lua_settop(L, base);
+}
 typedef struct es_registered {
     eslua_function_info info;
     int reference;
@@ -638,6 +694,7 @@ static void es_setup(lua_State *L) {
     lua_pushinteger(L,2);lua_setfield(L,-2,"REPL_SLAVE");
     lua_setglobal(L, "redis");
     es_install_libraries(L);
+    es_isolation_snapshot(L);
     lua_newtable(L); es_function(L, "clock", es_os_clock); lua_setglobal(L, "os");
     if (ctx->numkeys > INT_MAX || ctx->argc > INT_MAX) es_fail(L, ESLUA_ARGUMENT, "too many script arguments");
     lua_createtable(L, (int)ctx->numkeys, 0);
@@ -714,6 +771,7 @@ static int es_run(lua_State *L) {
     es_context *ctx = es_context_of(L);
     if (!ctx->compile_only && !ctx->library) es_debug_begin(L);
     if (ctx->calling) {
+        if (ctx->options.isolate) es_isolate(L);
         lua_rawgeti(L, LUA_REGISTRYINDEX, ctx->library->functions[ctx->function_index].reference);
         lua_createtable(L, (int)ctx->numkeys, 0);
         for (size_t i = 0; i < ctx->numkeys; i++) { lua_pushlstring(L, (const char *)ctx->keys[i].data, ctx->keys[i].len); lua_rawseti(L, -2, (int)i + 1); }
@@ -737,6 +795,7 @@ static int es_run(lua_State *L) {
         lua_setfield(L, globals, "ARGV");
         lua_enablereadonlytable(L, globals, 1); lua_pop(L, 1);
     }
+    if (ctx->options.isolate && !ctx->compile_only && !ctx->loading) es_isolate(L);
     es_check_abort(L);
     if (ctx->digest.len) {
         es_load_cached(L, ctx);

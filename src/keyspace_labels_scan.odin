@@ -52,6 +52,13 @@ label_shadowed :: #force_inline proc(dbi: int, p: ^Db, name: []u8) -> bool {
 }
 
 label_dbsize :: proc(dbi: int) -> int {
+	if owner_user() {
+		return owner_dbsize(dbi)
+	}
+	return label_dbsize_shared(dbi)
+}
+
+label_dbsize_shared :: proc(dbi: int) -> int {
 	ld := &label_dbs[dbi]
 	n := 0
 	for p in ld.order {
@@ -74,6 +81,13 @@ label_dbsize :: proc(dbi: int) -> int {
 }
 
 label_keyspace_line :: proc(dbi: int) -> (keys, expires: int, avg_ttl: i64, subexpiry: int) {
+	if owner_user() {
+		return owner_keyspace_line(dbi)
+	}
+	return label_keyspace_line_shared(dbi)
+}
+
+label_keyspace_line_shared :: proc(dbi: int) -> (keys, expires: int, avg_ttl: i64, subexpiry: int) {
 	ld := &label_dbs[dbi]
 	weighted: i128 = 0
 	for p in ld.order {
@@ -119,6 +133,10 @@ label_keyspace_line :: proc(dbi: int) -> (keys, expires: int, avg_ttl: i64, sube
 }
 
 label_keys :: proc(dbi: int, pat: []u8, all: bool) #no_bounds_check {
+	if owner_user() {
+		owner_keys(dbi, pat, all)
+		return
+	}
 	clear(&key_scratch)
 	now := srv.now_ms
 	for p in label_visible_order(dbi) {
@@ -240,6 +258,9 @@ label_scan_round :: proc(pass: ^Label_Scan, pos: u64) -> (next: u64, done: bool)
 }
 
 label_scan :: proc(dbi: int, cursor: u64, count: i64, pat: []u8, has_pat: bool) -> u64 {
+	if owner_user() {
+		return owner_scan(dbi, cursor, count, pat, has_pat)
+	}
 	clear(&scan_expired_ends)
 	clear(&scan_expired)
 	clear(&key_scratch)
@@ -322,6 +343,9 @@ label_random_pick :: proc(dbi: int, parts: []^Db, weights: []int, total: int, tr
 }
 
 label_random_key :: proc(dbi: int) -> (key: string, ok: bool) #no_bounds_check {
+	if owner_user() {
+		return owner_random_key(dbi)
+	}
 	parts := label_visible_order(dbi)
 	weights := make([]int, len(parts), context.temp_allocator)
 	tries := LABEL_RANDOM_TRIES

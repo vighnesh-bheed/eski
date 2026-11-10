@@ -32,6 +32,10 @@ PER_COMMAND = 'ERR this login must send every command through LABEL AS'
 TOKEN_ERROR = 'ERR invalid label token'
 CONTEXT_ERROR = 'ERR invalid context'
 PERSIST_ERROR = 'ERR persistence is off while a label scheme is configured'
+OWNER_PERSIST_ERROR = 'ERR persistence is off while owner mode is on'
+OPERATOR_ERROR = 'ERR this command needs a login with the owner-operator right'
+OWNER_TRANSACTION = "ERR the command's owner differs from the transaction's owner"
+OWNER_WATCH_REFUSED = "EXECABORT Transaction discarded because of: the command's owner differs from the transaction's owner"
 
 ED25519_SEED_PREFIX = bytes.fromhex('302e020100300506032b657004220420')
 ED25519_PUBLIC_PREFIX = bytes.fromhex('302a300506032b6570032100')
@@ -185,6 +189,20 @@ class OwnersOff(unittest.TestCase):
         self.assertEqual(c.call('CONFIG', 'GET', 'owner-partitions-max'), [b'owner-partitions-max', b'0'])
         self.assertEqual(c.call('INFO', 'owners'), b'')
 
+    def test_owner_mode_is_refused_while_the_server_holds_keys(self):
+        c = self.client
+        c.call('CONFIG', 'SET', 'save', '')
+        if self.scheme:
+            c.call('LABEL', 'AS', 'C', 'SET', 'k', 'v')
+        else:
+            c.call('VADD', 'vs', 'VALUES', 2, 1, 0, 'e')
+        self.assertEqual(error_of(c, 'CONFIG', 'SET', 'owners', 'yes'),
+                         "ERR CONFIG SET failed (possibly related to argument 'owners') - owner mode needs a server without keys, because existing keys carry no owner")
+        self.assertEqual(c.call('CONFIG', 'GET', 'owners'), [b'owners', b'no'])
+        self.assertEqual(c.call('FLUSHALL'), 'OK')
+        self.assertEqual(c.call('CONFIG', 'SET', 'owners', 'yes'), 'OK')
+        self.assertEqual(c.call('CONFIG', 'GET', 'owners'), [b'owners', b'yes'])
+
 
 
 class LabelsOff(OwnersOff):
@@ -198,8 +216,9 @@ class LabelsOff(OwnersOff):
         self.assertEqual(as_map(c.call('LABEL', 'WHOAMI'))[b'owners'], b'none')
         self.assertEqual(error_of(c, 'CONFIG', 'SET', 'owners', 'no'),
                          "ERR CONFIG SET failed (possibly related to argument 'owners') - owner mode cannot be turned off")
-        self.assertIn('persistence stays off', error_of(c, 'CONFIG', 'SET', 'save', '60 10'))
-        self.assertEqual(error_of(c, 'SAVE'), PERSIST_ERROR)
+        self.assertEqual(error_of(c, 'CONFIG', 'SET', 'save', '60 10'),
+                         "ERR CONFIG SET failed (possibly related to argument 'save') - persistence stays off while owner mode is on")
+        self.assertEqual(error_of(c, 'SAVE'), OWNER_PERSIST_ERROR)
         self.assertEqual(c.call('CONFIG', 'GET', 'owners'), [b'owners', b'yes'])
 
 
@@ -291,6 +310,19 @@ class OwnerMode(unittest.TestCase):
 
 
 class Owners(OwnerMode):
+    def test_the_owner_id_star_is_reserved(self):
+        c, app = self.admin, self.connect('app')
+        self.assertEqual(error_of(c, 'ACL', 'SETUSER', 'x', 'owner:*'), "ERR Error in ACL SETUSER modifier 'owner:*': Invalid owner rule")
+        self.assertEqual(c.call('ACL', 'SETUSER', 'x', 'owners:*'), 'OK')
+        self.assertEqual(as_map(c.call('ACL', 'GETUSER', 'x'))[b'owners'], b'*')
+        for command in (('LABEL', 'AS', 'OWNER', '*', 'GET', 'k'), ('LABEL', 'AS', 'S//A', 'OWNER', '*', 'GET', 'k'),
+                        ('LABEL', 'AS', 'OWNER', '*', 'CONTEXT', 'CREATE'), ('LABEL', 'AS', 'OWNER', 'u1', 'CONTEXT', 'CREATE', 'OWNER', '*')):
+            self.assertEqual(error_of(app, *command), INVALID_OWNER)
+        self.assertEqual(error_of(app, 'LABEL', 'AS', 'TOKEN', token('S//A', 'owner *'), 'GET', 'k'), TOKEN_ERROR)
+        for command in (('OWNERS', 'FORGET', '*'), ('OWNERS', 'INFO', '*'), ('OWNERS', 'QUOTA', '*')):
+            self.assertEqual(error_of(c, *command), INVALID_OWNER)
+        self.assertEqual(app.call('LABEL', 'AS', 'OWNER', '**', 'PING'), 'PONG')
+
     def test_owner_rules_round_trip_and_reset(self):
         c = self.admin
         c.call('ACL', 'SETUSER', 'x', 'on', 'nopass', '+@all', '~*', 'owners:*', 'owner-shared', 'owner-operator')
@@ -441,21 +473,26 @@ class Owners(OwnerMode):
         replies = app.call('EXEC')
         self.assertEqual(as_map(replies[0])[b'owner'], b'u1')
         app.call('LABEL', 'AS', 'OWNER', 'u1', 'MULTI')
-        self.assertEqual(error_of(app, 'LABEL', 'AS', 'OWNER', 'u2', 'GET', 'k'), TRANSACTION)
+        self.assertEqual(error_of(app, 'LABEL', 'AS', 'OWNER', 'u2', 'GET', 'k'), OWNER_TRANSACTION)
         self.assertEqual(error_of(app, 'EXEC'), 'EXECABORT Transaction discarded because of previous errors.')
         app.call('LABEL', 'AS', 'OWNER', 'u1', 'MULTI')
-        self.assertEqual(error_of(app, 'LABEL', 'AS', 'OWNER', 'u2', 'EXEC'), WATCH_REFUSED)
+        self.assertEqual(error_of(app, 'LABEL', 'AS', 'C', 'OWNER', 'u1', 'GET', 'k'), TRANSACTION)
+        self.assertEqual(error_of(app, 'LABEL', 'AS', 'OWNER', 'u2', 'EXEC'), OWNER_WATCH_REFUSED)
         self.assertEqual(error_of(app, 'LABEL', 'AS', 'OWNER', 'u1', 'EXEC'), 'ERR EXEC without MULTI')
         app.call('LABEL', 'AS', 'OWNER', 'u1', 'WATCH', 'k')
         app.call('LABEL', 'AS', 'OWNER', 'u2', 'MULTI')
         self.assertEqual(app.call('GET', 'k'), 'QUEUED')
-        self.assertEqual(error_of(app, 'EXEC'), WATCH_REFUSED)
+        self.assertEqual(error_of(app, 'EXEC'), OWNER_WATCH_REFUSED)
         self.assertEqual(app.call('LABEL', 'AS', 'OWNER', 'u1', 'CLIENT', 'INFO').decode().split(' watch=')[1].split()[0], '0')
         app.call('LABEL', 'AS', 'OWNER', 'u1', 'WATCH', 'k')
         app.call('LABEL', 'AS', 'OWNER', 'u1', 'MULTI')
         app.call('GET', 'k')
         self.assertEqual(app.call('EXEC'), [None])
         app.call('LABEL', 'AS', 'OWNER', 'u1', 'WATCH', 'k')
+        app.call('LABEL', 'AS', 'OWNER', 'u2', 'WATCH', 'j')
+        app.call('LABEL', 'AS', 'OWNER', 'u1', 'MULTI')
+        self.assertEqual(error_of(app, 'EXEC'), OWNER_WATCH_REFUSED)
+        app.call('LABEL', 'AS', 'C', 'OWNER', 'u1', 'WATCH', 'k')
         app.call('LABEL', 'AS', 'OWNER', 'u2', 'WATCH', 'j')
         app.call('LABEL', 'AS', 'OWNER', 'u1', 'MULTI')
         self.assertEqual(error_of(app, 'EXEC'), WATCH_REFUSED)
@@ -603,6 +640,31 @@ class Owners(OwnerMode):
         self.connect('plain').call('PUBLISH', 'news', 'm')
         self.assertEqual((messages(fixed), messages(listener)), ([b'm'], [b'm']))
 
+    def test_a_push_command_refused_after_admission_pins_no_owner(self):
+        app = self.connect('app', protocol=3)
+        def unpinned():
+            who = self.whoami(app)
+            self.assertEqual((who[b'session'], who[b'pinned-owner']), (0, None))
+            self.assertEqual(app.call('LABEL', 'AS', 'OWNER', 'u2', 'PING'), 'PONG')
+        self.admin.call('CONFIG', 'SET', 'busy-reply-threshold', 50)
+        script = self.connect('plain')
+        script.send('EVAL', 'while true do end', 0)
+        time.sleep(0.3)
+        for command in (('SUBSCRIBE', 'ch'), ('CLIENT', 'TRACKING', 'ON')):
+            self.assertTrue(error_of(app, 'LABEL', 'AS', 'OWNER', 'u1', *command).startswith('BUSY'))
+        self.assertEqual(self.admin.call('SCRIPT', 'KILL'), 'OK')
+        self.assertIn('killed', str(script.reply()).lower())
+        unpinned()
+        self.admin.call('CONFIG', 'SET', 'maxmemory', 1)
+        self.assertTrue(error_of(app, 'LABEL', 'AS', 'OWNER', 'u1', 'SUBSCRIBE', 'ch').startswith('OOM'))
+        self.admin.call('CONFIG', 'SET', 'maxmemory', 0)
+        unpinned()
+        self.assertTrue(error_of(app, 'LABEL', 'AS', 'OWNER', 'u1', 'CLIENT', 'TRACKING', 'ON', 'REDIRECT', 999999).startswith('ERR'))
+        unpinned()
+        self.assertEqual(app.call('LABEL', 'AS', 'OWNER', 'u1', 'CLIENT', 'TRACKING', 'ON'), 'OK')
+        self.assertEqual(self.whoami(app)[b'pinned-owner'], b'OWNER u1')
+        self.assertEqual(error_of(app, 'LABEL', 'AS', 'OWNER', 'u2', 'PING'), BOUND)
+
     def test_messages_reach_the_pins_that_dominate_their_scope(self):
         shared, u1, u2, every, fixed = self.subscribers()
         app = self.connect('app')
@@ -694,7 +756,8 @@ class Owners(OwnerMode):
         for command in (('MONITOR',), ('DEBUG', 'SLEEP', 0), ('CONFIG', 'RESETSTAT'), ('SLOWLOG', 'RESET'), ('MEMORY', 'STATS'),
                         ('OWNERS', 'INFO', 'u1'), ('OWNERS', 'FORGET', 'u1'), ('OWNERS', 'LIST', 0), ('OWNERS', 'QUOTA', 'u1'),
                         ('LABEL', 'COPIES')):
-            self.assertEqual(error_of(top, 'LABEL', 'AS', 'OWNER', 'u1', *command), TOP_ERROR)
+            self.assertEqual(error_of(top, 'LABEL', 'AS', 'OWNER', 'u1', *command), OPERATOR_ERROR)
+        self.assertEqual(error_of(self.connect('app'), 'LABEL', 'AS', 'OWNER', 'u1', 'DEBUG', 'SLEEP', 0), TOP_ERROR)
         self.assertTrue(top.call('LABEL', 'AS', 'OWNER', 'u1', 'OWNERS', 'HELP'))
         op = self.connect('op')
         self.assertEqual(self.whoami(op, 'LABEL', 'AS', 'OWNER', 'u1')[b'top'], 1)
@@ -726,7 +789,9 @@ class Owners(OwnerMode):
         kept = idle.call('LABEL', 'AS', 'OWNER', 'u8', 'CONTEXT', 'CREATE')
         idle.call('LABEL', 'AS', 'TOKEN', token('S//A', 'owner u7'), 'PING')
         time.sleep(0.2)
-        self.assertEqual(as_map(self.admin.call('OWNERS', 'FORGET', 'u7')), {b'keys': 0, b'elements': 0, b'bytes': 0})
+        entry = as_map(self.admin.call('OWNERS', 'INFO', 'u7'))[b'bytes']
+        self.assertGreater(entry, 0)
+        self.assertEqual(as_map(self.admin.call('OWNERS', 'FORGET', 'u7')), {b'keys': 0, b'elements': 0, b'bytes': entry})
         for client in (pinned, bound, watching, blocked):
             self.assertTrue(closed(client))
         self.assertFalse(closed(other_pin))
@@ -748,13 +813,15 @@ class Owners(OwnerMode):
         c = self.admin
         self.assertEqual(c.call('OWNERS', 'QUOTA', 'u1'), [0, 0])
         self.assertEqual(c.call('OWNERS', 'QUOTA', 'u1', 'LIMIT', 1000), 'OK')
-        self.assertEqual(c.call('OWNERS', 'QUOTA', 'u1'), [1000, 0])
+        entry = as_map(c.call('OWNERS', 'INFO', 'u1'))[b'bytes']
+        self.assertGreater(entry, 0)
+        self.assertEqual(c.call('OWNERS', 'QUOTA', 'u1'), [1000, entry])
         c.call('CONFIG', 'SET', 'owner-quota-default', '500')
         self.assertEqual(c.call('OWNERS', 'QUOTA', 'u2'), [500, 0])
         self.assertEqual(c.call('OWNERS', 'QUOTA', 'u1', 'LIMIT', 0), 'OK')
-        self.assertEqual(c.call('OWNERS', 'QUOTA', 'u1'), [500, 0])
+        self.assertEqual(c.call('OWNERS', 'QUOTA', 'u1'), [500, entry])
         self.assertEqual(as_map(c.call('OWNERS', 'INFO', 'u1')),
-                         {b'keys': 0, b'elements': 0, b'bytes': 0, b'partitions': 0, b'labels': 0, b'quota': 500})
+                         {b'keys': 0, b'elements': 0, b'bytes': entry, b'partitions': 0, b'labels': 0, b'quota': 500})
         self.assertEqual(error_of(c, 'OWNERS', 'QUOTA', 'u1', 'LIMIT', -1), 'ERR value is not an integer or out of range')
         self.assertEqual(error_of(c, 'OWNERS', 'QUOTA', 'u1', 'MAX', 1), 'ERR syntax error')
         self.assertEqual(c.call('OWNERS', 'LIST', 0), [b'0', []])
@@ -805,6 +872,91 @@ class Owners(OwnerMode):
         self.assertEqual(gone.reply(), 'OK')
         self.assertTrue(closed(gone))
 
+    def test_function_changes_need_the_operator_at_top(self):
+        library = "#!lua name=lib\nredis.register_function('f', function() return 'one' end)"
+        top, app, fixed, op = self.connect('top'), self.connect('app'), self.connect('fixed'), self.connect('op')
+        for client, prefix, text in ((top, ('LABEL', 'AS', 'OWNER', 'u1'), OPERATOR_ERROR), (app, ('LABEL', 'AS', 'OWNER', 'u1'), TOP_ERROR),
+                                     (fixed, (), TOP_ERROR)):
+            for command in (('FUNCTION', 'LOAD', library), ('FUNCTION', 'DELETE', 'lib'), ('FUNCTION', 'FLUSH'),
+                            ('FUNCTION', 'RESTORE', b'\x00'), ('SCRIPT', 'FLUSH')):
+                self.assertEqual(error_of(client, *prefix, *command), text)
+        self.assertEqual(op.call('LABEL', 'AS', 'OWNER', 'u1', 'FUNCTION', 'LOAD', library), b'lib')
+        self.assertEqual(app.call('LABEL', 'AS', 'OWNER', 'u2', 'FCALL', 'f', 0), b'one')
+        self.assertEqual(fixed.call('FCALL', 'f', 0), b'one')
+        self.assertEqual(len(fixed.call('FUNCTION', 'LIST')), 1)
+        self.assertEqual(self.admin.call('FUNCTION', 'DELETE', 'lib'), 'OK')
+        self.assertEqual(op.call('LABEL', 'AS', 'OWNER', 'u1', 'SCRIPT', 'FLUSH'), 'OK')
+
+    def test_scripts_are_cached_per_user(self):
+        app, shared, plain, op = self.connect('app'), self.connect('shared'), self.connect('plain'), self.connect('op')
+        u1 = ('LABEL', 'AS', 'S//A', 'OWNER', 'u1')
+        u2 = ('LABEL', 'AS', 'S//A', 'OWNER', 'u2')
+        mine = app.call(*u1, 'SCRIPT', 'LOAD', "return 'mine'")
+        self.assertEqual(app.call(*u1, 'SCRIPT', 'EXISTS', mine), [1])
+        self.assertEqual(app.call(*u2, 'SCRIPT', 'EXISTS', mine), [0])
+        self.assertEqual(error_of(app, *u2, 'EVALSHA', mine, 0), 'NOSCRIPT No matching script. Please use EVAL.')
+        self.assertEqual(plain.call('SCRIPT', 'EXISTS', mine), [0])
+        self.assertEqual(shared.call('LABEL', 'AS', 'SHARED', 'SCRIPT', 'EXISTS', mine), [0])
+        common = shared.call('LABEL', 'AS', 'SHARED', 'SCRIPT', 'LOAD', "return 'common'")
+        seen = plain.call('SCRIPT', 'LOAD', "return 'seen'")
+        for prefix in (u1, u2):
+            self.assertEqual(app.call(*prefix, 'SCRIPT', 'EXISTS', common, seen), [1, 1])
+            self.assertEqual(app.call(*prefix, 'EVALSHA', common, 0), b'common')
+        self.assertEqual(app.call('LABEL', 'AS', 'C', 'OWNER', 'u1', 'SCRIPT', 'EXISTS', common, seen), [0, 1])
+        self.assertEqual(self.admin.call('SCRIPT', 'EXISTS', mine, common, seen), [1, 1, 1])
+        self.assertEqual(op.call('LABEL', 'AS', 'OWNER', 'u2', 'SCRIPT', 'EXISTS', mine), [1])
+        self.assertEqual(op.call('LABEL', 'AS', 'C', 'OWNER', 'u2', 'SCRIPT', 'EXISTS', mine, seen), [0, 1])
+        self.assertEqual(app.call(*u2, 'EVAL', "return 'mine'", 0), b'mine')
+        self.assertEqual(app.call(*u2, 'EVALSHA', mine, 0), b'mine')
+        self.assertEqual(int(info(self.admin, 'memory')['number_of_cached_scripts']), 3)
+        text = app.call(*u1, 'INFO', 'memory').decode()
+        self.assertIn('\r\nnumber_of_cached_scripts:0\r\n', text)
+
+    def test_forget_drops_the_users_scripts_and_random_stream(self):
+        app = self.connect('app')
+        u1 = ('LABEL', 'AS', 'S//A', 'OWNER', 'u1')
+        u2 = ('LABEL', 'AS', 'S//A', 'OWNER', 'u2')
+        draws = 'return {math.random(1000000), math.random(1000000)}'
+        first = app.call(*u1, 'EVAL', draws, 0)
+        both = app.call(*u1, 'SCRIPT', 'LOAD', "return 'both'")
+        alone = app.call(*u1, 'SCRIPT', 'LOAD', "return 'alone'")
+        self.assertEqual(app.call(*u2, 'EVAL', "return 'both'", 0), b'both')
+        self.assertNotEqual(app.call(*u1, 'EVAL', draws, 0), first)
+        self.assertEqual(int(info(self.admin, 'memory')['number_of_cached_scripts']), 3)
+        self.admin.call('OWNERS', 'FORGET', 'u1')
+        self.assertEqual(app.call(*u1, 'SCRIPT', 'EXISTS', both, alone), [0, 0])
+        self.assertEqual(app.call(*u2, 'SCRIPT', 'EXISTS', both, alone), [1, 0])
+        self.assertEqual(int(info(self.admin, 'memory')['number_of_cached_scripts']), 1)
+        self.assertEqual(app.call(*u1, 'EVAL', draws, 0), first)
+
+    def scripted_world(self, hidden):
+        server = Server(BINARY, workers=0, arguments=('--keyspace-threads', str(KEYSPACE_THREADS), '--memcached-port', '0', '--owners', 'yes',
+                                                      '--label-stream-seed', '5') + SCHEME)
+        self.addCleanup(server.close)
+        server.start()
+        admin = Client(server.port)
+        self.addCleanup(admin.close)
+        admin.call('ACL', 'SETUSER', 'default', 'clearance:*', 'owner-operator')
+        admin.call('ACL', 'SETUSER', 'app', 'on', 'nopass', '+@all', '~*', '&*', 'clearance:S//A', 'owners:*')
+        app = Client(server.port)
+        self.addCleanup(app.close)
+        app.call('AUTH', 'app', 'x')
+        observed = []
+        settings = "return {math.random(1000000), cjson.encode_max_depth(), cjson.encode_number_precision(), cjson.encode({0.123456789012})}"
+        for step in range(5):
+            if hidden:
+                app.call('LABEL', 'AS', 'OWNER', 'u2', 'EVAL', 'math.randomseed(1); cjson.encode_max_depth(4); cjson.encode_number_precision(1); return math.random(9)', 0)
+                app.call('LABEL', 'AS', 'C', 'OWNER', 'u1', 'EVAL', 'return math.random(9)', 0)
+                app.call('LABEL', 'AS', 'S//A', 'OWNER', 'u1', 'EVAL', 'return math.random(9)', 0)
+            observed.append(app.call('LABEL', 'AS', 'C', 'OWNER', 'u2', 'EVAL', settings, 0))
+        return observed
+
+    def test_script_randomness_and_json_settings_stay_within_a_user(self):
+        quiet = self.scripted_world(False)
+        noisy = self.scripted_world(True)
+        self.assertEqual(quiet, noisy)
+        self.assertEqual([row[1:] for row in quiet], [[1000, 14, b'[0.123456789012]']] * 5)
+
 
 class OwnersWithoutLabels(OwnerMode):
     extra = ()
@@ -816,8 +968,10 @@ class OwnersWithoutLabels(OwnerMode):
         user = self.connect('user')
         who = self.whoami(user)
         self.assertEqual((who[b'label'], who[b'owner'], who[b'top']), (b'UNCLASSIFIED', b'u1', 0))
-        self.assertEqual(error_of(user, 'DEBUG', 'SLEEP', 0), TOP_ERROR)
-        self.assertEqual(error_of(user, 'SAVE'), PERSIST_ERROR)
+        self.assertEqual(error_of(user, 'DEBUG', 'SLEEP', 0), OPERATOR_ERROR)
+        self.assertEqual(error_of(user, 'SAVE'), OWNER_PERSIST_ERROR)
+        self.assertEqual(error_of(self.admin, 'CONFIG', 'SET', 'save', '60 1'),
+                         "ERR CONFIG SET failed (possibly related to argument 'save') - persistence stays off while owner mode is on")
         self.assertEqual(self.admin.call('DEBUG', 'SLEEP', 0), 'OK')
         self.assertEqual(self.whoami(self.admin)[b'top'], 1)
         self.assertEqual(user.call('SET', 'k', 'v'), 'OK')
@@ -825,6 +979,15 @@ class OwnersWithoutLabels(OwnerMode):
         events = [r['event'] for r in self.records()]
         self.assertEqual(events[0], 'owners-on')
         self.assertNotIn('scheme-load', events)
+
+    def test_a_scheme_is_refused_while_owner_mode_holds_keys(self):
+        user = self.connect('user')
+        self.assertEqual(user.call('SET', 'k', 'v'), 'OK')
+        self.assertEqual(error_of(self.admin, 'CONFIG', 'SET', 'label-levels', 'U,S'),
+                         "ERR CONFIG SET failed (possibly related to argument 'label-levels') - a label scheme needs a server without keys, because existing keys carry no label")
+        self.assertEqual(self.admin.call('CONFIG', 'GET', 'label-levels'), [b'label-levels', b'UNCLASSIFIED'])
+        self.assertEqual(user.call('DEL', 'k'), 1)
+        self.assertEqual(self.admin.call('CONFIG', 'SET', 'label-levels', 'U,S'), 'OK')
 
 
 class Startup(unittest.TestCase):
@@ -837,6 +1000,27 @@ class Startup(unittest.TestCase):
                                       '--appendonly', 'no', *arguments], stdin=subprocess.DEVNULL, capture_output=True, timeout=20)
             self.assertNotEqual(process.returncode, 0)
             return (process.stdout + process.stderr).decode(errors='replace')
+
+    def test_owner_mode_never_loads_a_data_file(self):
+        with tempfile.TemporaryDirectory(prefix='eski-owners-file-') as directory:
+            plain = Server(BINARY, workers=0)
+            plain.start()
+            try:
+                writer = plain.client()
+                writer.call('SET', 'old', 'value')
+                writer.call('CONFIG', 'SET', 'dir', directory)
+                self.assertEqual(writer.call('SAVE'), 'OK')
+            finally:
+                plain.close()
+            with socket.socket() as probe:
+                probe.bind(('127.0.0.1', 0))
+                port = probe.getsockname()[1]
+            process = subprocess.run([str(BINARY), '--bind', '127.0.0.1', '--port', str(port), '--dir', directory, '--owners', 'yes',
+                                      '--appendonly', 'no', '--save', '', '--memcached-port', '0'], stdin=subprocess.DEVNULL, capture_output=True, timeout=20)
+            self.assertEqual(process.returncode, 1)
+            text = (process.stdout + process.stderr).decode(errors='replace')
+            self.assertIn('Refusing to start: the data file dump.rdb in ', text)
+            self.assertIn('a server with a label scheme or owner mode never loads it', text)
 
     def test_owner_mode_refuses_persistence_memcached_and_reserved_levels(self):
         self.assertIn('needs persistence off', self.refused('--save', '900 1'))

@@ -94,7 +94,9 @@ def topOnly (args : List Arg) : Bool :=
     (isCmd args "memory" && (argIs args 1 "stats" || argIs args 1 "doctor" || argIs args 1 "malloc-stats" ||
       argIs args 1 "purge")) ||
     (isCmd args "slowlog" && argIs args 1 "reset") ||
-    (isCmd args "config" && argIs args 1 "resetstat")
+    (isCmd args "config" && argIs args 1 "resetstat") ||
+    (isCmd args "function" && (argIs args 1 "load" || argIs args 1 "delete" || argIs args 1 "flush" || argIs args 1 "restore")) ||
+    (isCmd args "script" && argIs args 1 "flush")
 
 def persistenceRefused (args : List Arg) : Bool :=
   ["save", "bgsave", "bgrewriteaof", "dump", "restore", "migrate"].any (isCmd args) ||
@@ -424,6 +426,20 @@ def arrive (E : AEnv) (D : ADyn) (id : Nat) (args : List Arg) : Arrival × ADyn 
     else if ((rulesOf E c.login).perCommand || (rulesOf E c.login).requireToken) && !c.inMulti && !housekeeping args then
       refuse D id c args (if (rulesOf E c.login).requireToken then errTokenOnly else errPerCommand)
     else arriveFinish E D id c args (sessionOf E c) none false
+
+def arriveVeto (E : AEnv) (D : ADyn) (id : Nat) (args : List Arg) : Arrival × ADyn :=
+  match connOf D id with
+  | none => (.refused "no connection", D)
+  | some c =>
+    if isLabelAs args then
+      match labelAsParse E D c.login args with
+      | (.error m, D1) => refuse D1 id c args m
+      | (.ok p, D1) =>
+        if nested (args.drop p.used) then refuse D1 id c args errNested
+        else arriveCore E D1 id c (args.drop p.used) p.label p.ctx true
+    else if ((rulesOf E c.login).perCommand || (rulesOf E c.login).requireToken) && !c.inMulti && !housekeeping args then
+      refuse D id c args (if (rulesOf E c.login).requireToken then errTokenOnly else errPerCommand)
+    else arriveCore E D id c args (sessionOf E c) none false
 
 inductive Reply
   | ok
@@ -2352,6 +2368,77 @@ theorem arrive_refused_keeps_session {E : AEnv} {D : ADyn} {id : Nat} {args : Li
     · rename_i hr
       simp only [hr, Bool.false_eq_true, ↓reduceIte] at h
       exact finish_refused_sess hc h
+
+theorem core_sess {E : AEnv} {D : ADyn} {id : Nat} {c c0 : AConn} {inner : List Arg} {l0 : TLabel}
+    {ctx : Option ACtx} {p : Bool} (hc : connOf D id = some c0) :
+    ∃ c', connOf (arriveCore E D id c inner l0 ctx p).2 id = some c' ∧ sessOf c' = sessOf c := by
+  unfold arriveCore
+  split
+  · exact refuse_sess hc _ _
+  · split
+    · obtain ⟨c', h1, h2⟩ := refuse_sess (connOf_setConn hc (finishConn c inner (finishLabel c l0) p)) inner _
+      exact ⟨c', h1, by rw [h2, sessOf_finishConn]⟩
+    · exact ⟨_, connOf_setConn hc _, sessOf_finishConn _ _ _ _⟩
+
+theorem arriveVeto_keeps_session {E : AEnv} {D : ADyn} {id : Nat} {args : List Arg} {c : AConn}
+    (hc : connOf D id = some c) :
+    ∃ c', connOf (arriveVeto E D id args).2 id = some c' ∧ sessOf c' = sessOf c := by
+  unfold arriveVeto
+  rw [hc]
+  simp only
+  split
+  · split
+    · rename_i mm D1 hp
+      have hc1 : connOf D1 id = some c := by
+        have e := labelAsParse_conns E D c.login args
+        rw [hp] at e
+        rw [connOf_of_conns e]
+        exact hc
+      exact refuse_sess hc1 _ _
+    · rename_i pp D1 hp
+      have hc1 : connOf D1 id = some c := by
+        have e := labelAsParse_conns E D c.login args
+        rw [hp] at e
+        rw [connOf_of_conns e]
+        exact hc
+      split
+      · exact refuse_sess hc1 _ _
+      · exact core_sess hc1
+  · split
+    · exact refuse_sess hc _ _
+    · exact core_sess hc
+
+theorem core_finish_verdict (E : AEnv) (D : ADyn) (id : Nat) (c : AConn) (inner : List Arg) (l0 : TLabel)
+    (ctx : Option ACtx) (p : Bool) : (arriveCore E D id c inner l0 ctx p).1 = (arriveFinish E D id c inner l0 ctx p).1 := by
+  unfold arriveCore arriveFinish
+  by_cases hm : (c.inMulti && p && l0 != c.bound) = true
+  · simp [hm]
+  · cases hg : gate E c inner (finishLabel c l0) p <;> simp [hm, hg]
+
+theorem arriveVeto_verdict (E : AEnv) (D : ADyn) (id : Nat) (args : List Arg) :
+    (arriveVeto E D id args).1 = (arrive E D id args).1 := by
+  unfold arriveVeto arrive
+  cases hc : connOf D id with
+  | none => rfl
+  | some c =>
+    simp only
+    by_cases hl : isLabelAs args = true
+    · simp only [hl, ↓reduceIte]
+      cases hp : labelAsParse E D c.login args with
+      | mk r D1 =>
+        cases r with
+        | error m => rfl
+        | ok pp =>
+          simp only
+          by_cases hn : nested (args.drop pp.used) = true
+          · simp [hn]
+          · simp only [hn, Bool.false_eq_true, ↓reduceIte]
+            exact core_finish_verdict _ _ _ _ _ _ _ _
+    · simp only [hl, Bool.false_eq_true, ↓reduceIte]
+      by_cases hr : (((rulesOf E c.login).perCommand || (rulesOf E c.login).requireToken) && !c.inMulti && !housekeeping args) = true
+      · simp [hr]
+      · simp only [hr, Bool.false_eq_true, ↓reduceIte]
+        exact core_finish_verdict _ _ _ _ _ _ _ _
 
 theorem arrive_ok_acl {E : AEnv} {D D' : ADyn} {id : Nat} {args inner : List Arg} {l : TLabel} {ctx : Option ACtx}
     {c : AConn} (hc : connOf D id = some c) (hk : known inner = true) (h : arrive E D id args = (.ok l inner ctx, D')) :

@@ -121,9 +121,10 @@ owner_texts_are_printable_ascii_without_spaces :: proc(t: ^testing.T) {
 	testing.expect(t, !text_valid(long[:]))
 	for b in 0 ..< 256 {
 		one := [1]u8{u8(b)}
-		testing.expect_value(t, text_valid(one[:]), b > 32 && b < 127)
+		testing.expect_value(t, text_valid(one[:]), b > 32 && b < 127 && b != '*')
 	}
 	testing.expect(t, !text_valid(transmute([]u8)string("a b")))
+	testing.expect(t, text_valid(transmute([]u8)string("**")))
 	testing.expect(t, !text_valid(transmute([]u8)string("a\tb")))
 }
 

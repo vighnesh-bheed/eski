@@ -271,6 +271,8 @@ import Vectors.OwnerSim
 #print axioms Vectors.hidden_write_find
 #print axioms Vectors.hidden_write_range
 #print axioms Vectors.hidden_history_view
+#print axioms Vectors.viewMemory_restrict
+#print axioms Vectors.hidden_history_memory
 #print axioms Vectors.pinned_insert
 #print axioms Vectors.pinned_remove
 #print axioms Vectors.mode_insert_not_pinned
@@ -393,11 +395,14 @@ import Vectors.OwnerSim
 #print axioms Vectors.owner_isolation_find
 #print axioms Vectors.owner_isolation_range
 #print axioms Vectors.owner_isolation_stream
+#print axioms Vectors.owner_purge_memory
+#print axioms Vectors.owner_isolation_memory
 #print axioms Vectors.owner_partition_history
 #print axioms Vectors.forget_gone
 #print axioms Vectors.forget_keeps
 #print axioms Vectors.forget_local
 #print axioms Vectors.forget_history
+#print axioms Vectors.forget_history_memory
 #print axioms Vectors.forget_leaves_shared
 #print axioms Vectors.forget_find_shared
 #print axioms Vectors.forget_view_shared

@@ -181,7 +181,7 @@ proof_acl :: proc(u: ^Acl_User, names: string) -> int {
 	return len(denied)
 }
 
-proof_arrive :: proc(c: ^Conn, argv: [][]u8, busy := false) -> ([][]u8, ^Cmd_Slot, bool) {
+proof_arrive :: proc(c: ^Conn, argv: [][]u8, busy := false, runs := true) -> ([][]u8, ^Cmd_Slot, bool) {
 	acl_conn_refresh(c)
 	inner, s, ok := access_enter(c, argv, lookup_entry(argv[0]))
 	if ok && s != nil && c.acl_gate {
@@ -195,7 +195,49 @@ proof_arrive :: proc(c: ^Conn, argv: [][]u8, busy := false) -> ([][]u8, ^Cmd_Slo
 	if ok {
 		ok = access_admit(c, s, inner)
 	}
+	if ok && !busy {
+		held := .Tracking in c.ps
+		if runs {
+			c.ps += {.Tracking}
+		}
+		access_pin_ran(c)
+		if !held {
+			c.ps -= {.Tracking}
+		}
+	}
 	return inner, s, ok
+}
+
+proof_veto_call :: proc(b: ^strings.Builder, kind: string, id: int, f: []string, owner: bool) {
+	c, found := proof_conns[id]
+	assert(found)
+	argv := make([][]u8, len(f))
+	for a, i in f {
+		argv[i] = proof_arg(a)
+	}
+	assert(c.wlen == 0)
+	inner, _, ok := proof_arrive(c, argv, false, false)
+	strings.write_string(b, kind)
+	if ok {
+		strings.write_string(b, "|ok:")
+		proof_write_label(b, access.label)
+		if owner {
+			strings.write_byte(b, ':')
+			proof_owner_text(b, access.owner)
+		}
+		fmt.sbprintf(b, ":%d:", len(inner))
+		proof_ctx_text(b, access.ctx)
+	} else {
+		strings.write_string(b, "|no:")
+		strings.write_string(b, proof_reply(c, false))
+	}
+	strings.write_string(b, "|-|")
+	if owner {
+		proof_state_owner(b, c)
+	} else {
+		proof_state(b, c)
+	}
+	fmt.sbprintf(b, "|%d", len(label_contexts))
 }
 
 proof_handle_ordinal :: proc(h: [LABEL_HANDLE_BYTES]u8) -> int {
@@ -275,6 +317,7 @@ proof_reset :: proc(levels, comps, trusts, audience: string, idle, cap: int, own
 	}
 	access_scheme_changed()
 	owners_on = owners
+	label_scheme_labelled = lb.config_labelled(&label_scheme)
 	labels_on = lb.config_labelled(&label_scheme) || owners
 	assert(labels_on)
 	label_scheme_runtime = true
@@ -541,7 +584,7 @@ proof_state_owner :: proc(b: ^strings.Builder, c: ^Conn) {
 	proof_owner_text(b, a.owner)
 	strings.write_byte(b, ':')
 	if a.watching {
-		proof_bit(b, a.watch_mixed)
+		proof_bit(b, a.watch_mixed || a.watch_owner_mixed)
 		strings.write_byte(b, '/')
 		proof_write_label(b, a.watched)
 		strings.write_byte(b, '/')
@@ -835,6 +878,10 @@ main :: proc() {
 			proof_bit(&b, label_script_denied(cmd, argv))
 		case "AR", "AH", "AE":
 			proof_request(&b, f[0], proof_nat(f[1]), f[2:])
+		case "AV":
+			proof_veto_call(&b, f[0], proof_nat(f[1]), f[2:], false)
+		case "OV":
+			proof_veto_call(&b, f[0], proof_nat(f[1]), f[2:], true)
 		case:
 			panic("unknown row")
 		}

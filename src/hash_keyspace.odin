@@ -1,5 +1,6 @@
 package main
 
+import "base:runtime"
 import "base:intrinsics"
 import ht "hashtype"
 import ld "ldfloat"
@@ -339,6 +340,10 @@ hash_resize_tick :: proc "contextless" () {
 				break
 			}
 		}
+	}
+	if owners_on && len(owner_active[.Hash_Resize]) > 0 && now_ns() < deadline {
+		context = runtime.default_context()
+		owner_resize_tick(.Hash_Resize, deadline)
 	}
 	ht.maintenance_release(deadline_ns = now_ns() + 50_000)
 }

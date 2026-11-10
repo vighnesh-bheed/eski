@@ -7,6 +7,7 @@ cmd_docs := [?]Cmd_Doc {
 		since = "8.0.0",
 		group = .Module,
 		module = VSET_MODULE_NAME,
+		acl = {.Write, .Slow},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
 			{name = "reduce", kind = .Block, token = "REDUCE", flags = {.Optional}, args = {{name = "dim", kind = .Integer}}},
@@ -39,6 +40,7 @@ cmd_docs := [?]Cmd_Doc {
 		since = "8.0.0",
 		group = .Module,
 		module = VSET_MODULE_NAME,
+		acl = {.Read, .Fast},
 		args = {{name = "key", kind = .Key, key_spec = 0}},
 	},
 	{
@@ -47,6 +49,7 @@ cmd_docs := [?]Cmd_Doc {
 		since = "8.0.0",
 		group = .Module,
 		module = VSET_MODULE_NAME,
+		acl = {.Read, .Fast},
 		args = {{name = "key", kind = .Key, key_spec = 0}},
 	},
 	{
@@ -55,6 +58,7 @@ cmd_docs := [?]Cmd_Doc {
 		since = "8.0.0",
 		group = .Module,
 		module = VSET_MODULE_NAME,
+		acl = {.Read, .Fast},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
 			{name = "element", kind = .String},
@@ -67,6 +71,7 @@ cmd_docs := [?]Cmd_Doc {
 		since = "8.0.0",
 		group = .Module,
 		module = VSET_MODULE_NAME,
+		acl = {.Read, .Fast},
 		args = {{name = "key", kind = .Key, key_spec = 0}, {name = "element", kind = .String}},
 	},
 	{
@@ -75,6 +80,7 @@ cmd_docs := [?]Cmd_Doc {
 		since = "8.0.0",
 		group = .Module,
 		module = VSET_MODULE_NAME,
+		acl = {.Read, .Fast},
 		args = {{name = "key", kind = .Key, key_spec = 0}},
 	},
 	{
@@ -83,6 +89,7 @@ cmd_docs := [?]Cmd_Doc {
 		since = "8.2.0",
 		group = .Module,
 		module = VSET_MODULE_NAME,
+		acl = {.Read, .Slow},
 		args = {{name = "key", kind = .Key, key_spec = 0}, {name = "element", kind = .String}},
 	},
 	{
@@ -91,6 +98,7 @@ cmd_docs := [?]Cmd_Doc {
 		since = "8.0.0",
 		group = .Module,
 		module = VSET_MODULE_NAME,
+		acl = {.Read, .Fast},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
 			{name = "element", kind = .String},
@@ -103,6 +111,7 @@ cmd_docs := [?]Cmd_Doc {
 		since = "8.0.0",
 		group = .Module,
 		module = VSET_MODULE_NAME,
+		acl = {.Read, .Slow},
 		args = {{name = "key", kind = .Key, key_spec = 0}, {name = "count", kind = .Integer, flags = {.Optional}}},
 	},
 	{
@@ -111,6 +120,7 @@ cmd_docs := [?]Cmd_Doc {
 		since = "8.4.0",
 		group = .Module,
 		module = VSET_MODULE_NAME,
+		acl = {.Read, .Slow},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
 			{name = "start", kind = .String},
@@ -124,6 +134,7 @@ cmd_docs := [?]Cmd_Doc {
 		since = "8.0.0",
 		group = .Module,
 		module = VSET_MODULE_NAME,
+		acl = {.Write, .Slow},
 		args = {{name = "key", kind = .Key, key_spec = 0}, {name = "element", kind = .String}},
 	},
 	{
@@ -132,6 +143,7 @@ cmd_docs := [?]Cmd_Doc {
 		since = "8.0.0",
 		group = .Module,
 		module = VSET_MODULE_NAME,
+		acl = {.Write, .Fast},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
 			{name = "element", kind = .String},
@@ -144,6 +156,7 @@ cmd_docs := [?]Cmd_Doc {
 		since = "8.0.0",
 		group = .Module,
 		module = VSET_MODULE_NAME,
+		acl = {.Read, .Slow},
 		args = {
 			{name = "key", kind = .Key, key_spec = 0},
 			{

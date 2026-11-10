@@ -62,7 +62,8 @@ plain_sets_read_the_same_through_the_labelled_api :: proc(t: ^testing.T) {
 		testing.expectf(t, named_text(s, hits[:]) == named_text(s, ours[:]), "round %d differs", round)
 		free_all(context.temp_allocator)
 	}
-	testing.expect_value(t, view_memory(&v), VIEW_BASE_BYTES + PART_FIXED_BYTES + s.ledger.bytes - usable_size(s) + card(s) * NAME_INDEX_BYTES)
+	testing.expect_value(t, view_memory(&v), expected_view_memory(s, &bottom, &sc))
+	testing.expect_value(t, view_memory(&v), VIEW_BASE_BYTES + part_content_bytes(s, &s.core))
 	top := lattice_access(&l, 2)
 	top.top = true
 	tv, _ := view_open(s, &top, &sc)

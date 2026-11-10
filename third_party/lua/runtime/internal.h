@@ -53,6 +53,7 @@ typedef struct es_context {
     int globals_reference, cleanup_reference, load_globals_reference, scripts_reference;
     struct es_debug_state *debug;
     uint64_t random_state;
+    int cjson_reference, gc_pause, gc_stepmul;
 } es_context;
 
 es_context *es_context_of(lua_State *L);

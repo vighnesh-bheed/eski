@@ -25,8 +25,16 @@ NORMALISATIONS = OrderedDict([
                  "that the reply is an integer, or the exact bytes when it is anything else")),
     ("ttl", ("the remaining time to live read right after EXPIRE depends on the clock", "that the reply is a non-negative integer, or the exact bytes of -1, -2 and anything else")),
     ("sorted", ("COMMAND LIST order follows the server's command table hashing", "the multiset of names")),
-    ("acl-listing", ("ACL CAT read and write list every command of the category, including the commands of the other modules in the reference image",
-                     "the vector set command names found in the listing, which must be none on both servers")),
+    ("acl-listing", ("ACL CAT read and write list every command of the category, including the commands of the other modules in the reference image, and "
+                     "Eski puts the vector set commands in the ordinary categories where the reference leaves them outside every category (" + cases.ACL_DIFFERENCE + ")",
+                     "the vector set command names found in the listing: none on the reference, and exactly the commands of that category on Eski")),
+    ("acl-scan", ("the deliberate category difference: " + cases.ACL_DIFFERENCE,
+                  "every category that lists a vector set command, with the names it lists: none on the reference, and on Eski exactly read, write, fast and slow with their commands")),
+    ("acl-metadata", ("the deliberate category and key flag difference: " + cases.ACL_DIFFERENCE,
+                      "every other byte of the reply, with the ACL categories and the key flags each checked against the server's documented value: none and RW access update on the reference, "
+                      "the command's two categories on Eski and RO access for the read commands")),
+    ("acl-login", ("a login built from category rules is granted or denied the vector set commands by those categories on Eski and only by name or by +@all on the reference: " + cases.ACL_DIFFERENCE,
+                   "for every vector set command run by a fresh connection authenticated as the login, whether it ran or was refused with NOPERM for the command or for the key, against the documented verdicts of each server; rules by name give the same verdicts on both")),
     ("module-list", ("the reference image loads five modules and Eski has no module interface; only the vector set entry can match",
                      "the complete name, ver, path and args entry of the vectorset module")),
     ("docs-summary", ("Eski words the COMMAND DOCS summaries of the vector set commands itself, so their text differs from the reference's by design",
@@ -224,6 +232,7 @@ class Context:
         self.runner = runner
         self.step = step
         self.conn = conn
+        self.role = runner.role
 
     def probe(self, argv):
         return self.conn.call(argv)
@@ -257,11 +266,99 @@ def norm_sorted(node, ctx):
     return node.head + b"\r\n" + b"".join(sorted(c.raw for c in node.value))
 
 
+def role(ctx):
+    return getattr(ctx, "role", None) or ctx.runner.role
+
+
+def documented(ctx, got, want, what):
+    if got == want:
+        return b"<" + what + b" as documented for each server>"
+    return b"<" + what + b" on " + role(ctx).encode() + b": " + got + b">"
+
+
+def vector_names(node):
+    return sorted(c.value.lower() for c in node.value if text(c) is not None and c.value.lower() in LOWER_COMMANDS)
+
+
 def norm_acl_listing(node, ctx):
     if not aggregate(node):
         return node.raw
-    hits = sorted(c.value.lower() for c in node.value if text(c) is not None and c.value.lower() in LOWER_COMMANDS)
-    return b"vector set commands in the listing: [" + b" ".join(hits) + b"]"
+    category = ctx.step["argv"][-1].decode("latin1").lower()
+    want = [] if role(ctx) == "reference" else sorted(c.lower().encode() for c in cases.ACL_LISTINGS.get(category, []))
+    hits = vector_names(node)
+    return documented(ctx, b" ".join(hits), b" ".join(want), b"vector set commands in the " + category.encode() + b" listing")
+
+
+def scan_listing(hits, ctx):
+    if role(ctx) == "reference":
+        want = []
+    else:
+        want = sorted(cat.encode() + b":" + c.lower().encode() for cat, names in cases.ACL_LISTINGS.items() for c in names)
+    return documented(ctx, b" ".join(sorted(hits)), b" ".join(want), b"vector set commands in ACL categories")
+
+
+def norm_acl_scan(node, ctx):
+    return node.raw
+
+
+def rebuild(node, subst):
+    if id(node) in subst:
+        return subst[id(node)]
+    if aggregate(node) and node.kind in (b"*", b"~", b"%"):
+        return node.head + b"\r\n" + b"".join(rebuild(c, subst) for c in node.value)
+    return node.raw
+
+
+def flag_texts(node):
+    if not aggregate(node):
+        return node.raw
+    return b" ".join(sorted(text(c) or c.raw for c in node.value))
+
+
+def key_flags_want(ctx, name):
+    if role(ctx) == "reference" or name.upper() in cases.WRITE_COMMANDS:
+        return [b"RW", b"access", b"update"]
+    return [b"RO", b"access"]
+
+
+def info_entry_check(entry, ctx, subst):
+    name = text(entry.value[0]) or b""
+    cats = entry.value[6]
+    got = flag_texts(cats)
+    want = [] if role(ctx) == "reference" else sorted(c.encode() for c in cases.ACL_CATEGORIES.get(name.decode("latin1").upper(), ()))
+    subst[id(cats)] = documented(ctx, got, b" ".join(want), b"ACL categories")
+    specs = entry.value[8]
+    if aggregate(specs):
+        for spec in specs.value:
+            if not aggregate(spec):
+                continue
+            items = spec.value
+            for i in range(0, len(items) - 1, 2):
+                if text(items[i]) == b"flags":
+                    flags = items[i + 1]
+                    subst[id(flags)] = documented(ctx, flag_texts(flags), b" ".join(sorted(key_flags_want(ctx, name.decode("latin1")))), b"key flags")
+
+
+def norm_acl_metadata(node, ctx):
+    if is_error(node) or is_null(node) or not aggregate(node):
+        return node.raw
+    argv = ctx.step["argv"]
+    subst = {}
+    if argv[1].upper() == b"INFO":
+        for entry in node.value:
+            if aggregate(entry) and len(entry.value) >= 10:
+                info_entry_check(entry, ctx, subst)
+    else:
+        command = argv[2].decode("latin1")
+        for pair in node.value:
+            if aggregate(pair) and len(pair.value) == 2:
+                flags = pair.value[1]
+                subst[id(flags)] = documented(ctx, flag_texts(flags), b" ".join(sorted(key_flags_want(ctx, command))), b"key flags")
+    return rebuild(node, subst)
+
+
+def norm_acl_login(node, ctx):
+    return node.raw
 
 
 def norm_docs_summary(node, ctx):
@@ -540,6 +637,9 @@ NORMALISERS = {
     "ttl": norm_ttl,
     "sorted": norm_sorted,
     "acl-listing": norm_acl_listing,
+    "acl-scan": norm_acl_scan,
+    "acl-metadata": norm_acl_metadata,
+    "acl-login": norm_acl_login,
     "module-list": norm_module_list,
     "docs-summary": norm_docs_summary,
     "debug-object": norm_debug_object,
@@ -575,8 +675,9 @@ def resolve_argv(argv, stored):
 
 
 class Runner:
-    def __init__(self, port, timeout):
+    def __init__(self, port, timeout, role="eski"):
         self.port = port
+        self.role = role
         self.timeout = timeout
         self.conns = {}
         self.sub = None
@@ -665,12 +766,38 @@ class Runner:
                         t = text(c)
                         if t is not None and t.lower() in LOWER_COMMANDS:
                             hits.append(name + b":" + t.lower())
-            return b"vector set commands in ACL categories: [" + b" ".join(sorted(hits)) + b"]"
+            return scan_listing(hits, Context(self, step, conn))
+        if kind == "login":
+            return self.login(step)
         argv = resolve_argv(step["argv"], self.stored)
         node = conn.call(argv)
         if step.get("store"):
             self.stored[step["store"]] = node
         return NORMALISERS[step["norm"]](node, Context(self, step, conn))
+
+    def login(self, step):
+        try:
+            c = Conn(self.port, step["proto"], self.timeout)
+        except OSError as e:
+            raise ServerGone("cannot connect: %s" % e)
+        try:
+            auth = c.call([b"AUTH", step["user"], step["password"]])
+            if is_error(auth) or text(auth) != b"OK":
+                return b"<" + step["user"] + b" could not authenticate: " + auth.raw + b">"
+            verdicts = []
+            for argv in step["commands"]:
+                reply = c.call(argv)
+                if is_error(reply) and reply.value.startswith(b"NOPERM"):
+                    verdicts.append("NOPERM key" if b"access a key" in reply.value else "NOPERM command")
+                else:
+                    verdicts.append("ran")
+        finally:
+            c.close()
+        got = " ".join(verdicts).encode()
+        want = " ".join(step["expect"][self.role]).encode()
+        if got == want:
+            return b"login " + step["user"] + b": verdicts as documented for each server"
+        return b"login " + step["user"] + b" on " + self.role.encode() + b": " + got
 
     def run(self, steps, results):
         for i, step in enumerate(steps):
@@ -694,7 +821,7 @@ def label(step, index):
     argv = step.get("argv")
     if step["kind"] == "pipeline":
         shown = step["note"]
-    elif step["kind"] in ("events", "subscribe", "unsubscribe", "acl-scan", "sleep"):
+    elif step["kind"] in ("events", "subscribe", "unsubscribe", "acl-scan", "login", "sleep"):
         shown = step["note"]
     else:
         parts = []
@@ -730,8 +857,8 @@ def first_difference(a, b):
 def compare(eski_port, ref_port, steps, timeout):
     eski = [None] * len(steps)
     ref = [None] * len(steps)
-    threads = [threading.Thread(target=Runner(eski_port, timeout).run, args=(steps, eski)),
-               threading.Thread(target=Runner(ref_port, timeout).run, args=(steps, ref))]
+    threads = [threading.Thread(target=Runner(eski_port, timeout, "eski").run, args=(steps, eski)),
+               threading.Thread(target=Runner(ref_port, timeout, "reference").run, args=(steps, ref))]
     for t in threads:
         t.start()
     for t in threads:

@@ -43,7 +43,7 @@ rank :: proc "contextless" (reader, a, b: Owner) -> int {
 }
 
 text_valid :: proc "contextless" (text: []u8) -> bool {
-	if len(text) == 0 || len(text) > TEXT_MAX {
+	if len(text) == 0 || len(text) > TEXT_MAX || (len(text) == 1 && text[0] == '*') {
 		return false
 	}
 	for b in text {

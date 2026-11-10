@@ -175,6 +175,7 @@ owners_forget :: proc(c: ^Conn, id: []u8) {
 		connections = owners_close(c, o)
 		contexts = label_contexts_drop_owner(o)
 		entries = slowlog_drop_owner(o)
+		lua_scopes_forget_owner(o)
 		owner_drop(o)
 	}
 	tokens := label_token_cache_drop_owner(string(id))
@@ -259,8 +260,7 @@ owners_list :: proc(c: ^Conn, argv: [][]u8) {
 		examined := 0
 		e := ow.table_from(&owner_table, from)
 		for e != nil && examined < count {
-			info := keyspace_owner_info(e)
-			if info.keys + info.elements > 0 {
+			if keyspace_owner_holds(e) {
 				append(&found, e)
 			}
 			examined += 1
@@ -354,7 +354,7 @@ cmd_owners :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	if !access.top {
-		reply_error(c, ERR_LABEL_TOP)
+		reply_error(c, access_top_refusal())
 		return
 	}
 	switch {

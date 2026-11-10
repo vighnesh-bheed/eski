@@ -180,7 +180,7 @@ deriving DecidableEq, Repr
 
 def noORules : ORules := ⟨.none, false, false⟩
 
-def textValid (t : List Nat) : Bool := decide (0 < t.length) && decide (t.length ≤ 128) && t.all (fun b => decide (33 ≤ b) && decide (b ≤ 126))
+def textValid (t : List Nat) : Bool := decide (0 < t.length) && decide (t.length ≤ 128) && t.all (fun b => decide (33 ≤ b) && decide (b ≤ 126)) && t != [42]
 
 def mayActText (r : ORules) (t : List Nat) : Bool :=
   match r.kind with

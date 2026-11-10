@@ -61,6 +61,7 @@ typedef struct eslua_options {
     int32_t function_mode;
     int32_t debug_mode;
     int32_t enable_deprecated_api;
+    int32_t isolate;
 } eslua_options;
 
 typedef eslua_result (*eslua_command_fn)(void *opaque, int32_t resp, size_t argc,
@@ -126,6 +127,7 @@ eslua_stats eslua_functions_active_stats(void);
 eslua_stats eslua_eval_stats(void);
 eslua_stats eslua_eval_active_stats(void);
 size_t eslua_detached_memory(void);
+uint64_t eslua_random_exchange(uint64_t next);
 void eslua_set_number_format(eslua_number_fn format);
 void eslua_set_load_log(eslua_log_fn log);
 

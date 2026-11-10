@@ -131,6 +131,7 @@ fuzz_read :: proc(f: ^Fuzz) {
 		info := view_info(&v)
 		testing.expect(t, info.size == view_size(&v) && info.attributes_count >= 0 && info.attributes_count <= info.size)
 		testing.expect(t, view_memory(&v) >= 0 && view_serialized_size(&v) >= 0)
+		testing.expect(t, a.top || view_memory(&v) == expected_memory_of(&v))
 	}
 }
 

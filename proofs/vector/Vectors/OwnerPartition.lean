@@ -123,6 +123,38 @@ theorem owner_isolation_stream (ops : PartOps N V P) (sees : L → L → Bool) (
   unfold restrictTo at this
   exact restrict_stream_eq _ _ _ this (r, u) (seesP_refl sees hs (r, u))
 
+theorem owner_purge_memory (ops : PartOps N V P) (sees : L → L → Bool) (hs : Sees sees) (gt : L → L → Bool)
+    (acc : PartAcc N P) (bytes : P → Nat) (base : Nat) (le : L × Nat → L × Nat → Bool) (labelsU : List (L × Nat))
+    (namesU : List N) (R : L × Nat) (cs : List (Cmd (L × Nat) N V)) (s : LState (L × Nat) N P) :
+    viewMemory acc bytes base le labelsU namesU (readerP sees gt R) (wrun ops (seesP sees) cs s) =
+      viewMemory acc bytes base le labelsU namesU (readerP sees gt R)
+        (wrun ops (seesP sees) (purge (seesP sees) R cs) s) := by
+  have hown := readerP_own sees hs gt R
+  rw [← viewMemory_restrict acc bytes base le labelsU namesU _ hown (wrun ops (seesP sees) cs s),
+    ← viewMemory_restrict acc bytes base le labelsU namesU _ hown (wrun ops (seesP sees) (purge (seesP sees) R cs) s)]
+  have := owner_run_purge ops sees hs gt R cs s
+  unfold restrictTo at this
+  have h : restrict (readerP sees gt R) (wrun ops (seesP sees) cs s) =
+      restrict (readerP sees gt R) (wrun ops (seesP sees) (purge (seesP sees) R cs) s) := this
+  rw [h]
+
+theorem owner_isolation_memory (ops : PartOps N V P) (sees : L → L → Bool) (hs : Sees sees) (gt : L → L → Bool)
+    (acc : PartAcc N P) (bytes : P → Nat) (base : Nat) (le : L × Nat → L × Nat → Bool) (labelsU : List (L × Nat))
+    (namesU : List N) (u v : Nat) (hv : v ≠ SHARED) (huv : u ≠ v) (r : L) (cs : List (Cmd (L × Nat) N V))
+    (s : LState (L × Nat) N P) :
+    viewMemory acc bytes base le labelsU namesU (readerP sees gt (r, u)) (wrun ops (seesP sees) cs s) =
+      viewMemory acc bytes base le labelsU namesU (readerP sees gt (r, u))
+        (wrun ops (seesP sees) (cs.filter (fun c => c.label.2 != v)) s) := by
+  have hown := readerP_own sees hs gt (r, u)
+  rw [← viewMemory_restrict acc bytes base le labelsU namesU _ hown (wrun ops (seesP sees) cs s),
+    ← viewMemory_restrict acc bytes base le labelsU namesU _ hown
+      (wrun ops (seesP sees) (cs.filter (fun c => c.label.2 != v)) s)]
+  have := owner_isolation ops sees hs gt u v hv huv r cs s
+  unfold restrictTo at this
+  have h : restrict (readerP sees gt (r, u)) (wrun ops (seesP sees) cs s) =
+      restrict (readerP sees gt (r, u)) (wrun ops (seesP sees) (cs.filter (fun c => c.label.2 != v)) s) := this
+  rw [h]
+
 theorem owner_partition_history (ops : PartOps N V P) (sees : L → L → Bool) (hs : Sees sees) (gt : L → L → Bool)
     (x : L × Nat) (cs : List (Cmd (L × Nat) N V)) (s : LState (L × Nat) N P) :
     (wrun ops (seesP sees) cs s).parts x = (wrun ops (seesP sees) (purge (seesP sees) x cs) s).parts x ∧
@@ -177,6 +209,24 @@ theorem forget_history (ops : PartOps N V P) (sees : L → L → Bool) (hs : See
     restrictTo (seesP sees) (gtP gt) R (wrun ops (seesP sees) cs₂ (forgetOwner o (wrun ops (seesP sees) cs₁ s))) =
       restrictTo (seesP sees) (gtP gt) R (wrun ops (seesP sees) cs₂ (wrun ops (seesP sees) cs₁ s)) :=
   run_congr ops (seesP sees) (seesP_sees sees hs) (gtP gt) R cs₂ _ _ (forget_local sees gt o ho R hR _)
+
+theorem forget_history_memory (ops : PartOps N V P) (sees : L → L → Bool) (hs : Sees sees) (gt : L → L → Bool)
+    (acc : PartAcc N P) (bytes : P → Nat) (base : Nat) (le : L × Nat → L × Nat → Bool) (labelsU : List (L × Nat))
+    (namesU : List N) (o : Nat) (ho : o ≠ SHARED) (R : L × Nat) (hR : R.2 ≠ o) (cs₁ cs₂ : List (Cmd (L × Nat) N V))
+    (s : LState (L × Nat) N P) :
+    viewMemory acc bytes base le labelsU namesU (readerP sees gt R)
+        (wrun ops (seesP sees) cs₂ (forgetOwner o (wrun ops (seesP sees) cs₁ s))) =
+      viewMemory acc bytes base le labelsU namesU (readerP sees gt R)
+        (wrun ops (seesP sees) cs₂ (wrun ops (seesP sees) cs₁ s)) := by
+  have hown := readerP_own sees hs gt R
+  rw [← viewMemory_restrict acc bytes base le labelsU namesU _ hown
+      (wrun ops (seesP sees) cs₂ (forgetOwner o (wrun ops (seesP sees) cs₁ s))),
+    ← viewMemory_restrict acc bytes base le labelsU namesU _ hown
+      (wrun ops (seesP sees) cs₂ (wrun ops (seesP sees) cs₁ s))]
+  have h : restrict (readerP sees gt R) (wrun ops (seesP sees) cs₂ (forgetOwner o (wrun ops (seesP sees) cs₁ s))) =
+      restrict (readerP sees gt R) (wrun ops (seesP sees) cs₂ (wrun ops (seesP sees) cs₁ s)) :=
+    forget_history ops sees hs gt o ho R hR cs₁ cs₂ s
+  rw [h]
 
 theorem forget_leaves_shared (sees gt : L → L → Bool) (o : Nat) (ho : o ≠ SHARED) (r : L)
     (s : LState (L × Nat) N P) :

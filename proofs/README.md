@@ -19,16 +19,16 @@ The retrieval leaves have three projects, which the aggregate runner includes af
 
 ## Recorded coverage
 
-The first phase contains 278 named contract theorems. The complete kernel inventory additionally checks generated declarations. The comparison counts below use different units and should be read by row.
+The first phase contains 285 named contract theorems. The complete kernel inventory additionally checks generated declarations. The comparison counts below use different units and should be read by row.
 
 | Area | Named theorems | Actual Odin comparison evidence |
 | --- | --- | --- |
-| 1. Hash-table resizing | 132 | 12,275 table operations and 2,254 SCAN rounds, including non-power-of-two capacities, growth and shrink rules, timed keys, partial migration, collisions, deletions and swaps |
+| 1. Hash-table resizing | 132 | 20,404 table operations and 3,639 SCAN rounds, including non-power-of-two capacities, growth and shrink rules, the production resize start and `db_make_room` in both partition roles, heap-role tables crossing 1,024 slots in both directions, timed keys, partial migration, collisions, deletions and swaps |
 | 2. Worker rollback | 18 | Five internal-failure, success and ordinary command-error fixtures |
 | 3. Expiry and persistence | 27 | 7,958 hash-operation steps, ten ordinary-key translation fixtures and two exact-deadline fixtures |
 | 4. Request parsing | 16 | 1,629 arithmetic guards and 4,042 fragmented-input prefix checks |
 | 5. Packed codecs | 26 | 11,376 codec, decode, validation and traversal rows |
-| 6. Memory accounting | 24 | 1,527 pool accounting operations and rollback/ownership checks, plus table-byte, timed-key and key-cell counters on each of the 12,275 table rows |
+| 6. Memory accounting | 31 | 1,527 pool accounting operations and rollback/ownership checks, plus role, table-byte, mapped-byte, timed-key and key-cell counters on each of the 20,404 table rows, and 1,174 heap-role string-value rows compared for the Odin bridge only |
 | 9. Bit and integer operations | 35 | 49,629 programs containing 100,155 operations |
 
 These checks passed in a fresh aggregate rebuild over the source tree of development commit 21ca928 on 7 November 2026 with Lean 4.35.0 and the repository's Odin toolchain. Each project records its own source, artifact and corpus identities. Validation/traversal rows, whole-parser fast/slow comparisons, ordinary-key translator fixtures and actual Odin correspondence remain tests where the individual documentation says so; their presence does not extend the formal proof claims.
@@ -47,7 +47,7 @@ The aggregate runner verifies projects sequentially: `storage`, `effects`, `enco
 
 ## Vector packages
 
-The vector project contains 400 named contract theorems and 1,971 kernel-checked theorems. Its comparison rows run the Lean model and the actual imported `vmath`, `hnsw`, `label` and `vsettype` procedures on one deterministic case file and check both against independent Python expectations.
+The vector project contains 405 named contract theorems and 1,976 kernel-checked theorems. Its comparison rows run the Lean model and the actual imported `vmath`, `hnsw`, `label` and `vsettype` procedures on one deterministic case file and check both against independent Python expectations.
 
 | Area | Named theorems | Actual Odin comparison evidence |
 | --- | --- | --- |
@@ -60,7 +60,7 @@ The vector project contains 400 named contract theorems and 1,971 kernel-checked
 | Filter programs | 6 | None; proof only |
 | Partition merge | 42 | 1,346 merged searches over flat, graph and pinned partitions with FILTER, FILTER-EF, EPSILON, TRUTH and element queries, 144 of the 533 label searches with tied scores in the reply, and 813 searches through owner views, 361 of them over own and shared partitions together |
 | Name resolution and views | 71 | 3,132 view rows: 1,008 over labels with and without trust (sizes and attribute counts with shadowed copies, resolved copies with their vectors and attributes, 64 resolutions decided by the own-label rule, ranges, 224 samples from per-label streams and the links of flat partitions), and 2,124 owner rows (views listing every partition with its owner, found copies with their scopes, ranges, samples from per-scope streams, links, top scopes and owner counts, with 155 resolutions decided by the shared copy at the reader's label) with 63 access rows at SHARED, a user and EVERY_OWNER, with and without a stream |
-| Label and owner independence | 61 | 16,736 rows: 5,879 labelled rows (3,466 labelled writes with 644 refusals and 520 forced copies, and reader digests before and after 102 bursts of writes at labels the reader cannot see) and 10,857 owner rows (5,410 owner and shared writes with 739 refusals naming a scope, 1,972 accounting rows with 64 graduations and 27 flattens of owner blocks, 309 forgets, 90 bursts the reader cannot see, and 14 twin pairs whose 399 observer replies are byte-identical without 1,402 hidden commands, with 9 sensitivity runs) |
+| Label and owner independence | 66 | 16,736 rows: 5,879 labelled rows (3,466 labelled writes with 644 refusals and 520 forced copies, and reader digests before and after 102 bursts of writes at labels the reader cannot see) and 10,857 owner rows (5,410 owner and shared writes with 739 refusals naming a scope, 1,972 accounting rows with 64 graduations and 27 flattens of owner blocks, 309 forgets, 90 bursts the reader cannot see, and 14 twin pairs whose 399 observer replies are byte-identical without 1,402 hidden commands, with 9 sensitivity runs) |
 | Labels-off and owners-off compatibility | 23 | 1,912 rows: 363 on 9 plain sets through the labels-off API and the labelled API, before and after a converting write, and 1,549 owner rows on plain sets that owner writes convert and in 8 single-owner pairs whose 649 replies equal the replies at SHARED |
 | Element relabelling | 14 | 613 relabel rows through `relabel_at` with 199 moves and 179 refusals, and 36 byte-exact comparisons of moved q8, f32 and binary elements |
 | Labelled commands | 30 | 3,512 replies of the real `cmd_vset` handlers through `execute` in a server copy, 631 observer replies compared directly across 37 runs with and without hidden commands, and 292 labelled reads of plain sets plus 229 single-level replies against the labels-off replies |

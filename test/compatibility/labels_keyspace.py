@@ -938,22 +938,28 @@ class ManyCopies(unittest.TestCase):
 
 
 class RuntimeScheme(unittest.TestCase):
-    def test_existing_data_becomes_bottom_data(self):
+    def test_existing_data_refuses_the_scheme(self):
         server = Server(BINARY, workers=0, arguments=('--keyspace-threads', str(KEYSPACE_THREADS)))
         self.addCleanup(server.close)
         server.start()
         c = Client(server.port)
         self.addCleanup(c.close)
+        refused = "ERR CONFIG SET failed (possibly related to argument 'label-levels') - a label scheme needs a server without keys, because existing keys carry no label"
         c.call('SET', 'old', 'value')
         c.call('VADD', 'vs', 'VALUES', 2, 1, 0, 'e')
-        c.call('CONFIG', 'SET', 'label-levels', 'U,S')
+        self.assertEqual(error_of(c, 'CONFIG', 'SET', 'label-levels', 'U,S'), refused)
+        self.assertEqual(c.call('DEL', 'old'), 1)
+        self.assertEqual(error_of(c, 'CONFIG', 'SET', 'label-levels', 'U,S'), refused)
+        self.assertEqual(c.call('GET', 'old'), None)
+        self.assertEqual(c.call('VCARD', 'vs'), 1)
+        self.assertEqual(c.call('DEL', 'vs'), 1)
+        self.assertEqual(c.call('CONFIG', 'SET', 'label-levels', 'U,S'), 'OK')
         c.call('ACL', 'SETUSER', 'default', 'clearance:*')
-        self.assertEqual(c.call(*AS('S'), 'GET', 'old'), b'value')
-        self.assertEqual(c.call(*AS('U'), 'LABEL', 'OF', 'old'), b'U')
-        self.assertEqual(c.call(*AS('S'), 'VCARD', 'vs'), 1)
+        self.assertEqual(c.call(*AS('U'), 'SET', 'old', 'value'), 'OK')
         self.assertEqual(c.call(*AS('S'), 'VADD', 'vs', 'VALUES', 2, 0, 1, 'f'), 1)
-        self.assertEqual(c.call(*AS('U'), 'VCARD', 'vs'), 1)
-        self.assertEqual(c.call(*AS('S'), 'VCARD', 'vs'), 2)
+        self.assertEqual(c.call(*AS('S'), 'VCARD', 'vs'), 1)
+        self.assertEqual(c.call(*AS('U'), 'EXISTS', 'vs'), 0)
+        self.assertEqual(c.call(*AS('S'), 'LABEL', 'OF', 'old'), b'U')
         self.assertEqual(error_of(c, *AS('S'), 'SET', 'old', 'x'), 'INUSE name in use at U')
 
     def test_a_watch_from_before_the_scheme_is_a_watch_at_the_lowest_label(self):
@@ -966,10 +972,10 @@ class RuntimeScheme(unittest.TestCase):
             admin = Client(server.port)
             self.addCleanup(c.close)
             self.addCleanup(admin.close)
-            c.call('SET', 'w', 1)
             c.call('WATCH', 'w')
             if dirty:
                 admin.call('SET', 'w', 2)
+                admin.call('DEL', 'w')
             admin.call('CONFIG', 'SET', 'label-levels', 'U,S')
             if raised:
                 admin.call('ACL', 'SETUSER', 'default', 'clearance:*')

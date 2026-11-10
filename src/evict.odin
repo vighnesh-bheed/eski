@@ -55,11 +55,90 @@ Pool_Entry :: struct {
 @(private = "file")
 evict_pool: [EVPOOL_SIZE]Pool_Entry
 @(private = "file")
+evict_owner_pool: [EVPOOL_SIZE]Pool_Entry
+@(private = "file")
+evict_pool_cur: ^[EVPOOL_SIZE]Pool_Entry = &evict_pool
+@(private = "file")
 evict_samples: [64]Evict_Sample
 @(private = "file")
 evict_next_db: int
 @(private = "file")
 evict_key: [dynamic]u8
+@(private = "file")
+evict_owner: ^Owner_Entry
+@(private = "file")
+evict_owner_parts: [dynamic]^Owner_Part
+
+evict_pool_forget :: proc(db: ^Db) {
+	for &pe in evict_pool {
+		if pe.db == db {
+			pe.used = false
+			pe.idle = 0
+			pe.db = nil
+		}
+	}
+	for &pe in evict_owner_pool {
+		if pe.db == db {
+			pe.used = false
+			pe.idle = 0
+			pe.db = nil
+		}
+	}
+}
+
+@(private = "file")
+evict_pool_admits :: #force_inline proc(db: ^Db) -> bool {
+	if evict_owner != nil {
+		return db != nil && db.role & DB_ROLE_OWNER != 0 && (^Owner_Part)(db).space.entry == evict_owner
+	}
+	if evict_scope >= 0 {
+		return db != nil && int(db.label) == evict_scope && db.role & DB_ROLE_OWNER == 0
+	}
+	return true
+}
+
+@(private = "file")
+@(cold)
+evict_owner_draws :: #force_no_inline proc(volatile: bool, shared: int) -> int {
+	weight := Owner_Weight.Expires if volatile else .Keys
+	if owner_sampler[weight].mass == 0 {
+		return 0
+	}
+	owned := owner_expires_total if volatile else owner_keys_total
+	if owned <= 0 {
+		return 0
+	}
+	draws := max(1, (maxmemory_samples * owned + owned + shared - 1) / max(owned + shared, 1))
+	for _ in 0 ..< draws {
+		p := owner_sampler_pick(weight)
+		if p == nil {
+			break
+		}
+		evict_pool_populate(&p.db, volatile)
+	}
+	return owned
+}
+
+@(private = "file")
+evict_owner_partition :: proc(volatile: bool) -> ^Db {
+	owner_parts_of(evict_owner, &evict_owner_parts)
+	total := 0
+	for q in evict_owner_parts {
+		total += q.db.expires if volatile else db_size_of(&q.db)
+	}
+	if total == 0 {
+		return nil
+	}
+	r := int(rng_next() % u64(total))
+	for q in evict_owner_parts {
+		w := q.db.expires if volatile else db_size_of(&q.db)
+		if r < w {
+			return &q.db
+		}
+		r -= w
+	}
+	return nil
+}
 
 evict_policy_parse :: proc(s: []u8) -> (Evict_Policy, bool) {
 	for name, p in EVICT_POLICY_NAMES {
@@ -141,7 +220,7 @@ evict_memory_ok :: proc() -> bool {
 
 @(private = "file")
 evict_pool_insert :: proc(db: ^Db, s: Evict_Sample) {
-	pool := &evict_pool
+	pool := evict_pool_cur
 	k := 0
 	for k < EVPOOL_SIZE && pool[k].used && pool[k].idle < s.score {
 		k += 1
@@ -193,26 +272,42 @@ evict_pick_pool :: proc() -> (db: ^Db, found: bool) {
 	volatile := evict_volatile()
 	for !found {
 		total := 0
-		for d in db_parts {
-			if evict_scope >= 0 && int(d.label) != evict_scope {
-				continue
+		if evict_owner != nil {
+			owner_parts_of(evict_owner, &evict_owner_parts)
+			for q in evict_owner_parts {
+				d := &q.db
+				keys := d.expires if volatile else db_size_of(d)
+				if keys == 0 {
+					continue
+				}
+				total += keys
+				evict_pool_populate(d, volatile)
 			}
-			keys := d.expires if volatile else db_size_of(d)
-			if keys == 0 {
-				continue
+		} else {
+			for d in db_parts {
+				if evict_scope >= 0 && int(d.label) != evict_scope {
+					continue
+				}
+				keys := d.expires if volatile else db_size_of(d)
+				if keys == 0 {
+					continue
+				}
+				total += keys
+				evict_pool_populate(d, volatile)
 			}
-			total += keys
-			evict_pool_populate(d, volatile)
+			if owners_on && evict_scope < 0 {
+				total += evict_owner_draws(volatile, total)
+			}
 		}
 		if total == 0 {
 			return nil, false
 		}
 		for k := EVPOOL_SIZE - 1; k >= 0; k -= 1 {
-			p := &evict_pool[k]
+			p := &evict_pool_cur[k]
 			if !p.used {
 				continue
 			}
-			if evict_scope >= 0 && (p.db == nil || int(p.db.label) != evict_scope) {
+			if !evict_pool_admits(p.db) {
 				continue
 			}
 			p.used = false
@@ -232,6 +327,26 @@ evict_pick_pool :: proc() -> (db: ^Db, found: bool) {
 evict_pick_random :: proc() -> (db: ^Db, found: bool) {
 	n := len(db_parts)
 	volatile := evict_volatile()
+	if evict_owner != nil || (owners_on && evict_scope < 0) {
+		if d := evict_random_owner(volatile); d != nil {
+			key: []u8
+			ok: bool
+			if volatile {
+				ok = db_evict_sample(d, evict_samples[:1], true, .Ttl) == 1
+				key = evict_samples[0].key
+			} else {
+				_, key, ok = db_sample_key(d)
+			}
+			if ok {
+				clear(&evict_key)
+				append(&evict_key, ..key)
+				return d, true
+			}
+		}
+		if evict_owner != nil {
+			return nil, false
+		}
+	}
 	for _ in 0 ..< n {
 		evict_next_db = (evict_next_db + 1) % n
 		d := db_parts[evict_next_db]
@@ -259,7 +374,32 @@ evict_pick_random :: proc() -> (db: ^Db, found: bool) {
 }
 
 @(private = "file")
+evict_random_owner :: proc(volatile: bool) -> ^Db {
+	if evict_owner != nil {
+		return evict_owner_partition(volatile)
+	}
+	weight := Owner_Weight.Expires if volatile else .Keys
+	if owner_sampler[weight].mass == 0 {
+		return nil
+	}
+	owned := owner_expires_total if volatile else owner_keys_total
+	shared := 0
+	for d in db_parts {
+		shared += d.expires if volatile else db_size_of(d)
+	}
+	if owned <= 0 || int(rng_next() % u64(owned + shared)) >= owned {
+		return nil
+	}
+	p := owner_sampler_pick(weight)
+	return &p.db if p != nil else nil
+}
+
+@(private = "file")
 evict_delete :: proc(db: ^Db) -> int {
+	owned := db.role & DB_ROLE_OWNER != 0
+	if owned {
+		owner_touch(db)
+	}
 	before := mem_used()
 	saved := lazy_set(cfg.lazyfree_lazy_eviction)
 	del_start := latency_start()
@@ -272,6 +412,9 @@ evict_delete :: proc(db: ^Db) -> int {
 	notify_in(.Evicted, "evicted", evict_key[:], db)
 	if aof.feed {
 		aof_propagate_del(db, evict_key[:], cfg.lazyfree_lazy_eviction)
+	}
+	if owned && !label_active {
+		owner_settle()
 	}
 	return freed
 }
@@ -399,6 +542,40 @@ evict_reset_stats :: proc() {
 	stat_evicted_clients = 0
 	stat_eviction_exceeded_us = 0
 	stat_eviction_exceeded_since = 0
+}
+
+evict_in_owner :: proc(e: ^Owner_Entry, quota: i64) -> (exhausted: bool) {
+	if maxmemory_policy == .Noeviction {
+		return true
+	}
+	saved := evict_owner
+	saved_pool := evict_pool_cur
+	evict_owner = e
+	evict_pool_cur = &evict_owner_pool
+	for &pe in evict_owner_pool {
+		pe.used = false
+		pe.idle = 0
+		pe.db = nil
+	}
+	defer {
+		evict_owner = saved
+		evict_pool_cur = saved_pool
+	}
+	random := maxmemory_policy == .Allkeys_Random || maxmemory_policy == .Volatile_Random
+	for i64(owner_used_live(e)) > quota {
+		db: ^Db
+		found: bool
+		if random {
+			db, found = evict_pick_random()
+		} else {
+			db, found = evict_pick_pool()
+		}
+		if !found {
+			return true
+		}
+		evict_delete(db)
+	}
+	return false
 }
 
 evict_in_label :: proc(label: int, tofree: int) -> (freed: int, exhausted: bool) {

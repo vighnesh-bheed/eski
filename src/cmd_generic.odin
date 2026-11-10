@@ -456,12 +456,12 @@ cmd_move :: proc(c: ^Conn, argv: [][]u8) {
 move_labelled :: proc(c: ^Conn, key: []u8, target: int) {
 	src := cur_db()
 	l := lookup_make(key)
-	tp := label_part(target, access.id)
+	tp := label_scope_find(target)
 	if tp != nil && label_live_in(tp, &l) {
 		reply_int(c, 0)
 		return
 	}
-	if _, _, i := label_locate_other(target, key, &l, access.id, access.vis); i >= 0 {
+	if _, _, i := label_scope_other(target, key, &l); i >= 0 {
 		reply_int(c, 0)
 		return
 	}
@@ -469,9 +469,9 @@ move_labelled :: proc(c: ^Conn, key: []u8, target: int) {
 		reply_int(c, 0)
 		return
 	}
-	made, ok := label_part_make(target, access.id)
-	if !ok {
-		reply_error(c, ERR_LABEL_PARTITIONS)
+	made, msg := label_scope_make(target, access.id)
+	if msg != "" {
+		reply_error(c, msg)
 		return
 	}
 	label_vset_detach_key(src, key)

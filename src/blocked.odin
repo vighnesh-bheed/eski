@@ -5,6 +5,7 @@ import "base:runtime"
 import "core:strings"
 import lb "label"
 import ld "ldfloat"
+import ow "owner"
 
 ERR_TIMEOUT_NOT_FLOAT :: "ERR timeout is not a float or out of range"
 
@@ -28,6 +29,7 @@ Block_State :: struct {
 	wake_on_key_removal: bool,
 	exact:               bool,
 	label:               lb.Id,
+	owner:               ow.Owner,
 	stream_ids:          [dynamic][2]u64,
 }
 
@@ -304,6 +306,7 @@ block_for_keys :: proc(c: ^Conn, type: Block_Type, keys: [][]u8, deadline: i64, 
 	bs.deadline = deadline
 	bs.wake_on_key_removal = wake_on_key_removal
 	bs.label = access.id if labels_on else lb.BOTTOM_ID
+	bs.owner = access.owner if owners_on && ow.is_user(access.owner) else ow.SHARED
 	bs.exact = labels_on && label_cmd_writes
 	m := &block_keys[dbi]
 	outer: for k in keys {
@@ -502,7 +505,7 @@ block_signal_key :: proc(db: ^Db, key: []u8, type: Obj_Type) {
 	if !found || bk.ready {
 		return
 	}
-	if labels_on && !block_label_wakes(bk, db.label) {
+	if labels_on && !block_label_wakes(bk, db.label, db.owner) {
 		return
 	}
 	block_queue_ready(dbi, k, bk)
@@ -779,17 +782,17 @@ block_before_sleep :: proc() {
 }
 
 @(private = "file")
-block_label_wakes :: proc(bk: ^Block_Key, written: lb.Id) -> bool {
+block_label_wakes :: proc(bk: ^Block_Key, written: lb.Id, owner: ow.Owner) -> bool {
 	for w in bk.waiters {
 		bs := w.bstate
 		if bs == nil {
 			continue
 		}
 		if bs.exact {
-			if bs.label == written {
+			if bs.label == written && bs.owner == owner {
 				return true
 			}
-		} else if access_dominates(bs.label, written) {
+		} else if access_dominates(bs.label, written) && (!owners_on || ow.sees(bs.owner, owner)) {
 			return true
 		}
 	}
@@ -804,7 +807,7 @@ block_waiter_type :: proc(dbi: int, key: string, c: ^Conn) -> (t: Obj_Type, foun
 	}
 	k := transmute([]u8)key
 	if bs.exact {
-		p := label_part(dbi, bs.label)
+		p, _ := label_scope_part(dbi, bs.label, bs.owner)
 		if p == nil {
 			return
 		}
@@ -815,7 +818,7 @@ block_waiter_type :: proc(dbi: int, key: string, c: ^Conn) -> (t: Obj_Type, foun
 		}
 		return entry_type(db_view_slot(p, tt, i)), true
 	}
-	p, tt, i := label_resolve(dbi, k, bs.label, access_visibility(bs.label))
+	p, tt, i := label_resolve(dbi, k, bs.label, access_visibility(bs.label), bs.owner)
 	if i < 0 {
 		return
 	}

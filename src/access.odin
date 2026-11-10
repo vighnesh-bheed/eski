@@ -23,7 +23,10 @@ ERR_OWNERS_OFF :: "ERR owners are not enabled on this server"
 ERR_OWNER_REQUIRED :: "ERR this login must name an owner with every command"
 ERR_OWNER_CONTEXT :: "ERR the owner differs from the context's owner"
 ERR_OWNER_BOUND :: "ERR this connection is bound to another owner"
-ERR_OWNER_TRANSACTION :: ERR_LABEL_TRANSACTION
+ERR_OWNER_TRANSACTION :: "ERR the command's owner differs from the transaction's owner"
+ERR_OWNER_WATCH_EXEC :: "EXECABORT Transaction discarded because of: the command's owner differs from the transaction's owner"
+ERR_OWNER_OPERATOR :: "ERR this command needs a login with the owner-operator right"
+ERR_OWNER_PERSISTENCE :: "ERR persistence is off while owner mode is on"
 
 Access :: struct {
 	label:       lb.Label,
@@ -32,6 +35,7 @@ Access :: struct {
 	top:         bool,
 	label_top:   bool,
 	operator:    bool,
+	owner_named: bool,
 	ctx:         ^Label_Context,
 	owner:       ow.Owner,
 	owner_entry: ^Owner_Entry,
@@ -44,6 +48,7 @@ Access_Conn :: struct {
 	pin_owner:      ow.Owner,
 	bound:          lb.Label,
 	bound_prefixed: bool,
+	owner_named:    bool,
 	owner:          ow.Owner,
 	implicit:       lb.Label,
 	monitor:        lb.Label,
@@ -51,6 +56,7 @@ Access_Conn :: struct {
 	watching:       bool,
 	watch_mixed:    bool,
 	ran:            bool,
+	watch_owner_mixed: bool,
 	watched_owner:  ow.Owner,
 	accounted:      int,
 }
@@ -92,6 +98,7 @@ Access_Arrival :: struct {
 	owner_only: bool,
 	token:      bool,
 	pin:        bool,
+	owner_pin:  bool,
 	token_pick: Owner_Pick,
 	token_len:  u8,
 	token_buf:  [ow.TEXT_MAX]u8,
@@ -425,8 +432,10 @@ access_watch_note_label :: proc(c: ^Conn, l: lb.Label, o: ow.Owner = ow.SHARED) 
 		a.watched = l
 		a.watched_owner = o
 		a.watching = true
-	} else if a.watched != l || a.watched_owner != o {
+	} else if a.watched != l {
 		a.watch_mixed = true
+	} else if a.watched_owner != o {
+		a.watch_owner_mixed = true
 	}
 }
 
@@ -436,13 +445,22 @@ access_watch_note :: proc(c: ^Conn) {
 
 access_watch_differs :: proc(c: ^Conn) -> bool {
 	a := c.label
-	return a != nil && a.watching && (a.watch_mixed || a.watched != a.bound || a.watched_owner != a.owner)
+	return a != nil && a.watching && (a.watch_mixed || a.watch_owner_mixed || a.watched != a.bound || a.watched_owner != a.owner)
+}
+
+access_watch_refusal :: proc(c: ^Conn) -> string {
+	a := c.label
+	if a.watch_mixed || a.watched != a.bound {
+		return ERR_LABEL_WATCH_EXEC
+	}
+	return ERR_OWNER_WATCH_EXEC
 }
 
 access_watch_clear :: proc(c: ^Conn) {
 	if a := c.label; a != nil {
 		a.watching = false
 		a.watch_mixed = false
+		a.watch_owner_mixed = false
 	}
 }
 
@@ -620,6 +638,10 @@ access_top_only :: proc(cmd: ^Command, argv: [][]u8) -> bool {
 		return access_word(argv, 1, "resetstat")
 	case h == cmd_owners:
 		return owners_on && !access_word(argv, 1, "help")
+	case h == cmd_function:
+		return access_word(argv, 1, "load") || access_word(argv, 1, "delete") || access_word(argv, 1, "flush") || access_word(argv, 1, "restore")
+	case h == cmd_script:
+		return access_word(argv, 1, "flush")
 	}
 	return false
 }
@@ -648,12 +670,20 @@ access_persistence_off :: #force_inline proc "contextless" () -> bool {
 	return labels_on
 }
 
+access_persistence_text :: proc "contextless" () -> string {
+	return ERR_OWNER_PERSISTENCE if owners_on && !label_scheme_labelled else ERR_LABEL_PERSISTENCE
+}
+
+access_top_refusal :: proc "contextless" () -> string {
+	return ERR_OWNER_OPERATOR if access.label_top else ERR_LABEL_TOP
+}
+
 access_command_refusal :: proc(cmd: ^Command, argv: [][]u8) -> string {
 	if access_persistence_refuses(cmd, argv) {
-		return ERR_LABEL_PERSISTENCE
+		return access_persistence_text()
 	}
 	if !access.top && access_top_only(cmd, argv) {
-		return ERR_LABEL_TOP
+		return access_top_refusal()
 	}
 	return ""
 }
@@ -693,6 +723,7 @@ access_set :: proc(l: lb.Label, ctx: ^Label_Context, operator: bool) -> bool {
 	access.top = access.label_top && (operator || !owners_on)
 	access.ctx = ctx
 	access.owner = ow.SHARED
+	access.owner_named = false
 	access.owner_entry = nil
 	return true
 }
@@ -782,11 +813,6 @@ access_admit :: proc(c: ^Conn, s: ^Cmd_Slot, args: [][]u8) -> bool {
 			access_refuse(c, s, args, msg)
 			return false
 		}
-	}
-	if access_arrival.pin {
-		a := access_conn(c)
-		a.session = access.label
-		a.explicit = true
 	}
 	if s.cmd.handler == cmd_monitor {
 		access_conn(c).monitor = access.label
@@ -891,10 +917,12 @@ access_owner_arrive :: proc(c: ^Conn, s: ^Cmd_Slot, args: [][]u8) -> string {
 		}
 		o, named = explicit, true
 	}
+	explicit := named
 	if !named {
 		switch {
 		case in_multi:
 			o = a.owner
+			explicit = a.owner_named
 		case r == nil || r.owners == .None:
 			o = ow.SHARED
 		case r.owners == .Fixed:
@@ -917,16 +945,35 @@ access_owner_arrive :: proc(c: ^Conn, s: ^Cmd_Slot, args: [][]u8) -> string {
 	if named && in_multi && o != a.owner {
 		return ERR_OWNER_TRANSACTION
 	}
+	if named && in_multi {
+		a.owner_named = true
+	}
 	access.owner = o
+	access.owner_named = explicit
 	access.owner_entry = owner_entry(o)
 	if !in_multi {
 		a.owner = o
-		if access_needs_session(s.cmd, args) && !a.owner_pinned {
-			a.owner_pinned = true
-			a.pin_owner = o
-		}
+		a.owner_named = explicit
+		arr.owner_pin = access_needs_session(s.cmd, args) && !a.owner_pinned
 	}
 	return ""
+}
+
+access_pin_ran :: proc(c: ^Conn) {
+	arr := &access_arrival
+	if !(arr.pin || arr.owner_pin) || !access_holds_push(c) {
+		return
+	}
+	a := access_conn(c)
+	if arr.pin && !a.explicit {
+		a.session = access.label
+		a.explicit = true
+	}
+	if arr.owner_pin && !a.owner_pinned {
+		a.owner_pinned = true
+		a.pin_owner = access.owner
+	}
+	arr.pin, arr.owner_pin = false, false
 }
 
 access_monitor_sees :: proc(m: ^Conn) -> bool {

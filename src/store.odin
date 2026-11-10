@@ -5,6 +5,7 @@ import "base:runtime"
 import "core:sys/linux"
 import ht "hashtype"
 import lb "label"
+import ow "owner"
 import st "settype"
 import zt "zsettype"
 import "sysclock"
@@ -40,6 +41,7 @@ Db :: struct {
 	zctx:          ^zt.Context,
 	label:         lb.Id,
 	role:          u8,
+	owner:         ow.Owner,
 }
 
 Release :: struct {
@@ -56,6 +58,7 @@ Dead :: struct {
 #assert(size_of(Entry) == 64)
 #assert(size_of(Db) == 3 * size_of(Table) + 8 + size_of(Slab) + 13 * 8)
 #assert(size_of(Db) == 936)
+#assert(offset_of(Db, owner) == 932)
 #assert(offset_of(Db, zctx) == 3 * size_of(Table) + 8 + size_of(Slab) + 11 * 8)
 #assert(offset_of(Db, sctx) == 3 * size_of(Table) + 8 + size_of(Slab) + 10 * 8)
 #assert(size_of(Release) == 24)
@@ -63,6 +66,8 @@ Dead :: struct {
 #assert(size_of(Dead) == size_of(Table) + 8)
 
 DB_COUNT :: 16
+DB_ROLE_HEAP :: u8(4)
+DB_ROLE_OWNER :: u8(8)
 DB_MAX :: 1024
 ENTRY_OVERHEAD :: 96
 EMBEDDED_STRING_MAX :: 44
@@ -319,6 +324,10 @@ key_store :: proc "contextless" (db: ^Db, kp: ^Key_Handle, key: []u8) #no_bounds
 		return
 	}
 	if n <= SLAB_MAX {
+		if db.role & DB_ROLE_HEAP != 0 {
+			key_store_heap(db, kp, key)
+			return
+		}
 		off := slab_alloc(&db.slab, n)
 		intrinsics.mem_copy_non_overlapping(slab_ptr(&db.slab, off), raw_data(key), n)
 		kp.bits = 0
@@ -351,6 +360,10 @@ key_store_heap :: #force_no_inline proc "contextless" (db: ^Db, kp: ^Key_Handle,
 key_store_timed :: proc "contextless" (db: ^Db, kp: ^Key_Handle, key: []u8, at: u64) #no_bounds_check {
 	n := len(key)
 	if n + DEADLINE_BYTES <= SLAB_MAX {
+		if db.role & DB_ROLE_HEAP != 0 {
+			key_store_timed_heap(db, kp, key, at)
+			return
+		}
 		off := slab_alloc(&db.slab, n + DEADLINE_BYTES)
 		p := slab_ptr(&db.slab, off)
 		(^u64)(p)^ = at
@@ -364,13 +377,21 @@ key_store_timed :: proc "contextless" (db: ^Db, kp: ^Key_Handle, key: []u8, at: 
 		kp.small.tag.key_form = FORM_SLAB
 		return
 	}
+	key_store_timed_heap(db, kp, key, at)
+}
+
+@(cold)
+key_store_timed_heap :: #force_no_inline proc "contextless" (db: ^Db, kp: ^Key_Handle, key: []u8, at: u64) {
+	n := len(key)
 	hp := mem_alloc(n + DEADLINE_BYTES + 8)
 	if hp == nil {
 		store_fatal("out of memory")
 	}
 	(^u64)(hp)^ = at
 	(^int)(&hp[DEADLINE_BYTES])^ = n
-	intrinsics.mem_copy_non_overlapping(&hp[DEADLINE_BYTES + 8], raw_data(key), n)
+	if n > 0 {
+		intrinsics.mem_copy_non_overlapping(&hp[DEADLINE_BYTES + 8], raw_data(key), n)
+	}
 	kp.bits = 0
 	kp.heap.addr = uintptr(&hp[DEADLINE_BYTES])
 	kp.heap.timed = KEY_TIMED
@@ -500,6 +521,10 @@ entry_store :: proc "contextless" (e: ^Entry, v: []u8, enc: Obj_Encoding, inline
 	if n <= SLAB_MAX {
 		c := slab_class(n)
 		if form != FORM_SLAB || slab_class(int(vp.slab.len)) != c {
+			if db.role & DB_ROLE_HEAP != 0 {
+				entry_store_heap(e, v, enc)
+				return
+			}
 			if form >= FORM_SLAB {
 				val_release(db, kp, vp)
 			}
@@ -547,6 +572,48 @@ entry_store :: proc "contextless" (e: ^Entry, v: []u8, enc: Obj_Encoding, inline
 		enc  = enc,
 	}
 	intrinsics.mem_copy_non_overlapping(bs.data, raw_data(v), n)
+	bs.len = u32(n)
+	e.val = bs.data[:n]
+	e.cap = bs.cap
+	e.raw_enc = enc == .Raw
+}
+
+@(cold)
+entry_store_heap :: #force_no_inline proc "contextless" (e: ^Entry, v: []u8, enc: Obj_Encoding) #no_bounds_check {
+	db := e.db
+	kp := e.kp
+	vp := e.vp
+	n := len(v)
+	form := kp.small.tag.val_form
+	tally := vp.small.tally
+	bs: ^Big_Str
+	if form == FORM_HEAP {
+		bs = (^Big_Str)(vp.ref.addr)
+		if bs.data == nil || n > int(bs.cap) || int(bs.cap) > 2 * n + 64 {
+			mem_free(bs.data)
+			size := max(n, 1)
+			db.heap_bytes += size - int(bs.cap)
+			db_used_memory += size - int(bs.cap)
+			bs.data = mem_alloc(size)
+			bs.cap = u32(size)
+		}
+	} else {
+		if form >= FORM_SLAB {
+			val_release(db, kp, vp)
+		}
+		bs = big_new(db, mem_alloc(max(n, 1)), n, max(n, 1))
+		big_attach(kp, vp, bs, tally)
+	}
+	if bs.data == nil {
+		store_fatal("out of memory")
+	}
+	vp.slab.info = Val_Info {
+		type = .String,
+		enc  = enc,
+	}
+	if n > 0 {
+		intrinsics.mem_copy_non_overlapping(bs.data, raw_data(v), n)
+	}
 	bs.len = u32(n)
 	e.val = bs.data[:n]
 	e.cap = bs.cap
@@ -604,6 +671,10 @@ entry_append :: proc "contextless" (e: ^Entry, v: []u8) #no_bounds_check {
 		if form == FORM_SLAB && newlen <= slab_size_of(cur) {
 			p = slab_ptr(&db.slab, vp.slab.offset)
 		} else {
+			if db.role & DB_ROLE_HEAP != 0 {
+				entry_append_heap(e, v)
+				return
+			}
 			off := slab_alloc(&db.slab, newlen)
 			p = slab_ptr(&db.slab, off)
 			if cur > 0 {
@@ -669,6 +740,58 @@ entry_append :: proc "contextless" (e: ^Entry, v: []u8) #no_bounds_check {
 	e.raw_enc = true
 }
 
+@(cold)
+entry_append_heap :: #force_no_inline proc "contextless" (e: ^Entry, v: []u8) #no_bounds_check {
+	db := e.db
+	kp := e.kp
+	vp := e.vp
+	cur := len(e.val)
+	add := len(v)
+	newlen := cur + add
+	form := kp.small.tag.val_form
+	tally := vp.small.tally
+	bs: ^Big_Str
+	if form == FORM_HEAP {
+		bs = (^Big_Str)(vp.ref.addr)
+		if newlen > int(bs.cap) {
+			newcap := max(newlen, int(bs.cap) * 2)
+			p := ([^]u8)(runtime.heap_resize(bs.data, newcap))
+			if p == nil {
+				store_fatal("out of memory")
+			}
+			db.heap_bytes += newcap - int(bs.cap)
+			db_used_memory += newcap - int(bs.cap)
+			bs.data = p
+			bs.cap = u32(newcap)
+		}
+	} else {
+		newcap := max(newlen, int(e.cap) * 2, 1)
+		data := mem_alloc(newcap)
+		if data == nil {
+			store_fatal("out of memory")
+		}
+		if cur > 0 {
+			intrinsics.mem_copy_non_overlapping(data, raw_data(e.val), cur)
+		}
+		if form >= FORM_SLAB {
+			val_release(db, kp, vp)
+		}
+		bs = big_new(db, data, cur, newcap)
+		big_attach(kp, vp, bs, tally)
+	}
+	if add > 0 {
+		intrinsics.mem_copy_non_overlapping(&bs.data[cur], raw_data(v), add)
+	}
+	bs.len = u32(newlen)
+	vp.slab.info = Val_Info {
+		type = .String,
+		enc  = .Raw,
+	}
+	e.val = bs.data[:newlen]
+	e.cap = bs.cap
+	e.raw_enc = true
+}
+
 entry_heap_open :: proc "contextless" (e: ^Entry, exact: bool) {
 	form := e.kp.small.tag.val_form
 	e.heap_tmp = false
@@ -719,7 +842,7 @@ entry_heap_close :: proc "contextless" (e: ^Entry) {
 	mc_meta_on_write(db, kp)
 	if form == FORM_HEAP {
 		bs := (^Big_Str)(vp.ref.addr)
-		if n > SLAB_MAX {
+		if n > SLAB_MAX || db.role & DB_ROLE_HEAP != 0 {
 			d := cap - int(bs.cap)
 			db.heap_bytes += d
 			db_used_memory += d
@@ -738,7 +861,7 @@ entry_heap_close :: proc "contextless" (e: ^Entry) {
 		mem_free(bs)
 		kp.small.tag.val_form = FORM_NONE
 		vp.bits = u64(tally) << TALLY_SHIFT
-	} else if n > SLAB_MAX {
+	} else if n > SLAB_MAX || db.role & DB_ROLE_HEAP != 0 {
 		if form != FORM_NONE {
 			val_release(db, kp, vp)
 		}
@@ -946,6 +1069,32 @@ db_rehash_step :: #force_inline proc "contextless" (db: ^Db) {
 	}
 }
 
+@(cold)
+owner_rehash_tick :: #force_no_inline proc "contextless" (deadline: i64) {
+	context = runtime.default_context()
+	list := &owner_active[.Rehash]
+	for i := len(list) - 1; i >= 0; i -= 1 {
+		if i >= len(list) {
+			continue
+		}
+		p := list[i]
+		owner_touch(&p.db)
+		for p.db.rehash_idx >= 0 {
+			db_rehash_groups(&p.db, REHASH_TICK_GROUPS, REHASH_TICK_SLOTS)
+			if now_ns() >= deadline {
+				break
+			}
+		}
+		if p.db.rehash_idx < 0 {
+			owner_active_drop(p, .Rehash)
+		}
+		owner_settle()
+		if now_ns() >= deadline {
+			return
+		}
+	}
+}
+
 @(private = "file")
 db_rehash_finish :: proc "contextless" (db: ^Db) {
 	for db.rehash_idx >= 0 {
@@ -955,8 +1104,15 @@ db_rehash_finish :: proc "contextless" (db: ^Db) {
 
 @(private = "file")
 db_rehash_start :: proc "contextless" (db: ^Db, cap: int) {
-	db.t[1] = table_alloc(cap)
+	db.t[1] = table_alloc_for(db, cap)
 	db_rehash_begin(db)
+}
+
+table_alloc_for :: proc "contextless" (db: ^Db, cap: int) -> Table {
+	if db.role & DB_ROLE_HEAP != 0 && cap <= TABLE_HEAP_MAX_CAP {
+		return table_alloc_heap(cap)
+	}
+	return table_alloc(cap)
 }
 
 @(private = "file")
@@ -989,7 +1145,7 @@ db_drop_prepared :: proc "contextless" () {
 @(cold)
 db_prepare_next :: #force_no_inline proc "contextless" (db: ^Db) {
 	t := &db.t[0]
-	if db.rehash_idx >= 0 || db.next.region != nil || t.cap <= REHASH_SYNC_CAP || t.live <= t.cap * 7 / 16 || maxmemory_bytes != 0 {
+	if db.role & DB_ROLE_HEAP != 0 || db.rehash_idx >= 0 || db.next.region != nil || t.cap <= REHASH_SYNC_CAP || t.live <= t.cap * 7 / 16 || maxmemory_bytes != 0 {
 		return
 	}
 	db.next = table_alloc(table_grow_cap(t.cap))
@@ -1018,7 +1174,7 @@ db_warm :: proc "contextless" (db: ^Db, deadline: i64) {
 @(cold)
 db_make_room :: #force_no_inline proc "contextless" (db: ^Db) -> ^Table {
 	if db.t[0].region == nil && db.rehash_idx < 0 {
-		db.t[0] = table_alloc(TABLE_MIN_CAP)
+		db.t[0] = table_alloc_for(db, TABLE_MIN_CAP)
 		return &db.t[0]
 	}
 	db_rehash_finish(db)
@@ -1498,9 +1654,14 @@ db_move :: proc(src: ^Db, dst: ^Db, key: []u8) -> bool #no_bounds_check {
 	switch form {
 	case FORM_SLAB:
 		n := int(vh.slab.len)
-		off := slab_alloc(&dst.slab, n)
-		intrinsics.mem_copy_non_overlapping(slab_ptr(&dst.slab, off), slab_ptr(&src.slab, vh.slab.offset), n)
-		vh.slab.offset = off
+		if dst.role & DB_ROLE_HEAP != 0 {
+			vh = db_move_heap(dst, slab_ptr(&src.slab, vh.slab.offset), n, vh)
+			form = FORM_HEAP
+		} else {
+			off := slab_alloc(&dst.slab, n)
+			intrinsics.mem_copy_non_overlapping(slab_ptr(&dst.slab, off), slab_ptr(&src.slab, vh.slab.offset), n)
+			vh.slab.offset = off
+		}
 	case FORM_HEAP:
 		bs := (^Big_Str)(vh.ref.addr)
 		n := int(bs.cap) + BIG_STR_BYTES
@@ -1539,6 +1700,23 @@ db_move :: proc(src: ^Db, dst: ^Db, key: []u8) -> bool #no_bounds_check {
 	db_erase(src, t, i)
 	db_maybe_shrink(src)
 	return true
+}
+
+@(cold)
+db_move_heap :: #force_no_inline proc "contextless" (dst: ^Db, from: [^]u8, n: int, vh: Val_Handle) -> Val_Handle {
+	data := mem_alloc(max(n, 1))
+	if data == nil {
+		store_fatal("out of memory")
+	}
+	if n > 0 {
+		intrinsics.mem_copy_non_overlapping(data, from, n)
+	}
+	bs := big_new(dst, data, n, max(n, 1))
+	out: Val_Handle
+	out.bits = u64(vh.slab.tally) << TALLY_SHIFT
+	out.ref.addr = uintptr(bs)
+	out.slab.info = vh.slab.info
+	return out
 }
 
 db_swap :: proc(a: int, b: int) {
@@ -1773,6 +1951,9 @@ db_tick :: proc "contextless" () {
 			}
 			rehash_db_next = rehash_db_next + 1 if rehash_db_next + 1 < n else 0
 		}
+		if owners_on && store_rehashing > 0 && len(owner_active[.Rehash]) > 0 {
+			owner_rehash_tick(deadline)
+		}
 	}
 	if dead_len > 0 {
 		dead_step()
@@ -1793,7 +1974,6 @@ db_expire_slot :: proc(db: ^Db, t: ^Table, slot: int) {
 	key_expired_event(expired_key_buf[:], db)
 }
 
-@(private = "file")
 db_expire_scan :: proc(db: ^Db, deadline: i64) #no_bounds_check {
 	t := &db.t[1] if db.rehash_idx >= 0 else &db.t[0]
 	group := u64(db.expire_cursor) >> GROUP_SHIFT
@@ -1882,6 +2062,9 @@ db_active_expire :: proc() {
 			timelimit_exit = true
 			break
 		}
+	}
+	if owners_on && !timelimit_exit && len(owner_active[.Expire]) > 0 {
+		timelimit_exit = owner_active_expire(deadline)
 	}
 	elapsed := now_ns() - start
 	stat_expire_cycle_us += elapsed / 1000

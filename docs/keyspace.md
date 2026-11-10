@@ -21,6 +21,8 @@ redis-cli -p 6399 TYPE demo:copy
 
 `SORT` and `SORT_RO` accept ascending/descending numeric or `ALPHA` ordering, `LIMIT`, `BY` and `GET` patterns. `SORT` can write a result with `STORE`; `SORT_RO` cannot. External lookups require permission for their key patterns. The historical conformance snapshot records sorting differences; applications should not depend on an unspecified tie order. Package checks include ACL and inline/encoded-value cases.
 
+With a label scheme, and in owner mode, each key belongs to the label and owner that wrote it, and `KEYS`, `SCAN`, `RANDOMKEY`, `DBSIZE` and the flush commands work over the caller's view; see [Labels](labels.md#keys) and [Owners](owners.md#keys). A user reader's `SCAN` cursor, like every cursor, is an unsigned 64-bit number sent as text.
+
 `WAIT` and `WAITAOF` are compatibility commands, not replication. `WAIT` validates arguments and reports zero replicas. `WAITAOF` can wait for local AOF synchronization and reports zero replica acknowledgements; requesting a local acknowledgement with AOF disabled is an error. See [persistence](persistence.md).
 
 Verify storage/expiry/sort ownership with `bash test/run_packages.sh`, and run `./test/conformance/run.sh --suite redis --units keyspace,expire,sort`. Replication remains excluded. Lua inner commands have the restrictions described in [scripting](scripting.md); [conformance](conformance.md) records the selected tests and implementation differences.

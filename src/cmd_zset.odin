@@ -1,5 +1,6 @@
 package main
 
+import "base:runtime"
 import zt "zsettype"
 import st "settype"
 import ht "hashtype"
@@ -993,6 +994,10 @@ zset_resize_tick :: proc "contextless" () {
 				break
 			}
 		}
+	}
+	if owners_on && len(owner_active[.Zset_Resize]) > 0 && now_ns() < deadline {
+		context = runtime.default_context()
+		owner_resize_tick(.Zset_Resize, deadline)
 	}
 	zt.maintenance_release(deadline_ns = now_ns() + 50_000)
 }

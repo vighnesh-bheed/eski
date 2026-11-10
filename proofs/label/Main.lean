@@ -275,6 +275,12 @@ def stepRequest (st : St) (kind id : String) (args : List String) : Except Strin
       | .ok l _ _ => busyText st.busy (inMultiOf D id) fun s => mayKill false (topLabelOf st.aenv l) l false .shared s.1 s.2
       | .refused _ => "-"
     return ({ st with adyn := D }, s!"AB|{arrivalText a}|{verdict}|{connText D id}|{D.ctxs.length}")
+  else if kind == "AV" then
+    let (a, D) := arriveVeto st.aenv st.adyn id args
+    return ({ st with adyn := D }, s!"AV|{arrivalText a}|-|{connText D id}|{D.ctxs.length}")
+  else if kind == "OV" then
+    let (a, D, OD) := arriveOVeto st.aenv st.oenv st.adyn st.odyn id args
+    return ({ st with adyn := D, odyn := OD }, s!"OV|{arrivalOText a}|-|{oconnText D OD id}|{D.ctxs.length}")
   else if kind == "OB" then
     let (a, D, OD) := arriveO st.aenv st.oenv st.adyn st.odyn id args
     let r := match connOf st.adyn id with

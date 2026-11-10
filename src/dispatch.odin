@@ -404,6 +404,7 @@ execute_hooked :: #force_no_inline proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8)
 	cmd.handler(c, argv)
 	if labels_on {
 		keyspace_label_leave()
+		access_pin_ran(c)
 	}
 	ticks := mono_now() - t0
 	ps_hooked = false

@@ -1,5 +1,6 @@
 import argparse
 import fnmatch
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -27,6 +28,8 @@ TOKEN_ERROR = 'ERR invalid label token'
 TOP_ERROR = 'ERR this command needs a label that dominates the whole label scheme'
 PERSIST_ERROR = 'ERR persistence is off while a label scheme is configured'
 LABELS_OFF = 'ERR labels are not configured on this server'
+KEYS_REFUSED = "ERR CONFIG SET failed (possibly related to argument 'label-levels') - a label scheme needs a server without keys, because existing keys carry no label"
+STARTUP_REFUSED = 'holds data that carries no labels or owners, and a server with a label scheme or owner mode never loads it'
 WATCH_REFUSED = "EXECABORT Transaction discarded because of: the command's label differs from the transaction's label"
 
 ED25519_SEED_PREFIX = bytes.fromhex('302e020100300506032b657004220420')
@@ -170,6 +173,26 @@ class LabelsOff(unittest.TestCase):
         self.assertIn('persistence stays off', error_of(self.client, 'CONFIG', 'SET', 'appendonly', 'yes'))
         self.assertIn('persistence stays off', error_of(self.client, 'CONFIG', 'SET', 'save', '60 10'))
         self.assertEqual(error_of(self.client, 'SAVE'), PERSIST_ERROR)
+
+    def test_a_scheme_is_refused_while_the_server_holds_keys(self):
+        c = self.client
+        c.call('CONFIG', 'SET', 'save', '')
+        for writes in ((('SET', 'k', 'v'),), (('SELECT', 5), ('HSET', 'h', 'f', 'v'), ('SELECT', 0)),
+                       (('VADD', 'vs', 'VALUES', 2, 1, 0, 'e'),), (('SET', 'gone', 'v', 'PX', 1),)):
+            for command in writes:
+                c.call(*command)
+            time.sleep(0.01)
+            self.assertEqual(error_of(c, 'CONFIG', 'SET', 'label-levels', 'U,S'), KEYS_REFUSED)
+            self.assertIn('without keys', error_of(c, 'CONFIG', 'SET', 'label-compartments', 'A'))
+            self.assertIn('without keys', error_of(c, 'CONFIG', 'SET', 'label-trust-levels', 'WEB,VETTED'))
+            self.assertEqual(c.call('CONFIG', 'GET', 'label-levels'), [b'label-levels', b'UNCLASSIFIED'])
+            self.assertEqual(error_of(c, 'LABEL', 'WHOAMI'), LABELS_OFF)
+            self.assertEqual(c.call('FLUSHALL'), 'OK')
+        self.assertEqual(c.call('CONFIG', 'SET', 'label-levels', 'U,S'), 'OK')
+        c.call('ACL', 'SETUSER', 'default', 'clearance:*')
+        self.assertEqual(c.call('LABEL', 'AS', 'S', 'SET', 'k', 'v'), 'OK')
+        self.assertEqual(c.call('CONFIG', 'SET', 'label-levels', 'U,S,T', 'label-compartments', 'A'), 'OK')
+        self.assertEqual(c.call('LABEL', 'AS', 'S', 'GET', 'k'), b'v')
 
 
 class Labelled(unittest.TestCase):
@@ -596,6 +619,41 @@ class Labelled(unittest.TestCase):
         push_of(queued, 'UNSUBSCRIBE', 'more')
         self.assertEqual(self.whoami(queued)[b'session'], 1)
 
+    def test_a_push_command_refused_after_admission_pins_nothing(self):
+        low = self.connect('low')
+        def unpinned():
+            who = self.whoami(low)
+            self.assertEqual((who[b'session'], who[b'label']), (0, b'C'))
+        self.admin.call('CONFIG', 'SET', 'busy-reply-threshold', 50)
+        script = self.connect('app')
+        script.send('EVAL', 'while true do end', 0)
+        time.sleep(0.3)
+        for command in (('SUBSCRIBE', 'ch'), ('PSUBSCRIBE', 'c*'), ('SSUBSCRIBE', 'sh'), ('CLIENT', 'TRACKING', 'ON')):
+            self.assertTrue(error_of(low, *command).startswith('BUSY'))
+        self.assertEqual(self.admin.call('SCRIPT', 'KILL'), 'OK')
+        self.assertIn('killed', str(script.reply()).lower())
+        unpinned()
+        self.admin.call('CONFIG', 'SET', 'maxmemory', 1)
+        for command in (('SUBSCRIBE', 'ch'), ('PSUBSCRIBE', 'c*'), ('SSUBSCRIBE', 'sh')):
+            self.assertTrue(error_of(low, *command).startswith('OOM'))
+        self.admin.call('CONFIG', 'SET', 'maxmemory', 0)
+        unpinned()
+        self.assertTrue(error_of(low, 'CLIENT', 'TRACKING', 'ON', 'REDIRECT', 999999).startswith('ERR'))
+        self.assertTrue(error_of(low, 'CLIENT', 'TRACKING', 'ON', 'BCAST', 'PREFIX', 'a', 'PREFIX', 'ab').startswith('ERR'))
+        unpinned()
+        self.assertEqual(low.call('MULTI'), 'OK')
+        self.assertEqual(low.call('CLIENT', 'TRACKING', 'ON', 'REDIRECT', 999999), 'QUEUED')
+        self.assertTrue(str(low.call('EXEC')[0]).startswith('ERR'))
+        unpinned()
+        self.assertEqual(low.call('MULTI'), 'OK')
+        self.assertEqual(low.call('CLIENT', 'TRACKING', 'ON'), 'QUEUED')
+        self.assertEqual(low.call('EXEC'), ['OK'])
+        who = self.whoami(low)
+        self.assertEqual((who[b'session'], who[b'label']), (1, b'C'))
+        other = self.connect('low', protocol=3)
+        push_of(other, 'SUBSCRIBE', 'ch')
+        self.assertEqual(self.whoami(other)[b'session'], 1)
+
     def test_client_tracking_pins_the_login_label(self):
         tracker = self.connect('peer', protocol=3)
         self.assertEqual(tracker.call('CLIENT', 'TRACKING', 'ON'), 'OK')
@@ -815,6 +873,133 @@ class Labelled(unittest.TestCase):
         for x in extra:
             x.close()
 
+    def test_function_changes_need_top(self):
+        app, admin = self.connect('app'), self.admin
+        library = "#!lua name=lib\nredis.register_function('f', function() return 'one' end)"
+        replaced = "#!lua name=lib\nredis.register_function('f', function() return 'two' end)"
+        for command in (('FUNCTION', 'LOAD', library), ('FUNCTION', 'LOAD', 'REPLACE', library), ('FUNCTION', 'DELETE', 'lib'),
+                        ('FUNCTION', 'FLUSH'), ('FUNCTION', 'FLUSH', 'ASYNC'), ('FUNCTION', 'RESTORE', b'\x00'), ('SCRIPT', 'FLUSH')):
+            self.assertEqual(error_of(app, *command), TOP_ERROR)
+            self.assertEqual(error_of(app, 'LABEL', 'AS', 'U', *command), TOP_ERROR)
+        self.assertEqual(app.call('MULTI'), 'OK')
+        self.assertEqual(error_of(app, 'FUNCTION', 'LOAD', library), TOP_ERROR)
+        self.assertTrue(error_of(app, 'EXEC').startswith('EXECABORT'))
+        admin.call('ACL', 'SETUSER', 'nofunction', 'on', 'nopass', '+@all', '-function', '~*', 'clearance:*')
+        self.assertEqual(error_of(self.connect('nofunction'), 'FUNCTION', 'LOAD', library),
+                         "NOPERM User nofunction has no permissions to run the 'function|load' command")
+        self.assertEqual(admin.call('FUNCTION', 'LOAD', library), b'lib')
+        self.assertEqual(app.call('LABEL', 'AS', 'U', 'FCALL', 'f', 0), b'one')
+        self.assertEqual(app.call('FCALL', 'f', 0), b'one')
+        self.assertEqual(as_map(app.call('FUNCTION', 'LIST', 'WITHCODE')[0])[b'library_code'], library.encode())
+        engines = as_map(as_map(app.call('FUNCTION', 'STATS'))[b'engines'])
+        self.assertEqual(as_map(engines[b'LUA'])[b'functions_count'], 1)
+        dump = app.call('FUNCTION', 'DUMP')
+        self.assertEqual(admin.call('FUNCTION', 'LOAD', 'REPLACE', replaced), b'lib')
+        self.assertEqual(app.call('FCALL', 'f', 0), b'two')
+        self.assertEqual(error_of(app, 'FUNCTION', 'RESTORE', dump, 'REPLACE'), TOP_ERROR)
+        self.assertEqual(app.call('FCALL', 'f', 0), b'two')
+        self.assertEqual(admin.call('FUNCTION', 'RESTORE', dump, 'REPLACE'), 'OK')
+        self.assertEqual(app.call('FCALL', 'f', 0), b'one')
+        self.assertEqual(admin.call('FUNCTION', 'DELETE', 'lib'), 'OK')
+        self.assertEqual(error_of(app, 'FCALL', 'f', 0), 'ERR Function not found')
+        self.assertEqual(admin.call('FUNCTION', 'FLUSH'), 'OK')
+        self.assertEqual(admin.call('SCRIPT', 'FLUSH'), 'OK')
+
+    def test_scripts_are_cached_per_label(self):
+        app, peer, admin = self.connect('app'), self.connect('peer'), self.admin
+        high = app.call('LABEL', 'AS', 'S//A', 'SCRIPT', 'LOAD', "return 'high'")
+        self.assertEqual(high, hashlib.sha1(b"return 'high'").hexdigest().encode())
+        self.assertEqual(app.call('LABEL', 'AS', 'S//A', 'SCRIPT', 'EXISTS', high), [1])
+        for prefix in (('LABEL', 'AS', 'U'), ('LABEL', 'AS', 'C'), ('LABEL', 'AS', 'S')):
+            self.assertEqual(app.call(*prefix, 'SCRIPT', 'EXISTS', high, high.upper()), [0, 0])
+            self.assertEqual(error_of(app, *prefix, 'EVALSHA', high, 0), 'NOSCRIPT No matching script. Please use EVAL.')
+            self.assertEqual(error_of(app, *prefix, 'EVALSHA_RO', high, 0), 'NOSCRIPT No matching script. Please use EVAL.')
+        self.assertEqual(error_of(peer, 'LABEL', 'AS', 'S//B', 'EVALSHA', high, 0), 'NOSCRIPT No matching script. Please use EVAL.')
+        self.assertEqual(peer.call('LABEL', 'AS', 'S//A/B', 'EVALSHA', high, 0), b'high')
+        self.assertEqual(app.call('LABEL', 'AS', 'C', 'EVAL', "return 'high'", 0), b'high')
+        self.assertEqual(app.call('LABEL', 'AS', 'C', 'EVALSHA', high, 0), b'high')
+        self.assertEqual(app.call('LABEL', 'AS', 'C', 'SCRIPT', 'EXISTS', high), [1])
+        self.assertEqual(app.call('LABEL', 'AS', 'U', 'SCRIPT', 'EXISTS', high), [0])
+        self.assertEqual(app.call('LABEL', 'AS', 'U', 'SCRIPT', 'LOAD', "return 'high'"), high)
+        self.assertEqual(app.call('LABEL', 'AS', 'U', 'EVALSHA_RO', high, 0), b'high')
+        low = app.call('LABEL', 'AS', 'U', 'SCRIPT', 'LOAD', "return 'low'")
+        for prefix in (('LABEL', 'AS', 'C'), ('LABEL', 'AS', 'S//A'), ()):
+            self.assertEqual(app.call(*prefix, 'SCRIPT', 'EXISTS', low), [1])
+            self.assertEqual(app.call(*prefix, 'EVALSHA', low, 0), b'low')
+        web = app.call('LABEL', 'AS', 'U', 'TRUST', 'WEB', 'SCRIPT', 'LOAD', "return 'web'")
+        self.assertEqual(app.call('LABEL', 'AS', 'S//A', 'TRUST', 'VETTED', 'SCRIPT', 'EXISTS', web), [0])
+        self.assertEqual(app.call('LABEL', 'AS', 'S//A', 'TRUST', 'WEB', 'SCRIPT', 'EXISTS', web), [1])
+        side = peer.call('LABEL', 'AS', 'C//B', 'SCRIPT', 'LOAD', "return 'side'")
+        self.assertEqual(app.call('LABEL', 'AS', 'S//A', 'SCRIPT', 'EXISTS', side), [0])
+        self.assertEqual(admin.call('SCRIPT', 'EXISTS', high, low, web, side), [1, 1, 1, 1])
+        self.assertEqual(admin.call('EVALSHA', side, 0), b'side')
+        self.assertEqual(int(info(admin, 'memory')['number_of_cached_scripts']), 4)
+        for field in ('number_of_cached_scripts', 'used_memory_scripts_eval', 'used_memory_scripts'):
+            self.assertEqual(info(app, 'memory')[field], '0')
+        self.assertEqual(info(app, 'stats')['evicted_scripts'], '0')
+        self.assertEqual(app.call('MULTI'), 'OK')
+        self.assertEqual(app.call('EVALSHA', side, 0), 'QUEUED')
+        self.assertEqual(app.call('EVALSHA', low, 0), 'QUEUED')
+        replies = app.call('EXEC')
+        self.assertEqual((str(replies[0]), replies[1]), ('NOSCRIPT No matching script. Please use EVAL.', b'low'))
+
+    def test_the_eval_cache_evicts_per_label(self):
+        app, admin = self.connect('app'), self.admin
+        kept = app.call('LABEL', 'AS', 'S//A', 'SCRIPT', 'LOAD', "return 'kept'")
+        app.call('LABEL', 'AS', 'S//A', 'EVAL', "return 'oldest'", 0)
+        app.call('LABEL', 'AS', 'U', 'EVAL', "return 'oldest'", 0)
+        oldest = hashlib.sha1(b"return 'oldest'").hexdigest()
+        app.pipeline([('LABEL', 'AS', 'U', 'EVAL', 'return %d' % i, 0) for i in range(500)])
+        self.assertEqual(app.call('LABEL', 'AS', 'U', 'SCRIPT', 'EXISTS', oldest), [0])
+        self.assertEqual(app.call('LABEL', 'AS', 'U', 'SCRIPT', 'EXISTS', hashlib.sha1(b'return 0').hexdigest()), [1])
+        self.assertEqual(app.call('LABEL', 'AS', 'S//A', 'SCRIPT', 'EXISTS', oldest, kept), [1, 1])
+        self.assertEqual(app.call('LABEL', 'AS', 'S//A', 'EVALSHA', oldest, 0), b'oldest')
+        self.assertEqual(int(info(admin, 'stats')['evicted_scripts']), 1)
+        self.assertEqual(int(info(admin, 'memory')['number_of_cached_scripts']), 502)
+        app.pipeline([('LABEL', 'AS', 'S//A', 'EVAL', 'return %d' % i, 0) for i in range(1000, 1500)])
+        self.assertEqual(app.call('LABEL', 'AS', 'S//A', 'SCRIPT', 'EXISTS', oldest, kept), [0, 1])
+        self.assertEqual(app.call('LABEL', 'AS', 'U', 'SCRIPT', 'EXISTS', hashlib.sha1(b'return 0').hexdigest()), [1])
+        self.assertEqual(int(info(admin, 'memory')['number_of_cached_scripts']), 1001)
+
+    def scripted_world(self, hidden):
+        server = Server(BINARY, workers=0, arguments=('--keyspace-threads', str(KEYSPACE_THREADS), '--label-stream-seed', '5') + SCHEME)
+        self.addCleanup(server.close)
+        server.start()
+        admin = Client(server.port)
+        self.addCleanup(admin.close)
+        admin.call('ACL', 'SETUSER', 'default', 'clearance:*')
+        admin.call('FUNCTION', 'LOAD', "#!lua name=lib\n"
+                   "redis.register_function('draw', function() return {math.random(1000000), cjson.encode_max_depth(), cjson.encode({0.123456789012})} end)\n"
+                   "redis.register_function('tune', function() math.randomseed(7); cjson.encode_max_depth(3); cjson.encode_number_precision(2) return 1 end)")
+        observed = []
+        settings = ("return {math.random(1000000), math.random(), cjson.encode_max_depth(), cjson.decode_max_depth(), "
+                    "cjson.encode_number_precision(), tostring(cjson.encode_keep_buffer()), tostring(cjson.encode_invalid_numbers()), "
+                    "tostring(cjson.decode_invalid_numbers()), {cjson.encode_sparse_array()}, cjson.encode({0.123456789012}), "
+                    "collectgarbage('setpause', 120), collectgarbage('setstepmul', 300)}")
+        tune = ("math.randomseed(3); cjson.encode_max_depth(2); cjson.decode_max_depth(2); cjson.encode_number_precision(3); "
+                "cjson.encode_keep_buffer(false); cjson.encode_invalid_numbers(true); cjson.decode_invalid_numbers(false); "
+                "cjson.encode_sparse_array(true, 1, 1); collectgarbage('setpause', 111); collectgarbage('setstepmul', 333); return math.random(10)")
+        for step in range(6):
+            if hidden:
+                admin.call('LABEL', 'AS', 'S//A', 'EVAL', tune, 0)
+                admin.call('LABEL', 'AS', 'S//A', 'FCALL', 'tune', 0)
+                admin.call('LABEL', 'AS', 'S//A', 'EVAL', 'return math.random(100)', 0)
+            observed.append(('settings', admin.call('LABEL', 'AS', 'C', 'EVAL', settings, 0)))
+            observed.append(('function', admin.call('LABEL', 'AS', 'C', 'FCALL', 'draw', 0)))
+            if step == 2:
+                observed.append(('seeded', admin.call('LABEL', 'AS', 'C', 'EVAL', 'math.randomseed(11); return math.random(1000)', 0)))
+        return observed
+
+    def test_script_randomness_and_json_settings_stay_within_a_label(self):
+        quiet = self.scripted_world(False)
+        noisy = self.scripted_world(True)
+        self.assertEqual(quiet, noisy)
+        rows = [reply for kind, reply in quiet if kind == 'settings']
+        self.assertEqual([(row[2], row[3], row[4], row[5], row[9], row[10], row[11]) for row in rows],
+                         [(1000, 1000, 14, b'true', b'[0.123456789012]', 200, 200)] * 6)
+        self.assertEqual(len({row[0] for row in rows}), 6)
+        self.assertEqual([reply[1:] for kind, reply in quiet if kind == 'function'], [[1000, b'[0.123456789012]']] * 6)
+
 
 class Startup(unittest.TestCase):
     def run_server(self, *arguments):
@@ -869,6 +1054,50 @@ class Startup(unittest.TestCase):
         finally:
             os.killpg(process.pid, signal.SIGTERM)
             process.wait(timeout=10)
+
+    def test_a_labelled_server_never_loads_a_data_file(self):
+        directory = tempfile.TemporaryDirectory(prefix='eski-labels-file-')
+        self.addCleanup(directory.cleanup)
+        plain = Server(BINARY, workers=0)
+        self.addCleanup(plain.close)
+        plain.start()
+        writer = plain.client()
+        writer.call('SET', 'old', 'value')
+        writer.call('CONFIG', 'SET', 'dir', directory.name)
+        writer.call('CONFIG', 'SET', 'dbfilename', 'old.rdb')
+        self.assertEqual(writer.call('SAVE'), 'OK')
+        writer.call('CONFIG', 'SET', 'dbfilename', 'dump.rdb')
+        self.assertEqual(writer.call('SAVE'), 'OK')
+        plain.close()
+        with socket.socket() as probe:
+            probe.bind(('127.0.0.1', 0))
+            port = probe.getsockname()[1]
+        for arguments in (('--label-levels', 'U,S'), ('--owners', 'yes', '--memcached-port', '0'), ('--label-compartments', 'A', '--dbfilename', 'old.rdb')):
+            result = subprocess.run([str(BINARY), '--bind', '127.0.0.1', '--port', str(port), '--dir', directory.name, '--save', '',
+                                     '--appendonly', 'no', *arguments], capture_output=True, timeout=20, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('Refusing to start: the data file ', result.stdout + result.stderr)
+            self.assertIn(STARTUP_REFUSED, result.stdout + result.stderr)
+            self.assertIn('Start once without the label scheme and owner mode to move the data out, or move the file away', result.stdout + result.stderr)
+        os.rename(os.path.join(directory.name, 'dump.rdb'), os.path.join(directory.name, 'moved.rdb'))
+        server = subprocess.Popen([str(BINARY), '--bind', '127.0.0.1', '--port', str(port), '--dir', directory.name, '--save', '',
+                                   '--appendonly', 'no', '--label-levels', 'U,S', '--enable-debug-command', 'yes', '--enable-protected-configs', 'yes'],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        try:
+            wait_for(lambda: self.ping(port), timeout=15, label='server started')
+            client = Client(port)
+            self.addCleanup(client.close)
+            self.assertEqual(client.call('DBSIZE'), 0)
+            client.call('ACL', 'SETUSER', 'default', 'clearance:*')
+            for command in (('DEBUG', 'RELOAD'), ('DEBUG', 'RELOAD', 'NOSAVE'), ('DEBUG', 'RELOAD', 'MERGE', 'NOSAVE'), ('DEBUG', 'LOADAOF')):
+                self.assertEqual(error_of(client, *command), PERSIST_ERROR)
+            client.call('CONFIG', 'SET', 'dbfilename', 'old.rdb')
+            self.assertEqual(error_of(client, 'DEBUG', 'RELOAD', 'NOSAVE'), PERSIST_ERROR)
+            self.assertIn('persistence stays off', error_of(client, 'CONFIG', 'SET', 'appendonly', 'yes'))
+            self.assertEqual(client.call('DBSIZE'), 0)
+        finally:
+            os.killpg(server.pid, signal.SIGTERM)
+            server.wait(timeout=10)
 
     def test_signals_and_shutdown_stop_a_labelled_server(self):
         for how in ('sigterm', 'sigint', 'shutdown'):

@@ -145,11 +145,19 @@
   },
   {
    "id": "reset",
-   "reason": "ACL SETUSER <login> reset also clears the clearance and trust rules (owner decision of 8 November). The ACL scenarios restore the default login with ACL SETUSER default reset on nopass ~* &* +@all, so from then on the default login runs at the lowest label and the counters scenario's CONFIG RESETSTAT is refused as a top-only command.",
+   "reason": "ACL SETUSER <login> reset also clears the clearance and trust rules (owner decision of 8 November). The ACL scenarios restore the default login with ACL SETUSER default reset on nopass ~* &* +@all, so from then on the default login runs at the lowest label and the counters scenario's CONFIG RESETSTAT is refused as a top-only command. The function scenario runs after them, so its FUNCTION LOAD, DELETE, FLUSH and RESTORE, which change stored functions and need a top label (see docs/labels.md#transactions-and-scripts), are refused with the top-only error before their own argument errors.",
    "doc": "docs/labels.md#logins",
    "entries": [
     "acl raw socket bytes for counters (resp3) differ from redis",
-    "acl raw socket bytes for counters differ from redis"
+    "acl raw socket bytes for counters differ from redis",
+    "function delete",
+    "function flush",
+    "function flush async",
+    "function flush bad mode",
+    "function flush too many args",
+    "function load",
+    "function load bad option",
+    "function restore bad payload"
    ]
   },
   {

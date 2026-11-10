@@ -5,6 +5,7 @@ import "base:runtime"
 import "core:mem/virtual"
 import "core:simd"
 import "core:sys/linux"
+import "core:sys/posix"
 
 GROUP_SLOTS :: 16
 GROUP_SHIFT :: 4
@@ -13,6 +14,8 @@ CTRL_DELETED :: u8(0x01)
 TABLE_MIN_CAP :: 16
 TABLE_PAGE :: 4096
 HUGE_PAGE :: 2 << 20
+TABLE_HEAP_MAX_CAP :: 1024
+TABLE_HEAP_ALIGN :: 64
 
 Group :: #simd[GROUP_SLOTS]u8
 
@@ -165,7 +168,12 @@ key_eq :: #force_inline proc "contextless" (a: [^]u8, b: [^]u8, n: int) -> bool 
 @(private = "file")
 key_matches :: #force_inline proc "contextless" (kh: Key_Handle, s: ^Slab, l: ^Lookup) -> bool #no_bounds_check {
 	if l.small {
-		return kh.bits & KEY_CMP_MASK == l.packed || (kh.small.tag.key_form == FORM_SLAB && int(kh.slab.len) == len(l.key) && runtime.memory_equal(slab_ptr(s, kh.slab.offset), raw_data(l.key), len(l.key)))
+		if kh.bits & KEY_CMP_MASK == l.packed || (kh.small.tag.key_form == FORM_SLAB && int(kh.slab.len) == len(l.key) && runtime.memory_equal(slab_ptr(s, kh.slab.offset), raw_data(l.key), len(l.key))) {
+			return true
+		}
+		if kh.small.tag.key_form != FORM_HEAP {
+			return false
+		}
 	}
 	form := kh.small.tag.key_form
 	n := len(l.key)
@@ -257,10 +265,50 @@ table_alloc :: proc "contextless" (cap: int) -> (t: Table) {
 	return
 }
 
+table_heap_size :: #force_inline proc "contextless" (cap: int) -> int {
+	return (cap + 63) &~ 63 + cap * SLOT_BYTES
+}
+
+table_alloc_heap :: proc "contextless" (cap: int) -> (t: Table) {
+	if cap < TABLE_MIN_CAP || cap & (GROUP_SLOTS - 1) != 0 || cap > TABLE_HEAP_MAX_CAP {
+		store_fatal("invalid key table capacity")
+	}
+	size := table_heap_size(cap)
+	ctrl_bytes := (cap + 63) &~ 63
+	raw: [^]u8
+	if posix.posix_memalign(&raw, TABLE_HEAP_ALIGN, uint(size)) != .NONE || raw == nil {
+		store_fatal("cannot allocate the key table")
+	}
+	intrinsics.mem_zero(raw, size)
+	base := raw
+	intrinsics.atomic_add_explicit(&storage_table_bytes, size, .Relaxed)
+	t.region = base
+	t.size = size
+	t.ctrl = base
+	metas := ([^]Slot_Meta)(&base[ctrl_bytes])[:cap]
+	keys := ([^]Key_Handle)(&base[ctrl_bytes + cap * size_of(Slot_Meta)])[:cap]
+	vals := ([^]Val_Handle)(&base[ctrl_bytes + cap * (size_of(Slot_Meta) + size_of(Key_Handle))])[:cap]
+	t.slots = soa_zip(meta = metas, key = keys, val = vals)
+	t.groups = u64(cap / GROUP_SLOTS)
+	t.pmask = 1
+	for t.pmask < t.groups {
+		t.pmask <<= 1
+	}
+	t.pmask -= 1
+	t.cap = cap
+	t.growth = cap - cap / 8
+	t.warm_at = -1
+	return
+}
+
 table_detach :: proc "contextless" (t: ^Table) {
 	if t.region != nil {
 		intrinsics.atomic_sub_explicit(&storage_table_bytes, t.size, .Relaxed)
-		graveyard_push(t.region, t.size, .Table)
+		if t.warm_at < 0 {
+			runtime.heap_free(t.region)
+		} else {
+			graveyard_push(t.region, t.size, .Table)
+		}
 	}
 	t^ = {}
 }

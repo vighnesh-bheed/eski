@@ -9,8 +9,6 @@ import "core:strings"
 import "core:sys/posix"
 import ks "@KEYSPACE@"
 
-SLAB_UNIT :: 8
-SLAB_MAX :: 4096
 SLAB_BACKING :: 1 << 22
 Slab :: struct {
 	base: [^]u8,
@@ -18,22 +16,35 @@ Slab :: struct {
 	live: int,
 }
 Mc_Table :: struct {}
+Lazy_Mode :: enum { Off, Async, Server }
+Value_Config :: struct { lazyfree_lazy_server_del: bool }
+labels_on: bool
+lazy_mode: Lazy_Mode
+cfg: Value_Config
+entry_ring: [ENTRY_RING]Entry
+entry_next: uint
 slab_backing: [SLAB_BACKING]u8
 storage_table_bytes: int
 storage_table_mapped: int
 store_rehashing: int
+store_warming: int
 store_no_touch: bool
 db_used_memory: int
+maxmemory_bytes: u64
 
 Storage_Kind :: enum { Table }
 Db :: struct {
-	t:          [2]Table,
-	slab:       Slab,
-	rehash_idx: i64,
-	expires:    int,
-	heap_objs:  int,
-	heap_bytes: int,
-	mc:         ^Mc_Table,
+	t:             [2]Table,
+	slab:          Slab,
+	rehash_idx:    i64,
+	rehash_credit: int,
+	expires:       int,
+	heap_objs:     int,
+	heap_bytes:    int,
+	next:          Table,
+	next_warm:     int,
+	mc:            ^Mc_Table,
+	role:          u8,
 }
 
 Scan_Pass :: struct {
@@ -64,9 +75,20 @@ graveyard_push :: proc "contextless" (base: [^]u8, size: int, kind: Storage_Kind
 	context = runtime.default_context()
 	assert(kind == .Table)
 	assert(posix.munmap(base, uint(size)) == .OK)
+	storage_table_mapped -= size
 }
-val_release :: proc "contextless" (db: ^Db, kp: ^Key_Handle, vp: ^Val_Handle) {
-	if db == nil || kp.small.tag.val_form != FORM_NONE || vp == nil { store_fatal("bridge values carry no storage") }
+mem_used :: proc "contextless" () -> int { store_fatal("bridge has no memory limit") }
+no_objects :: proc "contextless" () -> ! { store_fatal("bridge values carry no objects") }
+label_vset_release :: proc "contextless" (db: ^Db, obj: rawptr) { no_objects() }
+lazyfree_object :: proc "contextless" (type: Obj_Type, obj: rawptr) -> (int, bool) { no_objects() }
+set_object_release :: proc "contextless" (obj: rawptr) -> int { no_objects() }
+list_object_release :: proc "contextless" (obj: rawptr) -> int { no_objects() }
+zset_object_release :: proc "contextless" (obj: rawptr) -> int { no_objects() }
+stream_object_release :: proc "contextless" (obj: rawptr) -> int { no_objects() }
+object_release :: proc "contextless" (type: Obj_Type, obj: rawptr) -> int { no_objects() }
+block_note_removed :: proc "contextless" () { no_objects() }
+mc_meta_on_write :: proc "contextless" (db: ^Db, kp: ^Key_Handle) {
+	if db.mc != nil || kp == nil { store_fatal("bridge has no memcached metadata") }
 }
 mc_meta_on_erase :: proc "contextless" (db: ^Db, kp: ^Key_Handle) {
 	if db.mc != nil || kp == nil { store_fatal("bridge has no memcached metadata") }
@@ -91,29 +113,43 @@ unsigned :: proc(s: string) -> u64 {
 	return v
 }
 
-key_text :: proc(id: int) -> string { return fmt.aprintf("%07d", id) }
+key_text :: proc(id: int) -> string { return fmt.aprintf("%07d", id) if id < 10_000_000 else fmt.aprintf("%012d", id) }
 key_id :: proc(name: []u8) -> i64 {
 	id, ok := strconv.parse_i64(string(name), 10)
-	assert(ok && len(name) == 7)
+	assert(ok && len(name) == (7 if id < 10_000_000 else 12))
 	return id
 }
 
 show_slot :: proc(db: ^Db, t: ^Table, i: int) {
 	kh := t.slots[i].key
+	name := key_bytes(&t.slots[i].key, &db.slab)
 	timed := key_timed(kh)
-	assert(timed == (kh.small.tag.key_form == FORM_SLAB))
-	fmt.printf("%d:%d:%d:", key_id(key_bytes(&t.slots[i].key, &db.slab)), t.slots[i].val.bits, t.slots[i].meta.stamp)
+	form := int(kh.small.tag.key_form)
+	letter := "i"
+	if form == FORM_SLAB {
+		letter = "s"
+	} else if form == FORM_HEAP {
+		letter = "h"
+		assert((^int)(kh.heap.addr)^ == len(name) && uintptr(raw_data(name)) == uintptr(kh.heap.addr) + 8)
+	} else {
+		assert(!timed && form == FORM_INLINE + len(name))
+	}
+	fmt.printf("%d:%d:%d:%s", key_id(name), t.slots[i].val.bits, t.slots[i].meta.stamp, letter)
 	if timed {
-		cell := slab_ptr(&db.slab, kh.slab.offset - 1)
-		assert(rawptr(&cell[DEADLINE_BYTES]) == rawptr(raw_data(key_bytes(&t.slots[i].key, &db.slab))))
-		assert(intrinsics.unaligned_load((^u64)(cell)) == u64(key_deadline(kh, &db.slab)))
+		cell := key_deadline_ptr(kh, &db.slab)
+		gap := DEADLINE_BYTES if form == FORM_SLAB else DEADLINE_BYTES + 8
+		assert(uintptr(cell) + uintptr(gap) == uintptr(raw_data(name)))
+		assert(intrinsics.unaligned_load(cell) == u64(key_deadline(kh, &db.slab)))
 		fmt.printf("t%d", u64(key_deadline(kh, &db.slab)))
 	} else {
 		fmt.print("u")
 	}
 }
 show_table :: proc(db: ^Db, t: ^Table) {
-	fmt.printf("%d,%d,%d,%d;", t.cap, t.live, t.tombs, t.growth)
+	kind := "-"
+	if t.region != nil { kind = "h" if t.warm_at < 0 else "m" }
+	assert(t.region == nil || t.warm_at >= 0 || uintptr(t.region) % TABLE_HEAP_ALIGN == 0)
+	fmt.printf("%d,%d,%d,%d,%s;", t.cap, t.live, t.tombs, t.growth, kind)
 	for i in 0 ..< t.cap {
 		if i > 0 { fmt.print(",") }
 		switch t.ctrl[i] {
@@ -126,15 +162,119 @@ show_table :: proc(db: ^Db, t: ^Table) {
 
 start_resize :: proc(db: ^Db, size: int) {
 	assert(db.rehash_idx < 0)
-	db.t[1] = table_alloc(size)
+	db.t[1] = table_alloc_for(db, size)
 	db.rehash_idx = 0
 	store_rehashing += 1
 }
 
+release_keys :: proc(db: ^Db) {
+	for &t in db.t {
+		for i in 0 ..< t.cap {
+			if t.ctrl[i] & 0x80 != 0 { key_release(db, &t.slots[i].key) }
+		}
+		table_detach(&t)
+	}
+	table_detach(&db.next)
+	if db.rehash_idx >= 0 { store_rehashing -= 1 }
+	assert(db.slab.live == 0 && db.heap_bytes == 0 && db.heap_objs == 0 && db_used_memory == 0)
+	assert(storage_table_bytes == 0 && storage_table_mapped == 0 && store_rehashing == 0 && store_warming == 0)
+}
+
 Charge :: struct { id: int, bytes: int, region: []u8 }
+
+value_key :: proc(db: ^Db) -> int {
+	key := "0000042"
+	l := lookup_make(transmute([]u8)key)
+	t := &db.t[0]
+	i, exists := table_find_slot(t, &db.slab, &l, true)
+	assert(!exists && i >= 0)
+	table_place(t, i, l.hash)
+	key_store(db, &t.slots[i].key, transmute([]u8)key)
+	t.slots[i].val.bits = 0
+	t.slots[i].meta = {}
+	return i
+}
+
+show_value :: proc(db: ^Db, slot: int) {
+	e := entry_view(db, &db.t[0], slot)
+	form := int(e.kp.small.tag.val_form)
+	letter := "o"
+	empty_block := 0
+	switch {
+	case form == FORM_NONE: letter = "n"
+	case form <= FORM_INLINE + INLINE_BYTES: letter = "i"
+	case form == FORM_SLAB: letter = "s"
+	case form == FORM_HEAP:
+		letter = "h"
+		if (^Big_Str)(e.vp.ref.addr).data == nil { empty_block = 1 }
+	}
+	sum := u64(0xcbf29ce484222325)
+	for b in e.val { sum = (sum ~ u64(b)) * 0x100000001b3 }
+	assert(db_used_memory == db.heap_bytes)
+	fmt.printf("V|%s|%d|%d|%d|%d|%d|%d|%x\n", letter, len(e.val), e.cap, db.heap_objs, db.heap_bytes, db.slab.live, empty_block, sum)
+}
+
+values :: proc(path: string) {
+	input, err := os.read_entire_file(path, context.allocator)
+	assert(err == nil)
+	defer delete(input)
+	lines := strings.split(string(input), "\n")
+	defer delete(lines)
+	db: Db
+	db.rehash_idx = -1
+	slot := -1
+	fill: [dynamic]u8
+	defer delete(fill)
+	ops := 0
+	for line in lines {
+		if len(line) == 0 { continue }
+		fields := strings.split(line, " ")
+		defer delete(fields)
+		code := fields[0]
+		if code == "X" {
+			if slot >= 0 { db_erase(&db, &db.t[0], slot) }
+			release_keys(&db)
+			db = {}
+			db.role = u8(number(fields[1]))
+			db.t[0] = table_alloc_for(&db, TABLE_MIN_CAP)
+			db.rehash_idx = -1
+			slot = value_key(&db)
+			continue
+		}
+		if code == "E" {
+			db_erase(&db, &db.t[0], slot)
+			slot = value_key(&db)
+		} else {
+			n := number(fields[len(fields) - 1])
+			clear(&fill)
+			for _ in 0 ..< n { append(&fill, u8('a' + ops % 26)) }
+			ops += 1
+			e := entry_view(&db, &db.t[0], slot)
+			switch code {
+			case "S": entry_store(e, fill[:], .Raw if fields[1] == "r" else .Embstr, fields[1] != "r")
+			case "A": entry_append(e, fill[:])
+			case "G": entry_setrange(e, number(fields[1]), fill[:])
+			case "M":
+				assert(e.kp.small.tag.val_form == FORM_NONE)
+				moved: Val_Handle
+				moved.slab.info = Val_Info{type = .String, enc = .Raw}
+				e.vp^ = db_move_heap(&db, raw_data(fill[:]), n, moved)
+				e.kp.small.tag.val_form = FORM_HEAP
+			case: panic("invalid value trace")
+			}
+		}
+		show_value(&db, slot)
+	}
+	if slot >= 0 { db_erase(&db, &db.t[0], slot) }
+	release_keys(&db)
+}
 
 main :: proc() {
 	assert(size_of(int) == 8)
+	if len(os.args) == 3 && os.args[2] == "values" {
+		values(os.args[1])
+		return
+	}
 	assert(len(os.args) == 2)
 	input, err := os.read_entire_file(os.args[1], context.allocator)
 	assert(err == nil)
@@ -202,10 +342,10 @@ main :: proc() {
 			continue
 		}
 		if code == "R" {
-			for &t in db.t { table_detach(&t) }
-			assert(storage_table_bytes == 0)
+			release_keys(&db)
 			db = {}
-			db.t[0] = table_alloc(number(fields[1]))
+			db.role = u8(number(fields[2]))
+			db.t[0] = table_alloc_for(&db, number(fields[1]))
 			db.rehash_idx = -1
 			continue
 		}
@@ -223,6 +363,11 @@ main :: proc() {
 		switch code {
 		case "G":
 			start_resize(&db, number(fields[1]))
+		case "B":
+			assert(db.rehash_idx < 0)
+			db_rehash_start(&db, number(fields[1]))
+		case "O":
+			_ = db_make_room(&db)
 		case "U":
 			size := db.t[0].cap
 			if db.t[0].live > size * 7 / 16 { size = table_grow_cap(size) }
@@ -270,12 +415,13 @@ main :: proc() {
 		if query {
 			if found_index >= 0 { show_slot(&db, found_table, found_index) } else { fmt.print("n") }
 		} else { fmt.print(reply) }
-		fmt.printf("|%d|%d,%d,%d|", db.rehash_idx, db.expires, db.slab.live + db.heap_bytes, storage_table_bytes)
+		assert(db_used_memory == db.heap_bytes)
+		fmt.printf("|%d|%d|%d,%d,%d,%d|", db.rehash_idx, db.role, db.expires, db.slab.live + db.heap_bytes, storage_table_bytes, storage_table_mapped)
 		show_table(&db, &db.t[0])
 		fmt.print("|")
 		show_table(&db, &db.t[1])
 		fmt.println()
 	}
 	assert(ks.memory_used(&pool) == 0 && len(charges) == 0)
-	for &t in db.t { table_detach(&t) }
+	release_keys(&db)
 }

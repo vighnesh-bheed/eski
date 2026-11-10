@@ -153,7 +153,12 @@ import Storage.Cells
 #print axioms Storage.scan_round_advances
 #print axioms Storage.scan_visits_present_keys
 #print axioms Storage.table_bytes_bounds
+#print axioms Storage.heap_table_bytes_bounds
+#print axioms Storage.mapped_table_rounds_heap
+#print axioms Storage.exact_table_split
 #print axioms Storage.timed_cell_bytes
+#print axioms Storage.key_bytes_by_form
+#print axioms Storage.heap_cell_premium
 #print axioms Storage.deadline_in_cell
 #print axioms Storage.replicate_weight
 #print axioms Storage.reset_sound
@@ -161,4 +166,6 @@ import Storage.Cells
 #print axioms Storage.remove_sound
 #print axioms Storage.start_sound
 #print axioms Storage.migrate_sound
+#print axioms Storage.begin_sound
+#print axioms Storage.make_room_sound
 #print axioms Storage.sound_finds_present

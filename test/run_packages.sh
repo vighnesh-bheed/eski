@@ -148,6 +148,8 @@ run_script "test/compatibility/labels_subjects.py" "labels-coordinator" --server
 run_script "test/compatibility/labels_subjects.py" "labels-workers" --server "$server_binary" --keyspace-threads 2
 run_script "test/compatibility/owners_subjects.py" "owners-coordinator" --server "$server_binary" --keyspace-threads 0
 run_script "test/compatibility/owners_subjects.py" "owners-workers" --server "$server_binary" --keyspace-threads 2
+run_script "test/compatibility/owners_keyspace.py" "owners-keyspace-coordinator" --server "$server_binary" --keyspace-threads 0
+run_script "test/compatibility/owners_keyspace.py" "owners-keyspace-workers" --server "$server_binary" --keyspace-threads 2
 run_script "test/compatibility/labels_keyspace.py" "labels-keyspace-coordinator" --server "$server_binary" --keyspace-threads 0
 run_script "test/compatibility/labels_keyspace.py" "labels-keyspace-workers" --server "$server_binary" --keyspace-threads 2
 

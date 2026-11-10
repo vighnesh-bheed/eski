@@ -4624,6 +4624,17 @@ def run(proto):
     check(ser(("*", [canon_info(x) for x in a[1]])) == ser(("*", [canon_info(x) for x in b[1]])), "resp%d COMMAND INFO of several names differs" % proto)
     a, b = j.cmd("COMMAND", "DOCS", *mixed), r.cmd("COMMAND", "DOCS", *mixed)
     check(ser(canon_reply(a)) == ser(canon_reply(b)), "resp%d COMMAND DOCS of several names differs" % proto)
+    vset_all = {"VADD", "VCARD", "VDIM", "VEMB", "VGETATTR", "VINFO", "VISMEMBER", "VLINKS", "VRANDMEMBER", "VRANGE", "VREM", "VSETATTR", "VSIM"}
+    vset_reads = vset_all - {"VADD", "VREM", "VSETATTR"}
+    vset_fast = {"VCARD", "VDIM", "VEMB", "VGETATTR", "VINFO", "VLINKS", "VSETATTR"}
+    vset_cats = {"read": vset_reads, "write": vset_all - vset_reads, "fast": vset_fast, "slow": vset_all - vset_fast}
+    for v in CATEGORIES:
+        want = vset_cats.get(v.lower(), set())
+        listed = set(names_of(j.cmd("COMMAND", "LIST", "FILTERBY", "ACLCAT", v))) & vset_all
+        check(listed == want, "resp%d COMMAND LIST FILTERBY ACLCAT %r lists the vector set commands %s, want %s: Eski puts them in read or write and fast or slow where the reference lists them in no category" % (proto, v, sorted(listed), sorted(want)))
+        if v.lower() in vset_cats:
+            listed = set(names_of(j.cmd("ACL", "CAT", v))) & vset_all
+            check(listed == want, "resp%d ACL CAT %r lists the vector set commands %s, want %s" % (proto, v, sorted(listed), sorted(want)))
     for kind, values in (("ACLCAT", CATEGORIES), ("PATTERN", PATTERNS), ("MODULE", ["nosuch", ""])):
         for v in values:
             fa = [n for n in names_of(j.cmd("COMMAND", "LIST", "FILTERBY", kind, v)) if n not in module]
@@ -8809,7 +8820,7 @@ elif docker run -d --rm --name "$VSET_REF_CONTAINER" --network=host --memory 2g 
 	done
 	if [ "$vset_ready" == "1" ]; then
 		echo "comparing every captured vector set case with the reference image on port $VSET_REF_PORT"
-		expect_vectorset_report 1502 "$PORT" "$VSET_REF_PORT"
+		expect_vectorset_report 1521 "$PORT" "$VSET_REF_PORT"
 	else
 		fail "reference vector set server" "PONG on port $VSET_REF_PORT" "no answer"
 	fi

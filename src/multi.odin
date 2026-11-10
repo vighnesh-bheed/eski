@@ -427,9 +427,6 @@ tx_run :: proc(c: ^Conn, exec_argv: [][]u8) {
 				continue
 			}
 		}
-		if labels_on && access_needs_session(cmd, args) {
-			access_pin_bound(c)
-		}
 		store_no_touch = .No_Touch in c.flags && cmd.handler != cmd_touch
 		dirty := pst.dirty
 		if aof.feed {
@@ -438,6 +435,9 @@ tx_run :: proc(c: ^Conn, exec_argv: [][]u8) {
 		stat_cur = &hot.stats
 		t0 := mono_now()
 		cmd.handler(c, args)
+		if labels_on && access_needs_session(cmd, args) && access_holds_push(c) {
+			access_pin_bound(c)
+		}
 		ticks := mono_now() - t0
 		if ticks < hot.limit_ticks {
 			#no_bounds_check hot.small[(ticks * mono_mul) >> 32] += 1
@@ -516,7 +516,7 @@ tx_exec_gate :: proc(c: ^Conn) -> bool {
 		return true
 	}
 	if labels_on && access_watch_differs(c) {
-		reply_error(c, ERR_LABEL_WATCH_EXEC)
+		reply_error(c, access_watch_refusal(c))
 		tx_discard(c)
 		return true
 	}
@@ -606,7 +606,7 @@ watch_key :: proc(c: ^Conn, db: ^Db, key: []u8) {
 	}
 	exists, expired: bool
 	if labels_on {
-		exists, expired = label_key_state(db.id, key, access.id)
+		exists, expired = label_key_state(db.id, key, access.id, access.owner if owners_on else ow.SHARED)
 	} else {
 		exists, expired = db_key_state(db, key)
 	}
@@ -690,7 +690,7 @@ watch_touch :: proc(key: []u8, db: ^Db, known: bool = false, known_exists: bool 
 	for w in wk.watchers {
 		c := w.c
 		entry := &c.tx.watched[w.idx]
-		if labels_on && (.Dirty_Cas in c.txf || !access_dominates(entry.label, db.label)) {
+		if labels_on && (.Dirty_Cas in c.txf || !watch_sees(entry, db)) {
 			continue
 		}
 		if entry.expired {
@@ -698,7 +698,7 @@ watch_touch :: proc(key: []u8, db: ^Db, known: bool = false, known_exists: bool 
 				if known {
 					gone = !known_exists
 				} else if labels_on {
-					exists, _ := label_key_state(db.id, key, entry.label)
+					exists, _ := label_key_state(db.id, key, entry.label, entry.owner)
 					gone = !exists
 				} else {
 					exists, _ := db_key_state(db, key)
@@ -736,7 +736,7 @@ watch_db_replaced :: proc(emptied: ^Db, replaced: ^Db) {
 		for w in wk.watchers {
 			c := w.c
 			entry := &c.tx.watched[w.idx]
-			if labels_on && (.Dirty_Cas in c.txf || !access_dominates(entry.label, emptied.label)) {
+			if labels_on && (.Dirty_Cas in c.txf || !watch_sees(entry, emptied)) {
 				continue
 			}
 			if live || (old_stale && !entry.expired) {
@@ -747,6 +747,41 @@ watch_db_replaced :: proc(emptied: ^Db, replaced: ^Db) {
 			}
 		}
 	}
+}
+
+watch_sees :: #force_inline proc(entry: ^Watched_Key, db: ^Db) -> bool {
+	return access_dominates(entry.label, db.label) && (!owners_on || ow.sees(entry.owner, db.owner))
+}
+
+watch_flush_views :: proc(dbi: int) {
+	if watch_total == 0 {
+		return
+	}
+	for id in 0 ..< len(watch_dbs) {
+		if dbi >= 0 && id != dbi {
+			continue
+		}
+		for _, wk in watch_dbs[id] {
+			key := transmute([]u8)wk.key
+			for w in wk.watchers {
+				if .Dirty_Cas in w.c.txf {
+					continue
+				}
+				entry := &w.c.tx.watched[w.idx]
+				exists, expired := label_key_state(id, key, entry.label, entry.owner)
+				if !exists {
+					continue
+				}
+				if !expired || !entry.expired {
+					watch_mark(w.c)
+				} else {
+					entry.expired = false
+					entry.present = false
+				}
+			}
+		}
+	}
+	watch_dirty_victims()
 }
 
 watch_flush :: proc(db: ^Db) {
@@ -790,8 +825,8 @@ watch_views_replaced :: proc(id: int, other: int) {
 				continue
 			}
 			entry := &w.c.tx.watched[w.idx]
-			old_exists, old_expired := label_key_state(id, key, entry.label)
-			new_exists, new_expired := label_key_state(other, key, entry.label)
+			old_exists, old_expired := label_key_state(id, key, entry.label, entry.owner)
+			new_exists, new_expired := label_key_state(other, key, entry.label, entry.owner)
 			live := (old_exists && !old_expired) || (new_exists && !new_expired)
 			if live || (old_exists && old_expired && !entry.expired) {
 				watch_mark(w.c)
@@ -814,7 +849,7 @@ watch_expired_since :: proc(c: ^Conn) -> bool {
 		}
 		exists, expired: bool
 		if labels_on {
-			exists, expired = label_key_state(w.db, transmute([]u8)w.key, w.label)
+			exists, expired = label_key_state(w.db, transmute([]u8)w.key, w.label, w.owner)
 		} else {
 			exists, expired = db_key_state(&dbs[w.db], transmute([]u8)w.key)
 		}

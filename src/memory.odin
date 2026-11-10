@@ -3,6 +3,7 @@ package main
 import "base:intrinsics"
 import "base:runtime"
 import lr "lua_runtime"
+import ow "owner"
 import ht "hashtype"
 import st "settype"
 import zt "zsettype"
@@ -163,7 +164,7 @@ mem_keyspace :: #force_inline proc "contextless" () -> int {
 }
 
 mem_counter_total :: #force_inline proc "contextless" () -> int {
-	return diagnostics_memory_used() + intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed) + ht.maintenance_metadata() + st.maintenance_metadata() + zt.maintenance_metadata() + mem_startup + db_used_memory + mem_keyspace() + storage_dead_payload + client_metadata_total + conn_mem + tx_mem_total + mem_aof_buffer() + lazyfree_pending_bytes() + compute_reserved + keyspace_memory_used() + lua_host_memory_used()
+	return diagnostics_memory_used() + intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed) + ht.maintenance_metadata() + st.maintenance_metadata() + zt.maintenance_metadata() + mem_startup + db_used_memory + mem_keyspace() + storage_dead_payload + client_metadata_total + conn_mem + tx_mem_total + mem_aof_buffer() + lazyfree_pending_bytes() + compute_reserved + keyspace_memory_used() + lua_host_memory_used() + owner_struct_bytes + ow.table_bytes(&owner_table)
 }
 
 mem_registry_total :: #force_inline proc "contextless" () -> int {
@@ -242,6 +243,9 @@ mem_db_total_overhead :: proc "contextless" (db: ^Db) -> int {
 			total += mem_db_overhead(p)
 		}
 	}
+	if db.id >= 0 && db.id < len(owner_dbs) {
+		total += owner_dbs[db.id].tables
+	}
 	return total
 }
 
@@ -257,7 +261,7 @@ mem_overhead :: proc() -> (mh: Mem_Overhead) {
 	mh.frag_bytes = mem_sample_rss - i64(mem_sample_used)
 	mh.clients = conn_mem + tx_mem_total + client_metadata_total
 	mh.aof = mem_aof_buffer()
-	total := mem_startup + mh.clients + client_registry_memory() + mh.aof + mem_keyspace() + ht.maintenance_metadata() + st.maintenance_metadata() + zt.maintenance_metadata() + intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed) + compute_reserved + keyspace_memory_used() + lua_memory_used() + stat_error_memory() + diagnostics_memory_used()
+	total := mem_startup + mh.clients + client_registry_memory() + mh.aof + mem_keyspace() + ht.maintenance_metadata() + st.maintenance_metadata() + zt.maintenance_metadata() + intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed) + compute_reserved + keyspace_memory_used() + lua_memory_used() + stat_error_memory() + diagnostics_memory_used() + owner_struct_bytes + ow.table_bytes(&owner_table)
 	mh.lut = mem_keyspace()
 	for d in db_parts {
 		mh.keys += db_size_of(d)
@@ -266,6 +270,7 @@ mem_overhead :: proc() -> (mh: Mem_Overhead) {
 			mh.rehash_count += 1
 		}
 	}
+	mh.keys += owner_keys_total
 	mh.overhead = total
 	mh.dataset = used - total
 	mh.peak_perc = f32(used) * 100 / f32(max(mh.peak, 1))

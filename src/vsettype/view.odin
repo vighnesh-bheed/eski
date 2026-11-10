@@ -9,6 +9,10 @@ import "../rax"
 import "../vfilter"
 import "../vmath"
 
+NOMINAL_MIN_BYTES :: 24
+NOMINAL_HEADER_BYTES :: 8
+NOMINAL_ALIGN :: 16
+
 View_Part :: struct {
 	part:   ^Partition,
 	shadow: []u32,
@@ -954,7 +958,46 @@ view_memory :: proc "contextless" (v: ^View) -> int {
 	}
 	n := VIEW_BASE_BYTES
 	for &vp in v.parts {
-		n += part_footprint(s, view_head(v, &vp)) + vp.part.count * NAME_INDEX_BYTES
+		n += part_content_bytes(s, view_head(v, &vp))
+	}
+	return n
+}
+
+nominal_bytes :: #force_inline proc "contextless" (size: int) -> int {
+	if size <= 0 {
+		return 0
+	}
+	return max(NOMINAL_MIN_BYTES, (size + NOMINAL_HEADER_BYTES + NOMINAL_ALIGN - 1) &~ (NOMINAL_ALIGN - 1) - NOMINAL_HEADER_BYTES)
+}
+
+part_slot_bytes :: #force_inline proc "contextless" (p: ^Part_Head) -> int {
+	n := size_of(Element) + size_of(u32) + NAME_INDEX_BYTES + p.arena.stride + size_of(f32)
+	if p.arena.elem == .Int8 {
+		n += size_of(f32)
+	}
+	return n
+}
+
+part_content_bytes :: proc "contextless" (s: Vset, p: ^Part_Head) -> int {
+	n := COMPACT_FIXED_BYTES if p.kind == .Compact else PART_FIXED_BYTES
+	n += p.count * part_slot_bytes(p)
+	for i in 0 ..< p.count {
+		e := &p.elements[p.order[i]]
+		n += nominal_bytes(int(e.len)) + nominal_bytes(vfilter.attribute_size(e.attr))
+	}
+	full := part_full(p)
+	if full == nil || p.mode == .Flat || p.count == 0 {
+		return n
+	}
+	g := &full.graph
+	width := hnsw.link_width(p.count)
+	levels := 0
+	for i in 0 ..< p.count {
+		levels += max(hnsw.node_level(g, p.order[i]), 0)
+	}
+	n += hnsw.LINK_PAD + p.count * hnsw.node_fixed_bytes(g.m, width) + levels * (g.m + 1) * width
+	if g.twins > 0 {
+		n += p.count * size_of(u32)
 	}
 	return n
 }

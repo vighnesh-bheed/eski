@@ -16,6 +16,7 @@ Table :: struct($E: typeid) {
 	numbers:   [dynamic]Owner,
 	entries:   [dynamic]^E,
 	holes:     int,
+	text:      int,
 	next:      u32,
 	limit:     u32,
 	allocator: runtime.Allocator,
@@ -101,7 +102,22 @@ table_intern :: proc(t: ^Table($E), text: []u8) -> (^E, Error) {
 		return nil, .Out_Of_Memory
 	}
 	t.next += 1
+	t.text += len(owned)
 	return e, .None
+}
+
+table_entry_bytes :: #force_inline proc "contextless" (t: ^Table($E), e: ^E) -> int {
+	return size_of(E) + len(e.text) + size_of(string) + size_of(^E) + size_of(uintptr) + size_of(Owner) + size_of(^E)
+}
+
+table_bytes :: proc "contextless" (t: ^Table($E)) -> int {
+	n := len(t.by_text)
+	return n * size_of(E) + t.text + cap(t.by_text) * (size_of(string) + size_of(^E) + size_of(uintptr)) + cap(t.numbers) * size_of(Owner) + cap(t.entries) * size_of(^E)
+}
+
+table_entries_bytes :: proc "contextless" (t: ^Table($E)) -> int {
+	n := len(t.by_text)
+	return n * (size_of(E) + size_of(string) + size_of(^E) + size_of(uintptr) + size_of(Owner) + size_of(^E)) + t.text
 }
 
 @(private = "file")
@@ -172,6 +188,7 @@ table_drop :: proc(t: ^Table($E), number: Owner) -> bool {
 	}
 	e := t.entries[i]
 	delete_key(&t.by_text, e.text)
+	t.text -= len(e.text)
 	delete(e.text, t.allocator)
 	free(e, t.allocator)
 	t.entries[i] = nil

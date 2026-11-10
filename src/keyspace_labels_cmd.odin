@@ -1,6 +1,7 @@
 package main
 
 import lb "label"
+import ow "owner"
 import vt "vsettype"
 
 ERR_LABEL_NO_KEY :: "ERR no such key"
@@ -36,9 +37,10 @@ label_key_command :: proc(c: ^Conn, argv: [][]u8) {
 	}
 }
 
-label_reply_id :: proc(c: ^Conn, id: lb.Id) {
+label_reply_id :: proc(c: ^Conn, id: lb.Id, o := ow.SHARED) {
 	clear(&label_text)
 	access_format(&label_text, id)
+	scope_format(&label_text, ow.Scope{id, o})
 	reply_bulk(c, label_text[:])
 }
 
@@ -53,7 +55,7 @@ label_cmd_of :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	if len(argv) == 3 {
-		label_reply_id(c, e.db.label)
+		label_reply_id(c, e.db.label, e.db.owner)
 		return
 	}
 	obj := entry_object(e, .Vectorset)
@@ -73,7 +75,7 @@ label_cmd_of :: proc(c: ^Conn, argv: [][]u8) {
 		reply_null(c)
 		return
 	}
-	label_reply_id(c, vt.ref_label(s, r))
+	label_reply_id(c, vt.ref_label(s, r), ow.Owner(vt.ref_owner(s, r)))
 }
 
 Label_Target :: struct {
@@ -142,9 +144,17 @@ label_cmd_declassify :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	l := lookup_make(key)
+	user := owner_user()
 	if !label_live_in(own, &l) {
-		if other, _, i := label_locate_other(own.id, key, &l, access.id, access.vis); i >= 0 {
-			reply_error(c, label_in_use_text(ERR_LABEL_NAME_IN_USE, other.label))
+		other: ^Db
+		i: int
+		if user {
+			other, _, i = owner_locate_other(own.id, key, &l, access.id, access.owner_entry, access.vis)
+		} else {
+			other, _, i = label_locate_other(own.id, key, &l, access.id, access.vis)
+		}
+		if i >= 0 {
+			reply_error(c, label_in_use_text(ERR_LABEL_NAME_IN_USE, other.label, other.owner))
 			return
 		}
 		reply_error(c, ERR_LABEL_NO_KEY)
@@ -159,13 +169,13 @@ label_cmd_declassify :: proc(c: ^Conn, argv: [][]u8) {
 		reply_error(c, ERR_LABEL_VSET_ELEMENT)
 		return
 	}
-	if seen, _, i := label_resolve(own.id, key, target.id, access_visibility(target.id)); i >= 0 {
-		reply_error(c, label_in_use_text(ERR_LABEL_NAME_IN_USE, seen.label))
+	if seen, _, i := label_resolve(own.id, key, target.id, access_visibility(target.id), vset_scope_owner()); i >= 0 {
+		reply_error(c, label_in_use_text(ERR_LABEL_NAME_IN_USE, seen.label, seen.owner))
 		return
 	}
-	made, made_ok := label_part_make(own.id, target.id)
-	if !made_ok {
-		reply_error(c, ERR_LABEL_PARTITIONS)
+	made, made_msg := label_scope_make(own.id, target.id)
+	if made_msg != "" {
+		reply_error(c, made_msg)
 		return
 	}
 	if !db_move(own, made, key) {
@@ -183,30 +193,56 @@ label_cmd_declassify :: proc(c: ^Conn, argv: [][]u8) {
 	reply_ok(c)
 }
 
+label_target_access :: proc(target: lb.Id, vis: ^lb.Visibility) -> vt.Access {
+	if owner_user() && access.owner_entry != nil {
+		return vt.Access{label = target, owner = vt.Owner(access.owner), visibility = vis, table = &label_table, stream = &owner_stream_of(access.owner_entry, target).vset}
+	}
+	return vt.Access{label = target, visibility = vis, table = &label_table, stream = &label_stream_of(target).vset}
+}
+
+label_scope_make :: proc(dbi: int, id: lb.Id) -> (^Db, string) {
+	if owner_user() {
+		if access.owner_entry == nil {
+			return nil, ERR_OWNER_INVALID
+		}
+		p, ok := owner_part_make(access.owner_entry, dbi, id)
+		if !ok {
+			return nil, ERR_OWNER_PARTITIONS
+		}
+		owner_touch(&p.db)
+		return &p.db, ""
+	}
+	p, ok := label_part_make(dbi, id)
+	if !ok {
+		return nil, ERR_LABEL_PARTITIONS
+	}
+	return p, ""
+}
+
 label_declassify_seen :: proc(s: vt.Vset, obj: rawptr, dbi: int, key: []u8, target: Label_Target) -> (msg: string, f: vt.Failure) {
 	a := label_vt_access()
 	v, err := vt.view_open(s, &a, vset_scratch_get())
 	if err != .None {
 		return "", vt.failure(err)
 	}
-	if r, found := vt.view_find(&v, target.element); !found || vt.ref_label(s, r) != access.id {
+	if r, found := vt.view_find(&v, target.element); !found || vt.ref_label(s, r) != access.id || ow.Owner(vt.ref_owner(s, r)) != vset_scope_owner() {
 		return "", {}
 	}
 	vis := access_visibility(target.id)
-	p, t, i := label_resolve(dbi, key, target.id, vis)
+	p, t, i := label_resolve(dbi, key, target.id, vis, vset_scope_owner())
 	if i < 0 {
 		return "", {}
 	}
 	if entry_object(db_view_slot(p, t, i), .Vectorset) != obj {
-		return label_in_use_text(ERR_LABEL_NAME_IN_USE, p.label), {}
+		return label_in_use_text(ERR_LABEL_NAME_IN_USE, p.label, p.owner), {}
 	}
-	at := vt.Access{label = target.id, visibility = vis, table = &label_table, stream = &label_stream_of(target.id).vset}
+	at := label_target_access(target.id, vis)
 	tv, terr := vt.view_open(s, &at, vset_scratch_get())
 	if terr != .None {
 		return "", vt.failure(terr)
 	}
 	if r, found := vt.view_find(&tv, target.element); found {
-		return label_in_use_text(ERR_LABEL_ELEMENT_IN_USE, vt.ref_label(s, r)), {}
+		return label_in_use_text(ERR_LABEL_ELEMENT_IN_USE, vt.ref_label(s, r), ow.Owner(vt.ref_owner(s, r))), {}
 	}
 	return "", {}
 }
@@ -220,7 +256,7 @@ label_declassify_element :: proc(c: ^Conn, key: []u8, target: Label_Target) {
 	obj := entry_object(e, .Vectorset)
 	if obj == nil {
 		if label_entry_foreign(e) {
-			reply_error(c, label_in_use_text(ERR_LABEL_NAME_IN_USE, e.db.label))
+			reply_error(c, label_in_use_text(ERR_LABEL_NAME_IN_USE, e.db.label, e.db.owner))
 		} else {
 			reply_error(c, ERR_LABEL_NOT_VSET)
 		}
@@ -237,17 +273,16 @@ label_declassify_element :: proc(c: ^Conn, key: []u8, target: Label_Target) {
 		}
 		return
 	}
-	made, made_ok := label_part_make(dbi, target.id)
-	if !made_ok {
-		reply_error(c, ERR_LABEL_PARTITIONS)
+	made, made_msg := label_scope_make(dbi, target.id)
+	if made_msg != "" {
+		reply_error(c, made_msg)
 		return
 	}
-	to_stream := &label_stream_of(target.id).vset
 	a := label_vt_access()
 	to := a
 	to.label = target.id
-	to.stream = to_stream
-	before := label_vset_snapshot(s)
+	to.stream = label_target_access(target.id, a.visibility).stream
+	before := label_vset_take(s)
 	from_gone, to_new, failed := vt.relabel_at(s, &a, &to, target.element, vset_scratch_get())
 	if failed.err != .None {
 		label_vset_settle(dbi, before, s)
@@ -272,36 +307,49 @@ label_declassify_element :: proc(c: ^Conn, key: []u8, target: Label_Target) {
 }
 
 label_cmd_copies :: proc(c: ^Conn, argv: [][]u8) {
-	if len(argv) != 2 && len(argv) != 3 {
+	if !owners_on && len(argv) != 2 && len(argv) != 3 {
 		reply_wrong_args(c, "label|copies")
 		return
 	}
+	args := argv[2:]
+	id: []u8
+	scoped := false
+	if owners_on && len(args) > 0 {
+		switch {
+		case eq_nocase(args[0], "shared"):
+			args = args[1:]
+		case eq_nocase(args[0], "owner") && len(args) >= 2:
+			scoped = true
+			id = args[1]
+			args = args[2:]
+		}
+		if len(args) > 1 {
+			reply_wrong_args(c, "label|copies")
+			return
+		}
+	}
 	if !access.top {
-		reply_error(c, ERR_LABEL_TOP)
+		reply_error(c, access_top_refusal())
+		return
+	}
+	if scoped {
+		if !ow.text_valid(id) {
+			reply_error(c, ERR_OWNER_INVALID)
+			return
+		}
+		label_copies_owner(c, owner_lookup(id), args)
 		return
 	}
 	ld := &label_dbs[c.db.id]
-	if len(argv) == 2 {
+	if len(args) == 0 {
 		names := make([dynamic]string, context.temp_allocator)
 		for name in ld.copies {
 			append(&names, name)
 		}
-		for i in 1 ..< len(names) {
-			x := names[i]
-			j := i
-			for j > 0 && x < names[j - 1] {
-				names[j] = names[j - 1]
-				j -= 1
-			}
-			names[j] = x
-		}
-		reply_array(c, len(names))
-		for name in names {
-			reply_bulk_str(c, name)
-		}
+		label_reply_names(c, names[:])
 		return
 	}
-	key := argv[2]
+	key := args[0]
 	l := lookup_make(key)
 	found := make([dynamic]^Db, context.temp_allocator)
 	types := make([dynamic]Obj_Type, context.temp_allocator)
@@ -324,13 +372,64 @@ label_cmd_copies :: proc(c: ^Conn, argv: [][]u8) {
 	}
 }
 
+label_reply_names :: proc(c: ^Conn, names: []string) {
+	for i in 1 ..< len(names) {
+		x := names[i]
+		j := i
+		for j > 0 && x < names[j - 1] {
+			names[j] = names[j - 1]
+			j -= 1
+		}
+		names[j] = x
+	}
+	reply_array(c, len(names))
+	for name in names {
+		reply_bulk_str(c, name)
+	}
+}
+
+label_copies_owner :: proc(c: ^Conn, e: ^Owner_Entry, args: [][]u8) {
+	sp := owner_space_of(e, c.db.id)
+	if len(args) == 0 {
+		names := make([dynamic]string, context.temp_allocator)
+		if sp != nil && sp.copies != nil {
+			for name in sp.copies {
+				append(&names, name)
+			}
+		}
+		label_reply_names(c, names[:])
+		return
+	}
+	l := lookup_make(args[0])
+	found := make([dynamic]^Db, context.temp_allocator)
+	types := make([dynamic]Obj_Type, context.temp_allocator)
+	for i in 0 ..< owner_ever_len(sp) {
+		q := owner_space_part(sp, owner_ever_at(sp, i))
+		if q == nil || db_size_of(&q.db) == 0 {
+			continue
+		}
+		t, j := db_locate_slot(&q.db, &l)
+		if j < 0 || !label_slot_live(&q.db, t, j) {
+			continue
+		}
+		append(&found, &q.db)
+		append(&types, entry_type(db_view_slot(&q.db, t, j)))
+	}
+	reply_array(c, len(found))
+	for p, k in found {
+		reply_array(c, 2)
+		label_reply_id(c, p.label, p.owner)
+		reply_simple(c, type_name(types[k]))
+	}
+}
+
 label_cmd_quota :: proc(c: ^Conn, argv: [][]u8) {
 	if len(argv) < 3 {
 		reply_wrong_args(c, "label|quota")
 		return
 	}
 	if !access.top {
-		reply_error(c, ERR_LABEL_TOP)
+		reply_error(c, access_top_refusal())
 		return
 	}
 	marking := argv[2]
