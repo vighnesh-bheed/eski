@@ -8342,11 +8342,23 @@ wait_bgsave() {
 	return 1
 }
 
+await_server_exit() {
+	if [ -z "$SERVER_PID" ]; then
+		return
+	fi
+	for _ in $(seq 1 200); do
+		kill -0 "$SERVER_PID" 2>/dev/null || break
+		sleep 0.05
+	done
+	if kill -0 "$SERVER_PID" 2>/dev/null; then
+		kill "$SERVER_PID" 2>/dev/null
+	fi
+	wait "$SERVER_PID" 2>/dev/null
+}
+
 restart_eski() {
 	cli shutdown "$@" >/dev/null 2>&1
-	if [ -n "$SERVER_PID" ]; then
-		wait "$SERVER_PID" 2>/dev/null
-	fi
+	await_server_exit
 	"$BINARY" --port "$PORT" --enable-debug-command yes --dir "$PERSIST_DIR" --memcached-port "$MC_PORT" --keyspace-threads "$KEYSPACE_THREADS" >>"$LOG" 2>&1 &
 	SERVER_PID=$!
 	for _ in $(seq 1 100); do
@@ -8498,7 +8510,7 @@ if [ "$EXTERNAL" != "1" ]; then
 		else
 			cli shutdown >/dev/null 2>&1
 		fi
-		wait "$SERVER_PID" 2>/dev/null
+		await_server_exit
 		"$BINARY" --port "$PORT" --enable-debug-command yes --dir "$PERSIST_DIR" --memcached-port "$MC_PORT" --keyspace-threads "$KEYSPACE_THREADS" "$@" >>"$LOG" 2>&1 &
 		SERVER_PID=$!
 		for _ in $(seq 1 100); do

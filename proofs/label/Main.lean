@@ -189,12 +189,17 @@ def replyText (tc : TConfig) : Reply → String
   | .info l => s!"info:{hex ((format tc.base l.sec).getD [])}:{hex (tc.trusts.getD l.trust [])}"
   | .queued => "queued"
   | .exec => "exec"
+  | .nil => "nil"
   | .none => "-"
+
+def wsText (s : WSum) : String := if s.any then s!"{bit s.mixed}/{showLabel s.label}" else "-"
 
 def connText (D : ADyn) (id : Nat) : String :=
   match connOf D id with
   | none => "-"
-  | some c => s!"{bit c.inMulti}{bit c.dirty}{bit c.explicit}:{if c.explicit then showLabel c.session else "-"}:{showLabel c.bound}"
+  | some c => s!"{bit c.inMulti}{bit c.dirty}{bit c.explicit}{bit c.cas}:{if c.explicit then showLabel c.session else "-"}:{showLabel c.bound}:{wsText c.ws}:{c.watched.length}"
+
+def markedText (D : ADyn) : String := joinOr ((D.conns.filter (·.2.cas)).map (toString ·.1))
 
 def ruleClear (s : String) : Except String (Bool × Option Label) :=
   if s == "*" then .ok (true, none) else if s == "-" then .ok (false, none) else do return (false, some (← parseLabel s).sec)
@@ -304,9 +309,16 @@ def step (st : St) (f : List String) : Except String (St × String) := do
     return ({ st with aenv := e, adyn := { st.adyn with cache := [] } },
       s!"AU|{showLabel (ceilingFor e login)}|{bit r.perCommand}|{bit r.requireToken}|{r.keys.length}")
   | ["AC", id, login] =>
-    let c : AConn := ⟨← unhex login, false, tbottom, false, false, tbottom⟩
+    let c : AConn := ⟨← unhex login, false, tbottom, false, false, tbottom, false, false, wsEmpty, []⟩
     return ({ st with adyn := { st.adyn with conns := st.adyn.conns ++ [(← parseNat id, c)] } }, s!"AC|{id}")
   | ["AT", now] => return ({ st with aenv := { st.aenv with now := ← parseNat now } }, s!"AT|{now}")
+  | ["AK", k, w] =>
+    let D := touch st.adyn (← unhex k) (← parseLabel w)
+    return ({ st with adyn := D }, s!"AK|{markedText D}")
+  | ["AA", id, login] =>
+    let id ← parseNat id
+    let D := auth st.adyn id (← unhex login)
+    return ({ st with adyn := D }, s!"AA|{connText D id}")
   | ["AO", n, secret, marking, trust, expires, aud, ctx, flaw] =>
     let sp : TokSpec := ⟨← parseNat secret, ← optHex marking, ← optHex trust, ← unhex expires, ← optHex aud,
       ← parseHRef ctx, ← parseNat flaw⟩

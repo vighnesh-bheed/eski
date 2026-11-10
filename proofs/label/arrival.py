@@ -3,7 +3,7 @@ import random
 FIXED = b'0123456789abcdef0123456789abcdef'
 HEX = set(b'0123456789abcdefABCDEF')
 KNOWN = {b'get', b'set', b'ping', b'echo', b'select', b'auth', b'hello', b'quit', b'reset', b'client', b'label', b'context',
-         b'multi', b'exec', b'discard', b'watch', b'subscribe', b'psubscribe', b'ssubscribe', b'save', b'bgsave',
+         b'multi', b'exec', b'discard', b'watch', b'unwatch', b'subscribe', b'psubscribe', b'ssubscribe', b'save', b'bgsave',
          b'bgrewriteaof', b'dump', b'restore', b'migrate', b'debug', b'monitor', b'swapdb', b'latency', b'memory', b'slowlog', b'config', b'shutdown', b'eval', b'publish'}
 PERSISTENCE = {b'save', b'bgsave', b'bgrewriteaof', b'dump', b'restore', b'migrate'}
 INVALID = 'ERR invalid label'
@@ -20,6 +20,8 @@ TOP = 'ERR this command needs a label that dominates the whole label scheme'
 PERSIST = 'ERR persistence is off while a label scheme is configured'
 SYNTAX = 'ERR syntax error'
 CAP = 'ERR this login already holds the maximum number of contexts'
+WATCH_IN_MULTI = 'ERR WATCH inside MULTI is not allowed'
+EXEC_WATCH = 'EXECABORT Transaction discarded because of: ' + TRANSACTION[len('ERR '):]
 REFUSALS = {PER_COMMAND: 'refused_per_command', TOKEN_ONLY: 'refused_token_only', TRANSACTION: 'refused_transaction',
             NESTED: 'refused_nested', MISMATCH: 'refused_mismatch', TOP: 'refused_top', PERSIST: 'refused_persist',
             SESSION_NEEDED: 'refused_session_needed', INVALID: 'refused_invalid', CONTEXT: 'refused_context',
@@ -96,6 +98,48 @@ class Arrival:
 
     def admits(self, c, l):
         return l[0] <= c[0] and l[1] <= c[1] and l[2] <= c[2]
+
+    def dominates(self, r, d):
+        return d[0] <= r[0] and d[1] <= r[1] and r[2] <= d[2]
+
+    def clear_watch(self, c):
+        c['cas'], c['watched'], c['wlabels'] = False, [], []
+
+    def end_tx(self, c):
+        c['multi'] = c['dirty'] = False
+        self.clear_watch(c)
+
+    def state(self, c):
+        lt = self.h['label_text']
+        if c['wlabels']:
+            first = c['wlabels'][0]
+            ws = f"{int(any(x != first for x in c['wlabels']))}/{lt(first)}"
+        else:
+            ws = '-'
+        return f"{int(c['multi'])}{int(c['dirty'])}{int(c['explicit'])}{int(c['cas'])}:" \
+               f"{lt(c['session']) if c['explicit'] else '-'}:{lt(c['bound'])}:{ws}:{len(c['watched'])}"
+
+    def touch(self, key, w):
+        marked = []
+        for cid in sorted(self.conns):
+            c = self.conns[cid]
+            if any(k == key and self.dominates(lab, w) for k, lab in c['watched']):
+                self.note('touch_marked_again' if c['cas'] else 'touch_marked')
+                c['cas'] = True
+            elif any(k == key for k, _ in c['watched']):
+                self.note('touch_unseen')
+            if c['cas']:
+                marked.append(str(cid))
+        return 'AK|' + (','.join(marked) if marked else '-')
+
+    def auth(self, cid, login):
+        c = self.conns[cid]
+        if c['login'] != login:
+            c['login'], c['explicit'], c['session'] = login, False, (0, frozenset(), 0)
+            self.note('auth_switched')
+            if c['wlabels']:
+                self.note('auth_kept_watches')
+        return 'AA|' + self.state(c)
 
     def top(self, l):
         return l[0] >= len(self.cfg.levels) - 1 and l[1] >= frozenset(range(len(self.cfg.comps))) and l[2] == 0
@@ -250,7 +294,9 @@ class Arrival:
         if msg in REFUSALS:
             self.note(REFUSALS[msg])
         if self.is_cmd(slot, b'exec') and c['multi']:
-            c['multi'] = c['dirty'] = False
+            if c['wlabels'] or c['watched']:
+                self.note('exec_abort_arrival_watched')
+            self.end_tx(c)
             self.note('exec_abort_arrival')
             return 'no:EXECABORT Transaction discarded because of: ' + (msg[4:] if msg.startswith('ERR ') else msg)
         if c['multi']:
@@ -272,7 +318,12 @@ class Arrival:
     def nested(self, args):
         return self.is_cmd(args, b'label') and (self.arg_is(args, 1, b'as') or self.arg_is(args, 1, b'session'))
 
-    def refusal(self, args, label, explicit):
+    def subscribing(self, args):
+        n = self.name(args)
+        return n in (b'subscribe', b'psubscribe', b'ssubscribe') or \
+            (n == b'client' and self.arg_is(args, 1, b'tracking') and self.arg_is(args, 2, b'on'))
+
+    def refusal(self, args, label, c, prefixed):
         n = self.name(args)
         if n in PERSISTENCE or (n == b'debug' and (self.arg_is(args, 1, b'reload') or self.arg_is(args, 1, b'loadaof'))) \
                 or (n == b'shutdown' and any(self.word(a, b'save') for a in args[1:])):
@@ -283,9 +334,9 @@ class Arrival:
             (n == b'slowlog' and self.arg_is(args, 1, b'reset')) or (n == b'config' and self.arg_is(args, 1, b'resetstat'))
         if top_only and not self.top(label):
             return TOP
-        subscribing = n in (b'subscribe', b'psubscribe', b'ssubscribe') or \
-            (n == b'client' and self.arg_is(args, 1, b'tracking') and self.arg_is(args, 2, b'on'))
-        if subscribing and not explicit:
+        r = self.rules(c['login'])
+        kept = prefixed or (c['multi'] and c['bprefixed']) or r['pc'] or r['rt']
+        if self.subscribing(args) and not c['explicit'] and kept:
             return SESSION_NEEDED
         return None
 
@@ -310,13 +361,16 @@ class Arrival:
                 return self.refuse(c, inner, TRANSACTION), None
             label = c['bound']
         elif self.is_cmd(inner, b'multi'):
-            c['bound'] = label
+            c['bound'], c['bprefixed'] = label, prefixed
         if not self.admits(self.ceiling(login), label) or not self.cfg.valid(label):
             return self.refuse(c, inner, INVALID), None
         if self.known(inner):
-            msg = self.refusal(inner, label, c['explicit'])
+            msg = self.refusal(inner, label, c, prefixed)
             if msg:
                 return self.refuse(c, inner, msg), None
+            if self.subscribing(inner) and not c['explicit'] and not c['multi']:
+                c['explicit'], c['session'] = True, label
+                self.note('session_pinned')
         self.note('arrived_prefixed' if prefixed else 'arrived_session')
         if c['multi']:
             self.note('arrived_in_multi')
@@ -408,14 +462,45 @@ class Arrival:
         if self.is_cmd(inner, b'exec'):
             if not c['multi']:
                 return 'ERR EXEC without MULTI'
-            dirty = c['dirty']
-            c['multi'] = c['dirty'] = False
-            self.note('exec_dirty' if dirty else 'exec_clean')
-            return 'EXECABORT Transaction discarded because of previous errors.' if dirty else 'exec'
+            dirty, cas, labels, bound = c['dirty'], c['cas'], c['wlabels'], c['bound']
+            self.end_tx(c)
+            if dirty:
+                self.note('exec_dirty')
+                return 'EXECABORT Transaction discarded because of previous errors.'
+            if any(x != bound for x in labels):
+                self.note('exec_watch_refused')
+                self.note('exec_watch_refused_marked' if cas else 'exec_watch_refused_clean')
+                if len(set(labels)) > 1:
+                    self.note('exec_watch_mixed')
+                return EXEC_WATCH
+            if cas:
+                self.note('exec_watch_aborted')
+                return 'nil'
+            self.note('exec_watch_same' if labels else 'exec_clean')
+            return 'exec'
         if self.is_cmd(inner, b'discard'):
             if not c['multi']:
                 return 'ERR DISCARD without MULTI'
-            c['multi'] = c['dirty'] = False
+            self.end_tx(c)
+            return 'OK'
+        if self.is_cmd(inner, b'watch'):
+            if c['multi']:
+                self.note('watch_in_multi')
+                return WATCH_IN_MULTI
+            c['wlabels'].append(label)
+            self.note('watch_noted')
+            if c['cas']:
+                self.note('watch_noted_marked')
+            for a in inner[1:]:
+                key = self.lit(a)
+                if key is not None and not any(k == key for k, _ in c['watched']):
+                    c['watched'].append((key, label))
+                    if c['cas']:
+                        self.note('watch_added_marked')
+            return 'OK'
+        if self.is_cmd(inner, b'unwatch'):
+            self.clear_watch(c)
+            self.note('unwatched')
             return 'OK'
         if self.is_cmd(inner, b'label') and self.arg_is(inner, 1, b'session'):
             return self.session_cmd(c, inner)
@@ -427,10 +512,9 @@ class Arrival:
         c = self.conns[cid]
         arrival, ok = self.arrive(c, args)
         reply = self.handle(c, ok[0], ok[1]) if ok else '-'
-        lt = self.h['label_text']
-        state = f"{int(c['multi'])}{int(c['dirty'])}{int(c['explicit'])}:" \
-                f"{lt(c['session']) if c['explicit'] else '-'}:{lt(c['bound'])}"
-        return f'{kind}|{arrival}|{reply}|{state}|{len(self.ctxs)}'
+        if c['cas'] and c['watched']:
+            self.note('marked_keeps_watches')
+        return f'{kind}|{arrival}|{reply}|{self.state(c)}|{len(self.ctxs)}'
 
     def sweep(self):
         before = len(self.ctxs)
@@ -461,7 +545,7 @@ TRUST_POOL = [b'WEB', b'VETTED', b'ROOT']
 LOGINS = [b'app', b'batch', b'ops', b'reader']
 
 
-def corpus(helpers, seed, sessions=64, steps=160):
+def corpus(helpers, seed, sessions=64, steps=160, watch_sessions=32, episodes=30):
     rng = random.Random(seed)
     m = Arrival(helpers)
     hexs = helpers['hexs']
@@ -671,7 +755,7 @@ def corpus(helpers, seed, sessions=64, steps=160):
         line = f"AO {n} {sp['secret']} {opt(marking)} {opt(trust)} {hexs(expires)} {opt(audience)} {ctx_text} {flaw}"
         emit(line, f'AO|{n}')
 
-    for session in range(sessions):
+    def open_session():
         cfg = helpers['Config']()
         levels = rng.sample(LEVEL_POOL[:4], rng.randint(2, 4))
         if rng.random() < 0.3:
@@ -692,8 +776,13 @@ def corpus(helpers, seed, sessions=64, steps=160):
         for cid in range(rng.randint(2, 5)):
             login = rng.choice(logins)
             m.conns[cid] = {'login': login, 'explicit': False, 'session': (0, frozenset(), 0), 'multi': False,
-                            'dirty': False, 'bound': (0, frozenset(), 0)}
+                            'dirty': False, 'bound': (0, frozenset(), 0), 'bprefixed': False, 'cas': False,
+                            'watched': [], 'wlabels': []}
             emit(f'AC {cid} {login.hex()}', f'AC|{cid}')
+        return logins
+
+    for session in range(sessions):
+        logins = open_session()
         for _ in range(steps):
             roll = rng.random()
             if roll < 0.06:
@@ -751,4 +840,79 @@ def corpus(helpers, seed, sessions=64, steps=160):
             kind = 'AH' if any(a[0] in ('h', 'H', 'o') for a in args) or any(m.word(a, b'context') for a in args[:3]) \
                 or (len(args) > 3 and args[3][0] == 't' and m.tokens[args[3][1]]['ctx'] is not None) else 'AR'
             emit(f'{kind} {cid} ' + ' '.join(map(arg_text, args)), m.request(kind, cid, args))
+    watch_keys = [b'w0', b'w1', b'w2']
+
+    def labelled(label, words):
+        return [x(b'LABEL'), x(b'AS'), x(marking_of(label))] + words if label is not None else words
+
+    def request(cid, args):
+        kind = 'AH' if any(m.word(a, b'context') for a in args[:3]) else 'AR'
+        emit(f'{kind} {cid} ' + ' '.join(map(arg_text, args)), m.request(kind, cid, args))
+
+    def watch_label(c):
+        return known_label(c) if rng.random() < 0.6 else None
+
+    def touch_label(c, aims):
+        if aims and rng.random() < 0.6:
+            base = rng.choice(aims)
+            comps = frozenset(k for k in base[1] if rng.random() < 0.6)
+            trusts = max(1, len(m.cfg.trusts))
+            return (rng.randrange(base[0] + 1), comps, rng.randrange(base[2], trusts))
+        return random_label()
+
+    for session in range(watch_sessions):
+        logins = open_session()
+        for _ in range(episodes):
+            roll = rng.random()
+            if roll < 0.05:
+                set_user(rng.choice(logins))
+                continue
+            cid = rng.choice(list(m.conns))
+            c = m.conns[cid]
+            if roll < 0.1 and c['multi']:
+                request(cid, [x(b'DISCARD')])
+            if rng.random() < 0.25:
+                request(cid, labelled(watch_label(c) if rng.random() < 0.3 else None, [x(b'UNWATCH')]))
+            if rng.random() < 0.2 and m.cfg.levels:
+                parts = [x(b'LABEL'), x(b'SESSION'), x(marking_of(known_label(c)[:2] + (0,)))]
+                request(cid, parts)
+            multi_label = watch_label(c)
+            same = rng.random() < 0.5
+            aims = []
+            for _ in range(rng.randint(1, 3)):
+                label = multi_label if same else watch_label(c)
+                if label is not None:
+                    aims.append(label)
+                keys = [x(k) for k in rng.sample(watch_keys, rng.randint(1, 2))]
+                request(cid, labelled(label, [x(b'WATCH')] + keys))
+            if not aims:
+                aims.append(m.session(c))
+            for _ in range(rng.choice([0, 1, 1, 2])):
+                key = rng.choice(watch_keys)
+                w = touch_label(c, aims)
+                emit(f'AK {key.hex()} {helpers["label_text"](w)}', m.touch(key, w))
+            if rng.random() < 0.25:
+                request(cid, labelled(watch_label(c) if not same else multi_label, [x(b'WATCH'), x(rng.choice(watch_keys))]))
+            if rng.random() < 0.15:
+                login = rng.choice(logins)
+                emit(f'AA {cid} {login.hex()}', m.auth(cid, login))
+            request(cid, labelled(multi_label, [x(b'MULTI')]))
+            for _ in range(rng.randint(0, 2)):
+                body = rng.choice([[x(b'GET'), x(b'k')], [x(b'SET'), x(b'k'), x(b'v')], [x(b'PING')]])
+                if c['multi'] and rng.random() < 0.3:
+                    body = labelled(c['bound'], body)
+                request(cid, body)
+            if rng.random() < 0.15:
+                request(cid, [x(b'WATCH'), x(rng.choice(watch_keys))])
+            if rng.random() < 0.1:
+                key = rng.choice(watch_keys)
+                w = touch_label(c, aims)
+                emit(f'AK {key.hex()} {helpers["label_text"](w)}', m.touch(key, w))
+            end = [x(b'DISCARD')] if rng.random() < 0.08 else [x(b'EXEC')]
+            roll = rng.random()
+            if roll < 0.2:
+                end = labelled(c['bound'], end)
+            elif roll < 0.25:
+                end = labelled(random_label(), end)
+            request(cid, end)
     return '\n'.join(trace) + '\n', expected, stats, dict(sorted(m.notes.items())), marks

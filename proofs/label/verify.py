@@ -52,7 +52,7 @@ ROW_AREAS = {'L': 'lattice', 'CR': 'marking', 'CL': 'marking', 'CC': 'marking', 
              'V': 'visibility', 'VR': 'visibility', 'G': 'admission', 'B': 'admission', 'SU': 'rules', 'SR': 'rules', 'SW': 'rules',
              'SM': 'rules', 'SD': 'rules', 'NR': 'counters', 'NA': 'counters', 'NS': 'counters', 'NV': 'counters',
              'AH': 'contexts', 'AQ': 'contexts', 'AW': 'contexts', 'AX': 'arrival', 'AU': 'arrival', 'AC': 'arrival',
-             'AT': 'arrival', 'AO': 'arrival', 'AR': 'arrival', 'AS': 'arrival',
+             'AT': 'arrival', 'AO': 'arrival', 'AR': 'arrival', 'AS': 'arrival', 'AK': 'arrival', 'AA': 'arrival',
              'KO': 'resolution', 'KR': 'confinement', 'KW': 'placement', 'KH': 'purge', 'KP': 'plain'}
 KEY_SEED = 0x6B3E7
 ARRIVAL_SEED = 0xA2217
@@ -61,7 +61,11 @@ ARRIVAL_NOTES = ['created', 'create_full', 'dropped', 'swept', 'find_ok', 'find_
                  'form_token', 'token_ok', 'token_cached', 'token_expired', 'token_rejected', 'token_outside_ceiling',
                  'token_context_ok', 'token_context_refused', 'session_set', 'session_denied', 'arrived_session',
                  'arrived_prefixed', 'arrived_in_multi', 'queued', 'exec_clean', 'exec_dirty', 'exec_abort_arrival',
-                 'find_expired_boundary', 'token_expired_boundary', 'swept_several']
+                 'find_expired_boundary', 'token_expired_boundary', 'swept_several', 'session_pinned', 'watch_noted',
+                 'watch_noted_marked', 'watch_in_multi', 'unwatched', 'touch_marked', 'touch_unseen', 'exec_watch_refused',
+                 'exec_watch_refused_marked', 'exec_watch_refused_clean', 'exec_watch_mixed', 'exec_watch_aborted',
+                 'exec_watch_same', 'auth_switched', 'auth_kept_watches', 'exec_abort_arrival_watched', 'touch_marked_again',
+                 'watch_added_marked', 'marked_keeps_watches']
 ARRIVAL_SEMANTIC = {'expired_handle_used': 'find_expired', 'other_login_handle_used': 'find_other_login',
                     'handle_above_clearance_used': 'find_outside_ceiling', 'expired_token_used': 'token_expired',
                     'token_above_clearance_used': 'token_outside_ceiling', 'token_context_mismatch_used': 'token_context_refused',
@@ -71,7 +75,9 @@ ARRIVAL_SEMANTIC = {'expired_handle_used': 'find_expired', 'other_login_handle_u
                     'persistence_accepted': 'refused_persist', 'subscribe_without_session': 'refused_session_needed',
                     'label_above_clearance_accepted': 'refused_invalid', 'session_for_per_command_login': 'session_denied',
                     'context_cap_ignored': 'create_full', 'cron_keeps_expired': 'swept_several', 'dirty_exec_runs': 'exec_dirty',
-                    'boundary_handle_used': 'find_expired_boundary', 'boundary_token_used': 'token_expired_boundary'}
+                    'boundary_handle_used': 'find_expired_boundary', 'boundary_token_used': 'token_expired_boundary',
+                    'watch_label_ignored': 'exec_watch_refused_marked', 'watch_mark_ignored': 'exec_watch_aborted'}
+ARRIVAL_COUNT_SEMANTIC = {'mark_drops_watches': 'marked_keeps_watches', 'marked_watch_adds_nothing': 'watch_added_marked'}
 NAME_PATTERN = re.compile(rb'[A-Z0-9][A-Z0-9_-]*( [A-Z0-9][A-Z0-9_-]*)*')
 
 
@@ -1100,6 +1106,15 @@ def arrival_controls(expected, marks):
         if mutated[i] == expected[i]:
             raise AssertionError('semantic negative control does not change its row: ' + name)
         cases['arrival_semantic_' + name] = '\n'.join(mutated) + '\n'
+    for name, event in ARRIVAL_COUNT_SEMANTIC.items():
+        if event not in marks:
+            raise AssertionError('no row for semantic negative control ' + name)
+        i = marks[event]
+        mutated = list(expected)
+        mutated[i] = watches_dropped(expected[i])
+        if mutated[i] == expected[i]:
+            raise AssertionError('semantic negative control does not change its row: ' + name)
+        cases['arrival_semantic_' + name] = '\n'.join(mutated) + '\n'
     rejected = []
     for name, mutant in cases.items():
         try:
@@ -1109,6 +1124,85 @@ def arrival_controls(expected, marks):
         else:
             raise AssertionError('negative control accepted: ' + name)
     return rejected
+
+
+def watches_dropped(row):
+    cells = row.split('|')
+    cells[-2] = cells[-2].rsplit(':', 1)[0] + ':0'
+    return '|'.join(cells)
+
+
+def twin_runs(trace):
+    blocks = []
+    for line in trace.splitlines():
+        if line.startswith('AX '):
+            blocks.append([line])
+        elif blocks:
+            blocks[-1].append(line)
+    lines, pairs = [], []
+    for block in blocks:
+        if not any(line.startswith('AK ') for line in block):
+            continue
+        start = len(lines)
+        lines += block
+        middle = len(lines)
+        lines += [line for line in block if not line.startswith('AK ')]
+        pairs.append((start, middle, len(lines)))
+    return lines, pairs
+
+
+def unmarked(row):
+    cells = row.split('|')
+    if cells[0] in ('AR', 'AH'):
+        if len(cells) != 5:
+            raise AssertionError('unexpected arrival row: ' + row[:200])
+        return cells[0], cells[1], cells[3][:3] + cells[3][4:], cells[4]
+    if cells[0] == 'AA':
+        return cells[0], cells[1][:3] + cells[1][4:]
+    return tuple(cells)
+
+
+def twin_check(lines, rows, pairs):
+    if len(rows) != len(lines):
+        raise AssertionError(f'twin runs: {len(rows)} rows, expected {len(lines)}')
+    compared = marked = aborted = 0
+    for start, middle, end in pairs:
+        noisy = [row for line, row in zip(lines[start:middle], rows[start:middle]) if not line.startswith('AK ')]
+        quiet = rows[middle:end]
+        if len(noisy) != len(quiet):
+            raise AssertionError('twin runs differ in length')
+        for a, b in zip(noisy, quiet):
+            if unmarked(a) != unmarked(b):
+                raise AssertionError(f'twin rows differ beyond the mark: {a[:200]!r} != {b[:200]!r}')
+            if a.split('|')[0] in ('AR', 'AH'):
+                ra, rb = a.split('|')[2], b.split('|')[2]
+                if ra != rb:
+                    if (ra, rb) != ('nil', 'exec'):
+                        raise AssertionError(f'twin replies differ beyond an aborted EXEC: {a[:200]!r} != {b[:200]!r}')
+                    aborted += 1
+                sa, sb = a.split('|')[3], b.split('|')[3]
+                if sa[3] == '1' and sb[3] == '0' and sa.rsplit(':', 1)[1] != '0':
+                    marked += 1
+            compared += 1
+    if not marked or not aborted:
+        raise AssertionError('twin runs have no marked row or no aborted EXEC')
+    return {'pairs': len(pairs), 'rows': len(rows), 'compared_rows': compared, 'marked_rows_with_watches': marked,
+            'exec_aborted_by_writes': aborted}
+
+
+def twin_controls(lines, rows, pairs):
+    for start, middle, _ in pairs:
+        for i in range(start, middle):
+            cells = rows[i].split('|')
+            if cells[0] in ('AR', 'AH') and cells[3][3] == '1' and cells[3].rsplit(':', 1)[1] != '0':
+                mutated = list(rows)
+                mutated[i] = watches_dropped(rows[i])
+                try:
+                    twin_check(lines, mutated, pairs)
+                except AssertionError:
+                    return ['arrival_twin_mark_drops_watches']
+                raise AssertionError('negative control accepted: arrival_twin_mark_drops_watches')
+    raise AssertionError('no marked twin row for the negative control')
 
 
 def key_run(bridge, lines, path):
@@ -1196,6 +1290,56 @@ def key_evidence(bridge, lean_model, output):
             raise AssertionError('twin merge lost base commands')
         detail['twin_pairs'] += 1
         detail['twin_hidden'] += len(twin) - len(base)
+    pauses = keys.pause_corpus(random.Random(KEY_SEED ^ 0x50), 77, 32)
+    detail['pause_sessions'] = detail['pause_randomkey_rows'] = 0
+    pause_notes = {}
+    pause_real = []
+    for k, (lines, rows, cmds, notes) in enumerate(pauses):
+        got = key_run(bridge, lines, work / f'pause-{k}.txt')
+        if got[0] != 'S|3|1':
+            raise AssertionError('key bridge did not start labelled: ' + got[0])
+        key_compare(f'pause session {k}', got[1:], rows)
+        hashes.append(hashlib.sha256('\n'.join(got).encode()).hexdigest())
+        pause_real.append(got[1:])
+        detail['pause_sessions'] += 1
+        for (lab, cmd, args), row in zip(cmds, rows):
+            if cmd in ('SET', 'RANDOMKEY'):
+                stats[keys.row_kind(cmd)] += 1
+                detail['rows'] += 1
+            if cmd == 'RANDOMKEY':
+                detail['pause_randomkey_rows'] += 1
+        for name, n in notes.items():
+            pause_notes[name] = pause_notes.get(name, 0) + n
+    missing = [n for n in keys.PAUSE_NOTES if not pause_notes.get(n)]
+    if missing:
+        raise AssertionError('pause corpus misses ' + ', '.join(missing))
+    detail['pause_notes'] = {n: pause_notes[n] for n in keys.PAUSE_NOTES}
+    ptwins = keys.pause_twin_corpus(random.Random(KEY_SEED ^ 0x51), 77, 24)
+    detail['pause_twin_pairs'] = detail['pause_twin_hidden'] = detail['pause_twin_rows'] = 0
+    detail['pause_twin_expired_rows'] = 0
+    for k, (base, twin, observer) in enumerate(ptwins):
+        branches = keys.pause_branches(base)
+        oa = key_run(bridge, [keys.scheme_line(77, True)] + [keys.row_line(*c) for c in base], work / f'pause-twin-{k}-base.txt')[1:]
+        ob = key_run(bridge, [keys.scheme_line(77, True)] + [keys.row_line(*c) for c in twin], work / f'pause-twin-{k}-hidden.txt')[1:]
+        key_compare(f'pause twin {k} base', oa, keys.simulate(base)[0])
+        key_compare(f'pause twin {k} hidden', ob, keys.simulate(twin)[0])
+        j = 0
+        for i, c in enumerate(twin):
+            if j < len(base) and c is base[j]:
+                if c[0] is not None and keys.sees(observer, c[0]):
+                    if oa[j] != ob[i]:
+                        raise AssertionError(f'pause twin {k}: a hidden command changed a visible reply at row {j}')
+                    stats['KH'] += 1
+                    if c[1] == 'RANDOMKEY':
+                        detail['pause_twin_rows'] += 1
+                        detail['pause_twin_expired_rows'] += branches[j] == 'paused_expired'
+                j += 1
+        if j != len(base):
+            raise AssertionError('pause twin merge lost base commands')
+        detail['pause_twin_pairs'] += 1
+        detail['pause_twin_hidden'] += len(twin) - len(base)
+    if not detail['pause_twin_expired_rows']:
+        raise AssertionError('no pause twin compares a draw among visible expired names')
     p10 = random.Random(KEY_SEED ^ 0x10)
     detail['p10_runs'] = 0
     for k in range(6):
@@ -1236,6 +1380,14 @@ def key_evidence(bridge, lean_model, output):
         if not differing:
             raise AssertionError('key model mutant accepted: ' + name)
         mutants['key_' + name] = differing
+    for name, fn in keys.pause_mutants().items():
+        differing = 0
+        for (lines, rows, cmds, _), got in zip(pauses, pause_real):
+            mrows, _ = keys.simulate(cmds, mutant=fn)
+            differing += sum(1 for a, b in zip(got, mrows) if not key_match(a, b))
+        if not differing:
+            raise AssertionError('pause model mutant accepted: ' + name)
+        mutants['key_pause_' + name] = differing
     seen = {}
     for k, (lines, rows, cmds, _) in enumerate(sessions):
         for i, (lab, cmd, args) in enumerate(cmds):
@@ -1299,15 +1451,30 @@ def run():
         results['arrival_' + name] = hashlib.sha256(result.stdout.encode()).hexdigest()
     if results['arrival_lean'] != results['arrival_odin']:
         raise AssertionError('Lean oracle and Odin arrival rows differ')
+    tlines, pairs = twin_runs(atrace)
+    tpath = output / 'arrival-twins.txt'
+    tpath.write_text('\n'.join(tlines) + '\n')
+    for name, binary in (('lean', lean_model), ('odin', arrival_bridge)):
+        result = subprocess.run([str(binary.resolve()), str(tpath)], text=True, capture_output=True)
+        if result.returncode or result.stderr:
+            raise AssertionError(f'arrival twins {name}: exit {result.returncode}, stderr: {result.stderr[-2000:]}')
+        (output / f'arrival-twins-{name}-results.txt').write_text(result.stdout)
+        results['arrival_twins_' + name] = hashlib.sha256(result.stdout.encode()).hexdigest()
+        trows = result.stdout.splitlines()
+        twins = twin_check(tlines, trows, pairs)
+    if results['arrival_twins_lean'] != results['arrival_twins_odin']:
+        raise AssertionError('Lean oracle and Odin twin rows differ')
+    twin_rejected = twin_controls(tlines, trows, pairs)
     if set(stats) & set(astats) or set(astats) != {k for k, a in ROW_AREAS.items() if a in ('contexts', 'arrival')}:
         raise AssertionError('arrival row kinds overlap the label rows or miss a kind')
     stats.update(astats)
     extra['arrival'] = anotes
+    extra['arrival_twins'] = twins
     kstats, kdetail, kmutants = key_evidence(key_bridge, lean_model, output)
     stats.update(kstats)
     extra['keys'] = kdetail
     extra['key_mutants'] = kmutants
-    rejected = negative_controls(expected) + arrival_controls(aexpected, marks) + sorted(kmutants)
+    rejected = negative_controls(expected) + arrival_controls(aexpected, marks) + twin_rejected + sorted(kmutants)
     modules = {module: set(re.findall(r'^theorem\s+(\w+)', (PACKAGE / f'Labels/{module}.lean').read_text(), re.M))
                for files in AREAS.values() for module in files}
     comparisons = {area: sum(count for kind, count in stats.items() if ROW_AREAS[kind] == area) for area in AREAS}
@@ -1329,7 +1496,8 @@ def run():
                'kernel_checked_theorems': len(kernel['theorem_axioms']),
                'source_sha256': fingerprints, 'versions': versions, 'tool_sha256': tools,
                'trace_sha256': hashlib.sha256(trace.encode()).hexdigest(),
-               'arrival_trace_sha256': hashlib.sha256(atrace.encode()).hexdigest(), 'results_sha256': results,
+               'arrival_trace_sha256': hashlib.sha256(atrace.encode()).hexdigest(),
+               'arrival_twin_trace_sha256': hashlib.sha256(tpath.read_bytes()).hexdigest(), 'results_sha256': results,
                'executable_sha256': {'lean': digest(lean_model), 'odin': digest(odin_bridge),
                                      'arrival_odin': digest(arrival_bridge), 'key_odin': digest(key_bridge)},
                'proof_source_sha256': {str(p.relative_to(PACKAGE)): digest(p) for p in sorted(PACKAGE.rglob('*'))

@@ -340,6 +340,27 @@ theorem hidden_insertion (ord : List TLabel → List TLabel) (R : TLabel) (cs me
     (s : KState N V) : kouts ord R merge s = kouts ord R cs s := by
   rw [key_history ord R merge hmd s s rfl, key_history ord R cs hd s s rfl, hm]
 
+theorem randomKey_consistent (pickN pickE : List N → Option N) (alive : KCopy N V → Bool) (paused : Bool)
+    {R L : TLabel} (hv : domT R L = true) {s t : KState N V} (he : restrict R s = restrict R t) :
+    randomKey pickN pickE alive paused s L = randomKey pickN pickE alive paused t L := by
+  rw [← randomKey_restrict pickN pickE alive paused L s, ← randomKey_restrict pickN pickE alive paused L t,
+    ← restrict_restrict_of hv s, ← restrict_restrict_of hv t, he]
+
+def routs (ord : List TLabel → List TLabel) (pickN pickE : List N → Option N) (alive : KCopy N V → Bool)
+    (paused : Bool) (R : TLabel) (cs : List (KCmd N V)) (s : KState N V) : List (KOut N V × Option N) :=
+  outsK (fun r l => domT r l) KCmd.label cstep (fun c s => (creply ord c s, randomKey pickN pickE alive paused s c.label))
+    R cs s
+
+theorem random_history (ord : List TLabel → List TLabel) (pickN pickE : List N → Option N) (alive : KCopy N V → Bool)
+    (paused : Bool) (R : TLabel) (cs : List (KCmd N V)) (hd : ∀ c ∈ cs, Undeclassified c) (s : KState N V) :
+    routs ord pickN pickE alive paused R cs s = routs ord pickN pickE alive paused R (kpurge R cs) s :=
+  unwindingK (fun r l => domT r l) KCmd.label cstep
+    (fun c s => (creply ord c s, randomKey pickN pickE alive paused s c.label)) R Undeclassified (restrict R)
+    (fun _ s hc hv => cstep_local hc hv s)
+    (fun _ _ _ hc he hv => cstep_consistent hc hv he)
+    (fun _ _ _ hc he hv => by rw [creply_consistent ord hc hv he, randomKey_consistent pickN pickE alive paused hv he])
+    cs hd s s rfl
+
 end KeyPurge
 
 end Labels

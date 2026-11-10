@@ -27,6 +27,7 @@ TOKEN_ERROR = 'ERR invalid label token'
 TOP_ERROR = 'ERR this command needs a label that dominates the whole label scheme'
 PERSIST_ERROR = 'ERR persistence is off while a label scheme is configured'
 LABELS_OFF = 'ERR labels are not configured on this server'
+WATCH_REFUSED = "EXECABORT Transaction discarded because of: the command's label differs from the transaction's label"
 
 ED25519_SEED_PREFIX = bytes.fromhex('302e020100300506032b657004220420')
 ED25519_PUBLIC_PREFIX = bytes.fromhex('302a300506032b6570032100')
@@ -414,6 +415,32 @@ class Labelled(unittest.TestCase):
         self.assertEqual(error_of(app, 'DEBUG', 'SLEEP', 0), TOP_ERROR)
         self.assertTrue(error_of(app, 'EXEC').startswith('EXECABORT'))
 
+    def test_a_watch_made_under_another_login_refuses_exec(self):
+        self.admin.call('ACL', 'SETUSER', 'twin', 'on', 'nopass', '+@all', '~*', '&*', 'clearance:S//A')
+        outcomes = []
+        for hidden in (False, True):
+            c = self.connect('app')
+            self.admin.call('LABEL', 'AS', 'S//A', 'SET', 'w', 'before')
+            self.assertEqual(c.call('WATCH', 'w'), 'OK')
+            if hidden:
+                self.admin.call('LABEL', 'AS', 'S//A', 'SET', 'w', 'after')
+            self.assertEqual(c.call('AUTH', 'low', 'x'), 'OK')
+            self.assertEqual(self.whoami(c)[b'label'], b'C')
+            self.assertEqual(c.call('MULTI'), 'OK')
+            self.assertEqual(c.call('SET', 'probe', 1), 'QUEUED')
+            c.send('EXEC')
+            outcomes.append(str(c.reply()))
+            self.assertIsNone(self.admin.call('LABEL', 'AS', 'C', 'GET', 'probe'))
+            self.admin.call('LABEL', 'AS', 'S//A', 'DEL', 'w')
+        self.assertEqual(outcomes, [WATCH_REFUSED, WATCH_REFUSED])
+        c = self.connect('app')
+        self.assertEqual(c.call('WATCH', 'w'), 'OK')
+        self.assertEqual(c.call('AUTH', 'twin', 'x'), 'OK')
+        self.assertEqual(c.call('MULTI'), 'OK')
+        self.assertEqual(c.call('SET', 'probe', 2), 'QUEUED')
+        self.assertEqual(c.call('EXEC'), ['OK'])
+        self.assertEqual(self.admin.call('LABEL', 'AS', 'S//A', 'GET', 'probe'), b'2')
+
     def test_scripts_run_at_the_caller_label(self):
         app = self.connect('app')
         script = "return redis.call('LABEL', 'WHOAMI')"
@@ -430,7 +457,6 @@ class Labelled(unittest.TestCase):
 
     def test_pubsub_delivers_only_to_dominating_subscribers(self):
         low = self.connect('peer', protocol=3)
-        self.assertEqual(error_of(low, 'SUBSCRIBE', 'news'), 'ERR this command needs a session label set with LABEL SESSION')
         low.call('LABEL', 'SESSION', 'C')
         push_of(low, 'SUBSCRIBE', 'news')
         push_of(low, 'PSUBSCRIBE', 'n*')
@@ -474,6 +500,100 @@ class Labelled(unittest.TestCase):
         self.assertEqual(u.call('LABEL', 'AS', 'C', 'PUBSUB', 'CHANNELS'), [b'news'])
         self.assertEqual(self.admin.call('PUBSUB', 'NUMSUB', 'news'), [b'news', 3])
         self.assertEqual(self.admin.call('LABEL', 'AS', 'U', 'PUBSUB', 'NUMSUB', 'news'), [b'news', 0])
+
+    def pushed(self, client):
+        seen = []
+        while client.available(0.3):
+            value = client.read()
+            if isinstance(value, Push) and value[0] in (b'message', b'pmessage', b'smessage', b'invalidate'):
+                seen.append((value[0], value[-1]))
+        return sorted(seen)
+
+    def test_an_implicit_subscribe_pins_the_login_label(self):
+        sub = self.connect('peer', protocol=3)
+        self.assertEqual(self.whoami(sub)[b'session'], 0)
+        push_of(sub, 'SUBSCRIBE', 'news')
+        who = self.whoami(sub)
+        self.assertEqual((who[b'label'], who[b'session']), (b'S//A/B', 1))
+        pattern = self.connect('peer', protocol=3)
+        push_of(pattern, 'PSUBSCRIBE', 'n*')
+        shard = self.connect('peer', protocol=3)
+        push_of(shard, 'SSUBSCRIBE', 'news')
+        for client in (pattern, shard):
+            self.assertEqual(self.whoami(client)[b'session'], 1)
+        self.assertEqual(self.admin.call('LABEL', 'AS', 'C', 'PUBLISH', 'news', 'low'), 0)
+        self.assertEqual(self.admin.call('LABEL', 'AS', 'S//A/B', 'PUBLISH', 'news', 'same'), 2)
+        self.assertEqual(self.admin.call('LABEL', 'AS', 'TOP SECRET', 'PUBLISH', 'news', 'high'), 0)
+        self.assertEqual(self.admin.call('LABEL', 'AS', 'C', 'SPUBLISH', 'news', 'shard-low'), 0)
+        self.assertEqual(self.admin.call('LABEL', 'AS', 'S//A/B', 'SPUBLISH', 'news', 'shard-same'), 1)
+        self.assertEqual(self.admin.call('LABEL', 'AS', 'TOP SECRET', 'SPUBLISH', 'news', 'shard-high'), 0)
+        self.assertEqual(self.pushed(sub), [(b'message', b'low'), (b'message', b'same')])
+        self.assertEqual(self.pushed(pattern), [(b'pmessage', b'low'), (b'pmessage', b'same')])
+        self.assertEqual(self.pushed(shard), [(b'smessage', b'shard-low'), (b'smessage', b'shard-same')])
+        self.assertEqual(self.admin.call('LABEL', 'AS', 'C', 'PUBSUB', 'NUMSUB', 'news'), [b'news', 0])
+        self.assertEqual(self.admin.call('LABEL', 'AS', 'S//A/B', 'PUBSUB', 'NUMSUB', 'news'), [b'news', 1])
+        sub_id = sub.call('CLIENT', 'ID')
+        self.assertNotIn(b'id=%d ' % sub_id, self.admin.call('LABEL', 'AS', 'C', 'CLIENT', 'LIST'))
+        self.assertIn(b'id=%d ' % sub_id, self.admin.call('LABEL', 'AS', 'S//A/B', 'CLIENT', 'LIST'))
+        push_of(sub, 'UNSUBSCRIBE', 'news')
+        self.assertEqual(self.whoami(sub)[b'session'], 1)
+        self.admin.call('ACL', 'SETUSER', 'peer', 'clearance:S//A')
+        self.assertTrue(closed(sub))
+        self.assertTrue(closed(pattern))
+
+    def test_a_prefix_or_a_per_command_login_keeps_the_session_error(self):
+        needed = 'ERR this command needs a session label set with LABEL SESSION'
+        app = self.connect('peer')
+        self.assertEqual(error_of(app, 'LABEL', 'AS', 'C', 'SUBSCRIBE', 'ch'), needed)
+        self.assertEqual(error_of(app, 'LABEL', 'AS', 'C', 'CLIENT', 'TRACKING', 'ON'), needed)
+        self.assertEqual(self.whoami(app)[b'session'], 0)
+        app.call('LABEL', 'AS', 'C', 'MULTI')
+        self.assertEqual(error_of(app, 'SUBSCRIBE', 'ch'), needed)
+        self.assertTrue(error_of(app, 'EXEC').startswith('EXECABORT'))
+        self.assertEqual(self.whoami(app)[b'session'], 0)
+        app.call('MULTI')
+        self.assertEqual(app.call('SUBSCRIBE', 'ch'), 'QUEUED')
+        self.assertEqual(app.call('EXEC'), [[b'subscribe', b'ch', 1]])
+        self.assertEqual(app.call('PING'), [b'pong', b''])
+        app.call('RESET')
+        self.assertEqual(self.whoami(app)[b'session'], 0)
+        self.admin.call('ACL', 'SETUSER', 'pool', 'on', 'nopass', '+@all', '~*', '&*', 'clearance:S//A', 'label-per-command')
+        pool = self.connect('pool')
+        self.assertEqual(error_of(pool, 'SUBSCRIBE', 'ch'), 'ERR this login must send every command through LABEL AS')
+        self.assertEqual(error_of(pool, 'LABEL', 'AS', 'C', 'SUBSCRIBE', 'ch'), needed)
+        pool.call('LABEL', 'AS', 'C', 'MULTI')
+        self.assertEqual(error_of(pool, 'SUBSCRIBE', 'ch'), needed)
+
+    def test_client_tracking_pins_the_login_label(self):
+        tracker = self.connect('peer', protocol=3)
+        self.assertEqual(tracker.call('CLIENT', 'TRACKING', 'ON'), 'OK')
+        self.assertEqual((self.whoami(tracker)[b'label'], self.whoami(tracker)[b'session']), (b'S//A/B', 1))
+        self.assertIsNone(tracker.call('GET', 'seen'))
+        self.assertIsNone(tracker.call('GET', 'hidden'))
+        self.admin.call('LABEL', 'AS', 'TOP SECRET', 'SET', 'hidden', 1)
+        self.admin.call('LABEL', 'AS', 'C', 'SET', 'seen', 1)
+        self.assertEqual(self.pushed(tracker), [(b'invalidate', [b'seen'])])
+        self.assertEqual(tracker.call('CLIENT', 'TRACKING', 'OFF'), 'OK')
+        self.assertEqual(self.whoami(tracker)[b'session'], 1)
+
+    def test_auth_repins_or_closes_a_connection_that_holds_push_state(self):
+        sub = self.connect('peer', protocol=3)
+        push_of(sub, 'SUBSCRIBE', 'news')
+        self.assertEqual(sub.call('AUTH', 'low', 'x'), 'OK')
+        who = self.whoami(sub)
+        self.assertEqual((who[b'login'], who[b'label'], who[b'session']), (b'low', b'C', 1))
+        self.assertEqual(self.admin.call('LABEL', 'AS', 'S//A', 'PUBLISH', 'news', 'above'), 0)
+        self.assertEqual(self.admin.call('LABEL', 'AS', 'C', 'PUBLISH', 'news', 'at'), 1)
+        self.assertEqual(self.pushed(sub), [(b'message', b'at')])
+        quiet = self.connect('peer', protocol=3)
+        quiet.call('AUTH', 'low', 'x')
+        self.assertEqual(self.whoami(quiet)[b'session'], 0)
+        self.admin.call('ACL', 'SETUSER', 'pool', 'on', 'nopass', '+@all', '~*', '&*', 'clearance:S//A', 'label-per-command')
+        tracker = self.connect('peer', protocol=3)
+        self.assertEqual(tracker.call('CLIENT', 'TRACKING', 'ON'), 'OK')
+        tracker.send('AUTH', 'pool', 'x')
+        self.assertEqual(tracker.reply(), 'OK')
+        self.assertTrue(closed(tracker))
 
     def test_server_wide_introspection_is_top_only_or_filtered(self):
         app = self.connect('app')

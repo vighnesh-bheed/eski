@@ -21,10 +21,17 @@ LABELS_OFF = 'ERR labels are not configured on this server'
 INVALID = 'ERR invalid label'
 TOP_ERROR = 'ERR this command needs a label that dominates the whole label scheme'
 WRONGTYPE = 'WRONGTYPE Operation against a key holding the wrong kind of value'
+WATCH_REFUSED = "EXECABORT Transaction discarded because of: the command's label differs from the transaction's label"
 
 
 def AS(label):
     return ('LABEL', 'AS', label)
+
+
+def exec_outcome(client, *prefix):
+    client.send(*prefix, 'EXEC')
+    value = client.reply()
+    return str(value) if isinstance(value, ServerError) else value
 
 
 def error_of(client, *arguments):
@@ -320,6 +327,19 @@ class Labelled(unittest.TestCase):
         self.assertTrue(seen <= set(b'x%d' % i for i in range(300)) | {b'only'})
         self.assertNotIn(None, seen)
 
+    def test_randomkey_returns_an_expired_name_while_a_write_pause_holds_expiry(self):
+        c = self.c
+        self.at('S', 'SET', 'hidden', 'h', 'PX', 3)
+        c.call('MULTI')
+        c.call('SET', 'key', 'value', 'PX', 3)
+        c.call('CLIENT', 'PAUSE', 10000, 'WRITE')
+        c.call('EXEC')
+        time.sleep(0.05)
+        self.assertEqual(c.call('RANDOMKEY'), b'key')
+        self.assertIsNone(self.at('U', 'RANDOMKEY'))
+        c.call('CLIENT', 'UNPAUSE')
+        self.assertIsNone(c.call('RANDOMKEY'))
+
     def test_flush_deletes_only_the_command_label_unless_top(self):
         self.at('U', 'SET', 'a', 1)
         self.at('S', 'SET', 'b', 1)
@@ -358,6 +378,173 @@ class Labelled(unittest.TestCase):
             result = low.call(*AS(label), 'EXEC')
             self.assertEqual(result is None, aborted, (label, writer))
             high.call(*AS(writer), 'DEL', 'w')
+
+    def test_watch_at_another_label_refuses_exec_whatever_hidden_writes_did(self):
+        outcomes = []
+        for hidden in (False, True):
+            low = self.connect()
+            low.call('LABEL', 'SESSION', 'U')
+            self.at('S', 'SET', 'w', 'before')
+            self.assertEqual(low.call(*AS('S'), 'WATCH', 'w'), 'OK')
+            if hidden:
+                self.at('S', 'SET', 'w', 'after')
+            self.assertEqual(low.call('MULTI'), 'OK')
+            self.assertEqual(low.call('SET', 'probe', 1), 'QUEUED')
+            outcomes.append(exec_outcome(low))
+            self.assertIsNone(self.at('U', 'GET', 'probe'))
+            self.at('S', 'DEL', 'w')
+        for changed in (False, True):
+            low = self.connect()
+            low.call('LABEL', 'SESSION', 'U')
+            self.at('U', 'SET', 'v', 'before')
+            low.call('WATCH', 'v')
+            if changed:
+                self.at('U', 'SET', 'v', 'after')
+            low.call(*AS('S'), 'MULTI')
+            low.call('SET', 'probe', 1)
+            outcomes.append(exec_outcome(low, *AS('S')))
+            self.assertIsNone(self.at('S', 'GET', 'probe'))
+            self.at('U', 'DEL', 'v')
+        self.assertEqual(outcomes, [WATCH_REFUSED] * 4)
+
+    def test_a_refused_exec_clears_the_watches_and_same_label_watch_keeps_its_rule(self):
+        low = self.connect()
+        low.call('LABEL', 'SESSION', 'U')
+
+        def transaction(label='U'):
+            prefix = () if label == 'U' else AS(label)
+            low.call(*prefix, 'MULTI')
+            low.call('INCR', 'counter:' + label)
+            return exec_outcome(low, *prefix)
+
+        low.call(*AS('S'), 'WATCH', 'w')
+        self.assertEqual(transaction(), WATCH_REFUSED)
+        self.assertIn(b' watch=0 ', low.call('CLIENT', 'INFO'))
+        self.at('S', 'SET', 'w', 'hidden')
+        self.assertEqual(transaction(), [1])
+        low.call('WATCH', 'w')
+        self.at('U', 'SET', 'w', 'seen')
+        self.assertIsNone(transaction())
+        low.call('WATCH', 'w')
+        self.assertEqual(transaction(), [2])
+        low.call('WATCH', 'w')
+        self.at('S', 'SET', 'w', 'hidden again')
+        self.assertEqual(transaction(), [3])
+        low.call(*AS('S'), 'WATCH', 'x')
+        self.at('C', 'SET', 'x', 'seen from S')
+        self.assertIsNone(transaction('S'))
+        low.call(*AS('S'), 'WATCH', 'x')
+        self.assertEqual(transaction('S'), [1])
+        self.assertEqual(self.at('U', 'GET', 'counter:U'), b'3')
+        self.assertEqual(self.at('S', 'GET', 'counter:S'), b'1')
+
+    def test_every_watch_label_counts_even_after_a_hidden_write(self):
+        outcomes = []
+        for hidden in (False, True):
+            low = self.connect()
+            low.call('LABEL', 'SESSION', 'U')
+            self.at('S', 'SET', 'first', 'before')
+            low.call(*AS('S'), 'WATCH', 'first')
+            if hidden:
+                self.at('S', 'SET', 'first', 'after')
+            low.call('WATCH', 'second')
+            for label in ('S', 'U'):
+                low.call(*AS(label), 'MULTI')
+                low.call('PING')
+                outcomes.append(exec_outcome(low, *AS(label)))
+                low.call(*AS('S'), 'WATCH', 'first')
+                low.call('WATCH', 'second')
+            low.call('UNWATCH')
+            self.at('S', 'DEL', 'first')
+        self.assertEqual(outcomes, [WATCH_REFUSED] * 4)
+
+    def test_debug_digest_covers_every_label(self):
+        plain = Server(BINARY, workers=0, arguments=('--keyspace-threads', str(KEYSPACE_THREADS)))
+        self.addCleanup(plain.close)
+        plain.start()
+        off = Client(plain.port)
+        self.addCleanup(off.close)
+        for client in (off, self.c):
+            client.call('SET', 's', 'v')
+            client.call('HSET', 'h', 'f', 'g')
+            client.call('RPUSH', 'l', 'a', 'b')
+            client.call('VADD', 'vs', 'VALUES', 2, 1, 0, 'a', 'SETATTR', '{"c":1}')
+            client.call('VADD', 'vs', 'VALUES', 2, 0, 1, 'b')
+        off.call('SET', 'u', 'x')
+        self.at('U', 'SET', 'u', 'x')
+        names = ('s', 'h', 'l', 'vs', 'u', 'missing')
+        self.assertEqual(self.c.call('DEBUG', 'DIGEST-VALUE', *names), off.call('DEBUG', 'DIGEST-VALUE', *names))
+        self.assertEqual(self.c.call('DEBUG', 'DIGEST'), off.call('DEBUG', 'DIGEST'))
+        self.assertNotEqual(self.c.call('DEBUG', 'DIGEST'), '0' * 40)
+        before = self.c.call('DEBUG', 'DIGEST-VALUE', 'vs')
+        self.assertNotEqual(before, ['0' * 40])
+        self.c.call('VSETATTR', 'vs', 'a', '{"c":2}')
+        self.assertNotEqual(self.c.call('DEBUG', 'DIGEST-VALUE', 'vs'), before)
+
+    def test_watch_ignores_stale_keys_on_flush_and_swap(self):
+        c = self.c
+
+        def clean_exec(client):
+            client.call('MULTI')
+            client.call('PING')
+            return client.call('EXEC')
+
+        c.call('DEBUG', 'SET-ACTIVE-EXPIRE', 0)
+        self.at('U', 'SET', 'other', 1)
+        c.call('SET', 'x', 'foo', 'PX', 1)
+        time.sleep(0.01)
+        c.call('WATCH', 'x')
+        c.call('FLUSHDB')
+        self.assertEqual(clean_exec(c), ['PONG'])
+        c.call('FLUSHALL')
+        c.call('SELECT', 1)
+        c.call('SET', 'x', 'foo', 'PX', 1)
+        time.sleep(0.01)
+        c.call('WATCH', 'x')
+        c.call('SWAPDB', 0, 1)
+        self.assertEqual(clean_exec(c), ['PONG'])
+        c.call('FLUSHALL')
+        c.call('SELECT', 0)
+        c.call('SET', 'x', 'foo', 'PX', 1)
+        time.sleep(0.01)
+        c.call('SELECT', 1)
+        c.call('WATCH', 'x')
+        c.call('SWAPDB', 0, 1)
+        self.assertEqual(clean_exec(c), ['PONG'])
+        c.call('FLUSHALL')
+        c.call('SELECT', 1)
+        c.call('SET', 'x', 'foo', 'PX', 1)
+        c.call('SELECT', 0)
+        c.call('SET', 'x', 'bar', 'PX', 1)
+        time.sleep(0.01)
+        c.call('SELECT', 1)
+        c.call('WATCH', 'x')
+        c.call('SWAPDB', 0, 1)
+        self.assertEqual(clean_exec(c), ['PONG'])
+        c.call('FLUSHALL')
+        c.call('SELECT', 0)
+        c.call('SET', 'live', 1)
+        c.call('WATCH', 'live')
+        c.call('SWAPDB', 0, 1)
+        self.assertIsNone(clean_exec(c))
+        c.call('SWAPDB', 0, 1)
+        c.call('FLUSHALL')
+        low = self.connect()
+        low.call('LABEL', 'SESSION', 'U')
+        self.at('S', 'SET', 'hidden', 1)
+        low.call('WATCH', 'hidden')
+        c.call('SWAPDB', 0, 1)
+        self.assertEqual(clean_exec(low), ['PONG'])
+        c.call('SWAPDB', 0, 1)
+        low.call('SET', 'mine', 1)
+        low.call('WATCH', 'mine')
+        c.call('SWAPDB', 0, 1)
+        self.assertIsNone(clean_exec(low))
+        c.call('SWAPDB', 0, 1)
+        low.call('WATCH', 'mine')
+        self.at('S', 'FLUSHDB')
+        self.assertEqual(clean_exec(low), ['PONG'])
+        c.call('DEBUG', 'SET-ACTIVE-EXPIRE', 1)
 
     def test_blocking_pops_wake_only_on_their_label(self):
         waiter = self.connect()
@@ -674,6 +861,7 @@ class Labelled(unittest.TestCase):
         self.assertLess(used, 200000 + 64 * 1024)
         self.assertEqual(self.at('S', 'DBSIZE') - self.at('U', 'DBSIZE'), 200)
         self.c.call('CONFIG', 'SET', 'maxmemory-policy', 'noeviction')
+        self.assertEqual(self.c.call('LABEL', 'QUOTA', 'U', 'LIMIT', used // 2), 'OK')
         text = error_of(self.c, *AS('U'), 'SET', 'more', 'z' * 300000)
         self.assertTrue(text.startswith('OOM'), text)
         self.assertEqual(self.at('S', 'SET', 'fine', 1), 'OK')
@@ -767,6 +955,160 @@ class RuntimeScheme(unittest.TestCase):
         self.assertEqual(c.call(*AS('U'), 'VCARD', 'vs'), 1)
         self.assertEqual(c.call(*AS('S'), 'VCARD', 'vs'), 2)
         self.assertEqual(error_of(c, *AS('S'), 'SET', 'old', 'x'), 'INUSE name in use at U')
+
+    def test_a_watch_from_before_the_scheme_is_a_watch_at_the_lowest_label(self):
+        outcomes = []
+        for raised, dirty in ((False, False), (False, True), (True, False), (True, True)):
+            server = Server(BINARY, workers=0, arguments=('--keyspace-threads', str(KEYSPACE_THREADS)))
+            self.addCleanup(server.close)
+            server.start()
+            c = Client(server.port)
+            admin = Client(server.port)
+            self.addCleanup(c.close)
+            self.addCleanup(admin.close)
+            c.call('SET', 'w', 1)
+            c.call('WATCH', 'w')
+            if dirty:
+                admin.call('SET', 'w', 2)
+            admin.call('CONFIG', 'SET', 'label-levels', 'U,S')
+            if raised:
+                admin.call('ACL', 'SETUSER', 'default', 'clearance:*')
+            c.call('MULTI')
+            c.call('PING')
+            outcomes.append(exec_outcome(c))
+        self.assertEqual(outcomes, [['PONG'], None, WATCH_REFUSED, WATCH_REFUSED])
+
+
+CLIENT_FIELDS = ('flags', 'watch', 'multi', 'multi-mem', 'tot-mem')
+
+
+def client_fields(text):
+    fields = dict(part.split('=', 1) for part in text.decode().split() if '=' in part)
+    return tuple(fields[name] for name in CLIENT_FIELDS)
+
+
+def listed_fields(client, ident):
+    for line in client.call('CLIENT', 'LIST').splitlines():
+        if line.startswith(b'id=%d ' % ident):
+            return client_fields(line)
+    raise AssertionError('connection %d is not listed' % ident)
+
+
+class WatchCounts(unittest.TestCase):
+    def setUp(self):
+        self.server = start_server()
+        self.addCleanup(self.server.close)
+        self.admin = self.connect()
+        self.admin.call('ACL', 'SETUSER', 'default', 'clearance:*', 'trust:*')
+
+    def connect(self, session=None, port=None):
+        client = Client(self.server.port if port is None else port)
+        self.addCleanup(client.close)
+        if session is not None:
+            client.call('LABEL', 'SESSION', session)
+        return client
+
+    def twin_run(self, hidden):
+        server = start_server()
+        self.addCleanup(server.close)
+        admin = self.connect(port=server.port)
+        admin.call('ACL', 'SETUSER', 'default', 'clearance:*', 'trust:*')
+        low, other, observer = (self.connect('U', server.port) for _ in range(3))
+        ident, other_ident = low.call('CLIENT', 'ID'), other.call('CLIENT', 'ID')
+
+        def hidden_write(value):
+            if hidden:
+                admin.call(*AS('S'), 'SET', 'w', value)
+
+        def seen():
+            clients = info(observer, 'clients')
+            return (client_fields(low.call('CLIENT', 'INFO')), listed_fields(observer, ident),
+                    listed_fields(observer, other_ident), clients['watching_clients'], clients['total_watched_keys'])
+
+        views = []
+        admin.call(*AS('S'), 'SET', 'w', 'before')
+        self.assertEqual(low.call(*AS('S'), 'WATCH', 'w'), 'OK')
+        self.assertEqual(other.call('WATCH', 'w'), 'OK')
+        hidden_write('after')
+        views.append(seen())
+        self.assertEqual(low.call('WATCH', 'v'), 'OK')
+        hidden_write('again')
+        views.append(seen())
+        self.assertEqual(low.call('MULTI'), 'OK')
+        self.assertEqual(low.call('SET', 'probe', 1), 'QUEUED')
+        views.append(listed_fields(observer, ident))
+        views.append(exec_outcome(low))
+        views.append(seen())
+        self.assertEqual(low.call(*AS('S'), 'WATCH', 'w'), 'OK')
+        hidden_write('later')
+        views.append(seen())
+        self.assertEqual(low.call('UNWATCH'), 'OK')
+        views.append(seen())
+        self.assertIsNone(admin.call(*AS('U'), 'GET', 'probe'))
+        self.assertEqual(admin.call(*AS('S'), 'GET', 'w'), b'later' if hidden else b'before')
+        return views
+
+    def test_watch_count_and_client_memory_are_the_same_with_and_without_a_hidden_write(self):
+        quiet = self.twin_run(False)
+        noisy = self.twin_run(True)
+        self.assertEqual(quiet, noisy)
+        first, second, queued, outcome, refused, rewatched, unwatched = noisy
+        self.assertEqual(first[0][:2], ('N', '1'))
+        self.assertEqual(first[0], first[1])
+        self.assertEqual(first[2][:2], ('N', '1'))
+        self.assertEqual(first[3:], ('0', '0'))
+        self.assertEqual(second[0][:2], ('N', '2'))
+        self.assertEqual(queued[:3], ('x', '2', '1'))
+        self.assertGreater(int(queued[3]), 0)
+        self.assertEqual(outcome, WATCH_REFUSED)
+        self.assertEqual((refused[0][1], refused[1][1], refused[2][1]), ('0', '0', '1'))
+        self.assertEqual(rewatched[0][:2], ('N', '1'))
+        self.assertEqual((unwatched[0][1], unwatched[1][1], unwatched[2][1]), ('0', '0', '1'))
+
+    def test_the_dirty_flag_shows_only_to_labels_that_dominate_every_watch(self):
+        low = self.connect('U')
+        ident = low.call('CLIENT', 'ID')
+        lower, higher = self.connect('U'), self.connect('S')
+
+        def flags():
+            return (client_fields(low.call('CLIENT', 'INFO'))[0], client_fields(low.call(*AS('S'), 'CLIENT', 'INFO'))[0],
+                    listed_fields(lower, ident)[0], listed_fields(higher, ident)[0], listed_fields(self.admin, ident)[0])
+
+        low.call(*AS('S'), 'WATCH', 'w')
+        self.admin.call(*AS('S'), 'SET', 'w', 'hidden')
+        self.assertEqual(flags(), ('N', 'd', 'N', 'd', 'd'))
+        low.call('WATCH', 'v')
+        self.assertEqual(flags(), ('N', 'd', 'N', 'd', 'd'))
+        self.assertEqual(client_fields(low.call('CLIENT', 'INFO'))[1], '2')
+        low.call('MULTI')
+        self.assertEqual(exec_outcome(low), WATCH_REFUSED)
+        self.assertEqual(flags(), ('N', 'N', 'N', 'N', 'N'))
+
+    def test_a_visible_write_marks_a_same_label_transaction_and_keeps_its_keys(self):
+        low, observer = self.connect('U'), self.connect('U')
+        ident = low.call('CLIENT', 'ID')
+        self.admin.call(*AS('U'), 'SET', 'w', 'before')
+        low.call('WATCH', 'w', 'x')
+        self.admin.call(*AS('U'), 'SET', 'w', 'seen')
+        self.admin.call(*AS('U'), 'SET', 'w', 'seen again')
+        self.assertEqual(client_fields(low.call('CLIENT', 'INFO'))[:2], ('d', '2'))
+        self.assertEqual(listed_fields(observer, ident)[:2], ('d', '2'))
+        self.assertEqual(info(self.admin, 'clients')['total_watched_keys'], '2')
+        self.assertEqual(low.call('MULTI'), 'OK')
+        self.assertEqual(low.call('SET', 'probe', 1), 'QUEUED')
+        self.assertEqual(listed_fields(observer, ident)[:3], ('xd', '2', '1'))
+        self.assertIsNone(exec_outcome(low))
+        self.assertIsNone(self.admin.call(*AS('U'), 'GET', 'probe'))
+        self.assertEqual(client_fields(low.call('CLIENT', 'INFO'))[:3], ('N', '0', '-1'))
+        self.assertEqual(info(self.admin, 'clients')['total_watched_keys'], '0')
+        low.call('WATCH', 'w')
+        self.admin.call(*AS('U'), 'SET', 'w', 'third')
+        self.assertEqual(client_fields(low.call('CLIENT', 'INFO'))[:2], ('d', '1'))
+        self.assertEqual(low.call('UNWATCH'), 'OK')
+        self.assertEqual(client_fields(low.call('CLIENT', 'INFO'))[:2], ('N', '0'))
+        low.call('MULTI')
+        low.call('INCR', 'counter')
+        self.assertEqual(exec_outcome(low), [1])
 
 
 def normalise(command, value):

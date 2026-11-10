@@ -271,10 +271,14 @@ label_scheme_apply :: proc() -> string {
 	if label_scheme_runtime && labelled && mc_port != 0 {
 		return LABEL_SCHEME_MEMCACHED
 	}
+	was := labels_on
 	labels_on = labelled
 	access_scheme_changed()
 	if labelled {
 		keyspace_labels_enable()
+		if !was {
+			access_watch_adopt()
+		}
 	}
 	return ""
 }

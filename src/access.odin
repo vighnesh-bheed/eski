@@ -11,6 +11,7 @@ ERR_LABEL_TOKEN_ONLY :: "ERR this login must send every command through LABEL AS
 ERR_LABEL_SESSION_NEEDED :: "ERR this command needs a session label set with LABEL SESSION"
 ERR_LABEL_SESSION_DENIED :: "ERR LABEL SESSION is not available to this login"
 ERR_LABEL_TRANSACTION :: "ERR the command's label differs from the transaction's label"
+ERR_LABEL_WATCH_EXEC :: "EXECABORT Transaction discarded because of: the command's label differs from the transaction's label"
 ERR_LABEL_NESTED :: "ERR LABEL AS cannot wrap LABEL AS or LABEL SESSION"
 ERR_LABEL_CONTEXT_MISMATCH :: "ERR the label differs from the context's label"
 ERR_LABEL_TOP :: "ERR this command needs a label that dominates the whole label scheme"
@@ -29,8 +30,12 @@ Access_Conn :: struct {
 	session:  lb.Label,
 	explicit: bool,
 	bound:    lb.Label,
+	bound_prefixed: bool,
 	implicit: lb.Label,
 	monitor:  lb.Label,
+	watched:  lb.Label,
+	watching: bool,
+	watch_mixed: bool,
 	ran:      bool,
 	accounted: int,
 }
@@ -221,6 +226,71 @@ access_user_changed :: proc(c: ^Conn) {
 		c.label.explicit = false
 		c.label.session = {}
 		c.label.ran = false
+	}
+}
+
+access_holds_push :: proc(c: ^Conn) -> bool {
+	return .Tracking in c.ps || ps_total(c) + ps_count(c, .Shard) > 0
+}
+
+access_user_settled :: proc(c: ^Conn) {
+	if !labels_on || !access_holds_push(c) {
+		return
+	}
+	rules := &c.user.labels if c.user != nil else nil
+	if rules != nil && (rules.per_command || rules.require_token) {
+		c.close_after = true
+		return
+	}
+	l := lb.ceiling_session(access_ceiling(c.user))
+	if _, interned := access_intern(l); !interned {
+		c.close_after = true
+		return
+	}
+	a := access_conn(c)
+	a.session = l
+	a.explicit = true
+}
+
+access_pin_bound :: proc(c: ^Conn) {
+	a := access_conn(c)
+	if !a.explicit {
+		a.session = a.bound
+		a.explicit = true
+	}
+}
+
+access_watch_note_label :: proc(c: ^Conn, l: lb.Label) {
+	a := access_conn(c)
+	if !a.watching {
+		a.watched = l
+		a.watching = true
+	} else if a.watched != l {
+		a.watch_mixed = true
+	}
+}
+
+access_watch_note :: proc(c: ^Conn) {
+	access_watch_note_label(c, access.label)
+}
+
+access_watch_differs :: proc(c: ^Conn) -> bool {
+	a := c.label
+	return a != nil && a.watching && (a.watch_mixed || a.watched != a.bound)
+}
+
+access_watch_clear :: proc(c: ^Conn) {
+	if a := c.label; a != nil {
+		a.watching = false
+		a.watch_mixed = false
+	}
+}
+
+access_watch_adopt :: proc() {
+	for c in srv.conns {
+		if c != nil && c.tx != nil && (len(c.tx.watched) > 0 || .Dirty_Cas in c.txf) {
+			access_watch_note_label(c, lb.BOTTOM)
+		}
 	}
 }
 
@@ -458,6 +528,7 @@ access_enter :: #force_no_inline proc(c: ^Conn, argv: [][]u8, slot: ^Cmd_Slot) -
 		l = a.bound
 	} else if s != nil && s.cmd.handler == cmd_multi {
 		a.bound = l
+		a.bound_prefixed = prefixed
 	}
 	if !lb.ceiling_admits(access_ceiling(c.user), l) || !access_set(l, ctx) {
 		access_refuse(c, s, args, ERR_LABEL_INVALID)
@@ -471,8 +542,14 @@ access_enter :: #force_no_inline proc(c: ^Conn, argv: [][]u8, slot: ^Cmd_Slot) -
 		return args, s, false
 	}
 	if access_needs_session(s.cmd, args) && !a.explicit {
-		access_refuse(c, s, args, ERR_LABEL_SESSION_NEEDED)
-		return args, s, false
+		if prefixed || (.Multi in c.txf && a.bound_prefixed) || (rules != nil && (rules.per_command || rules.require_token)) {
+			access_refuse(c, s, args, ERR_LABEL_SESSION_NEEDED)
+			return args, s, false
+		}
+		if .Multi not_in c.txf {
+			a.session = l
+			a.explicit = true
+		}
 	}
 	if s.cmd.handler == cmd_monitor {
 		a.monitor = l

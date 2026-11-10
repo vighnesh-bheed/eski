@@ -22,6 +22,7 @@ def errNestedMulti : String := "ERR MULTI calls can not be nested"
 def errExecWithout : String := "ERR EXEC without MULTI"
 def errDiscardWithout : String := "ERR DISCARD without MULTI"
 def errExecDirty : String := "EXECABORT Transaction discarded because of previous errors."
+def errWatchInMulti : String := "ERR WATCH inside MULTI is not allowed"
 
 inductive Arg
   | lit (b : List Nat)
@@ -63,7 +64,7 @@ def nameOf (args : List Arg) : List Nat :=
 
 def knownCommands : List String :=
   ["get", "set", "ping", "echo", "select", "auth", "hello", "quit", "reset", "client", "label", "context", "multi", "exec",
-   "discard", "watch", "subscribe", "psubscribe", "ssubscribe", "save", "bgsave", "bgrewriteaof", "dump", "restore",
+   "discard", "watch", "unwatch", "subscribe", "psubscribe", "ssubscribe", "save", "bgsave", "bgrewriteaof", "dump", "restore",
    "migrate", "debug", "monitor", "swapdb", "latency", "memory", "slowlog", "config", "shutdown", "eval", "publish"]
 
 def isCmd (args : List Arg) (w : String) : Bool := nameOf args == word w
@@ -122,6 +123,21 @@ structure TokEntry where
   ctx : Option HRef
 deriving DecidableEq, Repr
 
+structure WSum where
+  any : Bool
+  mixed : Bool
+  label : TLabel
+deriving DecidableEq, Repr
+
+def wsEmpty : WSum := ⟨false, false, tbottom⟩
+
+def wnote (s : WSum) (l : TLabel) : WSum :=
+  if !s.any then ⟨true, false, l⟩ else if s.label != l then { s with mixed := true } else s
+
+def wdiffers (s : WSum) (b : TLabel) : Bool := s.any && (s.mixed || s.label != b)
+
+def wclear (s : WSum) : WSum := { s with any := false, mixed := false }
+
 structure AConn where
   login : List Nat
   explicit : Bool
@@ -129,7 +145,31 @@ structure AConn where
   inMulti : Bool
   dirty : Bool
   bound : TLabel
+  boundPrefixed : Bool
+  cas : Bool
+  ws : WSum
+  watched : List (List Nat × TLabel)
 deriving DecidableEq, Repr
+
+def clearWatch (c : AConn) : AConn := { c with cas := false, watched := [], ws := wclear c.ws }
+
+def endTx (c : AConn) : AConn := clearWatch { c with inMulti := false, dirty := false }
+
+def addWatch (ws : List (List Nat × TLabel)) (l : TLabel) : List Arg → List (List Nat × TLabel)
+  | [] => ws
+  | a :: rest =>
+    match a with
+    | .lit k => if ws.any (·.1 == k) then addWatch ws l rest else addWatch (ws ++ [(k, l)]) l rest
+    | _ => addWatch ws l rest
+
+def watchConn (c : AConn) (l : TLabel) (keys : List Arg) : AConn :=
+  { c with ws := wnote c.ws l, watched := addWatch c.watched l keys }
+
+def touchConn (k : List Nat) (w : TLabel) (c : AConn) : AConn :=
+  if c.watched.any (fun e => e.1 == k && domT e.2 w) then { c with cas := true } else c
+
+def authConn (c : AConn) (login : List Nat) : AConn :=
+  if c.login == login then c else { c with login := login, explicit := false, session := tbottom }
 
 structure AEnv where
   cfg : TConfig
@@ -296,6 +336,8 @@ def nested (inner : List Arg) : Bool :=
 
 def stripErr (m : String) : String := if m.startsWith "ERR " then String.ofList (m.toList.drop 4) else m
 
+def errExecWatch : String := "EXECABORT Transaction discarded because of: " ++ stripErr errTransaction
+
 inductive Arrival
   | ok (l : TLabel) (inner : List Arg) (ctx : Option ACtx)
   | refused (msg : String)
@@ -306,29 +348,36 @@ def setConn (D : ADyn) (id : Nat) (c : AConn) : ADyn :=
 
 def refuse (D : ADyn) (id : Nat) (c : AConn) (slotArgs : List Arg) (msg : String) : Arrival × ADyn :=
   if isCmd slotArgs "exec" && c.inMulti then
-    (.refused ("EXECABORT Transaction discarded because of: " ++ stripErr msg),
-     setConn D id { c with inMulti := false, dirty := false })
+    (.refused ("EXECABORT Transaction discarded because of: " ++ stripErr msg), setConn D id (endTx c))
   else (.refused msg, setConn D id { c with dirty := c.dirty || c.inMulti })
 
 def finishLabel (c : AConn) (l0 : TLabel) : TLabel := if c.inMulti then c.bound else l0
 
-def finishConn (c : AConn) (inner : List Arg) (l : TLabel) : AConn :=
-  if !c.inMulti && isCmd inner "multi" then { c with bound := l } else c
+def finishConn (c : AConn) (inner : List Arg) (l : TLabel) (prefixed : Bool) : AConn :=
+  if !c.inMulti && isCmd inner "multi" then { c with bound := l, boundPrefixed := prefixed } else c
 
-def gate (E : AEnv) (c : AConn) (inner : List Arg) (l : TLabel) : Option String :=
+def pinConn (c : AConn) (inner : List Arg) (l : TLabel) : AConn :=
+  if !c.inMulti && needsSession inner && !c.explicit then { c with explicit := true, session := l } else c
+
+def sessionKept (E : AEnv) (c : AConn) (prefixed : Bool) : Bool :=
+  prefixed || (c.inMulti && c.boundPrefixed) || (rulesOf E c.login).perCommand || (rulesOf E c.login).requireToken
+
+def gate (E : AEnv) (c : AConn) (inner : List Arg) (l : TLabel) (prefixed : Bool) : Option String :=
   if !ceilingAdmits (ceilingFor E c.login) l || !labelValidT E.cfg l then some errInvalid
   else if !known inner then none
   else if persistenceRefused inner then some errPersistence
   else if topOnly inner && !domT l (ttop E.cfg.base.levels.length E.cfg.base.comps.length) then some errTop
-  else if needsSession inner && !c.explicit then some errSessionNeeded
+  else if needsSession inner && !c.explicit && sessionKept E c prefixed then some errSessionNeeded
   else none
 
 def arriveFinish (E : AEnv) (D : ADyn) (id : Nat) (c : AConn) (inner : List Arg) (l0 : TLabel) (ctx : Option ACtx)
     (prefixed : Bool) : Arrival × ADyn :=
   if c.inMulti && prefixed && l0 != c.bound then refuse D id c inner errTransaction
-  else match gate E c inner (finishLabel c l0) with
-    | some m => refuse (setConn D id (finishConn c inner (finishLabel c l0))) id (finishConn c inner (finishLabel c l0)) inner m
-    | none => (.ok (finishLabel c l0) inner ctx, setConn D id (finishConn c inner (finishLabel c l0)))
+  else match gate E c inner (finishLabel c l0) prefixed with
+    | some m => refuse (setConn D id (finishConn c inner (finishLabel c l0) prefixed)) id
+        (finishConn c inner (finishLabel c l0) prefixed) inner m
+    | none => (.ok (finishLabel c l0) inner ctx,
+        setConn D id (pinConn (finishConn c inner (finishLabel c l0) prefixed) inner (finishLabel c l0)))
 
 def connOf (D : ADyn) (id : Nat) : Option AConn := (D.conns.find? (·.1 == id)).map (·.2)
 
@@ -353,6 +402,7 @@ inductive Reply
   | info (l : TLabel)
   | queued
   | exec
+  | nil
   | none
 deriving DecidableEq, Repr
 
@@ -421,7 +471,11 @@ def contextHandler (E : AEnv) (D : ADyn) (c : AConn) (l0 : TLabel) (inner : List
   else if argIs inner 1 "info" || argIs inner 1 "drop" then contextUse E D c inner
   else (.none, D)
 
-def endTx (c : AConn) : AConn := { c with inMulti := false, dirty := false }
+def execReply (c : AConn) : Reply :=
+  if c.dirty then .err errExecDirty
+  else if wdiffers c.ws c.bound then .err errExecWatch
+  else if c.cas then .nil
+  else .exec
 
 def handleCmd (E : AEnv) (D : ADyn) (id : Nat) (l : TLabel) (inner : List Arg) : Reply × ADyn :=
   match connOf D id with
@@ -431,14 +485,23 @@ def handleCmd (E : AEnv) (D : ADyn) (id : Nat) (l : TLabel) (inner : List Arg) :
     else if isCmd inner "multi" then
       (if c.inMulti then (.err errNestedMulti, D) else (.ok, setConn D id { c with inMulti := true, dirty := false }))
     else if isCmd inner "exec" then
-      (if !c.inMulti then (.err errExecWithout, D)
-       else if c.dirty then (.err errExecDirty, setConn D id (endTx c))
-       else (.exec, setConn D id (endTx c)))
+      (if !c.inMulti then (.err errExecWithout, D) else (execReply c, setConn D id (endTx c)))
     else if isCmd inner "discard" then
       (if !c.inMulti then (.err errDiscardWithout, D) else (.ok, setConn D id (endTx c)))
+    else if isCmd inner "watch" then
+      (if c.inMulti then (.err errWatchInMulti, D) else (.ok, setConn D id (watchConn c l (inner.drop 1))))
+    else if isCmd inner "unwatch" then (.ok, setConn D id (clearWatch c))
     else if isCmd inner "label" && argIs inner 1 "session" then sessionHandler E D id c inner
     else if isCmd inner "context" then contextHandler E D c l inner
     else (.none, D)
+
+def touch (D : ADyn) (k : List Nat) (w : TLabel) : ADyn :=
+  { D with conns := D.conns.map fun p => (p.1, touchConn k w p.2) }
+
+def auth (D : ADyn) (id : Nat) (login : List Nat) : ADyn :=
+  match connOf D id with
+  | none => D
+  | some c => setConn D id (authConn c login)
 
 def request (E : AEnv) (D : ADyn) (id : Nat) (args : List Arg) : Arrival × Reply × ADyn :=
   match arrive E D id args with
@@ -470,7 +533,7 @@ theorem findIn_spec {E : AEnv} {D D' : ADyn} {login : List Nat} {r : HRef} {x : 
       (some x, (ctxFind E.idle E.now D.ctxs login (ceilingFor E login) r).2) := Prod.ext h1 rfl
   exact ⟨find_owner hp, find_within_ceiling hp⟩
 
-theorem gate_none {E : AEnv} {c : AConn} {inner : List Arg} {l : TLabel} (h : gate E c inner l = none) :
+theorem gate_none {E : AEnv} {c : AConn} {inner : List Arg} {l : TLabel} {p : Bool} (h : gate E c inner l p = none) :
     ceilingAdmits (ceilingFor E c.login) l = true ∧ labelValidT E.cfg l = true := by
   unfold gate at h
   by_cases h1 : ceilingAdmits (ceilingFor E c.login) l = true <;> by_cases h2 : labelValidT E.cfg l = true <;> simp_all
@@ -479,7 +542,7 @@ theorem finish_spec {E : AEnv} {D D' : ADyn} {id : Nat} {c : AConn} {inner inner
     {ctx ctx' : Option ACtx} {p : Bool} (h : arriveFinish E D id c inner l0 ctx p = (.ok l inner' ctx', D')) :
     ceilingAdmits (ceilingFor E c.login) l = true ∧ labelValidT E.cfg l = true ∧ inner' = inner ∧ ctx' = ctx ∧
       l = finishLabel c l0 ∧ (c.inMulti = true → p = true → l0 = c.bound) ∧
-      D' = setConn D id (finishConn c inner l) := by
+      D' = setConn D id (pinConn (finishConn c inner l p) inner l) := by
   unfold arriveFinish at h
   split at h
   · exact (refuse_not_ok h).elim
@@ -1242,5 +1305,878 @@ theorem requests_within (E : AEnv) : ∀ (reqs : List (Nat × List Arg)) (D : AD
     · rw [← h2, ← h3]
       exact h0 z hz
     · exact h3
+
+theorem isCmd_other {args : List Arg} {w v : String} (h : isCmd args w = true) (hne : (word w == word v) = false) :
+    isCmd args v = false := by
+  unfold isCmd at *
+  rw [beq_iff_eq] at h
+  rw [h]
+  exact hne
+
+theorem wnote_any (s : WSum) (l : TLabel) : (wnote s l).any = true := by
+  unfold wnote
+  split
+  · rfl
+  · split
+    · simp_all
+    · simp_all
+
+theorem wnote_fold_any (h : TLabel) : ∀ (m : Bool) (ls : List TLabel),
+    ls.foldl wnote ⟨true, m, h⟩ = ⟨true, m || ls.any (fun y => y != h), h⟩
+  | m, [] => by simp
+  | m, x :: xs => by
+    have step : wnote ⟨true, m, h⟩ x = ⟨true, m || (x != h), h⟩ := by
+      by_cases hx : x = h
+      · subst hx
+        simp [wnote]
+      · have hb : (h != x) = true := bne_iff_ne.2 (Ne.symm hx)
+        have hb' : (x != h) = true := bne_iff_ne.2 hx
+        simp [wnote, hb, hb']
+    rw [List.foldl_cons, step, wnote_fold_any h (m || (x != h)) xs, List.any_cons, Bool.or_assoc]
+
+theorem wdiffers_fold (s : WSum) (hs : s.any = false) (b : TLabel) : ∀ ls : List TLabel,
+    wdiffers (ls.foldl wnote s) b = true ↔ ∃ x ∈ ls, x ≠ b
+  | [] => by simp [wdiffers, hs]
+  | x :: xs => by
+    have h1 : wnote s x = ⟨true, false, x⟩ := by simp [wnote, hs]
+    rw [List.foldl_cons, h1, wnote_fold_any, Bool.false_or]
+    simp only [wdiffers, Bool.true_and, Bool.or_eq_true, List.any_eq_true, bne_iff_ne, ne_eq, List.mem_cons]
+    constructor
+    · rintro (⟨y, hy, hyx⟩ | hxb)
+      · by_cases hyb : y = b
+        · exact ⟨x, Or.inl rfl, fun hxb => hyx (hyb.trans hxb.symm)⟩
+        · exact ⟨y, Or.inr hy, hyb⟩
+      · exact ⟨x, Or.inl rfl, hxb⟩
+    · rintro ⟨y, hy, hyb⟩
+      by_cases hxb : x = b
+      · rcases hy with rfl | hy
+        · exact absurd hxb hyb
+        · exact Or.inl ⟨y, hy, fun hyx => hyb (hyx.trans hxb)⟩
+      · exact Or.inr hxb
+
+theorem wclear_any (s : WSum) : (wclear s).any = false := rfl
+
+theorem handle_exec {E : AEnv} {D : ADyn} {id : Nat} {l : TLabel} {inner : List Arg} {c : AConn}
+    (hc : connOf D id = some c) (hx : isCmd inner "exec" = true) (hm : c.inMulti = true) :
+    handleCmd E D id l inner = (execReply c, setConn D id (endTx c)) := by
+  have hmulti : isCmd inner "multi" = false := isCmd_other hx (by decide)
+  have himm : immediate inner = true := by simp [immediate, hx]
+  unfold handleCmd
+  simp [hc, hm, himm, hmulti, hx]
+
+theorem exec_watch_refused {E : AEnv} {D : ADyn} {id : Nat} {l : TLabel} {inner : List Arg} {c : AConn}
+    (hc : connOf D id = some c) (hx : isCmd inner "exec" = true) (hm : c.inMulti = true) (hd : c.dirty = false)
+    (hw : wdiffers c.ws c.bound = true) :
+    handleCmd E D id l inner = (.err errExecWatch, setConn D id (endTx c)) ∧ (endTx c).ws.any = false ∧
+      (endTx c).watched = [] ∧ (endTx c).cas = false ∧ (endTx c).inMulti = false := by
+  rw [handle_exec hc hx hm]
+  simp [execReply, hd, hw, endTx, clearWatch, wclear]
+
+theorem exec_watch_data_free {c : AConn} (hd : c.dirty = false) (hw : wdiffers c.ws c.bound = true)
+    (cas : Bool) (w : List (List Nat × TLabel)) :
+    execReply { c with cas := cas, watched := w } = execReply c ∧ endTx { c with cas := cas, watched := w } = endTx c := by
+  simp [execReply, hd, hw, endTx, clearWatch]
+
+theorem exec_same_label {c : AConn} (hd : c.dirty = false) (hw : wdiffers c.ws c.bound = false) :
+    execReply c = if c.cas then .nil else .exec := by
+  simp [execReply, hd, hw]
+
+theorem handle_watch {E : AEnv} {D : ADyn} {id : Nat} {l : TLabel} {inner : List Arg} {c : AConn}
+    (hc : connOf D id = some c) (hw : isCmd inner "watch" = true) (hm : c.inMulti = false) :
+    handleCmd E D id l inner = (.ok, setConn D id (watchConn c l (inner.drop 1))) ∧
+      (watchConn c l (inner.drop 1)).ws = wnote c.ws l ∧ (watchConn c l (inner.drop 1)).cas = c.cas ∧
+      (watchConn c l (inner.drop 1)).bound = c.bound ∧ (watchConn c l (inner.drop 1)).inMulti = false := by
+  have h1 : isCmd inner "multi" = false := isCmd_other hw (by decide)
+  have h2 : isCmd inner "exec" = false := isCmd_other hw (by decide)
+  have h3 : isCmd inner "discard" = false := isCmd_other hw (by decide)
+  refine ⟨?_, rfl, rfl, rfl, hm⟩
+  unfold handleCmd
+  simp [hc, hm, h1, h2, h3, hw]
+
+theorem watch_in_multi {E : AEnv} {D : ADyn} {id : Nat} {l : TLabel} {inner : List Arg} {c : AConn}
+    (hc : connOf D id = some c) (hw : isCmd inner "watch" = true) (hm : c.inMulti = true) :
+    handleCmd E D id l inner = (.err errWatchInMulti, D) := by
+  have h1 : isCmd inner "multi" = false := isCmd_other hw (by decide)
+  have h2 : isCmd inner "exec" = false := isCmd_other hw (by decide)
+  have h3 : isCmd inner "discard" = false := isCmd_other hw (by decide)
+  have himm : immediate inner = true := by simp [immediate, hw]
+  unfold handleCmd
+  simp [hc, hm, himm, h1, h2, h3, hw]
+
+theorem touch_keeps_labels (k : List Nat) (w : TLabel) (c : AConn) :
+    (touchConn k w c).ws = c.ws ∧ (touchConn k w c).bound = c.bound ∧ (touchConn k w c).inMulti = c.inMulti ∧
+      (touchConn k w c).dirty = c.dirty ∧ (touchConn k w c).login = c.login ∧ (touchConn k w c).session = c.session := by
+  unfold touchConn
+  split <;> simp
+
+def WInv (c : AConn) : Prop := ∀ e ∈ c.watched, c.ws.any = true ∧ (c.ws.mixed = true ∨ e.2 = c.ws.label)
+
+theorem clearWatch_inv (c : AConn) : WInv (clearWatch c) := by
+  intro e he
+  simp [clearWatch] at he
+
+theorem endTx_inv (c : AConn) : WInv (endTx c) := clearWatch_inv _
+
+theorem addWatch_mem {ws : List (List Nat × TLabel)} {l : TLabel} : ∀ {keys : List Arg} {e : List Nat × TLabel},
+    e ∈ addWatch ws l keys → e ∈ ws ∨ e.2 = l
+  | [], _, h => Or.inl h
+  | a :: rest, e, h => by
+    cases a with
+    | lit k =>
+      simp only [addWatch] at h
+      split at h
+      · exact addWatch_mem h
+      · rcases addWatch_mem h with h | h
+        · rcases List.mem_append.1 h with h | h
+          · exact Or.inl h
+          · simp only [List.mem_singleton] at h
+            exact Or.inr (by rw [h])
+        · exact Or.inr h
+    | handle n =>
+      simp only [addWatch] at h
+      exact addWatch_mem h
+    | token n =>
+      simp only [addWatch] at h
+      exact addWatch_mem h
+
+theorem wnote_covers {s : WSum} {l x : TLabel} (h : s.any = true ∧ (s.mixed = true ∨ x = s.label)) :
+    (wnote s l).any = true ∧ ((wnote s l).mixed = true ∨ x = (wnote s l).label) := by
+  refine ⟨wnote_any s l, ?_⟩
+  unfold wnote
+  split
+  · rename_i hn
+    simp [h.1] at hn
+  · split
+    · exact Or.inl rfl
+    · exact h.2
+
+theorem wnote_covers_new (s : WSum) (l : TLabel) : (wnote s l).mixed = true ∨ l = (wnote s l).label := by
+  unfold wnote
+  split
+  · exact Or.inr rfl
+  · split
+    · exact Or.inl rfl
+    · rename_i hne
+      simp only [bne_iff_ne, ne_eq, Decidable.not_not] at hne
+      exact Or.inr hne.symm
+
+theorem watchConn_inv {c : AConn} (h : WInv c) (l : TLabel) (keys : List Arg) : WInv (watchConn c l keys) := by
+  intro e he
+  rcases addWatch_mem he with he | he
+  · exact wnote_covers (h e he)
+  · exact ⟨wnote_any c.ws l, he ▸ wnote_covers_new c.ws l⟩
+
+theorem touchConn_inv {c : AConn} (h : WInv c) (k : List Nat) (w : TLabel) : WInv (touchConn k w c) := by
+  unfold touchConn
+  split
+  · exact h
+  · exact h
+
+theorem authConn_inv {c : AConn} (h : WInv c) (login : List Nat) : WInv (authConn c login) := by
+  unfold authConn
+  split
+  · exact h
+  · exact h
+
+theorem touch_marks_only_seen {c : AConn} {b : TLabel} (h : WInv c) (hw : wdiffers c.ws b = false)
+    {k : List Nat} {w : TLabel} (hc : c.cas = false) (ht : (touchConn k w c).cas = true) : domT b w = true := by
+  unfold touchConn at ht
+  split at ht
+  · rename_i hany
+    obtain ⟨e, he, hk⟩ := List.any_eq_true.1 hany
+    obtain ⟨_, hd⟩ := band_both hk
+    obtain ⟨ha, hl⟩ := h e he
+    simp only [wdiffers, ha, Bool.true_and, Bool.or_eq_false_iff, bne_eq_false_iff_eq] at hw
+    rcases hl with hm | hl
+    · rw [hw.1] at hm
+      exact absurd hm (by decide)
+    · rw [hl, hw.2] at hd
+      exact hd
+  · rw [hc] at ht
+    exact absurd ht (by decide)
+
+theorem findIn_conns {E : AEnv} {D D' : ADyn} {login : List Nat} {r : HRef} {o : Option ACtx}
+    (h : findIn E D login r = (o, D')) : D'.conns = D.conns := by
+  unfold findIn at h
+  simp only [Prod.mk.injEq] at h
+  obtain ⟨_, rfl⟩ := h
+  rfl
+
+theorem tokenEntry_conns {E : AEnv} {D D' : ADyn} {login : List Nat} {sp : TokSpec} {o : Option TokEntry}
+    (h : tokenEntry E D login sp = (o, D')) : D'.conns = D.conns := by
+  unfold tokenEntry at h
+  repeat' split at h
+  all_goals
+    simp only [Prod.mk.injEq] at h
+    obtain ⟨_, rfl⟩ := h
+    rfl
+
+theorem tokenCtx_conns {E : AEnv} {D D' : ADyn} {login : List Nat} {l : TLabel} {r : Option HRef}
+    {o : Option (TLabel × Option ACtx)} (h : tokenCtx E D login l r = (o, D')) : D'.conns = D.conns := by
+  cases r with
+  | none =>
+    simp only [tokenCtx, Prod.mk.injEq] at h
+    obtain ⟨_, rfl⟩ := h
+    rfl
+  | some r =>
+    simp only [tokenCtx] at h
+    split at h
+    · rename_i D2 hf
+      simp only [Prod.mk.injEq] at h
+      obtain ⟨_, rfl⟩ := h
+      exact findIn_conns hf
+    · rename_i x D2 hf
+      split at h
+      · simp only [Prod.mk.injEq] at h
+        obtain ⟨_, rfl⟩ := h
+        exact findIn_conns hf
+      · simp only [Prod.mk.injEq] at h
+        obtain ⟨_, rfl⟩ := h
+        exact findIn_conns hf
+
+theorem tokenVerify_conns {E : AEnv} {D D' : ADyn} {login : List Nat} {sp : TokSpec}
+    {o : Option (TLabel × Option ACtx)} (h : tokenVerify E D login sp = (o, D')) : D'.conns = D.conns := by
+  unfold tokenVerify at h
+  split at h
+  · rename_i D1 he
+    simp only [Prod.mk.injEq] at h
+    obtain ⟨_, rfl⟩ := h
+    exact tokenEntry_conns he
+  · rename_i e D1 he
+    have k := tokenEntry_conns he
+    split at h
+    · simp only [Prod.mk.injEq] at h
+      obtain ⟨_, rfl⟩ := h
+      exact k
+    · split at h
+      · simp only [Prod.mk.injEq] at h
+        obtain ⟨_, rfl⟩ := h
+        exact k
+      · exact (tokenCtx_conns h).trans k
+
+theorem tailFind_conns (E : AEnv) (D : ADyn) (login : List Nat) (a : Arg) (l : TLabel) (u : Nat) :
+    (tailFind E D login a l u).2.conns = D.conns := by
+  unfold tailFind
+  split
+  · rename_i D1 hf
+    exact findIn_conns hf
+  · rename_i x D1 hf
+    split
+    · exact findIn_conns hf
+    · exact findIn_conns hf
+
+theorem contextTail_conns (E : AEnv) (D : ADyn) (login : List Nat) (args : List Arg) (i : Nat) (l : TLabel) :
+    (contextTail E D login args i l).2.conns = D.conns := by
+  unfold contextTail
+  split
+  · split
+    · exact tailFind_conns ..
+    · rfl
+  · rfl
+
+theorem labelAsParse_conns (E : AEnv) (D : ADyn) (login : List Nat) (args : List Arg) :
+    (labelAsParse E D login args).2.conns = D.conns := by
+  unfold labelAsParse
+  split
+  · rfl
+  · split
+    · unfold tokenForm
+      split
+      · rfl
+      · split
+        · rename_i D1 hv
+          exact tokenVerify_conns hv
+        · rename_i l x D1 hv
+          exact tokenVerify_conns hv
+    · split
+      · rfl
+      · split
+        · unfold contextForm
+          split
+          · rfl
+          · split
+            · rename_i D1 hf
+              exact findIn_conns hf
+            · rename_i x D1 hf
+              exact findIn_conns hf
+        · unfold markingForm
+          split
+          · rfl
+          · split
+            · rfl
+            · rw [markingEnd_snd]
+              exact contextTail_conns ..
+
+def AllInv (D : ADyn) : Prop := ∀ p ∈ D.conns, WInv p.2
+
+theorem allInv_conns {D D' : ADyn} (h : AllInv D) (e : D'.conns = D.conns) : AllInv D' := by
+  intro p hp
+  rw [e] at hp
+  exact h p hp
+
+theorem setConn_inv {D : ADyn} (h : AllInv D) (id : Nat) {c : AConn} (hc : WInv c) : AllInv (setConn D id c) := by
+  intro p hp
+  simp only [setConn, List.mem_map] at hp
+  obtain ⟨q, hq, rfl⟩ := hp
+  split
+  · exact hc
+  · exact h q hq
+
+theorem connOf_inv {D : ADyn} (h : AllInv D) {id : Nat} {c : AConn} (hc : connOf D id = some c) : WInv c := by
+  unfold connOf at hc
+  cases hf : D.conns.find? (·.1 == id) with
+  | none =>
+    rw [hf] at hc
+    simp at hc
+  | some p =>
+    rw [hf] at hc
+    simp only [Option.map_some, Option.some.injEq] at hc
+    subst hc
+    exact h p (List.mem_of_find?_eq_some hf)
+
+theorem winv_same {c c' : AConn} (h : WInv c) (h1 : c'.watched = c.watched) (h2 : c'.ws = c.ws) : WInv c' := by
+  intro e he
+  rw [h1] at he
+  rw [h2]
+  exact h e he
+
+theorem fresh_inv (login : List Nat) : WInv ⟨login, false, tbottom, false, false, tbottom, false, false, wsEmpty, []⟩ := by
+  intro e he
+  simp at he
+
+theorem refuse_inv {D : ADyn} (h : AllInv D) (id : Nat) {c : AConn} (hc : WInv c) (a : List Arg) (m : String) :
+    AllInv (refuse D id c a m).2 := by
+  unfold refuse
+  split
+  · exact setConn_inv h id (endTx_inv c)
+  · exact setConn_inv h id (winv_same hc rfl rfl)
+
+theorem finishConn_inv {c : AConn} (hc : WInv c) (inner : List Arg) (l : TLabel) (p : Bool) :
+    WInv (finishConn c inner l p) := by
+  unfold finishConn
+  split
+  · exact winv_same hc rfl rfl
+  · exact hc
+
+theorem pinConn_inv {c : AConn} (hc : WInv c) (inner : List Arg) (l : TLabel) : WInv (pinConn c inner l) := by
+  unfold pinConn
+  split
+  · exact winv_same hc rfl rfl
+  · exact hc
+
+theorem arriveFinish_inv {E : AEnv} {D : ADyn} {id : Nat} {c : AConn} {inner : List Arg} {l0 : TLabel}
+    {ctx : Option ACtx} {p : Bool} (h : AllInv D) (hc : WInv c) : AllInv (arriveFinish E D id c inner l0 ctx p).2 := by
+  unfold arriveFinish
+  split
+  · exact refuse_inv h id hc _ _
+  · split
+    · exact refuse_inv (setConn_inv h id (finishConn_inv hc _ _ _)) id (finishConn_inv hc _ _ _) _ _
+    · exact setConn_inv h id (pinConn_inv (finishConn_inv hc _ _ _) _ _)
+
+theorem arrive_inv {E : AEnv} {D : ADyn} {id : Nat} {args : List Arg} (h : AllInv D) : AllInv (arrive E D id args).2 := by
+  unfold arrive
+  split
+  · exact h
+  · rename_i c hc
+    have hci := connOf_inv h hc
+    split
+    · have e := labelAsParse_conns E D c.login args
+      split
+      · rename_i m D1 hp
+        rw [hp] at e
+        exact refuse_inv (allInv_conns h e) id hci _ _
+      · rename_i p D1 hp
+        rw [hp] at e
+        split
+        · exact refuse_inv (allInv_conns h e) id hci _ _
+        · exact arriveFinish_inv (allInv_conns h e) hci
+    · split
+      · exact refuse_inv h id hci _ _
+      · exact arriveFinish_inv h hci
+
+theorem sessionHandler_inv {E : AEnv} {D : ADyn} {id : Nat} {c : AConn} {inner : List Arg} (h : AllInv D)
+    (hc : WInv c) : AllInv (sessionHandler E D id c inner).2 := by
+  unfold sessionHandler
+  repeat' split
+  all_goals first
+    | exact h
+    | exact setConn_inv h id (winv_same hc rfl rfl)
+
+theorem contextHandler_conns (E : AEnv) (D : ADyn) (c : AConn) (l0 : TLabel) (inner : List Arg) :
+    (contextHandler E D c l0 inner).2.conns = D.conns := by
+  unfold contextHandler
+  split
+  · unfold contextCreate
+    repeat' split
+    all_goals rfl
+  · split
+    · unfold contextUse
+      split
+      · rfl
+      · split
+        · rfl
+        · split
+          · rename_i D1 hf
+            exact findIn_conns hf
+          · rename_i x D1 hf
+            split
+            · exact (show D1.conns = D.conns from findIn_conns hf)
+            · exact findIn_conns hf
+    · rfl
+
+theorem handleCmd_inv {E : AEnv} {D : ADyn} {id : Nat} {l : TLabel} {inner : List Arg} (h : AllInv D) :
+    AllInv (handleCmd E D id l inner).2 := by
+  unfold handleCmd
+  split
+  · exact h
+  · rename_i c hc
+    have hci := connOf_inv h hc
+    repeat' split
+    all_goals first
+      | exact h
+      | exact setConn_inv h id (endTx_inv _)
+      | exact setConn_inv h id (watchConn_inv hci _ _)
+      | exact setConn_inv h id (clearWatch_inv _)
+      | exact setConn_inv h id (winv_same hci rfl rfl)
+      | exact sessionHandler_inv h hci
+      | exact allInv_conns h (contextHandler_conns ..)
+
+theorem request_inv {E : AEnv} {D : ADyn} {id : Nat} {args : List Arg} (h : AllInv D) :
+    AllInv (request E D id args).2.2 := by
+  unfold request
+  have ha := arrive_inv (E := E) (id := id) (args := args) h
+  split
+  · rename_i l inner x D1 hr
+    rw [hr] at ha
+    exact handleCmd_inv ha
+  · rename_i a D1 _ hr
+    rw [hr] at ha
+    exact ha
+
+theorem touch_inv {D : ADyn} (h : AllInv D) (k : List Nat) (w : TLabel) : AllInv (touch D k w) := by
+  intro p hp
+  simp only [touch, List.mem_map] at hp
+  obtain ⟨q, hq, rfl⟩ := hp
+  exact touchConn_inv (h q hq) k w
+
+theorem auth_inv {D : ADyn} (h : AllInv D) (id : Nat) (login : List Nat) : AllInv (auth D id login) := by
+  unfold auth
+  split
+  · exact h
+  · rename_i c hc
+    exact setConn_inv h id (authConn_inv (connOf_inv h hc) login)
+
+inductive AEv
+  | req (id : Nat) (args : List Arg)
+  | touch (k : List Nat) (w : TLabel)
+  | auth (id : Nat) (login : List Nat)
+
+def evStep (E : AEnv) (D : ADyn) : AEv → ADyn
+  | .req id args => (request E D id args).2.2
+  | .touch k w => touch D k w
+  | .auth id login => auth D id login
+
+def evRun (E : AEnv) : ADyn → List AEv → ADyn
+  | D, [] => D
+  | D, e :: rest => evRun E (evStep E D e) rest
+
+theorem evRun_inv (E : AEnv) : ∀ (evs : List AEv) (D : ADyn), AllInv D → AllInv (evRun E D evs)
+  | [], _, h => h
+  | e :: rest, D, h => by
+    apply evRun_inv E rest
+    cases e with
+    | req id args => exact request_inv h
+    | touch k w => exact touch_inv h k w
+    | auth id login => exact auth_inv h id login
+
+theorem watch_rule_reachable (E : AEnv) (evs : List AEv) (D : ADyn) (h0 : AllInv D) {id : Nat} {c : AConn}
+    (hc : connOf (evRun E D evs) id = some c) :
+    (∀ b k w, wdiffers c.ws b = false → c.cas = false → (touchConn k w c).cas = true → domT b w = true) ∧
+    (c.dirty = false → wdiffers c.ws c.bound = true →
+      ∀ cas ws, execReply { c with cas := cas, watched := ws } = .err errExecWatch ∧
+        endTx { c with cas := cas, watched := ws } = endTx c) := by
+  have hi := connOf_inv (evRun_inv E evs D h0) hc
+  refine ⟨fun b k w hw hcas ht => touch_marks_only_seen hi hw hcas ht, fun hd hw cas ws => ?_⟩
+  obtain ⟨h1, h2⟩ := exec_watch_data_free hd hw cas ws
+  rw [h1]
+  exact ⟨by simp [execReply, hd, hw], h2⟩
+
+def unmark (c : AConn) : AConn := { c with cas := false }
+
+def unmarkAll (D : ADyn) : ADyn := { D with conns := D.conns.map fun p => (p.1, unmark p.2) }
+
+def quiet : List AEv → List AEv
+  | [] => []
+  | .req id args :: rest => .req id args :: quiet rest
+  | .touch _ _ :: rest => quiet rest
+  | .auth id login :: rest => .auth id login :: quiet rest
+
+theorem touchConn_watched (k : List Nat) (w : TLabel) (c : AConn) : (touchConn k w c).watched = c.watched := by
+  unfold touchConn
+  split <;> rfl
+
+theorem touchConn_unmark (k : List Nat) (w : TLabel) (c : AConn) : unmark (touchConn k w c) = unmark c := by
+  unfold touchConn
+  split <;> rfl
+
+theorem watchConn_mark_free (c : AConn) (l : TLabel) (keys : List Arg) (b : Bool) :
+    watchConn { c with cas := b } l keys = { watchConn c l keys with cas := b } := rfl
+
+theorem touch_unmarkAll (D : ADyn) (k : List Nat) (w : TLabel) : unmarkAll (touch D k w) = unmarkAll D := by
+  simp only [unmarkAll, touch, List.map_map]
+  congr 1
+  apply List.map_congr_left
+  intro p _
+  simp [touchConn_unmark]
+
+theorem connOf_unmarkAll (D : ADyn) (id : Nat) : connOf (unmarkAll D) id = (connOf D id).map unmark := by
+  simp only [connOf, unmarkAll, List.find?_map, Option.map_map]
+  rfl
+
+theorem setConn_unmarkAll (D : ADyn) (id : Nat) (c : AConn) :
+    setConn (unmarkAll D) id (unmark c) = unmarkAll (setConn D id c) := by
+  simp only [setConn, unmarkAll, List.map_map]
+  congr 1
+  apply List.map_congr_left
+  intro p _
+  by_cases h : p.1 = id <;> simp [h]
+
+theorem findIn_unmarkAll (E : AEnv) (D : ADyn) (login : List Nat) (h : HRef) :
+    findIn E (unmarkAll D) login h = ((findIn E D login h).1, unmarkAll (findIn E D login h).2) := rfl
+
+theorem tokenEntry_unmarkAll (E : AEnv) (D : ADyn) (login : List Nat) (sp : TokSpec) :
+    tokenEntry E (unmarkAll D) login sp = ((tokenEntry E D login sp).1, unmarkAll (tokenEntry E D login sp).2) := by
+  unfold tokenEntry
+  cases h1 : (D.cache.find? (·.1 == (login, sp))).map (·.2) with
+  | some e => simp [unmarkAll, h1]
+  | none => rcases tokenCheck E (rulesOf E login) sp with _ | e <;> simp [unmarkAll, h1]
+
+theorem tokenCtx_unmarkAll (E : AEnv) (D : ADyn) (login : List Nat) (l : TLabel) (r : Option HRef) :
+    tokenCtx E (unmarkAll D) login l r = ((tokenCtx E D login l r).1, unmarkAll (tokenCtx E D login l r).2) := by
+  cases r with
+  | none => rfl
+  | some r =>
+    simp only [tokenCtx, findIn_unmarkAll]
+    rcases findIn E D login r with ⟨_ | x, D2⟩
+    · rfl
+    · by_cases hx : (x.label != l) = true <;> simp [hx]
+
+theorem tokenVerify_unmarkAll (E : AEnv) (D : ADyn) (login : List Nat) (sp : TokSpec) :
+    tokenVerify E (unmarkAll D) login sp = ((tokenVerify E D login sp).1, unmarkAll (tokenVerify E D login sp).2) := by
+  simp only [tokenVerify, tokenEntry_unmarkAll]
+  rcases tokenEntry E D login sp with ⟨_ | e, D1⟩
+  · rfl
+  · by_cases h1 : e.expires ≤ (E.now : Int)
+    · simp [h1, unmarkAll]
+    · by_cases h2 : (!labelValidT E.cfg e.label || !ceilingAdmits (ceilingFor E login) e.label) = true
+      · simp [h1, h2]
+      · simp only [h1, h2, ↓reduceIte]
+        exact tokenCtx_unmarkAll ..
+
+theorem tailFind_unmarkAll (E : AEnv) (D : ADyn) (login : List Nat) (a : Arg) (l : TLabel) (u : Nat) :
+    tailFind E (unmarkAll D) login a l u = ((tailFind E D login a l u).1, unmarkAll (tailFind E D login a l u).2) := by
+  simp only [tailFind, findIn_unmarkAll]
+  rcases findIn E D login (hrefOf a) with ⟨_ | x, D1⟩
+  · rfl
+  · by_cases hx : (x.label != l) = true <;> simp [hx]
+
+theorem contextTail_unmarkAll (E : AEnv) (D : ADyn) (login : List Nat) (args : List Arg) (i : Nat) (l : TLabel) :
+    contextTail E (unmarkAll D) login args i l =
+      ((contextTail E D login args i l).1, unmarkAll (contextTail E D login args i l).2) := by
+  unfold contextTail
+  rcases args[i]? with _ | a <;> rcases args[i + 1]? with _ | h
+  · rfl
+  · rfl
+  · rfl
+  · by_cases hc : (decide (i + 2 < args.length) && isWord a "context" && shaped h) = true
+    · simp only [hc, ↓reduceIte]
+      exact tailFind_unmarkAll ..
+    · simp [hc]
+
+theorem markingEnd_unmarkAll (args : List Arg) (r : Except String Parsed × ADyn) :
+    markingEnd args (r.1, unmarkAll r.2) = ((markingEnd args r).1, unmarkAll (markingEnd args r).2) := by
+  match r with
+  | (.ok p, D1) => by_cases hu : args.length ≤ p.used <;> simp [markingEnd, hu]
+  | (.error m, D1) => rfl
+
+theorem markingForm_unmarkAll (E : AEnv) (D : ADyn) (login : List Nat) (args : List Arg) :
+    markingForm E (unmarkAll D) login args = ((markingForm E D login args).1, unmarkAll (markingForm E D login args).2) := by
+  unfold markingForm
+  rcases markingLabel E args with _ | l
+  · rfl
+  · by_cases hc : (!ceilingAdmits (ceilingFor E login) l) = true
+    · simp [hc]
+    · simp only [hc, Bool.false_eq_true, ↓reduceIte, contextTail_unmarkAll]
+      exact markingEnd_unmarkAll ..
+
+theorem tokenForm_unmarkAll (E : AEnv) (D : ADyn) (login : List Nat) (args : List Arg) :
+    tokenForm E (unmarkAll D) login args = ((tokenForm E D login args).1, unmarkAll (tokenForm E D login args).2) := by
+  unfold tokenForm
+  rcases args[3]?.bind (specOf E) with _ | sp
+  · rfl
+  · simp only [tokenVerify_unmarkAll]
+    rcases tokenVerify E D login sp with ⟨_ | ⟨l, x⟩, D1⟩ <;> rfl
+
+theorem contextForm_unmarkAll (E : AEnv) (D : ADyn) (login : List Nat) (args : List Arg) :
+    contextForm E (unmarkAll D) login args = ((contextForm E D login args).1, unmarkAll (contextForm E D login args).2) := by
+  unfold contextForm
+  rcases args[3]? with _ | h
+  · rfl
+  · simp only [findIn_unmarkAll]
+    rcases findIn E D login (hrefOf h) with ⟨_ | x, D1⟩ <;> rfl
+
+theorem labelAsParse_unmarkAll (E : AEnv) (D : ADyn) (login : List Nat) (args : List Arg) :
+    labelAsParse E (unmarkAll D) login args = ((labelAsParse E D login args).1, unmarkAll (labelAsParse E D login args).2) := by
+  unfold labelAsParse
+  by_cases h1 : args.length ≤ 2
+  · simp [h1]
+  · by_cases h2 : (argIs args 2 "token" && decide (4 < args.length)) = true
+    · simp only [h1, h2, ↓reduceIte]
+      exact tokenForm_unmarkAll ..
+    · by_cases h3 : (rulesOf E login).requireToken = true
+      · simp [h1, h2, h3]
+      · by_cases h4 : (argIs args 2 "context" && decide (4 < args.length) && (args[3]?.map shaped).getD false) = true
+        · simp only [h1, h2, h3, h4, ↓reduceIte]
+          exact contextForm_unmarkAll ..
+        · simp only [h1, h2, h3, h4, ↓reduceIte, Bool.false_eq_true]
+          exact markingForm_unmarkAll ..
+
+theorem unmark_login (c : AConn) : (unmark c).login = c.login := rfl
+
+theorem unmark_explicit (c : AConn) : (unmark c).explicit = c.explicit := rfl
+
+theorem unmark_inMulti (c : AConn) : (unmark c).inMulti = c.inMulti := rfl
+
+theorem unmark_bound (c : AConn) : (unmark c).bound = c.bound := rfl
+
+theorem unmarkAll_ctxs (D : ADyn) : (unmarkAll D).ctxs = D.ctxs := rfl
+
+theorem unmarkAll_next (D : ADyn) : (unmarkAll D).next = D.next := rfl
+
+theorem gate_unmark (E : AEnv) (c : AConn) (inner : List Arg) (l : TLabel) (p : Bool) :
+    gate E (unmark c) inner l p = gate E c inner l p := rfl
+
+theorem sessionOf_unmark (E : AEnv) (c : AConn) : sessionOf E (unmark c) = sessionOf E c := rfl
+
+theorem finishLabel_unmark (c : AConn) (l0 : TLabel) : finishLabel (unmark c) l0 = finishLabel c l0 := rfl
+
+theorem endTx_unmark (c : AConn) : endTx (unmark c) = unmark (endTx c) := rfl
+
+theorem finishConn_unmark (c : AConn) (inner : List Arg) (l : TLabel) (p : Bool) :
+    finishConn (unmark c) inner l p = unmark (finishConn c inner l p) := by
+  unfold finishConn
+  by_cases h : (!c.inMulti && isCmd inner "multi") = true
+  · simp only [unmark_inMulti, h, ↓reduceIte]
+    rfl
+  · simp only [unmark_inMulti, h, ↓reduceIte, Bool.false_eq_true]
+
+theorem pinConn_unmark (c : AConn) (inner : List Arg) (l : TLabel) :
+    pinConn (unmark c) inner l = unmark (pinConn c inner l) := by
+  unfold pinConn
+  by_cases h : (!c.inMulti && needsSession inner && !c.explicit) = true
+  · simp only [unmark_inMulti, unmark_explicit, h, ↓reduceIte]
+    rfl
+  · simp only [unmark_inMulti, unmark_explicit, h, ↓reduceIte, Bool.false_eq_true]
+
+theorem refuse_unmarkAll (D : ADyn) (id : Nat) (c : AConn) (a : List Arg) (m : String) :
+    refuse (unmarkAll D) id (unmark c) a m = ((refuse D id c a m).1, unmarkAll (refuse D id c a m).2) := by
+  unfold refuse
+  by_cases h : (isCmd a "exec" && c.inMulti) = true
+  · simp only [unmark_inMulti, h, ↓reduceIte, endTx_unmark, setConn_unmarkAll]
+  · simp only [unmark_inMulti, h, ↓reduceIte, Bool.false_eq_true]
+    rw [← setConn_unmarkAll]
+    rfl
+
+theorem arriveFinish_unmarkAll (E : AEnv) (D : ADyn) (id : Nat) (c : AConn) (inner : List Arg) (l0 : TLabel)
+    (ctx : Option ACtx) (p : Bool) :
+    arriveFinish E (unmarkAll D) id (unmark c) inner l0 ctx p =
+      ((arriveFinish E D id c inner l0 ctx p).1, unmarkAll (arriveFinish E D id c inner l0 ctx p).2) := by
+  unfold arriveFinish
+  by_cases h : (c.inMulti && p && l0 != c.bound) = true
+  · simp only [unmark_inMulti, unmark_bound, h, ↓reduceIte]
+    exact refuse_unmarkAll ..
+  · simp only [unmark_inMulti, unmark_bound, h, ↓reduceIte, Bool.false_eq_true, gate_unmark, finishLabel_unmark]
+    rcases gate E c inner (finishLabel c l0) p with _ | m
+    · simp only [finishConn_unmark, pinConn_unmark, setConn_unmarkAll]
+    · simp only [finishConn_unmark, setConn_unmarkAll]
+      exact refuse_unmarkAll ..
+
+theorem arrive_unmarkAll (E : AEnv) (D : ADyn) (id : Nat) (args : List Arg) :
+    arrive E (unmarkAll D) id args = ((arrive E D id args).1, unmarkAll (arrive E D id args).2) := by
+  unfold arrive
+  rw [connOf_unmarkAll]
+  rcases connOf D id with _ | c
+  · rfl
+  · simp only [Option.map_some, unmark_login, unmark_inMulti, sessionOf_unmark]
+    by_cases hl : isLabelAs args = true
+    · simp only [hl, ↓reduceIte, labelAsParse_unmarkAll]
+      rcases labelAsParse E D c.login args with ⟨_ | p, D1⟩
+      · exact refuse_unmarkAll ..
+      · by_cases hn : nested (args.drop p.used) = true
+        · simp only [hn, ↓reduceIte]
+          exact refuse_unmarkAll ..
+        · simp only [hn, ↓reduceIte, Bool.false_eq_true]
+          exact arriveFinish_unmarkAll ..
+    · by_cases hr : (((rulesOf E c.login).perCommand || (rulesOf E c.login).requireToken) && !c.inMulti &&
+          !housekeeping args) = true
+      · simp only [hl, hr, ↓reduceIte, Bool.false_eq_true]
+        exact refuse_unmarkAll ..
+      · simp only [hl, hr, ↓reduceIte, Bool.false_eq_true]
+        exact arriveFinish_unmarkAll ..
+
+theorem sessionHandler_unmarkAll (E : AEnv) (D : ADyn) (id : Nat) (c : AConn) (inner : List Arg) :
+    sessionHandler E (unmarkAll D) id (unmark c) inner =
+      ((sessionHandler E D id c inner).1, unmarkAll (sessionHandler E D id c inner).2) := by
+  unfold sessionHandler
+  simp only [unmark_login]
+  by_cases h1 : inner.length < 3
+  · simp [h1]
+  · by_cases h2 : ((rulesOf E c.login).perCommand || (rulesOf E c.login).requireToken) = true
+    · simp [h1, h2]
+    · simp only [h1, h2, ↓reduceIte, Bool.false_eq_true]
+      rcases sessionLabel E inner with m | l
+      · rfl
+      · by_cases h3 : (!ceilingAdmits (ceilingFor E c.login) l || !labelValidT E.cfg l) = true
+        · simp [h3]
+        · simp only [h3, ↓reduceIte, Bool.false_eq_true]
+          rw [← setConn_unmarkAll]
+          rfl
+
+theorem contextCreate_unmarkAll (E : AEnv) (D : ADyn) (c : AConn) (l0 : TLabel) (opts : List Arg) :
+    contextCreate E (unmarkAll D) (unmark c) l0 opts =
+      ((contextCreate E D c l0 opts).1, unmarkAll (contextCreate E D c l0 opts).2) := by
+  unfold contextCreate
+  simp only [unmark_login, unmarkAll_ctxs, unmarkAll_next]
+  rcases createLabel E l0 opts with e | l
+  · rfl
+  · dsimp only
+    rcases ctxCreate E.idle E.now E.cap D.next D.ctxs c.login (ceilingFor E c.login) l (labelValidT E.cfg l) with
+      ⟨_ | _ | _, cs, n⟩ <;> rfl
+
+theorem contextUse_unmarkAll (E : AEnv) (D : ADyn) (c : AConn) (inner : List Arg) :
+    contextUse E (unmarkAll D) (unmark c) inner = ((contextUse E D c inner).1, unmarkAll (contextUse E D c inner).2) := by
+  unfold contextUse
+  simp only [unmark_login]
+  by_cases h1 : inner.length ≠ 3
+  · simp [h1]
+  · simp only [h1, ↓reduceIte]
+    rcases inner[2]? with _ | h
+    · rfl
+    · simp only [findIn_unmarkAll]
+      rcases findIn E D c.login (hrefOf h) with ⟨_ | x, D1⟩
+      · rfl
+      · by_cases h2 : argIs inner 1 "drop" = true
+        · simp only [h2, ↓reduceIte]
+          rfl
+        · simp only [h2, ↓reduceIte, Bool.false_eq_true]
+
+theorem contextHandler_unmarkAll (E : AEnv) (D : ADyn) (c : AConn) (l0 : TLabel) (inner : List Arg) :
+    contextHandler E (unmarkAll D) (unmark c) l0 inner =
+      ((contextHandler E D c l0 inner).1, unmarkAll (contextHandler E D c l0 inner).2) := by
+  unfold contextHandler
+  by_cases h1 : argIs inner 1 "create" = true
+  · simp only [h1, ↓reduceIte]
+    exact contextCreate_unmarkAll ..
+  · by_cases h2 : (argIs inner 1 "info" || argIs inner 1 "drop") = true
+    · simp only [h1, h2, ↓reduceIte, Bool.false_eq_true]
+      exact contextUse_unmarkAll ..
+    · simp only [h1, h2, ↓reduceIte, Bool.false_eq_true]
+
+theorem handleCmd_unmarkAll (E : AEnv) (D : ADyn) (id : Nat) (l : TLabel) (inner : List Arg) :
+    (handleCmd E (unmarkAll D) id l inner).2 = unmarkAll (handleCmd E D id l inner).2 := by
+  unfold handleCmd
+  rw [connOf_unmarkAll]
+  rcases connOf D id with _ | c
+  · rfl
+  · simp only [Option.map_some, unmark_inMulti]
+    by_cases h0 : (c.inMulti && !immediate inner) = true
+    · simp [h0]
+    · simp only [h0, ↓reduceIte, Bool.false_eq_true]
+      by_cases h1 : isCmd inner "multi" = true
+      · by_cases hm : c.inMulti = true
+        · simp [h1, hm]
+        · simp only [h1, hm, ↓reduceIte, Bool.false_eq_true]
+          rw [← setConn_unmarkAll]
+          rfl
+      · by_cases h2 : isCmd inner "exec" = true
+        · by_cases hm : c.inMulti = true
+          · simp only [h1, h2, hm, ↓reduceIte, Bool.false_eq_true, Bool.not_true, endTx_unmark, setConn_unmarkAll]
+          · simp [h1, h2, hm]
+        · by_cases h3 : isCmd inner "discard" = true
+          · by_cases hm : c.inMulti = true
+            · simp only [h1, h2, h3, hm, ↓reduceIte, Bool.false_eq_true, Bool.not_true, endTx_unmark,
+                setConn_unmarkAll]
+            · simp [h1, h2, h3, hm]
+          · by_cases h4 : isCmd inner "watch" = true
+            · by_cases hm : c.inMulti = true
+              · simp [h1, h2, h3, h4, hm]
+              · simp only [h1, h2, h3, h4, hm, ↓reduceIte, Bool.false_eq_true]
+                rw [← setConn_unmarkAll]
+                rfl
+            · by_cases h5 : isCmd inner "unwatch" = true
+              · simp only [h1, h2, h3, h4, h5, ↓reduceIte, Bool.false_eq_true]
+                rw [← setConn_unmarkAll]
+                rfl
+              · by_cases h6 : (isCmd inner "label" && argIs inner 1 "session") = true
+                · simp only [h1, h2, h3, h4, h5, h6, ↓reduceIte, Bool.false_eq_true, sessionHandler_unmarkAll]
+                · by_cases h7 : isCmd inner "context" = true
+                  · simp only [h1, h2, h3, h4, h5, h6, h7, ↓reduceIte, Bool.false_eq_true, contextHandler_unmarkAll]
+                  · simp [h1, h2, h3, h4, h5, h6, h7]
+
+theorem request_unmarkAll (E : AEnv) (D : ADyn) (id : Nat) (args : List Arg) :
+    (request E (unmarkAll D) id args).1 = (request E D id args).1 ∧
+      (request E (unmarkAll D) id args).2.2 = unmarkAll (request E D id args).2.2 := by
+  unfold request
+  rw [arrive_unmarkAll]
+  rcases arrive E D id args with ⟨a, D1⟩
+  cases a with
+  | ok l inner x => exact ⟨rfl, handleCmd_unmarkAll ..⟩
+  | refused m => exact ⟨rfl, rfl⟩
+
+theorem auth_unmarkAll (D : ADyn) (id : Nat) (login : List Nat) : auth (unmarkAll D) id login = unmarkAll (auth D id login) := by
+  unfold auth
+  rw [connOf_unmarkAll]
+  rcases connOf D id with _ | c
+  · rfl
+  · simp only [Option.map_some]
+    rw [← setConn_unmarkAll]
+    unfold authConn
+    by_cases h : (c.login == login) = true
+    · simp only [unmark_login, h, ↓reduceIte]
+    · simp only [unmark_login, h, ↓reduceIte, Bool.false_eq_true]
+      rfl
+
+theorem quiet_unmarkAll (E : AEnv) : ∀ (evs : List AEv) (D D' : ADyn), unmarkAll D = unmarkAll D' →
+    unmarkAll (evRun E D evs) = unmarkAll (evRun E D' (quiet evs))
+  | [], _, _, h => h
+  | .req id args :: rest, D, D', h => by
+    simp only [evRun, evStep, quiet]
+    apply quiet_unmarkAll E rest
+    rw [← (request_unmarkAll E D id args).2, h, (request_unmarkAll E D' id args).2]
+  | .touch k w :: rest, D, D', h => by
+    simp only [evRun, evStep, quiet]
+    apply quiet_unmarkAll E rest
+    rw [touch_unmarkAll, h]
+  | .auth id login :: rest, D, D', h => by
+    simp only [evRun, evStep, quiet]
+    apply quiet_unmarkAll E rest
+    rw [← auth_unmarkAll, h, auth_unmarkAll]
+
+theorem writes_change_only_marks (E : AEnv) (evs : List AEv) (D : ADyn) :
+    unmarkAll (evRun E D evs) = unmarkAll (evRun E D (quiet evs)) :=
+  quiet_unmarkAll E evs D D rfl
+
+theorem watch_count_write_free (E : AEnv) (evs : List AEv) (D : ADyn) (id : Nat) :
+    (connOf (evRun E D evs) id).map (·.watched) = (connOf (evRun E D (quiet evs)) id).map (·.watched) ∧
+      (connOf (evRun E D evs) id).map (·.watched.length) =
+        (connOf (evRun E D (quiet evs)) id).map (·.watched.length) := by
+  have h := congrArg (fun X => connOf X id) (writes_change_only_marks E evs D)
+  simp only [connOf_unmarkAll] at h
+  have hw := congrArg (Option.map (·.watched)) h
+  simp only [Option.map_map] at hw
+  refine ⟨hw, ?_⟩
+  have hl := congrArg (Option.map List.length) hw
+  simp only [Option.map_map] at hl
+  exact hl
 
 end Labels

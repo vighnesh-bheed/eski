@@ -1834,28 +1834,45 @@ digest_vset :: proc(h: ^blake2b.Context, s: vt.Vset) {
 	digest_word(h, u64(p.input_dim))
 	digest_word(h, u64(p.m))
 	total: Digest
-	it := vt.element_iterator(s)
-	for {
-		slot, more := vt.next_element(&it)
-		if !more {
-			break
+	if labels_on {
+		a := label_vt_access()
+		v, err := vt.view_open(s, &a, vset_scratch_get())
+		if err == .None {
+			for j in 0 ..< vt.view_size(&v) {
+				r := vt.view_ref_at(&v, j)
+				text, has := vt.ref_attribute(s, r)
+				digest_accumulate(&total, digest_vset_element(vt.ref_name(s, r), vt.ref_raw_embedding(s, r), text, has))
+			}
 		}
-		eh: blake2b.Context
-		digest_begin(&eh, .Vectorset)
-		digest_text(&eh, vt.element_name(s, slot))
-		raw := vt.raw_embedding(s, slot)
-		digest_text(&eh, raw.data)
-		digest_word(&eh, u64(transmute(u32)raw.norm))
-		digest_word(&eh, u64(transmute(u32)raw.range) if raw.has_range else 0)
-		if text, ok := vt.element_attribute(s, slot); ok {
-			digest_word(&eh, 1)
-			digest_text(&eh, transmute([]u8)text)
-		} else {
-			digest_word(&eh, 0)
+	} else {
+		it := vt.element_iterator(s)
+		for {
+			slot, more := vt.next_element(&it)
+			if !more {
+				break
+			}
+			text, has := vt.element_attribute(s, slot)
+			digest_accumulate(&total, digest_vset_element(vt.element_name(s, slot), vt.raw_embedding(s, slot), text, has))
 		}
-		digest_accumulate(&total, digest_close(&eh))
 	}
 	blake2b.update(h, total[:])
+}
+
+@(private = "file")
+digest_vset_element :: proc(name: []u8, raw: vt.Raw_Embedding, text: string, has: bool) -> Digest {
+	eh: blake2b.Context
+	digest_begin(&eh, .Vectorset)
+	digest_text(&eh, name)
+	digest_text(&eh, raw.data)
+	digest_word(&eh, u64(transmute(u32)raw.norm))
+	digest_word(&eh, u64(transmute(u32)raw.range) if raw.has_range else 0)
+	if has {
+		digest_word(&eh, 1)
+		digest_text(&eh, transmute([]u8)text)
+	} else {
+		digest_word(&eh, 0)
+	}
+	return digest_close(&eh)
 }
 
 @(private = "file")
@@ -1931,16 +1948,27 @@ digest_table :: proc(total: ^Digest, db: ^Db, t: ^Table) {
 	}
 }
 
+@(private = "file")
+digest_db :: proc(total: ^Digest, db: ^Db) {
+	if db_size_of(db) == 0 {
+		return
+	}
+	for &t in db.t[:persist_table_count(db)] {
+		if persist_table_ok(&t) {
+			digest_table(total, db, &t)
+		}
+	}
+}
+
 persist_dataset_digest :: proc(final: ^[20]u8) {
 	total: Digest
-	for &db in dbs {
-		if db_size_of(&db) == 0 {
-			continue
+	if labels_on {
+		for p in db_parts {
+			digest_db(&total, p)
 		}
-		for &t in db.t[:persist_table_count(&db)] {
-			if persist_table_ok(&t) {
-				digest_table(&total, &db, &t)
-			}
+	} else {
+		for &db in dbs {
+			digest_db(&total, &db)
 		}
 	}
 	final^ = total
@@ -1987,7 +2015,14 @@ persist_raw_digest_value :: proc(c: ^Conn, keys: [][]u8) {
 	for key in keys {
 		d: [20]u8
 		db := c.db if c.db != nil else cur_db()
+		if labels_on {
+			db = cur_db()
+		}
 		t, i := persist_raw_locate(db, key)
+		if i < 0 && labels_on {
+			l := lookup_make(key)
+			db, t, i = label_locate_other(db.id, key, &l, access.id, access.vis)
+		}
 		if i >= 0 {
 			d = digest_of_value(persist_slot_value(db, &t.slots[i].key, &t.slots[i].val))
 		}

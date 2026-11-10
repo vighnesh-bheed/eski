@@ -34,6 +34,8 @@ EVAL/EVALSHA and their read-only variants can run as queued transaction commands
 
 Atomic foreground execution is separate from durability. A successful `EXEC` does not acknowledge a replica, and local AOF synchronization depends on [persistence settings](persistence.md).
 
+With a label scheme configured, `MULTI` binds one label, `EXEC` refuses a transaction whose keys were watched at another label, a watch is aborted only by writes its label can see, and a marked transaction keeps its watched keys until the watches are cleared. Blocking pops and moves wait on the name at exactly their own label, while read-only blockers such as `XREAD` wake on writes at any label they dominate. See [Labels](labels.md#transactions-and-scripts).
+
 Verify with `bash test/run_packages.sh`, `bash test/smoke.sh` and `./test/conformance/run.sh --suite redis --units multi,type/list-2,type/zset,type/stream-cgroups`. The [conformance report](conformance.md) records remaining supported-behaviour differences and tests requiring excluded features.
 
 Eski is an independent project, not affiliated with, endorsed or certified by Redis Ltd. Redis is a registered trademark of Redis Ltd.; any rights therein are reserved to Redis Ltd.

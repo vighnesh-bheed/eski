@@ -343,6 +343,16 @@ label_random_key :: proc(dbi: int) -> (key: string, ok: bool) #no_bounds_check {
 			break
 		}
 	}
+	if key, ok = label_random_scan(dbi, parts, true); ok {
+		return
+	}
+	if expiry_deletion_paused() {
+		return label_random_scan(dbi, parts, false)
+	}
+	return "", false
+}
+
+label_random_scan :: proc(dbi: int, parts: []^Db, live: bool) -> (key: string, ok: bool) #no_bounds_check {
 	eligible := 0
 	for pass in 0 ..< 2 {
 		target := 0
@@ -364,11 +374,11 @@ label_random_key :: proc(dbi: int) -> (key: string, ok: bool) #no_bounds_check {
 					for full != 0 {
 						i := int(g << GROUP_SHIFT) + int(intrinsics.count_trailing_zeros(full))
 						full &= full - 1
-						if !label_slot_live(p, t, i) {
+						if label_slot_live(p, t, i) != live {
 							continue
 						}
 						name := key_bytes(&t.slots[i].key, &p.slab)
-						if label_shadowed(dbi, p, name) {
+						if live && label_shadowed(dbi, p, name) {
 							continue
 						}
 						if pass == 1 && seen == target {

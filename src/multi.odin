@@ -330,7 +330,7 @@ tx_queue :: proc(c: ^Conn, cmd: ^Command, argv: [][]u8) {
 		tx_flag(c)
 		return
 	}
-	if c.txf & {.Dirty_Exec, .Dirty_Cas} != {} {
+	if .Dirty_Exec in c.txf || (.Dirty_Cas in c.txf && !labels_on) {
 		reply_simple(c, "QUEUED")
 		return
 	}
@@ -423,6 +423,9 @@ tx_run :: proc(c: ^Conn, exec_argv: [][]u8) {
 				continue
 			}
 		}
+		if labels_on && access_needs_session(cmd, args) {
+			access_pin_bound(c)
+		}
 		store_no_touch = .No_Touch in c.flags && cmd.handler != cmd_touch
 		dirty := pst.dirty
 		if aof.feed {
@@ -498,22 +501,33 @@ cmd_discard :: proc(c: ^Conn, argv: [][]u8) {
 	reply_ok(c)
 }
 
-cmd_exec :: proc(c: ^Conn, argv: [][]u8) {
+tx_exec_gate :: proc(c: ^Conn) -> bool {
 	if .Multi not_in c.txf {
 		reply_error(c, ERR_EXEC_WITHOUT_MULTI)
-		return
+		return true
 	}
 	if .Dirty_Exec in c.txf {
 		reply_error(c, ERR_EXECABORT)
 		tx_discard(c)
-		return
+		return true
+	}
+	if labels_on && access_watch_differs(c) {
+		reply_error(c, ERR_LABEL_WATCH_EXEC)
+		tx_discard(c)
+		return true
 	}
 	if .Dirty_Cas in c.txf || watch_expired_since(c) {
 		reply_null_array(c)
 		tx_discard(c)
-		return
+		return true
 	}
-	tx_run(c, argv)
+	return false
+}
+
+cmd_exec :: proc(c: ^Conn, argv: [][]u8) {
+	if !tx_exec_gate(c) {
+		tx_run(c, argv)
+	}
 }
 
 cmd_watch :: proc(c: ^Conn, argv: [][]u8) {
@@ -521,7 +535,10 @@ cmd_watch :: proc(c: ^Conn, argv: [][]u8) {
 		reply_error(c, ERR_WATCH_IN_MULTI)
 		return
 	}
-	if .Dirty_Cas in c.txf {
+	if labels_on {
+		access_watch_note(c)
+	}
+	if .Dirty_Cas in c.txf && !labels_on {
 		reply_ok(c)
 		return
 	}
@@ -634,6 +651,7 @@ watch_release :: proc(c: ^Conn) {
 
 watch_unwatch_all :: proc(c: ^Conn) {
 	c.txf -= {.Dirty_Cas}
+	access_watch_clear(c)
 	watch_release(c)
 }
 
@@ -641,7 +659,9 @@ watch_unwatch_all :: proc(c: ^Conn) {
 watch_mark :: #force_inline proc(c: ^Conn) {
 	if .Dirty_Cas not_in c.txf {
 		c.txf += {.Dirty_Cas}
-		append(&watch_victims, c)
+		if !labels_on {
+			append(&watch_victims, c)
+		}
 	}
 }
 
@@ -666,7 +686,7 @@ watch_touch :: proc(key: []u8, db: ^Db, known: bool = false, known_exists: bool 
 	for w in wk.watchers {
 		c := w.c
 		entry := &c.tx.watched[w.idx]
-		if labels_on && !access_dominates(entry.label, db.label) {
+		if labels_on && (.Dirty_Cas in c.txf || !access_dominates(entry.label, db.label)) {
 			continue
 		}
 		if entry.expired {
@@ -704,12 +724,15 @@ watch_db_replaced :: proc(emptied: ^Db, replaced: ^Db) {
 		if replaced != nil {
 			new_exists, new_expired = db_key_state(replaced, key)
 		}
+		if labels_on && !old_exists && !new_exists {
+			continue
+		}
 		live := (old_exists && !old_expired) || (new_exists && !new_expired)
 		old_stale := old_exists && old_expired
 		for w in wk.watchers {
 			c := w.c
 			entry := &c.tx.watched[w.idx]
-			if labels_on && !access_dominates(entry.label, emptied.label) {
+			if labels_on && (.Dirty_Cas in c.txf || !access_dominates(entry.label, emptied.label)) {
 				continue
 			}
 			if live || (old_stale && !entry.expired) {
@@ -741,21 +764,39 @@ watch_swap :: proc(a: int, b: int) {
 		return
 	}
 	if labels_on {
-		for id in ([2]int{a, b}) {
-			if id < len(watch_dbs) {
-				for _, wk in watch_dbs[id] {
-					for w in wk.watchers {
-						watch_mark(w.c)
-					}
-				}
-			}
-		}
+		watch_views_replaced(a, b)
+		watch_views_replaced(b, a)
 		watch_dirty_victims()
 		return
 	}
 	watch_db_replaced(&dbs[a], &dbs[b])
 	watch_db_replaced(&dbs[b], &dbs[a])
 	watch_dirty_victims()
+}
+
+@(private = "file")
+watch_views_replaced :: proc(id: int, other: int) {
+	if id >= len(watch_dbs) {
+		return
+	}
+	for _, wk in watch_dbs[id] {
+		key := transmute([]u8)wk.key
+		for w in wk.watchers {
+			if .Dirty_Cas in w.c.txf {
+				continue
+			}
+			entry := &w.c.tx.watched[w.idx]
+			old_exists, old_expired := label_key_state(id, key, entry.label)
+			new_exists, new_expired := label_key_state(other, key, entry.label)
+			live := (old_exists && !old_expired) || (new_exists && !new_expired)
+			if live || (old_exists && old_expired && !entry.expired) {
+				watch_mark(w.c)
+			} else {
+				entry.expired = new_exists && new_expired
+				entry.present = false
+			}
+		}
+	}
 }
 
 watch_expired_since :: proc(c: ^Conn) -> bool {
@@ -781,6 +822,18 @@ watch_expired_since :: proc(c: ^Conn) -> bool {
 		}
 	}
 	return false
+}
+
+tx_dirty_visible :: proc(c: ^Conn) -> bool {
+	if !labels_on || access.top || c.tx == nil {
+		return true
+	}
+	for w in c.tx.watched {
+		if !access_dominates(access.id, w.label) {
+			return false
+		}
+	}
+	return true
 }
 
 tx_client_fields :: proc(b: ^[dynamic]u8, c: ^Conn) {

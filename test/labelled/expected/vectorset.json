@@ -1,0 +1,15 @@
+{
+ "runner": "vectorset",
+ "description": "Tests of the vector set unit that pass labels-off and do not pass on the labelled server.",
+ "categories": [
+  {
+   "id": "persistence",
+   "reason": "DEBUG RELOAD and the append-only file are refused while a scheme is configured, so the tests that reload a set differ.",
+   "doc": "docs/labels.md#the-scheme",
+   "entries": [
+    "modules/vector-sets::HNSW Persistence",
+    "modules/vector-sets::[regression] VADD CAS SETATTR keeps attribute accounting"
+   ]
+  }
+ ]
+}

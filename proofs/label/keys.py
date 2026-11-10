@@ -84,6 +84,7 @@ class Keys:
         self.ordered = [set() for _ in range(DBS)]
         self.notes = {}
         self.events = []
+        self.paused = False
 
     def sees(self, r, d):
         return sees(r, d)
@@ -323,9 +324,30 @@ class Keys:
                 self.note('scan_empty_part')
         return '0:' + f'{len(names)}' + ''.join(',' + n for n in names)
 
+    def live(self, c):
+        return c.exp is None or c.exp > self.now
+
     def c_randomkey(self, d, lab):
-        names = self.visible_names(d, lab)
+        visible = [(n, c) for n, cs in self.names[d].items() for c in cs if self.sees(lab, c.label)]
+        names = sorted({n for n, c in visible if self.live(c)})
+        expired = sorted({n for n, c in visible if not self.live(c)})
+        if self.paused:
+            self.note('paused_live' if names else ('paused_expired' if expired else 'paused_empty'))
+            if names and expired:
+                self.note('paused_live_beside_expired')
+            if not names:
+                names = expired
+        elif expired and not names:
+            self.note('unpaused_expired_only')
         return {NULL} if not names else {bulk(n) for n in names}
+
+    def c_pause(self, d, lab, ms, mode):
+        self.paused = True
+        return OK
+
+    def c_unpause(self, d, lab):
+        self.paused = False
+        return OK
 
     def c_select(self, d, lab, n):
         self.db = int(n)
@@ -565,6 +587,8 @@ def argv(cmd, args):
         return ['LABEL', 'DECLASSIFY', args[0], text(args[1])]
     if cmd == 'IDLETIME':
         return ['OBJECT', 'IDLETIME'] + list(args)
+    if cmd in ('PAUSE', 'UNPAUSE'):
+        return ['CLIENT', cmd] + list(args)
     return [cmd] + [str(a) for a in args]
 
 
@@ -1025,3 +1049,126 @@ def resolution_trace(sessions):
                 lines.append(f'KQ {m.db} {ids(lab)} {args[0].encode().hex()}')
                 rows.append('KQ|' + (ids(c.label) if c is not None else '-'))
     return lines, rows
+
+
+TOP = (len(LEVELS) - 1, (1 << len(COMPS)) - 1, 0)
+PAUSE_SPANS = ['400', '1500', '2600']
+PAUSE_NOTES = ('paused_live', 'paused_expired', 'paused_empty', 'paused_live_beside_expired', 'unpaused_expired_only')
+
+
+def reach(x):
+    return sum(1 for y in all_labels() if sees(x, y))
+
+
+def pause_session(rng, number):
+    labs = session_labels(rng, number)
+    out, now = [], NOW
+    for name in rng.sample(NAMES, rng.randint(2, 6)):
+        group = rng.sample(labs, rng.randint(1, min(3, len(labs))))
+        group.sort(key=lambda x: -reach(x))
+        for lab in group:
+            if rng.randrange(10) < 7:
+                out.append((lab, 'SET', (name, 'p', 'PX', rng.choice(PAUSE_SPANS))))
+            else:
+                out.append((lab, 'SET', (name, 'q')))
+    for _ in range(rng.randint(1, 3)):
+        out.append((rng.choice(labs), 'RANDOMKEY', ()))
+    now += rng.choice([1000, 2000, 3000])
+    out.append((None, 'T', (now,)))
+    out.append((TOP, 'PAUSE', ('100000000', 'WRITE')))
+    for _ in range(rng.randint(4, 10)):
+        out.append((rng.choice(labs + [TOP]), 'RANDOMKEY', ()))
+    out.append((TOP, 'UNPAUSE', ()))
+    for _ in range(rng.randint(1, 3)):
+        out.append((rng.choice(labs), 'RANDOMKEY', ()))
+    return out, labs
+
+
+def pause_corpus(rng, seed, sessions):
+    out = []
+    for number in range(sessions):
+        cmds, labs = pause_session(rng, number)
+        rows, m = simulate(cmds)
+        lines = [scheme_line(seed, True)] + [row_line(lab, c, a) for lab, c, a in cmds]
+        out.append((lines, rows, cmds, m.notes))
+    return out
+
+
+def pause_branches(cmds):
+    m = Keys(True)
+    out = []
+    for lab, cmd, args in cmds:
+        before = dict(m.notes)
+        expected(m, lab, cmd, args)
+        changed = [n for n in PAUSE_NOTES if m.notes.get(n, 0) != before.get(n, 0) and n != 'paused_live_beside_expired']
+        out.append(changed[0] if changed else None)
+    return out
+
+
+def pause_hidden(rng, hidden, writes):
+    lab = rng.choice(hidden)
+    k = rng.choice(NAMES)
+    r = rng.randrange(4) if writes else 3
+    if r == 0:
+        return lab, 'SET', (k, 'h', 'PX', rng.choice(PAUSE_SPANS))
+    if r == 1:
+        return lab, 'SET', (k, 'h')
+    if r == 2:
+        return lab, 'DEL', (k,)
+    return lab, 'RANDOMKEY', ()
+
+
+def pause_twin_corpus(rng, seed, pairs):
+    out = []
+    for n in range(pairs):
+        base, labs = pause_session(rng, 2000 + n)
+        observer = rng.choice(labs)
+        hidden = [lab for lab in all_labels() if not sees(observer, lab)]
+        if not hidden:
+            continue
+        twin = []
+        phase = 'before'
+        for c in base:
+            while phase != 'expired' and rng.randrange(2) == 0:
+                twin.append(pause_hidden(rng, hidden, phase == 'before'))
+            phase = {'T': 'expired', 'PAUSE': 'paused'}.get(c[1], phase)
+            twin.append(c)
+        out.append((base, twin, observer))
+    return out
+
+
+def pause_mutants():
+    def expired_never_drawn(m):
+        original = m.c_randomkey
+
+        def c_randomkey(d, lab):
+            out = original(d, lab)
+            live = {bulk(n) for n, cs in m.names[d].items() if any(m.sees(lab, c.label) and m.live(c) for c in cs)}
+            return out if live else {NULL}
+        m.c_randomkey = c_randomkey
+
+    def hidden_expired_drawn(m):
+        def c_randomkey(d, lab):
+            live = sorted({n for n, cs in m.names[d].items() for c in cs if m.sees(lab, c.label) and m.live(c)})
+            if not live and m.paused:
+                live = sorted({n for n, cs in m.names[d].items() for c in cs if not m.live(c)})
+            return {NULL} if not live else {bulk(n) for n in live}
+        m.c_randomkey = c_randomkey
+
+    def expired_drawn_unpaused(m):
+        def c_randomkey(d, lab):
+            visible = [(n, c) for n, cs in m.names[d].items() for c in cs if m.sees(lab, c.label)]
+            names = sorted({n for n, c in visible if m.live(c)}) or sorted({n for n, c in visible})
+            return {NULL} if not names else {bulk(n) for n in names}
+        m.c_randomkey = c_randomkey
+
+    def expired_name_drawn_beside_live(m):
+        def c_randomkey(d, lab):
+            visible = [(n, c) for n, cs in m.names[d].items() for c in cs if m.sees(lab, c.label)]
+            names = sorted({n for n, c in visible if not m.live(c)}) if m.paused else []
+            names = names or sorted({n for n, c in visible if m.live(c)})
+            return {NULL} if not names else {bulk(n) for n in names}
+        m.c_randomkey = c_randomkey
+
+    return {f.__name__: f for f in (expired_never_drawn, hidden_expired_drawn, expired_drawn_unpaused,
+                                    expired_name_drawn_beside_live)}

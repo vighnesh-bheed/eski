@@ -1431,7 +1431,8 @@ acl_auth_required :: #force_inline proc(c: ^Conn) -> bool {
 
 @(private = "file")
 acl_set_conn_user :: proc(c: ^Conn, u: ^Acl_User, authed: bool) {
-	if c.user != u {
+	changed := c.user != u
+	if changed {
 		access_user_changed(c)
 	}
 	c.user = u
@@ -1440,6 +1441,9 @@ acl_set_conn_user :: proc(c: ^Conn, u: ^Acl_User, authed: bool) {
 		c.ever_authed = true
 	}
 	acl_conn_refresh(c)
+	if changed {
+		access_user_settled(c)
+	}
 }
 
 acl_conn_reset :: proc(c: ^Conn) {

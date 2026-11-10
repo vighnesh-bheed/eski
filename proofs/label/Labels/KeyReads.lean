@@ -202,6 +202,145 @@ theorem random_restrict (pickN : List N → Option N) (s : KState N V) (R : TLab
     pickN (visibleNames (restrict R s) R) = pickN (visibleNames s R) := by
   rw [visibleNames_restrict]
 
+def liveState (alive : KCopy N V → Bool) (s : KState N V) : KState N V := ⟨s.copies.filter alive, s.parts⟩
+
+def expiredNames (alive : KCopy N V → Bool) (s : KState N V) (R : TLabel) : List N :=
+  uniq ((s.copies.filter (fun c => domT R c.label && !alive c)).map (·.name))
+
+def randomKey (pickN pickE : List N → Option N) (alive : KCopy N V → Bool) (paused : Bool) (s : KState N V)
+    (R : TLabel) : Option N :=
+  match pickN (visibleNames (liveState alive s) R) with
+  | some x => some x
+  | none => if paused then pickE (expiredNames alive s R) else none
+
+theorem liveState_restrict (alive : KCopy N V → Bool) (R : TLabel) (s : KState N V) :
+    restrict R (liveState alive s) = liveState alive (restrict R s) := by
+  unfold restrict liveState
+  simp only [List.filter_filter, KState.mk.injEq, and_true]
+  congr 1
+  funext c
+  exact Bool.and_comm _ _
+
+theorem expiredNames_restrict (alive : KCopy N V → Bool) (R : TLabel) (s : KState N V) :
+    expiredNames alive (restrict R s) R = expiredNames alive s R := by
+  unfold expiredNames restrict
+  simp only [List.filter_filter]
+  congr 2
+  apply List.filter_congr
+  intro c _
+  cases domT R c.label <;> simp
+
+theorem randomKey_restrict (pickN pickE : List N → Option N) (alive : KCopy N V → Bool) (paused : Bool)
+    (R : TLabel) (s : KState N V) :
+    randomKey pickN pickE alive paused (restrict R s) R = randomKey pickN pickE alive paused s R := by
+  unfold randomKey
+  rw [← liveState_restrict, visibleNames_restrict, expiredNames_restrict]
+
+theorem randomKey_paused_restrict (pickE : List N → Option N) (alive : KCopy N V → Bool) (R : TLabel)
+    (s : KState N V) : pickE (expiredNames alive (restrict R s) R) = pickE (expiredNames alive s R) := by
+  rw [expiredNames_restrict]
+
+theorem mem_expiredNames {alive : KCopy N V → Bool} {s : KState N V} {R : TLabel} {n : N} :
+    n ∈ expiredNames alive s R ↔ ∃ c ∈ s.copies, c.name = n ∧ domT R c.label = true ∧ alive c = false := by
+  unfold expiredNames
+  rw [mem_uniq, List.mem_map]
+  constructor
+  · rintro ⟨c, hc, rfl⟩
+    obtain ⟨hm, hp⟩ := List.mem_filter.1 hc
+    simp only [Bool.and_eq_true, Bool.not_eq_true'] at hp
+    exact ⟨c, hm, rfl, hp.1, hp.2⟩
+  · rintro ⟨c, hm, rfl, h1, h2⟩
+    exact ⟨c, List.mem_filter.2 ⟨hm, by simp [h1, h2]⟩, rfl⟩
+
+theorem live_visible {alive : KCopy N V → Bool} {s : KState N V} {R : TLabel} {n : N} :
+    n ∈ visibleNames (liveState alive s) R ↔ ∃ c ∈ s.copies, c.name = n ∧ domT R c.label = true ∧ alive c = true := by
+  unfold visibleNames liveState
+  rw [mem_uniq, List.mem_map]
+  constructor
+  · rintro ⟨c, hc, rfl⟩
+    obtain ⟨hm, hv⟩ := List.mem_filter.1 hc
+    obtain ⟨hm, ha⟩ := List.mem_filter.1 hm
+    exact ⟨c, hm, rfl, hv, ha⟩
+  · rintro ⟨c, hm, rfl, hv, ha⟩
+    exact ⟨c, List.mem_filter.2 ⟨List.mem_filter.2 ⟨hm, ha⟩, hv⟩, rfl⟩
+
+theorem randomKey_visible (pickN pickE : List N → Option N) (hpN : ∀ l x, pickN l = some x → x ∈ l)
+    (hnN : ∀ l, pickN l = none → l = []) (hpE : ∀ l x, pickE l = some x → x ∈ l) (alive : KCopy N V → Bool)
+    (paused : Bool) (s : KState N V) (R : TLabel) {x : N} (h : randomKey pickN pickE alive paused s R = some x) :
+    ∃ c ∈ s.copies, c.name = x ∧ domT R c.label = true ∧
+      (alive c = true ∨ (paused = true ∧ visibleNames (liveState alive s) R = [])) := by
+  unfold randomKey at h
+  split at h
+  · rename_i y hy
+    cases h
+    obtain ⟨c, hm, h1, h2, h3⟩ := live_visible.1 (hpN _ _ hy)
+    exact ⟨c, hm, h1, h2, Or.inl h3⟩
+  · rename_i hnone
+    split at h
+    · rename_i hp
+      obtain ⟨c, hm, h1, h2, _⟩ := mem_expiredNames.1 (hpE _ _ h)
+      exact ⟨c, hm, h1, h2, Or.inr ⟨hp, hnN _ hnone⟩⟩
+    · simp at h
+
+theorem randomKey_none (pickN pickE : List N → Option N) (hnN : ∀ l, pickN l = none → l = [])
+    (hnE : ∀ l, pickE l = none → l = []) (alive : KCopy N V → Bool) (paused : Bool) (s : KState N V) (R : TLabel)
+    (h : randomKey pickN pickE alive paused s R = none) :
+    (∀ c ∈ s.copies, domT R c.label = true → alive c = false) ∧
+      (paused = true → ∀ c ∈ s.copies, domT R c.label = false) := by
+  unfold randomKey at h
+  split at h
+  · simp at h
+  · rename_i hnone
+    have hl := hnN _ hnone
+    have hdead : ∀ c ∈ s.copies, domT R c.label = true → alive c = false := by
+      intro c hm hv
+      cases ha : alive c with
+      | false => rfl
+      | true =>
+        have : c.name ∈ visibleNames (liveState alive s) R := live_visible.2 ⟨c, hm, rfl, hv, ha⟩
+        rw [hl] at this
+        simp at this
+    refine ⟨hdead, fun hp c hm => ?_⟩
+    rw [hp] at h
+    simp only [↓reduceIte] at h
+    have he := hnE _ h
+    cases hv : domT R c.label with
+    | false => rfl
+    | true =>
+      have : c.name ∈ expiredNames alive s R := mem_expiredNames.2 ⟨c, hm, rfl, hv, hdead c hm hv⟩
+      rw [he] at this
+      simp at this
+
+theorem randomKey_unpaused (pickN pickE : List N → Option N) (alive : KCopy N V → Bool) (s : KState N V)
+    (R : TLabel) : randomKey pickN pickE alive false s R = pickN (visibleNames (liveState alive s) R) := by
+  unfold randomKey
+  split <;> simp_all
+
+theorem randomKey_all_alive (pickN pickE : List N → Option N) (hpE : ∀ l x, pickE l = some x → x ∈ l)
+    (alive : KCopy N V → Bool) (paused : Bool) (s : KState N V) (R : TLabel) (ha : ∀ c ∈ s.copies, alive c = true) :
+    randomKey pickN pickE alive paused s R = pickN (visibleNames s R) := by
+  have hs : liveState alive s = s := by
+    unfold liveState
+    rw [List.filter_eq_self.2 ha]
+  have he : expiredNames alive s R = [] := by
+    apply List.eq_nil_iff_forall_not_mem.2
+    intro n hn
+    obtain ⟨c, hm, _, _, hc⟩ := mem_expiredNames.1 hn
+    rw [ha c hm] at hc
+    exact absurd hc (by decide)
+  unfold randomKey
+  rw [hs, he]
+  split
+  · rename_i y hy
+    exact hy.symm
+  · rename_i hnone
+    rw [hnone]
+    split
+    · cases hE : pickE [] with
+      | none => rfl
+      | some y => exact absurd (hpE _ _ hE) (by simp)
+    · rfl
+
 end KeyReads
 
 end Labels

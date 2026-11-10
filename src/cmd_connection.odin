@@ -318,7 +318,7 @@ client_info_line :: proc(b: ^[dynamic]u8, other: ^Conn, self: ^Conn, argv: [][]u
 		sb_byte(b, 'b')
 	}
 	tracking_client_flags(b, other)
-	if .Dirty_Cas in other.txf {
+	if .Dirty_Cas in other.txf && tx_dirty_visible(other) {
 		sb_byte(b, 'd')
 	}
 	if other.close_after {

@@ -4,6 +4,7 @@ import "base:runtime"
 import "core:crypto/ed25519"
 import "core:fmt"
 import "core:os"
+import "core:slice"
 import "core:strconv"
 import "core:strings"
 import lb "label"
@@ -72,6 +73,48 @@ proof_write_label :: proc(b: ^strings.Builder, l: lb.Label) {
 
 proof_bit :: proc(b: ^strings.Builder, v: bool) {
 	strings.write_byte(b, '1' if v else '0')
+}
+
+proof_label :: proc(s: string) -> lb.Label {
+	parts := strings.split(s, ":")
+	defer delete(parts)
+	assert(len(parts) == 3)
+	l: lb.Label
+	l.level = u8(proof_nat(parts[0]))
+	if parts[1] != "-" {
+		comps := strings.split(parts[1], ",")
+		defer delete(comps)
+		for x in comps {
+			assert(lb.compartment_add(&l, proof_nat(x)))
+		}
+	}
+	l.trust = u8(proof_nat(parts[2]))
+	return l
+}
+
+proof_state :: proc(b: ^strings.Builder, c: ^Conn) {
+	a := access_conn(c)
+	proof_bit(b, .Multi in c.txf)
+	proof_bit(b, .Dirty_Exec in c.txf)
+	proof_bit(b, a.explicit)
+	proof_bit(b, .Dirty_Cas in c.txf)
+	strings.write_byte(b, ':')
+	if a.explicit {
+		proof_write_label(b, a.session)
+	} else {
+		strings.write_byte(b, '-')
+	}
+	strings.write_byte(b, ':')
+	proof_write_label(b, a.bound)
+	strings.write_byte(b, ':')
+	if a.watching {
+		proof_bit(b, a.watch_mixed)
+		strings.write_byte(b, '/')
+		proof_write_label(b, a.watched)
+	} else {
+		strings.write_byte(b, '-')
+	}
+	fmt.sbprintf(b, ":%d", len(c.tx.watched) if c.tx != nil else 0)
 }
 
 proof_names :: proc(s: string) -> [dynamic][]u8 {
@@ -294,6 +337,9 @@ proof_reply :: proc(c: ^Conn, creating: bool) -> string {
 	if len(out) == 0 {
 		return "-"
 	}
+	if out == "*-1\r\n" {
+		return "nil"
+	}
 	switch out[0] {
 	case '+', '-':
 		assert(strings.has_suffix(out, "\r\n"))
@@ -332,13 +378,16 @@ proof_handler :: proc(c: ^Conn, s: ^Cmd_Slot, inner: [][]u8) -> string {
 	case h == cmd_multi:
 		cmd_multi(c, inner)
 	case h == cmd_exec:
-		if .Multi in c.txf && .Dirty_Exec not_in c.txf {
+		if !tx_exec_gate(c) {
 			tx_discard(c)
 			return "exec"
 		}
-		cmd_exec(c, inner)
 	case h == cmd_discard:
 		cmd_discard(c, inner)
+	case h == cmd_watch:
+		cmd_watch(c, inner)
+	case h == cmd_unwatch:
+		cmd_unwatch(c, inner)
 	case h == cmd_label && len(inner) >= 2 && eq_nocase(inner[1], "session"):
 		cmd_label(c, inner)
 	case h == cmd_context && len(inner) >= 2 && (eq_nocase(inner[1], "create") || eq_nocase(inner[1], "info") || eq_nocase(inner[1], "drop")):
@@ -372,26 +421,17 @@ proof_request :: proc(b: ^strings.Builder, kind: string, id: int, f: []string) {
 		strings.write_string(b, proof_reply(c, false))
 		strings.write_string(b, "|-")
 	}
-	a := c.label
-	assert(a != nil)
+	assert(c.label != nil)
 	strings.write_byte(b, '|')
-	proof_bit(b, .Multi in c.txf)
-	proof_bit(b, .Dirty_Exec in c.txf)
-	proof_bit(b, a.explicit)
-	strings.write_byte(b, ':')
-	if a.explicit {
-		proof_write_label(b, a.session)
-	} else {
-		strings.write_byte(b, '-')
-	}
-	strings.write_byte(b, ':')
-	proof_write_label(b, a.bound)
+	proof_state(b, c)
 	fmt.sbprintf(b, "|%d", len(label_contexts))
 }
 
 main :: proc() {
 	assert(len(os.args) == 2)
 	access_init()
+	db_init()
+	keyspace_labels_enable()
 	input, err := os.read_entire_file(os.args[1], context.allocator)
 	assert(err == nil)
 	lines := strings.split(string(input), "\n")
@@ -417,7 +457,7 @@ main :: proc() {
 			fmt.sbprintf(&b, "|%d", n)
 		case "AC":
 			c := new(Conn)
-			c^ = Conn{fd = -1, resp = 2, wcap = 1 << 16, user = proof_user(proof_unhex(f[2])), authed = true}
+			c^ = Conn{fd = -1, resp = 2, wcap = 1 << 16, user = proof_user(proof_unhex(f[2])), authed = true, db = &dbs[0]}
 			c.wbuf = cast([^]u8)runtime.heap_alloc(c.wcap)
 			id := proof_nat(f[1])
 			assert(id not_in proof_conns)
@@ -426,6 +466,44 @@ main :: proc() {
 		case "AT":
 			srv.now_ms = i64(proof_nat(f[1]))
 			fmt.sbprintf(&b, "AT|%d", srv.now_ms)
+		case "AK":
+			id, interned := access_intern(proof_label(f[2]))
+			assert(interned)
+			part, made := label_part_make(0, id)
+			assert(made)
+			signal_key_in(proof_unhex(f[1]), part)
+			marked := make([dynamic]int)
+			for cid, c in proof_conns {
+				if .Dirty_Cas in c.txf {
+					append(&marked, cid)
+				}
+			}
+			slice.sort(marked[:])
+			strings.write_string(&b, "AK|")
+			if len(marked) == 0 {
+				strings.write_byte(&b, '-')
+			}
+			for cid, i in marked {
+				if i > 0 {
+					strings.write_byte(&b, ',')
+				}
+				fmt.sbprintf(&b, "%d", cid)
+			}
+		case "AA":
+			cid := proof_nat(f[1])
+			c, found := proof_conns[cid]
+			assert(found)
+			u := proof_user(proof_unhex(f[2]))
+			changed := c.user != u
+			if changed {
+				access_user_changed(c)
+			}
+			c.user = u
+			if changed {
+				access_user_settled(c)
+			}
+			strings.write_string(&b, "AA|")
+			proof_state(&b, c)
 		case "AO":
 			n := proof_nat(f[1])
 			proof_tokens[n] = proof_token(f)

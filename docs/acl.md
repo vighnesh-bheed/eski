@@ -18,6 +18,8 @@ Configure `aclfile` at startup to use `ACL LOAD` and `ACL SAVE`. Runtime rule ch
 
 ACL covers the RESP command path and key/channel access. The optional [memcached text endpoint](memcached.md) does not provide this authentication flow; enable and isolate it separately. ACL controls authorization; [TLS listeners](connections-and-protocol.md) provide transport encryption and optional client-certificate authentication.
 
+With a label scheme configured, a login also carries label rules: `clearance:`, `trust:`, `label-per-command` or `label-per-session`, `require-token` or `token-optional`, and `token-key:`. `reset` clears them with every other rule, and an ACL change that leaves a connection outside the login's new clearance closes that connection. The rules and the rights over labels are described in [Labels](labels.md#logins).
+
 Verify with `bash test/run_packages.sh`, `bash test/smoke.sh` and `./test/conformance/run.sh --suite redis --units auth,acl,acl-v2`. Package checks include selector/key specifications, command permissions and protected sort lookups. See [conformance](conformance.md) for the test runner's external-server constraints and recorded coverage.
 
 Eski is an independent project, not affiliated with, endorsed or certified by Redis Ltd. Redis is a registered trademark of Redis Ltd.; any rights therein are reserved to Redis Ltd.
