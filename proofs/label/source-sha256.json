@@ -14,6 +14,6 @@
   "src/hnsw/heap.odin": "c6e30aeceb58b6e4d6beb54c6c8595f7e26114ef5905bd3e144470f53e87259d",
   "src/vfilter/evaluate.odin": "7b98d9309022dde6000e7b1f6bc9015cd4d570a358ae0e59d3ec45ae55541b85",
   "src/access.odin": "6389dbca3f6549eb4a4aa8e1f4fd912f0506d83ad028003ff0b0525ba7de32bc",
-  "src/cmd_label.odin": "705b464e5fa42036e5f463e5d3c33ba2af62be787fbc8468085eb60ee29a70a8",
-  "src/multi.odin": "78bc62ec308d3aa1dd8a39ee09d333325e29d203ed46f6d6c0ce5443fc46c752"
+  "src/cmd_label.odin": "82364fdcebfa1004e92770331d646d9e0bb62f47db15a22452edb9f9322dd9d4",
+  "src/multi.odin": "186254931946e4c3a2217aa5073e3fcca9dc2753ed7b2eb51b492957bddaff2e"
 }

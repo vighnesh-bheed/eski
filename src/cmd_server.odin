@@ -134,7 +134,7 @@ cmd_debug :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	if eq_nocase(argv[1], "object") && len(argv) == 3 {
-		e := db_find_raw_in(c.db, argv[2])
+		e := db_find_notouch(argv[2]) if labels_on else db_find_raw_in(c.db, argv[2])
 		if e == nil {
 			reply_error(c, ERR_NO_KEY)
 			return
@@ -213,6 +213,9 @@ cmd_debug :: proc(c: ^Conn, argv: [][]u8) {
 @(private = "file")
 debug_serialized_length :: proc(e: ^Entry, key: []u8) -> int {
 	if vs := entry_object(e, .Vectorset); vs != nil {
+		if labels_on {
+			return vset_view_serialized(vs)
+		}
 		return vset_serialized_length(vs)
 	}
 	w: rdb.Writer
@@ -235,6 +238,10 @@ cmd_time :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 cmd_dbsize :: proc(c: ^Conn, argv: [][]u8) {
+	if labels_on {
+		reply_int(c, i64(label_dbsize(c.db.id)))
+		return
+	}
 	reply_int(c, i64(db_size()))
 }
 
@@ -249,7 +256,9 @@ flush_generic :: proc(c: ^Conn, argv: [][]u8, all: bool) {
 	}
 	blocking := !lazy && c.fd >= 0 && c.kind == .Redis && .Multi not_in c.txf && !deny_blocking
 	removed: i64 = 0
-	if all {
+	if labels_on {
+		removed = label_flush(c.db, all, lazy || blocking)
+	} else if all {
 		removed = persist_total_keys()
 		watch_flush(nil)
 		db_flush_all(lazy || blocking)
@@ -259,7 +268,9 @@ flush_generic :: proc(c: ^Conn, argv: [][]u8, all: bool) {
 		db_flush_in(c.db, lazy || blocking)
 	}
 	block_note_removed()
-	tracking_flush()
+	if !labels_on {
+		tracking_flush()
+	}
 	persist_flushed(all, removed)
 	if blocking {
 		lazyfree_block(c)
@@ -291,8 +302,13 @@ cmd_swapdb :: proc(c: ^Conn, argv: [][]u8) {
 	}
 	watch_swap(a, b)
 	db_swap(a, b)
-	block_scan_ready(&dbs[a])
-	block_scan_ready(&dbs[b])
+	if labels_on {
+		label_block_scan_db(a)
+		label_block_scan_db(b)
+	} else {
+		block_scan_ready(&dbs[a])
+		block_scan_ready(&dbs[b])
+	}
 	block_note_removed()
 	reply_ok(c)
 }

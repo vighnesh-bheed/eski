@@ -67,7 +67,7 @@ cmd_hooks: bool
 ps_held_count: int
 
 hooks_update :: proc() {
-	cmd_hooks = maxmemory_bytes != 0 || cfg.maxmemory_clients != 0 || len(ps_conns) > 0 || tracking_clients > 0 || ps_held_count > 0 || tx_multi_count > 0 || len(monitors) > 0
+	cmd_hooks = maxmemory_bytes != 0 || cfg.maxmemory_clients != 0 || len(ps_conns) > 0 || tracking_clients > 0 || ps_held_count > 0 || tx_multi_count > 0 || len(monitors) > 0 || labels_on
 }
 
 @(private)

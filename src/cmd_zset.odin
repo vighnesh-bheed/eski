@@ -970,10 +970,10 @@ zset_resize_tick :: proc "contextless" () {
 	scans, moves, grants := 4096, 256, 64
 	empty, visits := 0, 0
 	finished := false
-	for grants > 0 && empty < len(dbs) && visits < 128 && !finished {
+	for grants > 0 && empty < len(db_parts) && visits < 128 && !finished {
 		visits += 1
-		d := &dbs[zset_resize_db_next]
-		zset_resize_db_next = (zset_resize_db_next + 1) % len(dbs)
+		d := db_parts[zset_resize_db_next]
+		zset_resize_db_next = (zset_resize_db_next + 1) % len(db_parts)
 		if d.zctx.resize_head == nil {
 			empty += 1
 			continue

@@ -1,6 +1,5 @@
 package vsettype
 
-import "base:intrinsics"
 import "../hnsw"
 import lbl "../label"
 import "../rax"
@@ -70,19 +69,7 @@ resolution_compare :: proc "contextless" (a: ^Access, x, y: lbl.Id) -> int {
 	if !okx || !oky {
 		return 0
 	}
-	when intrinsics.type_has_field(lbl.Label, "trust") {
-		return lbl.resolution_compare(lx, ly)
-	} else {
-		if lx.level != ly.level {
-			return 1 if lx.level > ly.level else -1
-		}
-		cx := lbl.compartment_count(lx)
-		cy := lbl.compartment_count(ly)
-		if cx != cy {
-			return 1 if cx > cy else -1
-		}
-		return 0
-	}
+	return lbl.resolution_compare(lx, ly)
 }
 
 label_order_less :: proc "contextless" (a: ^Access, x, y: lbl.Id) -> bool {

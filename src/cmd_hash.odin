@@ -1,6 +1,7 @@
 package main
 
 import ht "hashtype"
+import lp "listpack"
 
 hset_generic :: proc(c: ^Conn, argv: [][]u8, name: string) {
 	pst.dirty_explicit = true
@@ -76,7 +77,7 @@ cmd_hget :: proc(c: ^Conn, argv: [][]u8) {
 		reply_null(c)
 		return
 	}
-	v, read := ht.get(h, argv[2], hash_now(), !expiry_deletion_paused())
+	v, read := ht.get(h, argv[2], hash_now(), !expiry_deletion_paused() && !label_entry_foreign(e))
 	if .Live in read {
 		reply_hash_value(c, v)
 	} else {
@@ -87,7 +88,7 @@ cmd_hget :: proc(c: ^Conn, argv: [][]u8) {
 
 cmd_hmget :: proc(c: ^Conn, argv: [][]u8) {
 	key := argv[1]
-	_, h, wrong := hash_lookup(key, true)
+	e, h, wrong := hash_lookup(key, true)
 	if wrong {
 		reply_wrongtype(c)
 		return
@@ -108,7 +109,7 @@ cmd_hmget :: proc(c: ^Conn, argv: [][]u8) {
 			reply_null(c)
 			continue
 		}
-		v, read := ht.get(h, field, now, !expiry_deletion_paused())
+		v, read := ht.get(h, field, now, !expiry_deletion_paused() && !label_entry_foreign(e))
 		if .Live in read {
 			reply_hash_value(c, v)
 		} else {
@@ -199,7 +200,7 @@ cmd_hexists :: proc(c: ^Conn, argv: [][]u8) {
 		reply_int(c, 0)
 		return
 	}
-	found, read := ht.exists(h, argv[2], hash_now(), !expiry_deletion_paused())
+	found, read := ht.exists(h, argv[2], hash_now(), !expiry_deletion_paused() && !label_entry_foreign(e))
 	reply_int(c, i64(found))
 	hash_lazy(key, e, h, read)
 }
@@ -215,7 +216,7 @@ cmd_hstrlen :: proc(c: ^Conn, argv: [][]u8) {
 		reply_int(c, 0)
 		return
 	}
-	n, read := ht.field_strlen(h, argv[2], hash_now(), !expiry_deletion_paused())
+	n, read := ht.field_strlen(h, argv[2], hash_now(), !expiry_deletion_paused() && !label_entry_foreign(e))
 	reply_int(c, i64(n))
 	hash_lazy(key, e, h, read)
 }
@@ -352,10 +353,15 @@ hrandfield_counted :: proc(c: ^Conn, key: []u8, count: i64, with_values: bool) {
 	case wrong:
 		reply_wrongtype(c)
 		return
-	case h == nil || hash_expire_if_needed(key, e, h):
+	case h == nil || hash_read_expired(key, e, h):
 		reply_array(c, 0)
 		return
 	}
+	snap, made := hash_live_snapshot(e, h)
+	defer if made {
+		ht.destroy(snap)
+	}
+	h = snap
 	defer {
 		clear(&hash_fields)
 		clear(&hash_values)
@@ -400,11 +406,15 @@ cmd_hrandfield :: proc(c: ^Conn, argv: [][]u8) {
 		reply_wrongtype(c)
 		return
 	}
-	if h == nil || hash_expire_if_needed(key, e, h) {
+	if h == nil || hash_read_expired(key, e, h) {
 		reply_null(c)
 		return
 	}
-	field, _ := ht.random_element(h)
+	snap, made := hash_live_snapshot(e, h)
+	defer if made {
+		ht.destroy(snap)
+	}
+	field, _ := ht.random_element(snap)
 	reply_hash_value(c, field)
 }
 
@@ -441,4 +451,37 @@ cmd_hscan :: proc(c: ^Conn, argv: [][]u8) {
 		reply_hash_value(c, v)
 	}
 	clear(&hash_fields)
+}
+
+@(private = "file")
+hash_read_expired :: proc(key: []u8, e: ^Entry, h: ht.Hash) -> bool {
+	if label_entry_foreign(e) {
+		return ht.length_live(h, hash_now()) == 0
+	}
+	return hash_expire_if_needed(key, e, h)
+}
+
+@(private = "file")
+hash_snapshot_field: [lp.DECIMAL_BUFFER_BYTES]u8
+
+@(private = "file")
+hash_snapshot_value: [lp.DECIMAL_BUFFER_BYTES]u8
+
+@(private = "file")
+hash_live_snapshot :: proc(e: ^Entry, h: ht.Hash) -> (snap: ht.Hash, made: bool) {
+	if !label_entry_foreign(e) {
+		return h, false
+	}
+	now := hash_now()
+	if ht.length_live(h, now) == ht.length(h) {
+		return h, false
+	}
+	snap = ht.create()
+	it := ht.iterator_live(h, now)
+	for ht.next(&it) {
+		f := ht.value_bytes(ht.current_field(&it), &hash_snapshot_field)
+		v := ht.value_bytes(ht.current_value(&it), &hash_snapshot_value)
+		ht.set(snap, f, v)
+	}
+	return snap, true
 }

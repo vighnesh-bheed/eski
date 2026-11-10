@@ -205,18 +205,18 @@ slab_retire_zero :: proc "contextless" (s: ^Slab) -> bool {
 }
 
 slab_reclaim :: proc "contextless" (deadline: i64, zero_only: bool = false) -> (work: Slab_Reclaim_Work) {
-	if !slab_reclaim_pending() || zero_only && slab_zero_slabs == 0 || len(dbs) == 0 {
+	if !slab_reclaim_pending() || zero_only && slab_zero_slabs == 0 || len(db_parts) == 0 {
 		return
 	}
-	if slab_reclaim_next >= len(dbs) {
+	if slab_reclaim_next >= len(db_parts) {
 		slab_reclaim_next = 0
 	}
-	for work.visited < min(len(dbs), SLAB_RECLAIM_DBS) {
+	for work.visited < min(len(db_parts), SLAB_RECLAIM_DBS) {
 		if now_ns() >= deadline {
 			break
 		}
-		s := &dbs[slab_reclaim_next].slab
-		slab_reclaim_next = (slab_reclaim_next + 1) % len(dbs)
+		s := &db_parts[slab_reclaim_next].slab
+		slab_reclaim_next = (slab_reclaim_next + 1) % len(db_parts)
 		work.visited += 1
 		if work.retired == 0 && s.base != nil && s.live == 0 && now_ns() < deadline && slab_retire_zero(s) {
 			work.retired += 1

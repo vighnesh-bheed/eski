@@ -4,6 +4,7 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:sys/linux"
 import ht "hashtype"
+import lb "label"
 import st "settype"
 import zt "zsettype"
 import "sysclock"
@@ -37,6 +38,8 @@ Db :: struct {
 	mc:            ^Mc_Table,
 	sctx:          ^st.Context,
 	zctx:          ^zt.Context,
+	label:         lb.Id,
+	role:          u8,
 }
 
 Release :: struct {
@@ -51,8 +54,8 @@ Dead :: struct {
 }
 
 #assert(size_of(Entry) == 64)
-#assert(size_of(Db) == 3 * size_of(Table) + 8 + size_of(Slab) + 12 * 8)
-#assert(size_of(Db) == 928)
+#assert(size_of(Db) == 3 * size_of(Table) + 8 + size_of(Slab) + 13 * 8)
+#assert(size_of(Db) == 936)
 #assert(offset_of(Db, zctx) == 3 * size_of(Table) + 8 + size_of(Slab) + 11 * 8)
 #assert(offset_of(Db, sctx) == 3 * size_of(Table) + 8 + size_of(Slab) + 10 * 8)
 #assert(size_of(Release) == 24)
@@ -94,6 +97,7 @@ DEAD_MAX :: 16
 DEAD_SCAN_SLOTS :: 65536
 
 dbs: []Db
+db_parts: [dynamic]^Db
 db_count: int = DB_COUNT
 db_cur: ^Db
 expire_db_next: int
@@ -153,6 +157,34 @@ db_init :: proc() {
 		d.rehash_idx = -1
 	}
 	db_cur = &dbs[0]
+	if db_parts.allocator.procedure == nil {
+		db_parts = make([dynamic]^Db, 0, len(dbs), runtime.heap_allocator())
+	}
+	clear(&db_parts)
+	for &d in dbs {
+		append(&db_parts, &d)
+	}
+	if labels_on {
+		keyspace_labels_enable()
+	}
+}
+
+db_part_init :: proc "contextless" (db: ^Db, id: int) {
+	db.id = id
+	db.t[0] = table_empty()
+	db.rehash_idx = -1
+}
+
+db_view_slot :: #force_inline proc "contextless" (db: ^Db, t: ^Table, i: int) -> ^Entry {
+	return entry_view(db, t, i)
+}
+
+db_random_slot :: proc "contextless" (t: ^Table) -> int {
+	return random_full_slot(t)
+}
+
+db_locate_slot :: #force_inline proc "contextless" (db: ^Db, l: ^Lookup) -> (^Table, int) {
+	return db_locate(db, l)
 }
 
 cur_db :: #force_inline proc "contextless" () -> ^Db {
@@ -242,6 +274,13 @@ val_release :: proc "contextless" (db: ^Db, kp: ^Key_Handle, vp: ^Val_Handle) {
 		mem_free(bs.data)
 		mem_free(bs)
 	case FORM_OBJECT:
+		if labels_on && vp.slab.info.type == .Vectorset {
+			label_vset_release(db, rawptr(vp.ref.addr))
+			db.heap_objs -= 1
+			kp.small.tag.val_form = FORM_NONE
+			vp.bits &= u64(0xFF) << TALLY_SHIFT
+			return
+		}
 		n: int
 		queued := false
 		if lazy_mode == .Async || (lazy_mode == .Server && cfg.lazyfree_lazy_server_del) {
@@ -848,6 +887,9 @@ db_erase :: proc "contextless" (db: ^Db, t: ^Table, i: int) #no_bounds_check {
 }
 
 db_erase_expired :: proc "contextless" (db: ^Db, t: ^Table, i: int) {
+	if labels_on {
+		label_note_erased(db, key_bytes(&t.slots[i].key, &db.slab))
+	}
 	saved := lazy_set(cfg.lazyfree_lazy_expire)
 	start: i64 = 0
 	if cfg.latency_monitor_threshold != 0 {
@@ -939,8 +981,8 @@ db_drop_next :: proc "contextless" (db: ^Db) {
 }
 
 db_drop_prepared :: proc "contextless" () {
-	for &d in dbs {
-		db_drop_next(&d)
+	for d in db_parts {
+		db_drop_next(d)
 	}
 }
 
@@ -1027,8 +1069,8 @@ db_maybe_shrink :: #force_inline proc "contextless" (db: ^Db) {
 }
 
 db_resize_all :: proc "contextless" () {
-	for &d in dbs {
-		db_maybe_shrink(&d)
+	for d in db_parts {
+		db_maybe_shrink(d)
 	}
 }
 
@@ -1042,15 +1084,15 @@ db_pressure_shrink :: proc "contextless" (deadline: i64) -> (work: Table_Pressur
 	if !over || len(dbs) == 0 {
 		return
 	}
-	if pressure_db_next >= len(dbs) {
+	if pressure_db_next >= len(db_parts) {
 		pressure_db_next = 0
 	}
-	for work.visited < min(len(dbs), REHASH_PRESSURE_DBS) {
+	for work.visited < min(len(db_parts), REHASH_PRESSURE_DBS) {
 		if now_ns() >= deadline {
 			break
 		}
-		d := &dbs[pressure_db_next]
-		pressure_db_next = (pressure_db_next + 1) % len(dbs)
+		d := db_parts[pressure_db_next]
+		pressure_db_next = (pressure_db_next + 1) % len(db_parts)
 		work.visited += 1
 		t := &d.t[0]
 		if d.rehash_idx >= 0 {
@@ -1086,6 +1128,9 @@ db_find_in :: proc(db: ^Db, key: []u8) -> ^Entry #no_bounds_check {
 	l := lookup_make(key)
 	t, i := db_locate(db, &l)
 	if i < 0 {
+		if labels_on {
+			return label_find_miss(db, key, &l)
+		}
 		return nil
 	}
 	if db.expires > 0 {
@@ -1094,6 +1139,9 @@ db_find_in :: proc(db: ^Db, key: []u8) -> ^Entry #no_bounds_check {
 			if !expiry_deletion_paused() {
 				db_erase_expired(db, t, i)
 				key_expired_event(key, db)
+			}
+			if labels_on {
+				return label_find_miss(db, key, &l)
 			}
 			return nil
 		}
@@ -1299,6 +1347,9 @@ db_remove_in :: proc(db: ^Db, key: []u8) -> (found: bool, expired: bool) #no_bou
 		exp := slot_deadline(db, t, i)
 		expired = exp != 0 && exp <= expire_now()
 	}
+	if labels_on {
+		label_note_erased(db, key)
+	}
 	if expired {
 		saved := lazy_set(cfg.lazyfree_lazy_expire)
 		db_erase(db, t, i)
@@ -1379,6 +1430,9 @@ db_upsert_in :: proc(db: ^Db, key: []u8) -> (^Entry, bool) #no_bounds_check {
 	}
 	t.slots[i].val = transmute(Val_Handle)(u64(fresh.tally) << TALLY_SHIFT)
 	e := entry_view(db, t, i)
+	if labels_on {
+		label_note_created(db, key)
+	}
 	if !store_reconciling { notify_in(.New, "new", key, db) }
 	return e, true
 }
@@ -1406,6 +1460,9 @@ db_rename :: proc(src: []u8, dst: []u8) -> bool #no_bounds_check {
 	vh := t.slots[i].val
 	vform := t.slots[i].key.small.tag.val_form
 	t.slots[i].key.small.tag.val_form = FORM_NONE
+	if labels_on {
+		label_note_erased(db, src)
+	}
 	db_erase(db, t, i)
 	db_find_in(db, dst)
 	e, _ := db_upsert_timed_in(db, dst, due)
@@ -1476,6 +1533,9 @@ db_move :: proc(src: ^Db, dst: ^Db, key: []u8) -> bool #no_bounds_check {
 	e.kp.small.tag.val_form = form
 	e.mp.stamp = stamp
 	entry_set_expire(e, due)
+	if labels_on {
+		label_note_erased(src, key)
+	}
 	db_erase(src, t, i)
 	db_maybe_shrink(src)
 	return true
@@ -1496,6 +1556,9 @@ db_swap :: proc(a: int, b: int) {
 	y.sctx.owner = y
 	x.zctx.owner = x
 	y.zctx.owner = y
+	if labels_on {
+		label_swap(a, b)
+	}
 }
 
 db_flush :: proc() {
@@ -1503,12 +1566,15 @@ db_flush :: proc() {
 }
 
 db_flush_all :: proc(lazy: bool = false) {
-	for &d in dbs {
-		db_flush_in(&d, lazy)
+	for d in db_parts {
+		db_flush_in(d, lazy)
 	}
 }
 
 db_flush_in :: proc(db: ^Db, lazy: bool = false) {
+	if labels_on {
+		label_flush_prepare(db)
+	}
 	mc_meta_on_flush(db)
 	hash_registry_flush(db)
 	st.maintenance_clear(db.sctx)
@@ -1674,7 +1740,7 @@ db_tick :: proc "contextless" () {
 	if slab_cold_pages {
 		slab_cold_pages = false
 		warm_deadline := start + (WARM_TICK_NS if idle else WARM_BUSY_TICK_NS)
-		for &d in dbs {
+		for d in db_parts {
 			if slab_warm(&d.slab, warm_deadline) && d.slab.warm < d.slab.top + slab_warm_ahead(&d.slab) {
 				slab_cold_pages = true
 			}
@@ -1682,20 +1748,20 @@ db_tick :: proc "contextless" () {
 	}
 	if store_warming > 0 {
 		deadline := start + (WARM_TICK_NS if idle else WARM_BUSY_TICK_NS)
-		for &d in dbs {
+		for d in db_parts {
 			if d.next.region != nil && d.next_warm < d.next.size {
-				db_warm(&d, deadline)
+				db_warm(d, deadline)
 			}
 		}
 	}
 	if cfg.activerehashing && store_rehashing > 0 {
 		deadline := start + (REHASH_TICK_NS if idle else REHASH_BUSY_TICK_NS)
-		n := len(dbs)
+		n := len(db_parts)
 		for _ in 0 ..< n {
 			if store_rehashing == 0 {
 				break
 			}
-			d := &dbs[rehash_db_next]
+			d := db_parts[rehash_db_next]
 			for d.rehash_idx >= 0 {
 				db_rehash_groups(d, REHASH_TICK_GROUPS, REHASH_TICK_SLOTS)
 				if now_ns() >= deadline {
@@ -1796,7 +1862,7 @@ db_active_expire :: proc() {
 	if !expiry_sweep_on || expiry_deletion_paused() {
 		return
 	}
-	n := len(dbs)
+	n := len(db_parts)
 	effort := cfg.active_expire_effort - 1
 	expire_slots_limit = EXPIRE_SLOTS_PER_TICK * int(4 + effort) / 4
 	start := now_ns()
@@ -1805,7 +1871,7 @@ db_active_expire :: proc() {
 	expire_cycle_sampled = 0
 	timelimit_exit := false
 	for _ in 0 ..< n {
-		d := &dbs[expire_db_next]
+		d := db_parts[expire_db_next]
 		expire_db_next = expire_db_next + 1 if expire_db_next + 1 < n else 0
 		if d.expires == 0 {
 			d.avg_ttl = 0

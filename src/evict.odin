@@ -42,12 +42,13 @@ stat_eviction_exceeded_us: i64
 stat_eviction_exceeded_since: i64
 evict_no_shared_ints: bool
 evict_timer: bool
+evict_scope := -1
 
 @(private = "file")
 Pool_Entry :: struct {
 	idle: u64,
 	key:  [dynamic]u8,
-	dbid: int,
+	db:   ^Db,
 	used: bool,
 }
 
@@ -139,7 +140,7 @@ evict_memory_ok :: proc() -> bool {
 }
 
 @(private = "file")
-evict_pool_insert :: proc(dbid: int, s: Evict_Sample) {
+evict_pool_insert :: proc(db: ^Db, s: Evict_Sample) {
 	pool := &evict_pool
 	k := 0
 	for k < EVPOOL_SIZE && pool[k].used && pool[k].idle < s.score {
@@ -166,7 +167,7 @@ evict_pool_insert :: proc(dbid: int, s: Evict_Sample) {
 	clear(&pool[k].key)
 	append(&pool[k].key, ..s.key)
 	pool[k].idle = s.score
-	pool[k].dbid = dbid
+	pool[k].db = db
 	pool[k].used = true
 }
 
@@ -183,7 +184,7 @@ evict_pool_populate :: proc(db: ^Db, volatile: bool) {
 	}
 	n := db_evict_sample(db, evict_samples[:maxmemory_samples], volatile, score)
 	for i in 0 ..< n {
-		evict_pool_insert(db.id, evict_samples[i])
+		evict_pool_insert(db, evict_samples[i])
 	}
 }
 
@@ -192,13 +193,16 @@ evict_pick_pool :: proc() -> (db: ^Db, found: bool) {
 	volatile := evict_volatile()
 	for !found {
 		total := 0
-		for &d in dbs {
-			keys := d.expires if volatile else db_size_of(&d)
+		for d in db_parts {
+			if evict_scope >= 0 && int(d.label) != evict_scope {
+				continue
+			}
+			keys := d.expires if volatile else db_size_of(d)
 			if keys == 0 {
 				continue
 			}
 			total += keys
-			evict_pool_populate(&d, volatile)
+			evict_pool_populate(d, volatile)
 		}
 		if total == 0 {
 			return nil, false
@@ -208,10 +212,13 @@ evict_pick_pool :: proc() -> (db: ^Db, found: bool) {
 			if !p.used {
 				continue
 			}
+			if evict_scope >= 0 && (p.db == nil || int(p.db.label) != evict_scope) {
+				continue
+			}
 			p.used = false
 			p.idle = 0
-			d := &dbs[p.dbid]
-			if db_evict_has(d, p.key[:], volatile) {
+			d := p.db
+			if d != nil && db_evict_has(d, p.key[:], volatile) {
 				clear(&evict_key)
 				append(&evict_key, ..p.key[:])
 				return d, true
@@ -223,11 +230,14 @@ evict_pick_pool :: proc() -> (db: ^Db, found: bool) {
 
 @(private = "file")
 evict_pick_random :: proc() -> (db: ^Db, found: bool) {
-	n := len(dbs)
+	n := len(db_parts)
 	volatile := evict_volatile()
 	for _ in 0 ..< n {
 		evict_next_db = (evict_next_db + 1) % n
-		d := &dbs[evict_next_db]
+		d := db_parts[evict_next_db]
+		if evict_scope >= 0 && int(d.label) != evict_scope {
+			continue
+		}
 		key: []u8
 		ok: bool
 		if volatile {
@@ -389,4 +399,28 @@ evict_reset_stats :: proc() {
 	stat_evicted_clients = 0
 	stat_eviction_exceeded_us = 0
 	stat_eviction_exceeded_since = 0
+}
+
+evict_in_label :: proc(label: int, tofree: int) -> (freed: int, exhausted: bool) {
+	if maxmemory_policy == .Noeviction {
+		return 0, true
+	}
+	saved := evict_scope
+	evict_scope = label
+	defer evict_scope = saved
+	random := maxmemory_policy == .Allkeys_Random || maxmemory_policy == .Volatile_Random
+	for freed < tofree {
+		db: ^Db
+		found: bool
+		if random {
+			db, found = evict_pick_random()
+		} else {
+			db, found = evict_pick_pool()
+		}
+		if !found {
+			return freed, true
+		}
+		freed += evict_delete(db)
+	}
+	return freed, false
 }

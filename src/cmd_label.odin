@@ -44,7 +44,7 @@ label_token_cache: map[[32]u8]Label_Token_Entry
 label_help_lines := [?]string {
 	"LABEL <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
 	"AS <marking> [TRUST <trust>] [CONTEXT <handle>] <command> [<arg> ...]",
-	"    Run one command at the given lb.",
+	"    Run one command at the given label.",
 	"AS CONTEXT <handle> <command> [<arg> ...]",
 	"    Run one command at the label of a context.",
 	"AS TOKEN <token> <command> [<arg> ...]",
@@ -53,6 +53,16 @@ label_help_lines := [?]string {
 	"    Set the label of this connection's later commands.",
 	"WHOAMI",
 	"    Show the login, its clearance and the label of this command.",
+	"OF <key> [<element>]",
+	"    Show the label of the copy that a read of the key or element resolves to.",
+	"DECLASSIFY <key> <marking> [TRUST <trust>] [ELEMENT <element>]",
+	"    Move the copy at this command's label to a label it dominates.",
+	"RAISE <key> <marking> [TRUST <trust>] [ELEMENT <element>]",
+	"    Move the copy at this command's label to a label that dominates it.",
+	"COPIES [<key>]",
+	"    List the names held at more than one label, or every copy of a key.",
+	"QUOTA <marking> [TRUST <trust>] [LIMIT <bytes>]",
+	"    Show or set the memory quota of a label.",
 	"HELP",
 	"    Print this help.",
 }
@@ -569,6 +579,8 @@ cmd_label :: proc(c: ^Conn, argv: [][]u8) {
 			reply_wrong_args(c, "label|whoami")
 			return
 		}
+	case label_key_subcommand(sub) != "":
+		c.last_cmd = label_key_subcommand(sub)
 	case:
 		c.last_cmd = "NULL"
 		reply_unknown_subcommand(c, sub, "LABEL")
@@ -585,6 +597,8 @@ cmd_label :: proc(c: ^Conn, argv: [][]u8) {
 		label_session(c, argv)
 	case eq_nocase(sub, "whoami"):
 		label_whoami(c)
+	case:
+		label_key_command(c, argv)
 	}
 }
 

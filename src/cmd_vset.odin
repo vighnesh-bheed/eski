@@ -119,6 +119,8 @@ vset_reply_failure :: proc(c: ^Conn, f: vt.Failure) {
 		reply_error_parts(c, "ERR Input dimension mismatch for projection - got ", vset_text_int(&a, f.got), " but projection expects ", vset_text_int(&b, f.expected))
 	case .Filter_Syntax:
 		reply_error_parts(c, vfilter.SYNTAX_ERROR_PREFIX, vfilter.reply_near(f.near))
+	case .Name_In_Use:
+		reply_error(c, label_in_use_text(ERR_LABEL_ELEMENT_IN_USE, f.label))
 	case .None:
 	case:
 		text, _ := vt.failure_text(f)
@@ -170,6 +172,10 @@ cmd_vadd :: proc(c: ^Conn, argv: [][]u8) {
 	defer va.vadd_request_destroy(&req)
 	if err.kind != .None {
 		vset_reply_parse_error(c, err)
+		return
+	}
+	if labels_on {
+		vadd_labelled(c, argv, &req)
 		return
 	}
 	key := req.key
@@ -238,6 +244,10 @@ cmd_vrem :: proc(c: ^Conn, argv: [][]u8) {
 		vset_reply_parse_error(c, err)
 		return
 	}
+	if labels_on {
+		vrem_labelled(c, argv, req.key, req.element)
+		return
+	}
 	defer signal_key(req.key)
 	e, s, wrong := vset_lookup(req.key, false)
 	if wrong {
@@ -271,6 +281,10 @@ cmd_vsetattr :: proc(c: ^Conn, argv: [][]u8) {
 		vset_reply_parse_error(c, err)
 		return
 	}
+	if labels_on {
+		vsetattr_labelled(c, argv, req.key, req.element, req.attributes)
+		return
+	}
 	defer signal_key(req.key)
 	e, s, wrong := vset_lookup(req.key, false)
 	if wrong {
@@ -301,6 +315,10 @@ cmd_vcard :: proc(c: ^Conn, argv: [][]u8) {
 		vset_reply_parse_error(c, err)
 		return
 	}
+	if labels_on {
+		vcard_labelled(c, req.key)
+		return
+	}
 	_, s, wrong := vset_lookup(req.key, true)
 	if wrong {
 		reply_wrongtype(c)
@@ -313,6 +331,10 @@ cmd_vdim :: proc(c: ^Conn, argv: [][]u8) {
 	req, err := va.parse_vdim(argv[1:])
 	if err.kind != .None {
 		vset_reply_parse_error(c, err)
+		return
+	}
+	if labels_on {
+		vdim_labelled(c, req.key)
 		return
 	}
 	_, s, wrong := vset_lookup(req.key, true)
@@ -333,6 +355,10 @@ cmd_vismember :: proc(c: ^Conn, argv: [][]u8) {
 		vset_reply_parse_error(c, err)
 		return
 	}
+	if labels_on {
+		vismember_labelled(c, req.key, req.element)
+		return
+	}
 	_, s, wrong := vset_lookup(req.key, true)
 	if wrong {
 		reply_wrongtype(c)
@@ -345,6 +371,10 @@ cmd_vgetattr :: proc(c: ^Conn, argv: [][]u8) {
 	req, err := va.parse_vgetattr(argv[1:])
 	if err.kind != .None {
 		vset_reply_parse_error(c, err)
+		return
+	}
+	if labels_on {
+		vgetattr_labelled(c, req.key, req.element)
 		return
 	}
 	_, s, wrong := vset_lookup(req.key, true)
@@ -368,6 +398,10 @@ cmd_vinfo :: proc(c: ^Conn, argv: [][]u8) {
 	req, err := va.parse_vinfo(argv[1:])
 	if err.kind != .None {
 		vset_reply_parse_error(c, err)
+		return
+	}
+	if labels_on {
+		vinfo_labelled(c, req.key)
 		return
 	}
 	_, s, wrong := vset_lookup(req.key, true)
@@ -406,6 +440,10 @@ cmd_vemb :: proc(c: ^Conn, argv: [][]u8) {
 	req, err := va.parse_vemb(argv[1:])
 	if err.kind != .None {
 		vset_reply_parse_error(c, err)
+		return
+	}
+	if labels_on {
+		vemb_labelled(c, req.key, req.element, req.raw)
 		return
 	}
 	_, s, wrong := vset_lookup(req.key, true)
@@ -482,6 +520,10 @@ cmd_vlinks :: proc(c: ^Conn, argv: [][]u8) {
 		vset_reply_parse_error(c, err)
 		return
 	}
+	if labels_on {
+		vlinks_labelled(c, req.key, req.element, req.with_scores)
+		return
+	}
 	_, s, wrong := vset_lookup(req.key, true)
 	if wrong {
 		reply_wrongtype(c)
@@ -519,6 +561,10 @@ cmd_vrange :: proc(c: ^Conn, argv: [][]u8) {
 	req, err := va.parse_vrange(argv[1:])
 	if err.kind != .None {
 		vset_reply_parse_error(c, err)
+		return
+	}
+	if labels_on {
+		vrange_labelled(c, &req)
 		return
 	}
 	_, s, wrong := vset_lookup(req.key, true)
@@ -568,6 +614,10 @@ cmd_vrandmember :: proc(c: ^Conn, argv: [][]u8) {
 	}
 	if req.has_count && req.count == min(i64) {
 		reply_error(c, ERR_VSET_COUNT_RANGE)
+		return
+	}
+	if labels_on {
+		vrandmember_labelled(c, &req)
 		return
 	}
 	_, s, wrong := vset_lookup(req.key, true)
@@ -643,6 +693,10 @@ cmd_vsim :: proc(c: ^Conn, argv: [][]u8) {
 	defer va.vsim_request_destroy(&req)
 	if err.kind != .None && err.stage == .Before_Key {
 		vset_reply_parse_error(c, err)
+		return
+	}
+	if labels_on {
+		vsim_labelled(c, &req, err)
 		return
 	}
 	_, s, wrong := vset_lookup(req.key, true)
@@ -787,4 +841,523 @@ cmd_module :: proc(c: ^Conn, argv: [][]u8) {
 register_vset_commands :: proc "contextless" () {
 	register_module_commands(vset_commands[:])
 	register_commands(module_commands[:])
+}
+
+vset_refs: [dynamic]vt.Ref
+
+vset_wrong_label :: proc(c: ^Conn, e: ^Entry) {
+	pst.dirty_explicit = true
+	if label_entry_foreign(e) {
+		reply_error(c, label_in_use_text(ERR_LABEL_NAME_IN_USE, e.db.label))
+		return
+	}
+	reply_wrongtype(c)
+}
+
+vset_view :: proc(s: vt.Vset, a: ^vt.Access) -> (v: vt.View, ok: bool) {
+	err: vt.Error
+	v, err = vt.view_open(s, a, vset_scratch_get())
+	return v, err == .None && vt.view_exists(&v)
+}
+
+vset_presence_add :: proc(key: []u8, s: vt.Vset) {
+	fresh, _ := db_upsert(key)
+	entry_object_attach(fresh, s, .Vectorset, .Raw, 0)
+}
+
+vset_presence_drop :: proc(db: ^Db, key: []u8) {
+	l := lookup_make(key)
+	t, i := db_locate_slot(db, &l)
+	if i < 0 {
+		return
+	}
+	kp := &t.slots[i].key
+	if kp.small.tag.val_form == FORM_OBJECT {
+		db.heap_objs -= 1
+		kp.small.tag.val_form = FORM_NONE
+	}
+	owned := make([]u8, len(key), context.temp_allocator)
+	copy(owned, key)
+	db_remove_in(db, owned)
+}
+
+vset_apply_change :: proc(key: []u8, s: vt.Vset, ch: vt.Change, before: []Vset_Charge) {
+	own := cur_db()
+	if ch.label_new {
+		vset_presence_add(key, s)
+	}
+	if ch.label_gone {
+		vset_presence_drop(own, key)
+	}
+	if vt.card(s) == 0 {
+		label_vset_settle(own.id, before, nil)
+		vt.destroy(s)
+		return
+	}
+	label_vset_settle(own.id, before, s)
+}
+
+vadd_labelled :: proc(c: ^Conn, argv: [][]u8, req: ^va.Vadd_Request) {
+	key := req.key
+	defer signal_key(key)
+	e, s, wrong := vset_lookup(key, false)
+	if wrong {
+		vset_wrong_label(c, e)
+		return
+	}
+	add := vt.Add_Request {
+		name     = req.element,
+		vector   = req.vector,
+		quant    = vset_quant(req.quant),
+		reduce   = int(req.reduce),
+		m        = int(req.m),
+		ef       = int(req.ef),
+		attr     = req.attributes,
+		set_attr = req.set_attributes,
+	}
+	a := label_vt_access()
+	sc := vset_scratch_get()
+	if s == nil {
+		created, failed := vt.create_at(&add, &a)
+		if failed.err != .None {
+			pst.dirty_explicit = true
+			vset_reply_failure(c, failed)
+			return
+		}
+		ch, added_failed := vt.add_at(created, &a, &add, sc)
+		if added_failed.err != .None {
+			vt.destroy(created)
+			pst.dirty_explicit = true
+			vset_reply_failure(c, added_failed)
+			return
+		}
+		vset_presence_add(key, created)
+		label_vset_settle(cur_db().id, nil, created)
+		vset_propagate(c, argv, true)
+		reply_bool(c, ch.added)
+		return
+	}
+	before := label_vset_snapshot(s)
+	ch, failed := vt.add_at(s, &a, &add, sc)
+	vset_apply_change(key, s, ch, before)
+	if failed.err != .None {
+		pst.dirty_explicit = true
+		if ch.dropped {
+			removal := [3][]u8{transmute([]u8)string("VREM"), key, req.element}
+			vset_propagate(c, removal[:], true)
+		}
+		vset_reply_failure(c, failed)
+		return
+	}
+	vset_propagate(c, argv, true)
+	reply_bool(c, ch.added)
+}
+
+vrem_labelled :: proc(c: ^Conn, argv: [][]u8, key: []u8, element: []u8) {
+	defer signal_key(key)
+	e, s, wrong := vset_lookup(key, false)
+	if wrong {
+		vset_wrong_label(c, e)
+		return
+	}
+	if s == nil {
+		vset_propagate(c, argv, false)
+		reply_bool(c, false)
+		return
+	}
+	a := label_vt_access()
+	before := label_vset_snapshot(s)
+	ch, failed := vt.remove_at(s, &a, element, vset_scratch_get())
+	vset_apply_change(key, s, ch, before)
+	if failed.err != .None {
+		pst.dirty_explicit = true
+		vset_reply_failure(c, failed)
+		return
+	}
+	vset_propagate(c, argv, ch.found)
+	reply_bool(c, ch.found)
+}
+
+vsetattr_labelled :: proc(c: ^Conn, argv: [][]u8, key: []u8, element: []u8, text: []u8) {
+	defer signal_key(key)
+	e, s, wrong := vset_lookup(key, false)
+	if wrong {
+		vset_wrong_label(c, e)
+		return
+	}
+	if s == nil {
+		vset_propagate(c, argv, false)
+		reply_bool(c, false)
+		return
+	}
+	a := label_vt_access()
+	before := label_vset_snapshot(s)
+	ch, failed := vt.set_attribute_at(s, &a, element, text)
+	vset_apply_change(key, s, ch, before)
+	if failed.err != .None {
+		pst.dirty_explicit = true
+		vset_reply_failure(c, failed)
+		return
+	}
+	vset_propagate(c, argv, ch.found)
+	reply_bool(c, ch.found)
+}
+
+vset_read_view :: proc(c: ^Conn, key: []u8) -> (s: vt.Vset, v: vt.View, wrong: bool, ok: bool) {
+	e: ^Entry
+	e, s, wrong = vset_lookup(key, true)
+	if wrong || s == nil {
+		return
+	}
+	a := label_vt_access()
+	v, ok = vset_view(s, &a)
+	if !ok {
+		s = nil
+	}
+	return
+}
+
+vcard_labelled :: proc(c: ^Conn, key: []u8) {
+	_, v, wrong, ok := vset_read_view(c, key)
+	if wrong {
+		reply_wrongtype(c)
+		return
+	}
+	reply_int(c, i64(vt.view_size(&v)) if ok else 0)
+}
+
+vdim_labelled :: proc(c: ^Conn, key: []u8) {
+	s, _, wrong, ok := vset_read_view(c, key)
+	if wrong {
+		reply_wrongtype(c)
+		return
+	}
+	if !ok {
+		reply_error(c, ERR_VSET_NO_KEY)
+		return
+	}
+	reply_int(c, i64(vt.dim(s)))
+}
+
+vismember_labelled :: proc(c: ^Conn, key: []u8, element: []u8) {
+	_, v, wrong, ok := vset_read_view(c, key)
+	if wrong {
+		reply_wrongtype(c)
+		return
+	}
+	reply_bool(c, ok && vt.view_contains(&v, element))
+}
+
+vgetattr_labelled :: proc(c: ^Conn, key: []u8, element: []u8) {
+	_, v, wrong, ok := vset_read_view(c, key)
+	if wrong {
+		reply_wrongtype(c)
+		return
+	}
+	if !ok {
+		reply_null(c)
+		return
+	}
+	text, has := vt.view_get_attribute(&v, element)
+	if !has {
+		reply_null(c)
+		return
+	}
+	reply_bulk_str(c, text)
+}
+
+vinfo_labelled :: proc(c: ^Conn, key: []u8) {
+	_, v, wrong, ok := vset_read_view(c, key)
+	if wrong {
+		reply_wrongtype(c)
+		return
+	}
+	if !ok {
+		reply_null_array(c)
+		return
+	}
+	info := vt.view_info(&v)
+	names := vt.INFO_FIELDS
+	reply_map(c, len(names))
+	reply_simple(c, names[0])
+	reply_simple(c, vt.quant_name(info.quant))
+	reply_simple(c, names[1])
+	reply_int(c, i64(info.m))
+	reply_simple(c, names[2])
+	reply_int(c, i64(info.dim))
+	reply_simple(c, names[3])
+	reply_int(c, i64(info.projection_input_dim))
+	reply_simple(c, names[4])
+	reply_int(c, i64(info.size))
+	reply_simple(c, names[5])
+	reply_int(c, i64(info.max_level))
+	reply_simple(c, names[6])
+	reply_int(c, i64(info.attributes_count))
+	reply_simple(c, names[7])
+	reply_int(c, i64(info.vset_uid))
+	reply_simple(c, names[8])
+	reply_int(c, i64(info.max_node_uid))
+}
+
+vemb_labelled :: proc(c: ^Conn, key: []u8, element: []u8, raw: bool) {
+	s, v, wrong, ok := vset_read_view(c, key)
+	if wrong {
+		reply_wrongtype(c)
+		return
+	}
+	if !ok {
+		reply_null(c)
+		return
+	}
+	r, found := vt.view_find(&v, element)
+	if !found {
+		reply_null(c)
+		return
+	}
+	if raw {
+		emb := vt.ref_raw_embedding(s, r)
+		reply_array(c, 4 if emb.has_range else 3)
+		reply_simple(c, vt.quant_name(emb.quant))
+		reply_bulk(c, emb.data)
+		reply_double(c, f64(emb.norm))
+		if emb.has_range {
+			reply_double(c, f64(emb.range))
+		}
+		return
+	}
+	resize(&vset_floats, vt.dim(s))
+	values := vt.ref_embedding(s, r, vset_floats[:])
+	reply_array(c, len(values))
+	for x in values {
+		reply_double(c, f64(x))
+	}
+}
+
+vlinks_labelled :: proc(c: ^Conn, key: []u8, element: []u8, with_scores: bool) {
+	s, v, wrong, ok := vset_read_view(c, key)
+	if wrong {
+		reply_wrongtype(c)
+		return
+	}
+	if !ok {
+		reply_null(c)
+		return
+	}
+	self, found := vt.view_find(&v, element)
+	if !found {
+		reply_null(c)
+		return
+	}
+	links: vt.Links
+	defer vt.links_destroy(&links)
+	if !vt.view_links(&v, element, vset_scratch_get(), &links) {
+		reply_null(c)
+		return
+	}
+	reply_array(c, len(links.ends))
+	start := 0
+	for end in links.ends {
+		layer := links.refs[start:end]
+		if with_scores {
+			reply_map(c, len(layer))
+		} else {
+			reply_array(c, len(layer))
+		}
+		for r in layer {
+			reply_bulk(c, vt.ref_name(s, r))
+			if with_scores {
+				reply_double(c, f64(vt.ref_link_score(s, self, r)))
+			}
+		}
+		start = end
+	}
+}
+
+vrange_labelled :: proc(c: ^Conn, req: ^va.Vrange_Request) {
+	s, v, wrong, ok := vset_read_view(c, req.key)
+	if wrong {
+		reply_wrongtype(c)
+		return
+	}
+	if !ok {
+		reply_array(c, 0)
+		return
+	}
+	limit, limited := va.vrange_limit(req)
+	count := -1
+	if limited {
+		count = int(min(limit, i64(max(int))))
+	}
+	clear(&vset_refs)
+	vt.view_range(&v, vset_bound(req.start), vset_bound(req.end), count, &vset_refs)
+	reply_array(c, len(vset_refs))
+	for r in vset_refs {
+		reply_bulk(c, vt.ref_name(s, r))
+	}
+	clear(&vset_refs)
+	vset_trim()
+}
+
+vrandmember_labelled :: proc(c: ^Conn, req: ^va.Vrandmember_Request) {
+	s, v, wrong, ok := vset_read_view(c, req.key)
+	if wrong {
+		reply_wrongtype(c)
+		return
+	}
+	if !req.has_count {
+		if !ok {
+			reply_null(c)
+			return
+		}
+		r, _ := vt.view_random_member(&v)
+		reply_bulk(c, vt.ref_name(s, r))
+		return
+	}
+	if !ok || req.count == 0 {
+		reply_array(c, 0)
+		return
+	}
+	clear(&vset_refs)
+	defer clear(&vset_refs)
+	if req.count > 0 {
+		vt.view_random_distinct(&v, int(min(req.count, i64(vt.view_size(&v)))), &vset_refs, vset_heap())
+		reply_array(c, len(vset_refs))
+		for r in vset_refs {
+			reply_bulk(c, vt.ref_name(s, r))
+		}
+		return
+	}
+	total := vt.repeat_total(req.count)
+	reply_array(c, int(total))
+	for remaining := total; remaining > 0; {
+		batch := min(remaining, VSET_REPLY_CHUNK)
+		clear(&vset_refs)
+		vt.view_random_repeats(&v, int(batch), &vset_refs)
+		for r in vset_refs {
+			reply_bulk(c, vt.ref_name(s, r))
+		}
+		remaining -= batch
+		if vset_output_over(c) {
+			return
+		}
+	}
+}
+
+vsim_labelled :: proc(c: ^Conn, req: ^va.Vsim_Request, err: va.Error) {
+	s, v, wrong, ok := vset_read_view(c, req.key)
+	if !ok && !wrong {
+		reply_array(c, 0)
+		return
+	}
+	if wrong {
+		reply_wrongtype(c)
+		return
+	}
+	if err.kind != .None && err.stage == .After_Key {
+		vset_reply_parse_error(c, err)
+		return
+	}
+	checked := vt.Failure{}
+	if req.query == .Element {
+		if !vt.view_contains(&v, req.element) {
+			checked = vt.failure(.Element_Not_Found)
+		}
+	} else {
+		checked = vset_query_check(s, req)
+	}
+	if checked.err != .None {
+		vset_reply_failure(c, checked)
+		return
+	}
+	if err.kind != .None {
+		vset_reply_parse_error(c, err)
+		return
+	}
+	search := vt.Search_Request {
+		kind        = .Element if req.query == .Element else .Vector,
+		vector      = req.vector,
+		element     = req.element,
+		count       = int(req.count),
+		ef          = int(req.ef),
+		epsilon     = req.epsilon,
+		use_epsilon = req.epsilon > 0,
+		filter      = string(req.filter_text),
+		use_filter  = req.has_filter,
+		filter_ef   = int(req.filter_ef),
+		truth       = req.truth,
+	}
+	clear(&vset_hits)
+	if failed := vt.view_search(&v, &search, vset_scratch_get(), &vset_hits); failed.err != .None {
+		clear(&vset_hits)
+		vset_reply_failure(c, failed)
+		return
+	}
+	vset_reply_named_hits(c, s, vset_hits[:], req.with_scores, req.with_attribs)
+	clear(&vset_hits)
+	vset_trim()
+}
+
+vset_reply_named_attribute :: proc(c: ^Conn, s: vt.Vset, h: vt.Hit) {
+	if text, ok := vt.hit_attribute(s, h); ok {
+		reply_bulk_str(c, text)
+	} else {
+		reply_null(c)
+	}
+}
+
+vset_reply_named_hits :: proc(c: ^Conn, s: vt.Vset, hits: []vt.Hit, scores: bool, attribs: bool) {
+	n := len(hits)
+	switch {
+	case scores && attribs:
+		if c.resp >= RESP3 {
+			reply_map(c, n)
+		} else {
+			reply_array(c, 3 * n)
+		}
+		for h in hits {
+			reply_bulk(c, vt.hit_name(s, h))
+			if c.resp >= RESP3 {
+				reply_array(c, 2)
+			}
+			reply_double(c, h.score)
+			vset_reply_named_attribute(c, s, h)
+		}
+	case scores:
+		reply_map(c, n)
+		for h in hits {
+			reply_bulk(c, vt.hit_name(s, h))
+			reply_double(c, h.score)
+		}
+	case attribs:
+		reply_map(c, n)
+		for h in hits {
+			reply_bulk(c, vt.hit_name(s, h))
+			vset_reply_named_attribute(c, s, h)
+		}
+	case:
+		reply_array(c, n)
+		for h in hits {
+			reply_bulk(c, vt.hit_name(s, h))
+		}
+	}
+}
+
+vset_view_memory :: proc(obj: rawptr) -> int {
+	s := cast(vt.Vset)obj
+	a := label_vt_access()
+	v, ok := vset_view(s, &a)
+	if !ok {
+		return 0
+	}
+	return vt.view_memory(&v)
+}
+
+vset_view_serialized :: proc(obj: rawptr) -> int {
+	s := cast(vt.Vset)obj
+	a := label_vt_access()
+	v, ok := vset_view(s, &a)
+	if !ok {
+		return 0
+	}
+	return vt.view_serialized_size(&v)
 }

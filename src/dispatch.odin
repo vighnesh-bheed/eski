@@ -372,6 +372,19 @@ execute_hooked :: #force_no_inline proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8)
 		return
 	}
 	db_cur = c.db
+	if labels_on {
+		if refusal := keyspace_label_enter(c, cmd, argv); refusal != "" {
+			keyspace_label_leave()
+			stat_cur = nil
+			reply_error(c, refusal)
+			tx_flag(c)
+			stat_reject(st, argv)
+			if ps_exec != nil {
+				pubsub_after(c, nil, nil)
+			}
+			return
+		}
+	}
 	store_no_touch = .No_Touch in c.flags && cmd.handler != cmd_touch
 	pending := c.wlen - c.wpos
 	dirty := pst.dirty
@@ -386,6 +399,9 @@ execute_hooked :: #force_no_inline proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8)
 		monitor_feed_raw(c, argv)
 	}
 	cmd.handler(c, argv)
+	if labels_on {
+		keyspace_label_leave()
+	}
 	ticks := mono_now() - t0
 	ps_hooked = false
 	deferred := compute_note_deferred(c, cmd, st, t0)

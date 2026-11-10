@@ -273,6 +273,9 @@ label_scheme_apply :: proc() -> string {
 	}
 	labels_on = labelled
 	access_scheme_changed()
+	if labelled {
+		keyspace_labels_enable()
+	}
 	return ""
 }
 

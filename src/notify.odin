@@ -67,13 +67,13 @@ notify_chan: [dynamic]u8
 
 notify :: #force_inline proc(class: Notify_Class, event: string, key: []u8) {
 	if class in notify_active {
-		notify_publish(event, key, cur_db().id)
+		notify_publish(event, key, cur_db().id, cur_db().label)
 	}
 }
 
 notify_in :: #force_inline proc(class: Notify_Class, event: string, key: []u8, db: ^Db) {
 	if class in notify_active {
-		notify_publish(event, key, db.id)
+		notify_publish(event, key, db.id, db.label)
 	}
 }
 
@@ -105,7 +105,7 @@ signal_key_hooked :: #force_no_inline proc(key: []u8, db: ^Db, attributed: bool)
 		watch_touch(key, db)
 	}
 	if tracking_on {
-		tracking_invalidate_key(key, attributed)
+		tracking_invalidate_key(key, attributed, true, db.label if labels_on else lb.ID_NONE)
 	}
 }
 

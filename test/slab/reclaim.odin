@@ -43,7 +43,7 @@ resident_token :: proc() {
 
 resident_fixture :: proc() {
 	owners := make([]Db, 1)
-	dbs = owners
+	set_owners(owners)
 	defer delete(owners)
 	s := &dbs[0].slab
 	keeper := slab_alloc(s, 24)
@@ -92,7 +92,7 @@ resident_fixture :: proc() {
 
 cow_fixture :: proc() {
 	owners := make([]Db, 1)
-	dbs = owners
+	set_owners(owners)
 	defer delete(owners)
 	s := &dbs[0].slab
 	keeper := slab_alloc(s, 24)
@@ -266,7 +266,7 @@ recount :: proc(s: ^Slab) {
 
 pool_reclaim :: proc() {
 	owners := make([]Db, 1)
-	dbs = owners
+	set_owners(owners)
 	defer delete(owners)
 	s := &dbs[0].slab
 	keeper := slab_alloc(s, 24)
@@ -332,7 +332,7 @@ pool_reclaim :: proc() {
 	work = slab_reclaim(now_ns() + 1_000_000_000)
 	check(work.retired == 1 && s.base == nil && s.runs == nil, "whole-zero owner retirement clears payload and descriptors")
 	check(!slab_reclaim_pending() && db_used_memory == 0 && storage_metadata_owned == 0 && storage_metadata_virtual == 0 && storage_slab_virtual == 0, "whole-zero release converges every owner and mapping counter")
-	dbs = nil
+	set_owners(nil)
 }
 
 metadata_growth :: proc() {
@@ -357,7 +357,7 @@ metadata_growth :: proc() {
 
 owner_budget :: proc() {
 	owners := make([]Db, 20)
-	dbs = owners
+	set_owners(owners)
 	defer delete(owners)
 	for &d in dbs {
 		off := slab_alloc(&d.slab, 64)
@@ -387,13 +387,13 @@ owner_budget :: proc() {
 	work = slab_reclaim(now_ns() + 1_000_000_000, true)
 	check(work.retired == 1 && s.base == nil && storage_metadata_virtual == 0 && storage_slab_virtual == 0, "admitted owner releases both exact mapping prefixes")
 	graveyard_len = 0
-	dbs = nil
+	set_owners(nil)
 }
 
 reclaim_fairness :: proc() {
 	for locked in ([2]bool{false, true}) {
 		owners := make([]Db, 16)
-		dbs = owners
+		set_owners(owners)
 		keepers: [2]u32
 		for &keeper, i in keepers {
 			s := &dbs[i].slab
@@ -438,7 +438,7 @@ reclaim_fairness :: proc() {
 			slab_detach(&dbs[i].slab)
 		}
 		delete(owners)
-		dbs = nil
+		set_owners(nil)
 		check(!slab_reclaim_pending() && storage_metadata_owned == 0 && storage_slab_virtual == 0, "fairness fixture releases all ownership")
 	}
 }

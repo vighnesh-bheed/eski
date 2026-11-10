@@ -139,6 +139,17 @@ cmd_pfcount :: proc(c: ^Conn, argv: [][]u8) {
 			return
 		}
 		invalid := false
+		if label_entry_foreign(e) {
+			clear(&hll_scratch)
+			append(&hll_scratch, ..e.val)
+			counted := hll.hll_count(hll_scratch[:], &invalid)
+			if invalid {
+				reply_error(c, hll.HLL_ERR_INVALIDOBJ)
+				return
+			}
+			reply_int(c, i64(counted))
+			return
+		}
 		card := hll.hll_count(e.val, &invalid)
 		if invalid {
 			reply_error(c, hll.HLL_ERR_INVALIDOBJ)

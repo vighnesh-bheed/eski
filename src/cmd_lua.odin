@@ -396,6 +396,13 @@ lua_inner :: proc(run: ^Lua_Invocation, argv: [][]u8) {
 		db_cur, store_no_touch, stat_cur, deny_blocking = saved_db, saved_touch, saved_stat, saved_deny
 	}
 	db_cur, store_no_touch, deny_blocking = run.db, .No_Touch in run.source.flags && cmd.handler != cmd_touch, true
+	if labels_on {
+		if refusal := label_step(run.db, cmd, argv); refusal != "" {
+			lua_inner_reject(run, refusal)
+			stat_reject(hot, argv)
+			return
+		}
+	}
 	client.last_cmd = cmd.name
 	dirty := pst.dirty
 	if aof.feed {

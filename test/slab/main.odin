@@ -12,6 +12,7 @@ Db :: struct {
 	slab: Slab,
 }
 dbs: []Db
+db_parts: [dynamic]^Db
 graveyard_len: int
 GRAVEYARD_MAX :: 64
 RELEASE_NOW_BYTES :: 1 << 20
@@ -23,6 +24,14 @@ store_fatal :: proc "contextless" (msg: string) -> ! {
 	linux.write(2, transmute([]u8)msg)
 	linux.write(2, transmute([]u8)string("\n"))
 	linux.exit_group(1)
+}
+
+set_owners :: proc(owners: []Db) {
+	dbs = owners
+	clear(&db_parts)
+	for &d in dbs {
+		append(&db_parts, &d)
+	}
 }
 
 now_ns :: proc "contextless" () -> i64 {

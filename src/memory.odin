@@ -120,7 +120,7 @@ mem_storage :: proc "contextless" () -> (m: Storage_Memory) {
 	m.dead_payload = storage_dead_payload
 	m.lazy_payload = lazyfree_pending_bytes()
 	m.lazy_slab_live = lazyfree_pending_slab_bytes()
-	for &d in dbs {
+	for d in db_parts {
 		s := &d.slab
 		if s.base == nil {
 			continue
@@ -207,7 +207,7 @@ mem_sample :: proc() {
 	mem_sample_used = mem_used()
 	mi := mallinfo2()
 	slab_live := lazyfree_pending_slab_bytes()
-	for &d in dbs {
+	for d in db_parts {
 		slab_live += d.slab.live
 	}
 	mapped, retired, _ := ht.maintenance_memory()
@@ -232,6 +232,19 @@ mem_db_overhead :: proc "contextless" (db: ^Db) -> int {
 	return db.t[0].size + db.t[1].size + db.next.size
 }
 
+mem_db_total_overhead :: proc "contextless" (db: ^Db) -> int {
+	if !labels_on {
+		return mem_db_overhead(db)
+	}
+	total := 0
+	for p in db_parts {
+		if p.id == db.id {
+			total += mem_db_overhead(p)
+		}
+	}
+	return total
+}
+
 mem_overhead :: proc() -> (mh: Mem_Overhead) {
 	used := mem_used()
 	mh.total = used
@@ -246,8 +259,8 @@ mem_overhead :: proc() -> (mh: Mem_Overhead) {
 	mh.aof = mem_aof_buffer()
 	total := mem_startup + mh.clients + client_registry_memory() + mh.aof + mem_keyspace() + ht.maintenance_metadata() + st.maintenance_metadata() + zt.maintenance_metadata() + intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed) + compute_reserved + keyspace_memory_used() + lua_memory_used() + stat_error_memory() + diagnostics_memory_used()
 	mh.lut = mem_keyspace()
-	for &d in dbs {
-		mh.keys += db_size_of(&d)
+	for d in db_parts {
+		mh.keys += db_size_of(d)
 		if d.rehash_idx >= 0 {
 			mh.rehashing += d.t[0].size
 			mh.rehash_count += 1
@@ -470,7 +483,7 @@ memory_stats :: proc(c: ^Conn) {
 	mh := mem_overhead()
 	ndbs := 0
 	for &d in dbs {
-		if mem_db_overhead(&d) > 0 {
+		if mem_db_total_overhead(&d) > 0 {
 			ndbs += 1
 		}
 	}
@@ -487,7 +500,7 @@ memory_stats :: proc(c: ^Conn) {
 	library_host, _ := lua_library_memory()
 	reply_kv_int(c, "functions.caches", i64(library_host))
 	for &d in dbs {
-		if mem_db_overhead(&d) == 0 {
+		if mem_db_total_overhead(&d) == 0 {
 			continue
 		}
 		clear(&scratch)
@@ -495,7 +508,7 @@ memory_stats :: proc(c: ^Conn) {
 		sb_int(&scratch, i64(d.id))
 		reply_bulk(c, scratch[:])
 		reply_map(c, 2)
-		reply_kv_int(c, "overhead.hashtable.main", i64(mem_db_overhead(&d)))
+		reply_kv_int(c, "overhead.hashtable.main", i64(mem_db_total_overhead(&d)))
 		reply_kv_int(c, "overhead.hashtable.expires", 0)
 	}
 	reply_kv_int(c, "overhead.db.hashtable.lut", i64(mh.lut))
@@ -564,6 +577,9 @@ entry_memory :: proc(e: ^Entry) -> int {
 		return stream_memory(sm)
 	}
 	if v := entry_object(e, .Vectorset); v != nil {
+		if labels_on {
+			return vset_view_memory(v)
+		}
 		return vset_object_acct(v)
 	}
 	return int(e.cap)

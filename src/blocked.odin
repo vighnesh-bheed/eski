@@ -3,6 +3,7 @@ package main
 import "base:intrinsics"
 import "base:runtime"
 import "core:strings"
+import lb "label"
 import ld "ldfloat"
 
 ERR_TIMEOUT_NOT_FLOAT :: "ERR timeout is not a float or out of range"
@@ -25,6 +26,8 @@ Block_State :: struct {
 	deadline:            i64,
 	keys:                [dynamic]string,
 	wake_on_key_removal: bool,
+	exact:               bool,
+	label:               lb.Id,
 	stream_ids:          [dynamic][2]u64,
 }
 
@@ -233,14 +236,16 @@ block_db_index :: proc "contextless" (db: ^Db) -> int {
 	}
 	base := uintptr(raw_data(dbs))
 	p := uintptr(db)
-	if p < base {
-		return -1
+	if p >= base {
+		i := int((p - base) / size_of(Db))
+		if i < len(dbs) && &dbs[i] == db {
+			return i
+		}
 	}
-	i := int((p - base) / size_of(Db))
-	if i >= len(dbs) || &dbs[i] != db {
-		return -1
+	if labels_on && db.id >= 0 && db.id < len(dbs) {
+		return db.id
 	}
-	return i
+	return -1
 }
 
 @(private = "file")
@@ -298,6 +303,8 @@ block_for_keys :: proc(c: ^Conn, type: Block_Type, keys: [][]u8, deadline: i64, 
 	clear(&bs.keys)
 	bs.deadline = deadline
 	bs.wake_on_key_removal = wake_on_key_removal
+	bs.label = access.id if labels_on else lb.BOTTOM_ID
+	bs.exact = labels_on && label_cmd_writes
 	m := &block_keys[dbi]
 	outer: for k in keys {
 		kp, vp, inserted, _ := map_entry(m, string(k))
@@ -495,6 +502,9 @@ block_signal_key :: proc(db: ^Db, key: []u8, type: Obj_Type) {
 	if !found || bk.ready {
 		return
 	}
+	if labels_on && !block_label_wakes(bk, db.label) {
+		return
+	}
 	block_queue_ready(dbi, k, bk)
 }
 
@@ -518,6 +528,16 @@ block_check_removed :: proc() {
 			if bk.nokey == 0 || bk.ready {
 				continue
 			}
+			if labels_on {
+				for w in bk.waiters {
+					wt, wf := block_waiter_type(dbi, key, w)
+					if !wf || wt != .Stream {
+						block_queue_ready(dbi, key, bk)
+						break
+					}
+				}
+				continue
+			}
 			t, found := block_key_type(dbi, key)
 			if !found || t != .Stream {
 				block_queue_ready(dbi, key, bk)
@@ -532,6 +552,14 @@ block_signal_existing :: proc(db: ^Db, key: []u8) {
 	}
 	dbi := block_db_index(db)
 	if dbi < 0 {
+		return
+	}
+	if labels_on {
+		l := lookup_make(key)
+		tt, i := db_locate_slot(db, &l)
+		if i >= 0 && label_slot_live(db, tt, i) {
+			block_signal_key(db, key, entry_type(db_view_slot(db, tt, i)))
+		}
 		return
 	}
 	t, found := block_key_type(dbi, string(key))
@@ -552,7 +580,12 @@ block_scan_ready :: proc(db: ^Db) {
 		if bk.ready || len(bk.waiters) == 0 {
 			continue
 		}
-		_, found := block_key_type(dbi, key)
+		found: bool
+		if labels_on {
+			_, found = block_any_waiter_type(dbi, key, bk)
+		} else {
+			_, found = block_key_type(dbi, key)
+		}
 		if found || bk.nokey > 0 {
 			block_queue_ready(dbi, key, bk)
 		}
@@ -627,7 +660,13 @@ block_serve_key :: proc(dbi: int, key: string) {
 	i := 0
 	for i < len(bk.waiters) {
 		c := bk.waiters[i]
-		t, present := block_key_type(dbi, key)
+		t: Obj_Type
+		present: bool
+		if labels_on {
+			t, present = block_waiter_type(dbi, key, c)
+		} else {
+			t, present = block_key_type(dbi, key)
+		}
 		if !present && bk.nokey == 0 {
 			break
 		}
@@ -737,4 +776,57 @@ block_before_sleep :: proc() {
 	block_handle_timeouts()
 	block_serve_ready()
 	block_drain()
+}
+
+@(private = "file")
+block_label_wakes :: proc(bk: ^Block_Key, written: lb.Id) -> bool {
+	for w in bk.waiters {
+		bs := w.bstate
+		if bs == nil {
+			continue
+		}
+		if bs.exact {
+			if bs.label == written {
+				return true
+			}
+		} else if access_dominates(bs.label, written) {
+			return true
+		}
+	}
+	return false
+}
+
+@(private = "file")
+block_waiter_type :: proc(dbi: int, key: string, c: ^Conn) -> (t: Obj_Type, found: bool) {
+	bs := c.bstate
+	if bs == nil {
+		return
+	}
+	k := transmute([]u8)key
+	if bs.exact {
+		p := label_part(dbi, bs.label)
+		if p == nil {
+			return
+		}
+		l := lookup_make(k)
+		tt, i := db_locate_slot(p, &l)
+		if i < 0 || !label_slot_live(p, tt, i) {
+			return
+		}
+		return entry_type(db_view_slot(p, tt, i)), true
+	}
+	p, tt, i := label_resolve(dbi, k, bs.label, access_visibility(bs.label))
+	if i < 0 {
+		return
+	}
+	return entry_type(db_view_slot(p, tt, i)), true
+}
+
+block_any_waiter_type :: proc(dbi: int, key: string, bk: ^Block_Key) -> (t: Obj_Type, found: bool) {
+	for w in bk.waiters {
+		if t, found = block_waiter_type(dbi, key, w); found {
+			return
+		}
+	}
+	return
 }

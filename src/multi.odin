@@ -1,6 +1,7 @@
 package main
 
 import "base:intrinsics"
+import lb "label"
 
 Tx_Flag :: enum u8 {
 	Multi,
@@ -19,6 +20,7 @@ Watched_Key :: struct {
 	key:     string,
 	expired: bool,
 	present: bool,
+	label:   lb.Id,
 }
 
 Watcher :: struct {
@@ -413,6 +415,14 @@ tx_run :: proc(c: ^Conn, exec_argv: [][]u8) {
 		notices := len(c.pubsub.deferred) if c.pubsub != nil else 0
 		hot := stat_of(cmd)
 		db_cur = c.db
+		if labels_on {
+			if refusal := label_step(c.db, cmd, args); refusal != "" {
+				stat_cur = nil
+				reply_error(c, refusal)
+				tx_reply_step(c, pending, closing)
+				continue
+			}
+		}
 		store_no_touch = .No_Touch in c.flags && cmd.handler != cmd_touch
 		dirty := pst.dirty
 		if aof.feed {
@@ -573,10 +583,15 @@ watch_key :: proc(c: ^Conn, db: ^Db, key: []u8) {
 	} else if watch_holds(st, c, wk, db.id) {
 		return
 	}
-	exists, expired := db_key_state(db, key)
+	exists, expired: bool
+	if labels_on {
+		exists, expired = label_key_state(db.id, key, access.id)
+	} else {
+		exists, expired = db_key_state(db, key)
+	}
 	watch_metadata_adjust(wk, -1)
 	append(&wk.watchers, Watcher{c, len(st.watched)})
-	append(&st.watched, Watched_Key{db.id, wk.key, exists && expired, exists && !expired})
+	append(&st.watched, Watched_Key{db.id, wk.key, exists && expired, exists && !expired, access.id if labels_on else lb.BOTTOM_ID})
 	watch_metadata_adjust(wk, 1)
 	client_metadata_sync(c)
 	if len(st.watched) == 1 {
@@ -651,10 +666,16 @@ watch_touch :: proc(key: []u8, db: ^Db, known: bool = false, known_exists: bool 
 	for w in wk.watchers {
 		c := w.c
 		entry := &c.tx.watched[w.idx]
+		if labels_on && !access_dominates(entry.label, db.label) {
+			continue
+		}
 		if entry.expired {
-			if !probed {
+			if !probed || labels_on {
 				if known {
 					gone = !known_exists
+				} else if labels_on {
+					exists, _ := label_key_state(db.id, key, entry.label)
+					gone = !exists
 				} else {
 					exists, _ := db_key_state(db, key)
 					gone = !exists
@@ -688,6 +709,9 @@ watch_db_replaced :: proc(emptied: ^Db, replaced: ^Db) {
 		for w in wk.watchers {
 			c := w.c
 			entry := &c.tx.watched[w.idx]
+			if labels_on && !access_dominates(entry.label, emptied.label) {
+				continue
+			}
 			if live || (old_stale && !entry.expired) {
 				watch_mark(c)
 			} else {
@@ -716,6 +740,19 @@ watch_swap :: proc(a: int, b: int) {
 	if watch_total == 0 || a == b || a < 0 || b < 0 || a >= len(dbs) || b >= len(dbs) {
 		return
 	}
+	if labels_on {
+		for id in ([2]int{a, b}) {
+			if id < len(watch_dbs) {
+				for _, wk in watch_dbs[id] {
+					for w in wk.watchers {
+						watch_mark(w.c)
+					}
+				}
+			}
+		}
+		watch_dirty_victims()
+		return
+	}
 	watch_db_replaced(&dbs[a], &dbs[b])
 	watch_db_replaced(&dbs[b], &dbs[a])
 	watch_dirty_victims()
@@ -730,7 +767,12 @@ watch_expired_since :: proc(c: ^Conn) -> bool {
 		if w.expired {
 			continue
 		}
-		exists, expired := db_key_state(&dbs[w.db], transmute([]u8)w.key)
+		exists, expired: bool
+		if labels_on {
+			exists, expired = label_key_state(w.db, transmute([]u8)w.key, w.label)
+		} else {
+			exists, expired = db_key_state(&dbs[w.db], transmute([]u8)w.key)
+		}
 		if w.present && (!exists || expired) {
 			return true
 		}

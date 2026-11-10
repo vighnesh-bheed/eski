@@ -146,6 +146,8 @@ run_script "test/compatibility/datatype_parity.py" "datatype-parity-workers" --s
 run_script "test/scripting/debugger.py" "lua-debugger" --server "$server_binary"
 run_script "test/compatibility/labels_subjects.py" "labels-coordinator" --server "$server_binary" --keyspace-threads 0
 run_script "test/compatibility/labels_subjects.py" "labels-workers" --server "$server_binary" --keyspace-threads 2
+run_script "test/compatibility/labels_keyspace.py" "labels-keyspace-coordinator" --server "$server_binary" --keyspace-threads 0
+run_script "test/compatibility/labels_keyspace.py" "labels-keyspace-workers" --server "$server_binary" --keyspace-threads 2
 
 if [ "$ran" -eq 0 ]; then
 	echo "no test packages found yet"

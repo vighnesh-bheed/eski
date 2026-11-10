@@ -495,6 +495,26 @@ info_cpu :: proc(b: ^[dynamic]u8) {
 @(private = "file")
 info_keyspace :: proc(b: ^[dynamic]u8) {
 	info_section_header(b, "Keyspace")
+	if labels_on {
+		for i in 0 ..< len(dbs) {
+			keys, expires, avg_ttl, subexpiry := label_keyspace_line(i)
+			if keys <= 0 {
+				continue
+			}
+			sb_str(b, "db")
+			sb_int(b, i64(i))
+			sb_str(b, ":keys=")
+			sb_int(b, i64(keys))
+			sb_str(b, ",expires=")
+			sb_int(b, i64(expires))
+			sb_str(b, ",avg_ttl=")
+			sb_int(b, avg_ttl)
+			sb_str(b, ",subexpiry=")
+			sb_int(b, i64(subexpiry))
+			sb_str(b, "\r\n")
+		}
+		return
+	}
 	for &d in dbs {
 		keys := db_size_of(&d)
 		if keys == 0 {

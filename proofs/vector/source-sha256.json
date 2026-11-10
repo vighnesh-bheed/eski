@@ -22,7 +22,7 @@
   "src/vfilter/compile.odin": "87ff037bffee43b656ecf86989f8d431721b1c582a8a04340e637a59afe5c12f",
   "src/vfilter/value.odin": "cf44c8582407ddeadfa30d15ea0d5bd1030ebf827cce6a891bc5f90148e68094",
   "src/vfilter/attribute.odin": "8589f9ed5e673a825a4ac865acd805ff643a425d671456d6f124fae38e6d2280",
-  "src/vsettype/labelled.odin": "023d937332b9ed6e5beb39d03152fdcf47171c1ab12cfa95f204cd2bd68c3225",
+  "src/vsettype/labelled.odin": "d9a11f76d16ad27ba35f070809a41ea696f006df5f7338372a93a39dd6e16a44",
   "src/vsettype/view.odin": "a91105cdb8ce586c3183bd4edc2469445691cad8b55c528871cc5d1ee31f106f",
   "src/vsettype/write.odin": "ae734afc865937a001172e463fa259fd528e4b7bac401daa8d761c36e5f97954",
   "src/vsettype/grow.odin": "917f6b909a9a71a860e5cc7779e9c94876cda67a5c17c9c757588090b4f9f996",

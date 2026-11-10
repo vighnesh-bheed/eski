@@ -2,6 +2,7 @@ package main
 
 import "core:slice"
 import "core:sys/linux"
+import lb "label"
 
 Track_Flag :: enum u8 {
 	On,
@@ -131,12 +132,14 @@ Trk_Entry :: struct {
 
 @(private = "file")
 Trk_Batch_Key :: struct {
-	key: string,
-	by:  i64,
+	key:   string,
+	by:    i64,
+	label: lb.Id,
 }
 
 @(private = "file")
 Trk_Prefix :: struct {
+	labelled_seen: bool,
 	batch_bytes: int,
 	prefix:  []u8,
 	clients: [dynamic]^Conn,
@@ -202,6 +205,9 @@ trk_parsed: [dynamic][]u8
 
 @(private = "file")
 trk_targets: [dynamic]^Conn
+
+@(private = "file")
+trk_seen_key: [dynamic]u8
 
 @(private = "file")
 trk_redirects: map[i64]^Conn
@@ -460,6 +466,12 @@ trk_batch_reset :: proc(bs: ^Trk_Prefix) {
 	for k in bs.batch {
 		delete(k.key)
 	}
+	if bs.labelled_seen {
+		for k in bs.seen {
+			delete(k)
+		}
+		bs.labelled_seen = false
+	}
 	clear(&bs.batch)
 	clear(&bs.seen)
 	bs.batch_bytes = 0
@@ -507,7 +519,7 @@ trk_enable_prefix :: proc(c: ^Conn, st: ^Ps_State, p: []u8) {
 }
 
 @(private = "file")
-trk_remember_broadcast :: proc(key: []u8, by: ^Conn) {
+trk_remember_broadcast :: proc(key: []u8, by: ^Conn, label: lb.Id) {
 	by_id: i64 = 0
 	if by != nil {
 		by_id = by.id
@@ -520,6 +532,10 @@ trk_remember_broadcast :: proc(key: []u8, by: ^Conn) {
 		if !ok {
 			continue
 		}
+		if labels_on && label != lb.ID_NONE {
+			trk_remember_labelled(bs, key, by_id, label)
+			continue
+		}
 		if at, seen := bs.seen[string(key)]; seen {
 			bs.batch[at].by = by_id
 			continue
@@ -527,7 +543,7 @@ trk_remember_broadcast :: proc(key: []u8, by: ^Conn) {
 		trk_metadata_adjust(bs, -1)
 		k := string(trk_clone(key))
 		bs.seen[k] = len(bs.batch)
-		append(&bs.batch, Trk_Batch_Key{k, by_id})
+		append(&bs.batch, Trk_Batch_Key{k, by_id, lb.ID_NONE})
 		bs.batch_bytes += len(k)
 		trk_metadata_adjust(bs, 1)
 		trk_bcast_dirty = true
@@ -564,6 +580,15 @@ trk_flush_bcast :: proc() {
 		slice.sort_by(bs.batch[:], proc(x, y: Trk_Batch_Key) -> bool {
 			return x.key < y.key
 		})
+		if labels_on {
+			for c in bs.clients {
+				if trk_batch_payload_labelled(&trk_payload_own, bs, c) > 0 {
+					trk_deliver(c, c.pubsub, trk_payload_own[:], false)
+				}
+			}
+			trk_batch_reset(bs)
+			continue
+		}
 		all := trk_batch_payload(&trk_payload, bs, 0)
 		for c in bs.clients {
 			st := c.pubsub
@@ -881,20 +906,24 @@ client_trackinginfo :: proc(c: ^Conn, argv: [][]u8) {
 	}
 }
 
-tracking_invalidate_key :: proc(key: []u8, attributed: bool, bcast := true) {
+tracking_invalidate_key :: proc(key: []u8, attributed: bool, bcast := true, label := lb.ID_NONE) {
 	mem_registry_changed()
 	by: ^Conn = nil
 	if attributed {
 		by = ps_exec
 	}
 	if bcast && len(trk_prefixes) > 0 {
-		trk_remember_broadcast(key, by)
+		trk_remember_broadcast(key, by, label)
 	}
 	if len(trk_table) == 0 {
 		return
 	}
 	e, found := trk_table[string(key)]
 	if !found {
+		return
+	}
+	if labels_on && label != lb.ID_NONE {
+		trk_invalidate_labelled(e, by, label)
 		return
 	}
 	trk_unlink(e)
@@ -1052,4 +1081,158 @@ tracking_release_idle :: proc() {
 	delete(trk_bcast_lens); trk_bcast_lens = nil
 	delete(trk_bcast_lens_count); trk_bcast_lens_count = nil
 	delete(trk_parsed); trk_parsed = nil
+}
+
+@(private = "file")
+trk_remember_labelled :: proc(bs: ^Trk_Prefix, key: []u8, by_id: i64, label: lb.Id) {
+	clear(&trk_seen_key)
+	append(&trk_seen_key, ..key)
+	append(&trk_seen_key, u8(u16(label) >> 8), u8(u16(label) & 0xFF))
+	if at, seen := bs.seen[string(trk_seen_key[:])]; seen {
+		bs.batch[at].by = by_id
+		return
+	}
+	trk_metadata_adjust(bs, -1)
+	composite := string(trk_clone(trk_seen_key[:]))
+	k := string(trk_clone(key))
+	bs.seen[composite] = len(bs.batch)
+	bs.labelled_seen = true
+	append(&bs.batch, Trk_Batch_Key{k, by_id, label})
+	bs.batch_bytes += len(k) + len(composite)
+	trk_metadata_adjust(bs, 1)
+	trk_bcast_dirty = true
+}
+
+@(private = "file")
+trk_batch_payload_labelled :: proc(b: ^[dynamic]u8, bs: ^Trk_Prefix, c: ^Conn) -> int {
+	session := access_conn_session(c)
+	skip: i64 = c.id if .Noloop in c.pubsub.trk else 0
+	count := 0
+	last := ""
+	have_last := false
+	for k in bs.batch {
+		if skip != 0 && k.by == skip {
+			continue
+		}
+		l, ok := access_label_of(k.label)
+		if !ok || !lb.dominates(session, l) {
+			continue
+		}
+		if have_last && last == k.key {
+			continue
+		}
+		last = k.key
+		have_last = true
+		count += 1
+	}
+	clear(b)
+	append(b, '*')
+	trk_put_int(b, i64(count))
+	append(b, "\r\n")
+	have_last = false
+	for k in bs.batch {
+		if skip != 0 && k.by == skip {
+			continue
+		}
+		l, ok := access_label_of(k.label)
+		if !ok || !lb.dominates(session, l) {
+			continue
+		}
+		if have_last && last == k.key {
+			continue
+		}
+		last = k.key
+		have_last = true
+		trk_put_bulk(b, transmute([]u8)k.key)
+	}
+	return count
+}
+
+@(private = "file")
+trk_invalidate_labelled :: proc(e: ^Trk_Entry, by: ^Conn, label: lb.Id) {
+	l, _ := access_label_of(label)
+	payload := trk_key_payload(&trk_payload, e.key)
+	kept := 0
+	for id in e.ids {
+		c, ok := trk_conns[id]
+		if !ok {
+			continue
+		}
+		if !lb.dominates(access_conn_session(c), l) {
+			e.ids[kept] = id
+			kept += 1
+			continue
+		}
+		st := c.pubsub
+		if .Bcast in st.trk {
+			continue
+		}
+		if c == by && .Noloop in st.trk {
+			continue
+		}
+		trk_deliver(c, st, payload, false)
+	}
+	if kept == 0 {
+		trk_unlink(e)
+		trk_free_entry(e)
+		return
+	}
+	trk_items -= len(e.ids) - kept
+	resize(&e.ids, kept)
+}
+
+label_tracking_flush :: proc(label: lb.Id) {
+	if tracking_clients == 0 {
+		return
+	}
+	l, _ := access_label_of(label)
+	targets := &trk_targets
+	clear(targets)
+	for _, c in trk_conns {
+		if lb.dominates(access_conn_session(c), l) {
+			append(targets, c)
+		}
+	}
+	slice.sort_by(targets[:], proc(a, b: ^Conn) -> bool {
+		return a.id < b.id
+	})
+	for c in targets {
+		trk_deliver(c, c.pubsub, nil, true)
+	}
+	if len(targets) > 0 {
+		i := 0
+		for i < len(trk_dense) {
+			e := trk_dense[i]
+			kept := 0
+			for id in e.ids {
+				drop := false
+				for c in targets {
+					if c.id == id {
+						drop = true
+						break
+					}
+				}
+				if !drop {
+					e.ids[kept] = id
+					kept += 1
+				}
+			}
+			if kept == 0 {
+				trk_unlink(e)
+				trk_free_entry(e)
+				continue
+			}
+			trk_items -= len(e.ids) - kept
+			resize(&e.ids, kept)
+			i += 1
+		}
+	}
+	clear(targets)
+	mem_registry_changed()
+}
+
+tracking_bcast_settle :: proc() {
+	if trk_bcast_dirty {
+		trk_flush_bcast()
+	}
 }

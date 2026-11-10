@@ -214,7 +214,7 @@ special_mc_port := Config_Special{config_mc_port_set, config_mc_port_get, config
 special_mc_item_size := Config_Special{config_mc_item_size_set, config_mc_item_size_get, config_mc_item_size_rewrite}
 special_databases := Config_Special{config_databases_set, config_databases_get, config_databases_rewrite}
 
-CONFIG_TABLE_LEN :: 205
+CONFIG_TABLE_LEN :: 207
 
 configs: [CONFIG_TABLE_LEN]Config
 
@@ -425,6 +425,8 @@ config_table_init :: proc() {
 		{name = "label-token-audience", type = .Str, flags = {.Hidden}, store = &label_token_audience},
 		{name = "label-context-idle-timeout", type = .Num, flags = {.Hidden}, def = 3600, lo = 1, hi = u64(INT_MAX_CFG), store = &label_context_idle},
 		{name = "label-context-max-per-login", type = .Num, flags = {.Hidden}, def = 1000, lo = 1, hi = u64(INT_MAX_CFG), store = &label_context_cap},
+		{name = "label-partitions-max", type = .Num, flags = {.Immutable, .Hidden}, def = LABEL_PARTITIONS_DEFAULT, lo = 1, hi = 1 << 20, store = &label_partitions_max},
+		{name = "label-stream-seed", type = .Num, flags = {.Immutable, .Hidden}, def = 0, lo = 0, hi = LLONG_MAX_CFG, store = &label_stream_seed},
 	}
 	#assert(len(t) == CONFIG_TABLE_LEN)
 	configs = t

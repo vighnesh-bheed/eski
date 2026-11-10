@@ -320,6 +320,9 @@ rename_relocate :: proc(c: ^Conn, src, dst: []u8, overwrite: bool) {
 	if overwrite {
 		db_remove(dst)
 	}
+	if labels_on {
+		label_vset_detach_key(cur_db(), src)
+	}
 	db_rename(src, dst)
 	pst.dirty += 1
 	hash_rename(dst)
@@ -327,7 +330,7 @@ rename_relocate :: proc(c: ^Conn, src, dst: []u8, overwrite: bool) {
 	moved := db_find_notouch(dst)
 	if moved != nil {
 		entry_access_init(moved)
-		block_signal_key(c.db, dst, entry_type(moved))
+		block_signal_key(cur_db(), dst, entry_type(moved))
 	}
 }
 
@@ -430,6 +433,10 @@ cmd_move :: proc(c: ^Conn, argv: [][]u8) {
 		reply_error(c, "ERR source and destination objects are the same")
 		return
 	}
+	if labels_on {
+		move_labelled(c, argv[1], id)
+		return
+	}
 	if !db_move(c.db, dst, argv[1]) {
 		reply_int(c, 0)
 		return
@@ -445,8 +452,52 @@ cmd_move :: proc(c: ^Conn, argv: [][]u8) {
 	reply_int(c, 1)
 }
 
+@(private = "file")
+move_labelled :: proc(c: ^Conn, key: []u8, target: int) {
+	src := cur_db()
+	l := lookup_make(key)
+	tp := label_part(target, access.id)
+	if tp != nil && label_live_in(tp, &l) {
+		reply_int(c, 0)
+		return
+	}
+	if other, _, i := label_locate_other(target, key, &l, access.id, access.vis); i >= 0 {
+		reply_error(c, label_in_use_text(ERR_LABEL_NAME_IN_USE, other.label))
+		return
+	}
+	if !label_live_in(src, &l) {
+		reply_int(c, 0)
+		return
+	}
+	made, ok := label_part_make(target, access.id)
+	if !ok {
+		reply_error(c, ERR_LABEL_PARTITIONS)
+		return
+	}
+	label_vset_detach_key(src, key)
+	if !db_move(src, made, key) {
+		reply_int(c, 0)
+		return
+	}
+	pst.dirty += 1
+	fresh_access_clock(made, key)
+	block_signal_existing(made, key)
+	block_note_removed()
+	signal_key_in(key, src)
+	signal_key_in(key, made)
+	notify_in(.Generic, "move_from", key, src)
+	notify_in(.Generic, "move_to", key, made)
+	reply_int(c, 1)
+}
+
 cmd_randomkey :: proc(c: ^Conn, argv: [][]u8) {
-	k, ok := db_random_key()
+	k: string
+	ok: bool
+	if labels_on {
+		k, ok = label_random_key(c.db.id)
+	} else {
+		k, ok = db_random_key()
+	}
 	if !ok {
 		reply_null(c)
 		return
@@ -457,7 +508,11 @@ cmd_randomkey :: proc(c: ^Conn, argv: [][]u8) {
 cmd_keys :: proc(c: ^Conn, argv: [][]u8) {
 	pat := argv[1]
 	all := len(pat) == 1 && pat[0] == '*'
-	db_keys(pat, all)
+	if labels_on {
+		label_keys(c.db.id, pat, all)
+	} else {
+		db_keys(pat, all)
+	}
 	reply_array(c, len(key_scratch))
 	for k in key_scratch {
 		reply_bulk_str(c, k)
@@ -598,7 +653,7 @@ cmd_scan :: proc(c: ^Conn, argv: [][]u8) {
 	if !scan_read_options(c, argv[2:], &req) {
 		return
 	}
-	next := db_scan(cursor, req.count, req.pattern, req.use_pattern)
+	next := label_scan(c.db.id, cursor, req.count, req.pattern, req.use_pattern) if labels_on else db_scan(cursor, req.count, req.pattern, req.use_pattern)
 	if req.typed {
 		scan_filter_by_type(req.want, req.type_known)
 	}

@@ -25,6 +25,14 @@ cmd_copy :: proc(c: ^Conn, argv: [][]u8) {
 		reply_int(c, 0)
 		return
 	}
+	if labels_on {
+		labelled, refusal := label_copy_target(target.id, destination)
+		if refusal != "" {
+			reply_error(c, refusal)
+			return
+		}
+		target = labelled
+	}
 	exists := db_find_in(target, destination) != nil
 	if exists && !replace {
 		reply_int(c, 0)

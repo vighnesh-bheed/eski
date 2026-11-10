@@ -268,17 +268,17 @@ hash_tick :: proc "contextless" () {
 		return
 	}
 	hash_tick_due = srv.now_ms + CRON_INTERVAL_MS
-	if !expiry_sweep_on || expiry_deletion_paused() || len(dbs) == 0 {
+	if !expiry_sweep_on || expiry_deletion_paused() || len(db_parts) == 0 {
 		return
 	}
 	effort := cfg.active_expire_effort - 1
 	deadline := now_ns() + EXPIRE_TICK_NS * (25 + 2 * effort) / 25
 	now := hash_now()
 	quiet := 0
-	for quiet < len(dbs) && now_ns() < deadline {
-		hash_db_next %= len(dbs)
-		db := &dbs[hash_db_next]
-		hash_db_next = (hash_db_next + 1) % len(dbs)
+	for quiet < len(db_parts) && now_ns() < deadline {
+		hash_db_next %= len(db_parts)
+		db := db_parts[hash_db_next]
+		hash_db_next = (hash_db_next + 1) % len(db_parts)
 		if ht.registry_len(db.hreg) == 0 || ht.registry_next_expire(db.hreg) > now {
 			quiet += 1
 			continue

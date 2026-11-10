@@ -134,7 +134,7 @@ hash_sort_field :: proc(key: []u8, e: ^Entry, field: []u8) -> (val: []u8, ok: bo
 	if h == nil {
 		return nil, false
 	}
-	v, read := ht.get(h, field, hash_now())
+	v, read := ht.get(h, field, hash_now(), !label_entry_foreign(e))
 	if .Live not_in read {
 		hash_lazy(key, e, h, read)
 		return nil, false
@@ -316,10 +316,10 @@ hash_resize_tick :: proc "contextless" () {
 	scans, moves, grants := 4096, 256, 64
 	empty, visits := 0, 0
 	finished := false
-	for grants > 0 && empty < len(dbs) && visits < 128 && !finished {
+	for grants > 0 && empty < len(db_parts) && visits < 128 && !finished {
 		visits += 1
-		d := &dbs[hash_resize_db_next]
-		hash_resize_db_next = (hash_resize_db_next + 1) % len(dbs)
+		d := db_parts[hash_resize_db_next]
+		hash_resize_db_next = (hash_resize_db_next + 1) % len(db_parts)
 		if d.hreg.resize_head == nil {
 			empty += 1
 			continue
