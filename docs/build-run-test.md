@@ -24,6 +24,8 @@ bash tools/build_diagnostics.sh all
 
 Both helpers also accept `release`, `address` or `thread` to prepare one archive. Debug and ordinary builds use the release archives. The Odin bindings select the address or thread archives through `ODIN_SANITIZER_FLAGS` when the matching sanitizer is enabled. The original C diagnostic bridge builds separately under `.build/diagnostics` and dynamically links the system libunwind library. Its cache identity covers preprocessed header contents and the actual linked library. Keep `.build` beside `src` when copying the source into another build directory; the storage test driver preserves this layout automatically.
 
+The compiler's default target for amd64 is x86-64-v2, so every build needs a processor with SSE4.2 and POPCNT. The vector kernels of the vector set type pick a faster path at run time from the processor's CPUID and XGETBV reports: AVX2 when FMA, POPCNT and F16C are also present, then AVX-VNNI and AVX-VNNI-INT8 for 8-bit vectors, and a portable path otherwise. Graph traversal uses the fastest available kernel, while the scores that VSIM reports are computed in one fixed summation order on every path, so they do not depend on the processor.
+
 ## Run and configure
 
 ```sh
@@ -118,6 +120,39 @@ Conformance downloads the pinned upstream Tcl test suite and verifies its archiv
 Run conformance before smoke on a fresh clone so smoke can use the downloaded corrupt-payload fixtures. Smoke starts its own Eski and reference containers, compares protocol replies, checks persistence and tests the memcached endpoint. `ESKI_SMOKE_PORT`, `ESKI_SMOKE_REF_PORT`, `ESKI_SMOKE_MC_PORT` and `ESKI_SMOKE_MC_REF_PORT` change its ports. `ESKI_REDIS_IMAGE` and `ESKI_MEMCACHED_IMAGE` select references. The raw socket comparisons of pub/sub, transactions, ACL and MONITOR log only the first 400 characters of each side of a difference; both full strings go to `ESKI_SMOKE_FULL_DIR`, or to a new directory under `TMPDIR` that smoke keeps, and a `full:` line under the failure names the two files. Their steps that contain `FLUSHALL` or `FLUSHDB` wait for every reply of the flushing connection before the next step. The optional `ESKI_SMOKE_BENCH=1` step is a functional benchmark invocation, not the dedicated comparison method.
 
 Native comparison harnesses include `bash test/listtype/compare.sh`, `bash test/hashtype/compare.sh`, `bash test/settype/compare.sh`, `bash test/zsettype/compare.sh`, `bash test/bitmap/compare.sh`, `bash test/hll/compare.sh`, `bash test/geo/compare.sh` and `bash test/streamtype/compare.sh`. They build their drivers, start reference containers and compare generated operation sequences. Persistence-specific commands include `bash test/rdb/roundtrip.sh` and `bash test/aof/roundtrip.sh`. The group pages link the most relevant checks.
+
+### Vector set checks
+
+The vector set group has three checks against the reference image `docker.io/library/redis@sha256:f245f4c83b84a9e9a0588da1c9456e579455310f0945d5db52cd2ba27f2000cc` (server 8.10.3 with vector set module version 1). Every container they start is capped with `--memory 2g --memory-swap 2g`, `--maxmemory 1gb`, `--client-output-buffer-limit "normal 64mb 32mb 60"`, `--save ""` and `--appendonly no`, and no case sends a count beyond a thousand, because the reference builds the whole reply of a negative random-member count.
+
+```sh
+bash test/vectorset/compare.sh
+python3 -I test/vectorset/compare.py --list
+python3 -I test/vectorset/compare.py --normalisations
+./test/conformance/run.sh --suite vectorset --baseline test/conformance/baseline-vectorset.json
+python3 -I test/vectorset/memory.py 127.0.0.1:PORT 127.0.0.1:REFERENCE_PORT --max-margin 0.1
+```
+
+The reply comparison replays 1,193 recorded cases, 709 in RESP2 and 484 in RESP3, together with their setup commands, keyspace notification drains and an ACL category scan, 1,502 compared steps in all. The case inputs are committed in `test/vectorset/cases.py`; the reference replies are not, because each run compares live against a fresh capped container. Smoke runs it after the memcached checks; `ESKI_SMOKE_VSET=0` skips it, `ESKI_SMOKE_VSET_REF_PORT` moves the reference (default: the smoke port plus 30) and `ESKI_VSET_IMAGE` selects another image. `test/vectorset/compare.sh` runs the same comparison on its own, starting `bin/eski` and the container on `ESKI_VSET_PORT` and `ESKI_VSET_REF_PORT` (6481 and 6482), with `ESKI_VSET_SERVER` for another binary, `ESKI_VSET_EXTERNAL=1` for an already running server, and `--sections`, `--quiet` or `--summary PATH` passed to the driver. Replies are compared byte for byte except where a value cannot match by design:
+
+| Normalisation | Applied to | Why | Still compared |
+| --- | --- | --- | --- |
+| `type` | INFO server, DUMP | server identity fields; DUMP payloads use Eski's own serialization and are restored on the server that produced them | the reply type |
+| `integer`, `ttl` | MEMORY USAGE, COMMAND COUNT, TTL | sizes are compared by `test/vectorset/memory.py`; the reference image loads other modules; the clock | an integer, or the exact bytes of anything else, including -1 and -2 |
+| `sorted`, `acl-listing`, `module-list` | COMMAND LIST, ACL CAT read and write, MODULE LIST | hash order; listings of the other modules' commands | the names; that no category lists a vector set command; the whole vectorset module entry |
+| `docs-summary` | COMMAND DOCS of the vector set commands | Eski words the summaries itself | every other byte of the reply, with the summary checked to be a string in the same place |
+| `debug-object` | DEBUG OBJECT | address, serialized length and LRU clock | refcount, encoding and the field layout |
+| `scan`, `scan-partial` | SCAN | table order, and the subset a partial page returns | the sorted keys of a complete scan; that a partial page holds only vector sets without repeats |
+| `vinfo` | VINFO | random HNSW levels and the server-wide set counter | every field except max-level and vset-uid |
+| `vsim`, `exec-vsim` | VSIM without TRUTH, directly, from Lua and inside EXEC | the graph orders equal scores and picks which tied members a COUNT cut keeps | every name, score and attribute in order, names sorted inside groups of equal scores, a cut tie group by its size and score; scores for replies without WITHSCORES come from the same query with WITHSCORES on the same server; TRUTH replies compare exactly |
+| `vrandmember` | VRANDMEMBER | random sampling | the reply type and count, membership, distinctness for positive counts, and the sorted names when the whole set comes back |
+| `vlinks`, `vlinks-graph` | VLINKS | neighbour order and the levels above layer 0 | the sorted complete layer 0 list with scores on the small sets; the reply shape on the 300-element sets |
+
+The package runner checks these normalisations on fixed replies with `test/vectorset/test_compare.py`.
+
+The conformance suite `vectorset` downloads the Redis 8.10.3 source release from `https://github.com/redis/redis/archive/refs/tags/8.10.3.tar.gz` at run time, checks its SHA-256 `85ae62e175cc76f638015fa18cb384b549b6808a765425d9e9d47466f69532ea`, extracts only `modules/vector-sets/test.py` and `modules/vector-sets/tests` into the ignored `test/conformance/.vectorset`, installs the pinned redis Python client into a virtual environment there, and runs the unit against one server. It starts `bin/eski` on a free port by default; `--external 127.0.0.1:PORT` uses a running server, `--reference` starts the capped reference image instead, and `./test/conformance/vectorset.sh --help` lists the rest. The unit's runner connects only to the primary port and a replica port; the harness passes a closed replica port, so the unit's replication test skips itself. `test/conformance/vectorset-exclusions.json` records that exclusion and one more with their reasons: the unit expects the rewrite of an append-only file without an RDB preamble to fail for a vector set, while Eski rewrites each vector set exactly as a RESTORE of its serialized payload, so that test fails on Eski by design. `test/conformance/reference-vectorset.json` records the reference run, 42 passes and one skip of 43 tests, and `test/conformance/baseline-vectorset.json` the Eski run it is gated against; `--baseline test/conformance/reference-vectorset.json` lists every reference pass Eski does not yet reproduce. Summaries keep test titles, counts and one-line failure reasons, never the unit's files or tracebacks.
+
+`test/vectorset/memory.py` measures MEMORY USAGE at 1, 100 and 1,000 elements of 8, 32 and 300 dimensions in NOQUANT, Q8 and BIN with M 16, elements named `e0` to `e999` and float32 components drawn with a fixed seed, and prints the table with bytes per vector, the usage slope from 100 to 1,000 elements, and the same slope of DEBUG OBJECT's serialized length. Given a candidate and a reference it reports the relative margin of every slope and usage, the largest one either way, and the largest excess over the reference; `--max-margin` fails the run only when the candidate uses more than the reference by more than that fraction somewhere, so using less memory always passes.
 
 ## Optional formal verification
 

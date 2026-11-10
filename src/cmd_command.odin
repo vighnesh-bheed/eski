@@ -18,6 +18,7 @@ Cmd_Group :: enum u8 {
 	Geo,
 	Stream,
 	Bitmap,
+	Module,
 }
 
 Acl_Cat :: enum u8 {
@@ -105,6 +106,7 @@ Cmd_Doc :: struct {
 	acl:              Acl_Cats,
 	group:            Cmd_Group,
 	doc_flags:        Doc_Flags,
+	module:           string,
 }
 
 #assert(len(cmd_docs) == len(cmd_specs))
@@ -125,6 +127,7 @@ info_flags := [?]Info_Flag {
 	{.Write, "write"},
 	{.Readonly, "readonly"},
 	{.Denyoom, "denyoom"},
+	{.Module, "module"},
 	{.Admin, "admin"},
 	{.Pubsub, "pubsub"},
 	{.Noscript, "noscript"},
@@ -160,6 +163,7 @@ group_names := [Cmd_Group]string {
 	.Geo          = "geo",
 	.Stream       = "stream",
 	.Bitmap       = "bitmap",
+	.Module       = "module",
 }
 
 acl_names := [Acl_Cat]string {
@@ -713,6 +717,9 @@ reply_docs :: proc(c: ^Conn, i: int) {
 	if d.complexity != "" {
 		n += 1
 	}
+	if d.module != "" {
+		n += 1
+	}
 	if d.doc_flags != {} {
 		n += 1
 	}
@@ -742,6 +749,10 @@ reply_docs :: proc(c: ^Conn, i: int) {
 	}
 	reply_bulk_str(c, "group")
 	reply_bulk_str(c, group_names[d.group])
+	if d.module != "" {
+		reply_bulk_str(c, "module")
+		reply_bulk_str(c, d.module)
+	}
 	if d.complexity != "" {
 		reply_bulk_str(c, "complexity")
 		reply_bulk_str(c, d.complexity)
@@ -896,12 +907,12 @@ acl_cat_by_name :: proc(name: []u8) -> (Acl_Cat, bool) {
 }
 
 @(private = "file")
-list_match :: proc(filter: List_Filter, arg: []u8, name: string, acl: Acl_Cats) -> bool {
+list_match :: proc(filter: List_Filter, arg: []u8, name: string, acl: Acl_Cats, module: string = "") -> bool {
 	switch filter {
 	case .None:
 		return true
 	case .Module:
-		return false
+		return module != "" && eq_nocase(arg, module)
 	case .Aclcat:
 		cat, ok := acl_cat_by_name(arg)
 		return ok && cat in acl
@@ -929,14 +940,14 @@ list_walk :: proc(c: ^Conn, filter: List_Filter, arg: []u8, emit: bool) -> int {
 			continue
 		}
 		lo, hi := doc_subs(i)
-		if list_match(filter, arg, cmd_docs[i].name, cmd_docs[i].acl) {
+		if list_match(filter, arg, cmd_docs[i].name, cmd_docs[i].acl, cmd_docs[i].module) {
 			n += 1
 			if emit {
 				reply_bulk_str(c, cmd_docs[i].name)
 			}
 		}
 		for j in lo ..< hi {
-			if list_match(filter, arg, cmd_docs[j].name, cmd_docs[j].acl) {
+			if list_match(filter, arg, cmd_docs[j].name, cmd_docs[j].acl, cmd_docs[j].module) {
 				n += 1
 				if emit {
 					reply_bulk_str(c, cmd_docs[j].name)

@@ -82,13 +82,22 @@ table_insert :: proc "contextless" (key: string, cmd: ^Command) #no_bounds_check
 	}
 }
 
-register_command :: proc "contextless" (cmd: ^Command) #no_bounds_check {
+@(private = "file")
+module_keys: [32][CMD_NAME_MAX]u8
+
+@(private = "file")
+module_key_count: int
+
+register_command :: proc "contextless" (cmd: ^Command, module := false) #no_bounds_check {
 	if len(cmd.name) == 0 || len(cmd.name) > CMD_NAME_MAX {
 		register_fail("name must be 1 to 32 bytes", cmd.name)
 	}
 	for b in transmute([]u8)cmd.name {
-		if b >= 'A' && b <= 'Z' {
+		if !module && b >= 'A' && b <= 'Z' {
 			register_fail("name must be lowercase", cmd.name)
+		}
+		if module && b >= 'a' && b <= 'z' {
+			register_fail("module command names must be uppercase", cmd.name)
 		}
 	}
 	if cmd.handler == nil || cmd.arity == 0 {
@@ -97,19 +106,37 @@ register_command :: proc "contextless" (cmd: ^Command) #no_bounds_check {
 	if cmd_count >= CMD_TABLE_SIZE / 2 {
 		register_fail("command table is full", cmd.name)
 	}
-	h := cmd_home(cmd.name)
+	key := cmd.name
+	if module {
+		if module_key_count >= len(module_keys) {
+			register_fail("too many module commands", cmd.name)
+		}
+		folded := &module_keys[module_key_count]
+		module_key_count += 1
+		for b, i in transmute([]u8)cmd.name {
+			folded[i] = lower(b)
+		}
+		key = string(folded[:len(cmd.name)])
+	}
+	h := cmd_home(key)
 	for cmd_table[h].cmd != nil {
-		if cmd_table[h].key == cmd.name {
+		if cmd_table[h].key == key {
 			register_fail("registered twice", cmd.name)
 		}
 		h = (h + 1) & CMD_TABLE_MASK
 	}
-	table_insert(cmd.name, cmd)
+	table_insert(key, cmd)
 }
 
 register_commands :: proc "contextless" (cmds: []Command) {
 	for &cmd in cmds {
 		register_command(&cmd)
+	}
+}
+
+register_module_commands :: proc "contextless" (cmds: []Command) {
+	for &cmd in cmds {
+		register_command(&cmd, true)
 	}
 }
 

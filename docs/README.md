@@ -16,6 +16,7 @@ Start with [build, run and test](build-run-test.md) and [architecture](architect
 | Sorted sets and geospatial searches | [Sorted sets and geo](sorted-sets-and-geo.md) |
 | Bit operations and probabilistic cardinality | [Bitmaps and HyperLogLog](bitmaps-and-hyperloglog.md) |
 | Stream records and consumer groups | [Streams](streams.md) |
+| Vector similarity search, attributes and filters | [Vector sets](vector-sets.md) |
 | Subscription delivery, notifications and cache invalidation | [Pub/sub, notifications and tracking](pubsub-notifications-tracking.md) |
 | Queued transactions, watches and blocked clients | [Transactions](transactions.md) |
 | Lua scripts, Function libraries, debugging and cancellation | [Scripting](scripting.md) |

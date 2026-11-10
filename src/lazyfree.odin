@@ -115,6 +115,8 @@ object_acct_of :: proc "contextless" (type: Obj_Type, obj: rawptr) -> int {
 		return stream_object_acct(obj)
 	case .Hash:
 		return ht.Hash(obj).acct
+	case .Vectorset:
+		return vset_object_acct(obj)
 	}
 	return 0
 }
@@ -171,6 +173,8 @@ lazyfree_effort :: proc(type: Obj_Type, obj: rawptr) -> int {
 			effort += groups * (1 + pel)
 		}
 		return effort
+	case .Vectorset:
+		return max(vset_object_card(obj), 1)
 	}
 	return 1
 }

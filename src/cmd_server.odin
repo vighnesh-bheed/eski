@@ -150,6 +150,8 @@ cmd_debug :: proc(c: ^Conn, argv: [][]u8) {
 			addr = uintptr(l)
 		} else if sm := entry_object(e, .Stream); sm != nil {
 			addr = uintptr(sm)
+		} else if vs := entry_object(e, .Vectorset); vs != nil {
+			addr = uintptr(vs)
 		}
 		size := debug_serialized_length(e, argv[2])
 		debug_lru := entry_debug_lru(e)
@@ -210,6 +212,9 @@ cmd_debug :: proc(c: ^Conn, argv: [][]u8) {
 
 @(private = "file")
 debug_serialized_length :: proc(e: ^Entry, key: []u8) -> int {
+	if vs := entry_object(e, .Vectorset); vs != nil {
+		return vset_serialized_length(vs)
+	}
 	w: rdb.Writer
 	rdb.writer_init_mem(&w, pst.compression, false)
 	persist_write_value(&w, key, persist_slot_value(e.db, e.kp, e.vp), false)

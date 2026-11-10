@@ -23,6 +23,7 @@ Cmd_Flag :: enum u32 {
 	Stale,
 	Touches_Arbitrary_Keys,
 	Write,
+	Module,
 }
 
 Cmd_Flags :: bit_set[Cmd_Flag;u32]
@@ -291,6 +292,19 @@ command_keys :: proc(spec: ^Cmd_Spec, argv: [][]u8, out: ^[dynamic]int) {
 }
 
 cmd_specs := [?]Cmd_Spec {
+	{"VADD", -5, {.Write, .Denyoom, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw, .Access, .Update}}}},
+	{"VCARD", 2, {.Readonly, .Module, .Fast}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw, .Access, .Update}}}},
+	{"VDIM", 2, {.Readonly, .Module, .Fast}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw, .Access, .Update}}}},
+	{"VEMB", -3, {.Readonly, .Module, .Fast}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw, .Access, .Update}}}},
+	{"VGETATTR", 3, {.Readonly, .Module, .Fast}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw, .Access, .Update}}}},
+	{"VINFO", 2, {.Readonly, .Module, .Fast}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw, .Access, .Update}}}},
+	{"VISMEMBER", 3, {.Readonly, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw, .Access, .Update}}}},
+	{"VLINKS", -3, {.Readonly, .Module, .Fast}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw, .Access, .Update}}}},
+	{"VRANDMEMBER", -2, {.Readonly, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw, .Access, .Update}}}},
+	{"VRANGE", -4, {.Readonly, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw, .Access, .Update}}}},
+	{"VREM", 3, {.Write, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw, .Access, .Update}}}},
+	{"VSETATTR", 4, {.Write, .Module, .Fast}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw, .Access, .Update}}}},
+	{"VSIM", -4, {.Readonly, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw, .Access, .Update}}}},
 	{"acl", -2, {.Sentinel}, .None, 0, 0, 0, nil},
 	{"acl|cat", -2, {.Noscript, .Loading, .Stale, .Sentinel}, .None, 0, 0, 0, nil},
 	{"acl|deluser", -3, {.Admin, .Noscript, .Loading, .Stale, .Sentinel}, .None, 0, 0, 0, nil},

@@ -563,6 +563,9 @@ entry_memory :: proc(e: ^Entry) -> int {
 	if sm := entry_object(e, .Stream); sm != nil {
 		return stream_memory(sm)
 	}
+	if v := entry_object(e, .Vectorset); v != nil {
+		return vset_object_acct(v)
+	}
 	return int(e.cap)
 }
 

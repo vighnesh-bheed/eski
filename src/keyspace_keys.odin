@@ -198,6 +198,7 @@ keyspace_restore_decode :: proc(reader: ^rdb.Reader, payload: []u8) -> (out: Key
 		out.object = ht.rdb_load(reader, code, true)
 	case .Stream:
 		out.object = sm.rdb_load(reader, code, true)
+	case .Vectorset:
 	}
 	if reader.status == .Ok && (kind == .String || out.object != nil) {
 		return out, true

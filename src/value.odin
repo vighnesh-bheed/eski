@@ -9,6 +9,7 @@ Obj_Type :: enum u8 {
 	Zset,
 	Hash,
 	Stream,
+	Vectorset,
 }
 
 Obj_Encoding :: enum u8 {
@@ -196,6 +197,8 @@ type_name :: proc "contextless" (t: Obj_Type) -> string {
 		return "hash"
 	case .Stream:
 		return "stream"
+	case .Vectorset:
+		return "vectorset"
 	}
 	return "none"
 }

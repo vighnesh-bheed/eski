@@ -143,6 +143,89 @@ Cleanup: may take some time... OK
 """
 
 
+VSET_PASSING_RUN = """================================================
+Make sure the server is running
+Primary port: 7001
+Replica port: 7002
+================================================
+
+\x1b[93mWARNING: Replica instance (port 7002) is not running.\x1b[0m
+\x1b[93mReplication tests will be skipped. Start the replica instance.\x1b[0m
+Adding items works: \x1b[92mOK\x1b[0m (0.01s)
+Scores: plain and quantised: \x1b[92mOK\x1b[0m (0.00s)
+Talkative test: first line of its own output: 3
+second line
+\x1b[92mOK\x1b[0m (1.20s)
+Quiet table test: 
+
+col | col
+\x1b[92mOK\x1b[0m (0.50s)
+Replicated writes: \x1b[93mSKIPPING\x1b[0m
+
+==================================================
+Test Summary: 4/5 tests passed
+\x1b[93m1 TESTS SKIPPED!\x1b[0m
+"""
+
+VSET_FAILING_RUN = """================================================
+Make sure the server is running
+Primary port: 7001
+Replica port: 7002
+================================================
+
+Adding items works: \x1b[91mERR\x1b[0m (0.00s)
+Error: Unexpected error: unknown command 'VADD', with args beginning with: 'k' 'FP32' '\x01\x02
+
+\x03' 'e1'
+
+Traceback:
+Traceback (most recent call last):
+  File "runner.py", line 1, in run
+    step()
+ValueError: unknown command 'VADD', with args beginning with: 'k' 'FP32' '\x01\x02
+
+\x03' 'e1'
+
+Scores: plain and quantised: \x1b[91mERR\x1b[0m (0.00s)
+Error: Expected 2 results, got 0
+
+Traceback:
+Traceback (most recent call last):
+  File "runner.py", line 1, in run
+    step()
+AssertionError: Expected 2 results, got 0
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "runner.py", line 2, in run
+    report()
+KeyError: 'x'
+
+Talkative test: first line of its own output: 3
+second line
+\x1b[92mOK\x1b[0m (1.20s)
+Quiet table test: 
+
+\x1b[91mERR\x1b[0m (0.10s)
+Error: config value missing
+
+Traceback:
+Traceback (most recent call last):
+  File "runner.py", line 3, in run
+    check()
+AssertionError: config value missing
+
+Replicated writes: \x1b[93mSKIPPING\x1b[0m
+
+==================================================
+Test Summary: 1/5 tests passed
+\x1b[91m3 TESTS FAILED!\x1b[0m
+"""
+
+VSET_TITLES = ["Adding items works", "Scores: plain and quantised", "Talkative test", "Quiet table test", "Replicated writes"]
+
+
 def write(path, text):
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(text)
@@ -721,6 +804,83 @@ class SuiteSummaryTests(unittest.TestCase):
         self.assertEqual(compared["exit_code"], 0)
         text = pr.render_report(compared, "results/latest-valkey.json")
         self.assertNotIn("Warning", text)
+
+
+class VectorSetLogTests(unittest.TestCase):
+    def check_failing(self, result):
+        self.assertEqual((result["passed"], result["failed"], result["skipped"], result["errored"]), (1, 3, 1, 0))
+        self.assertEqual(list(result["tests"]), VSET_TITLES)
+        self.assertTrue(result["ended"])
+        self.assertEqual(result["final_failed_count"], 3)
+        reasons = {f["test"]: f["reason"] for f in result["failures"]}
+        self.assertEqual(reasons["Adding items works"], "Unexpected error: unknown command 'VADD', with args beginning with: ...")
+        self.assertEqual(reasons["Scores: plain and quantised"], "Expected 2 results, got 0")
+        self.assertEqual(reasons["Quiet table test"], "config value missing")
+        for failure in result["failures"]:
+            self.assertNotIn("Traceback", failure["message"])
+            self.assertNotIn("runner.py", failure["message"])
+
+    def test_passing_run(self):
+        result = pr.parse_vectorset_log(VSET_PASSING_RUN)
+        self.assertEqual((result["passed"], result["failed"], result["skipped"], result["errored"]), (4, 0, 1, 0))
+        self.assertEqual(list(result["tests"]), VSET_TITLES)
+        self.assertEqual(result["final_failed_count"], 0)
+        self.assertEqual(result["errors"], [])
+
+    def test_failing_run_without_titles(self):
+        self.check_failing(pr.parse_vectorset_log(VSET_FAILING_RUN))
+
+    def test_failing_run_with_recorded_titles(self):
+        self.check_failing(pr.parse_vectorset_log(VSET_FAILING_RUN, VSET_TITLES))
+
+    def test_count_mismatch_is_an_error(self):
+        result = pr.parse_vectorset_log(VSET_PASSING_RUN.replace("Test Summary: 4/5", "Test Summary: 5/5"))
+        self.assertEqual(result["errored"], 1)
+        self.assertEqual(result["errors"][0]["kind"], "count-mismatch")
+
+    def test_run_cut_inside_a_test(self):
+        cut = VSET_PASSING_RUN.split("second line")[0]
+        result = pr.parse_vectorset_log(cut, VSET_TITLES)
+        self.assertFalse(result["ended"])
+        self.assertEqual(result["errors"][0]["kind"], "incomplete-test")
+
+    def test_summary_with_exclusions(self):
+        with tempfile.TemporaryDirectory() as root:
+            log = os.path.join(root, "vector-sets.log")
+            write(log, VSET_FAILING_RUN)
+            meta = os.path.join(root, "units.tsv")
+            write(meta, "modules/vector-sets\trun\t1\t9\t%s\t0\t0\n" % log)
+            exclusions = os.path.join(root, "exclusions.json")
+            write(exclusions, json.dumps([{"unit": "modules/vector-sets", "test": "Quiet table test", "reason": "by design"}]))
+            out = os.path.join(root, "summary.json")
+            args = ["summarize", "--meta", meta, "--known", os.path.join(root, "none.txt"), "--root", root, "--out", out,
+                    "--latest", os.path.join(root, "latest.json"), "--suite-name=vectorset", "--suite-tag=8.10.3", "--exclusions", exclusions]
+            with open(os.devnull, "w") as sink:
+                saved = sys.stdout
+                sys.stdout = sink
+                try:
+                    code = pr.main(args)
+                finally:
+                    sys.stdout = saved
+            self.assertEqual(code, 1)
+            with open(out) as handle:
+                summary = json.load(handle)
+            unit = summary["units"]["modules/vector-sets"]
+            self.assertEqual(unit["status"], "failed")
+            self.assertEqual(unit["known_failing_tests"], ["Quiet table test"])
+            self.assertEqual(len(summary["unexpected_failures"]), 2)
+            self.assertEqual(summary["suite"]["exclusions"][0]["reason"], "by design")
+
+    def test_bad_exclusions_are_refused(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "exclusions.json")
+            write(path, json.dumps([{"unit": "modules/vector-sets", "test": "x"}]))
+            with self.assertRaises(ValueError):
+                pr.read_exclusions(path)
+
+    def test_module_units_keep_their_name(self):
+        self.assertEqual(pr.canonical_unit("modules/vector-sets"), "modules/vector-sets")
+        self.assertEqual(pr.display_unit("modules/vector-sets"), "modules/vector-sets")
 
 
 if __name__ == "__main__":

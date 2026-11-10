@@ -28,6 +28,10 @@ MC_REF_PORT="${ESKI_SMOKE_MC_REF_PORT:-11312}"
 MC_IMAGE="${ESKI_MEMCACHED_IMAGE:-docker.io/library/memcached:1.6}"
 MC_REF_CONTAINER="eski-smoke-mcref-$$"
 MC_REF_CLOCK_SETTLE_SECONDS=3
+VSET="${ESKI_SMOKE_VSET:-1}"
+VSET_REF_PORT="${ESKI_SMOKE_VSET_REF_PORT:-$((PORT + 30))}"
+VSET_IMAGE="${ESKI_VSET_IMAGE:-docker.io/library/redis@sha256:f245f4c83b84a9e9a0588da1c9456e579455310f0945d5db52cd2ba27f2000cc}"
+VSET_REF_CONTAINER="eski-smoke-vset-$$"
 LOG="$(mktemp -t eski-smoke.XXXXXX)"
 PERSIST_DIR="$(mktemp -d -t eski-smoke-rdb.XXXXXX)"
 FULL_DIR="${ESKI_SMOKE_FULL_DIR:-}"
@@ -49,6 +53,7 @@ cleanup() {
 	docker rm -f "$REF_CONTAINER" >/dev/null 2>&1
 	docker rm -f "$MC_REF_CONTAINER" >/dev/null 2>&1
 	docker rm -f "$ACL_REF_CONTAINER" >/dev/null 2>&1
+	docker rm -f "$VSET_REF_CONTAINER" >/dev/null 2>&1
 	rm -f "$LOG"
 	chmod -R u+rwx "$PERSIST_DIR" 2>/dev/null
 	rm -rf "$PERSIST_DIR"
@@ -4576,7 +4581,9 @@ def check(ok, msg):
 
 def run(proto):
     j, r = Conn(ESKI, proto), Conn(REF, proto)
-    jl = names_of(j.cmd("COMMAND", "LIST"))
+    module = set(names_of(j.cmd("COMMAND", "LIST", "FILTERBY", "MODULE", "vectorset")))
+    check(len(module) == 13, "resp%d COMMAND LIST FILTERBY MODULE vectorset lists %d commands" % (proto, len(module)))
+    jl = [n for n in names_of(j.cmd("COMMAND", "LIST")) if n not in module]
     rl = names_of(r.cmd("COMMAND", "LIST"))
     check(jl, "resp%d COMMAND LIST is empty" % proto)
     if not jl:
@@ -4589,7 +4596,7 @@ def run(proto):
         subs_r = sorted(x for x in rl if x.startswith(n + "|"))
         check(subs_j == subs_r, "resp%d subcommands of %s: eski %s redis %s" % (proto, n, subs_j, subs_r))
     count = j.cmd("COMMAND", "COUNT")
-    check(count == (":", str(len(top)).encode()), "resp%d COMMAND COUNT %r for %d commands" % (proto, count, len(top)))
+    check(count == (":", str(len(top) + len(module)).encode()), "resp%d COMMAND COUNT %r for %d commands" % (proto, count, len(top) + len(module)))
     for n in jl:
         a, b = j.cmd("COMMAND", "INFO", n), r.cmd("COMMAND", "INFO", n)
         check(ser(canon_info(a[1][0])) == ser(canon_info(b[1][0])), "resp%d COMMAND INFO %s differs" % (proto, n))
@@ -4597,13 +4604,13 @@ def run(proto):
         check(ser(canon_reply(a)) == ser(canon_reply(b)), "resp%d COMMAND DOCS %s differs" % (proto, n))
     for args in (["COMMAND"], ["COMMAND", "INFO"]):
         a, b = j.cmd(*args), r.cmd(*args)
-        ra = dict((x[1][0][1].decode(), ser(canon_info(x))) for x in a[1])
+        ra = dict((x[1][0][1].decode(), ser(canon_info(x))) for x in a[1] if x[1][0][1].decode() not in module)
         rb = dict((x[1][0][1].decode(), ser(canon_info(x))) for x in b[1])
-        check(len(a[1]) == len(top) and sorted(ra) == sorted(top), "resp%d %s lists other commands" % (proto, " ".join(args)))
+        check(len(a[1]) == len(top) + len(module) and sorted(ra) == sorted(top), "resp%d %s lists other commands" % (proto, " ".join(args)))
         bad = [n for n in ra if ra[n] != rb.get(n)]
         check(not bad, "resp%d %s entries differ: %s" % (proto, " ".join(args), bad[:10]))
     a, b = j.cmd("COMMAND", "DOCS"), r.cmd("COMMAND", "DOCS")
-    da = dict((x[1].decode(), ser(canon_docs(y, x[1]))) for x, y in pairs_of(a))
+    da = dict((x[1].decode(), ser(canon_docs(y, x[1]))) for x, y in pairs_of(a) if x[1].decode() not in module)
     db = dict((x[1].decode(), ser(canon_docs(y, x[1]))) for x, y in pairs_of(b))
     check(sorted(da) == sorted(top), "resp%d COMMAND DOCS lists other commands" % proto)
     bad = [n for n in da if da[n] != db.get(n)]
@@ -4615,7 +4622,7 @@ def run(proto):
     check(ser(canon_reply(a)) == ser(canon_reply(b)), "resp%d COMMAND DOCS of several names differs" % proto)
     for kind, values in (("ACLCAT", CATEGORIES), ("PATTERN", PATTERNS), ("MODULE", ["nosuch", ""])):
         for v in values:
-            fa = names_of(j.cmd("COMMAND", "LIST", "FILTERBY", kind, v))
+            fa = [n for n in names_of(j.cmd("COMMAND", "LIST", "FILTERBY", kind, v)) if n not in module]
             fb = names_of(r.cmd("COMMAND", "LIST", "FILTERBY", kind, v))
             want = sorted(set(fb) & set(jl))
             check(sorted(fa) == want, "resp%d COMMAND LIST FILTERBY %s %r: eski %s redis %s" % (proto, kind, v, sorted(fa)[:8], want[:8]))
@@ -8737,6 +8744,64 @@ elif [ "$EXTERNAL" == "1" ]; then
 	echo "skipping the memcached checks, nothing listens on port $MC_PORT"
 else
 	fail "memcached port" "listening on $MC_PORT" "closed"
+fi
+
+vset_port_open() {
+	(exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
+
+expect_vectorset_report() {
+	local minimum="$1" line name n=0 summary=0
+	shift
+	while IFS= read -r line; do
+		case "$line" in
+		PASS\ *)
+			n=$((n + 1))
+			pass
+			;;
+		FAIL\ *)
+			n=$((n + 1))
+			name="${line#FAIL }"
+			name="${name%% first difference at byte *}"
+			fail "vector set reply: ${name%% eski=*}" "the reference reply" "${line:0:400}"
+			;;
+		passed:\ *)
+			summary=1
+			;;
+		*)
+			echo "  $line"
+			;;
+		esac
+	done < <(timeout 900 python3 -I test/vectorset/compare.py "$@" 2>&1)
+	if [ "$summary" != "1" ] || [ "$n" -lt "$minimum" ]; then
+		fail "vector set comparison ran to completion" "at least $minimum checks" "$n"
+	fi
+}
+
+if [ "$VSET" != "1" ]; then
+	echo "skipping the vector set comparison, set ESKI_SMOKE_VSET=1 to run it"
+elif vset_port_open "$VSET_REF_PORT"; then
+	fail "reference vector set server" "port $VSET_REF_PORT free" "port in use"
+elif docker run -d --rm --name "$VSET_REF_CONTAINER" --network=host --memory 2g --memory-swap 2g "$VSET_IMAGE" redis-server --port "$VSET_REF_PORT" --bind 127.0.0.1 --protected-mode yes --save "" --appendonly no --maxmemory 1gb --client-output-buffer-limit "normal 64mb 32mb 60" --enable-debug-command yes >/dev/null; then
+	vset_ready=0
+	for _ in $(seq 1 100); do
+		if [ "$(docker exec "$CLI_CONTAINER" redis-cli -p "$VSET_REF_PORT" ping 2>&1)" == "PONG" ]; then
+			vset_ready=1
+			break
+		fi
+		sleep 0.1
+	done
+	if [ "$vset_ready" == "1" ]; then
+		echo "comparing every captured vector set case with the reference image on port $VSET_REF_PORT"
+		expect_vectorset_report 1502 "$PORT" "$VSET_REF_PORT"
+	else
+		fail "reference vector set server" "PONG on port $VSET_REF_PORT" "no answer"
+	fi
+	docker rm -f "$VSET_REF_CONTAINER" >/dev/null 2>&1
+	expect "server alive after the vector set comparison" "PONG" ping
+	expect "flushall after the vector set comparison" "OK" flushall
+else
+	fail "reference vector set server" "container started" "docker run failed"
 fi
 
 if [ "$BENCH" == "1" ]; then

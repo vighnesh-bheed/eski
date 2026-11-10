@@ -385,7 +385,7 @@ class LiveInputs(FixtureInputs, unittest.TestCase):
     def test_live_inventory_covers_registration_and_repeated_starts_are_deterministic(self):
         with tables.server_connection(BINARY) as connection:
             commands = tables.command_inventory(connection)
-            self.assertEqual(set(commands), set(connection.call('COMMAND', 'LIST')))
+            self.assertEqual(set(commands), {name.lower() for name in connection.call('COMMAND', 'LIST')})
             self.assertEqual(sum('|' not in name for name in commands), connection.call('COMMAND', 'COUNT'))
         self.assertEqual(self.commands, commands)
         self.assertGreater(len(commands), 200)

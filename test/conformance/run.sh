@@ -3,6 +3,12 @@ set -uo pipefail
 
 CONF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$CONF_DIR/../.." && pwd)"
+for ((arg = 1; arg < $#; arg++)); do
+	next=$((arg + 1))
+	if [ "${!arg}" = "--suite" ] && [ "${!next}" = "vectorset" ]; then
+		exec "$CONF_DIR/vectorset.sh" "${@:1:arg-1}" "${@:next+1}"
+	fi
+done
 REDIS_TAG="7.4.11"
 REDIS_SHA256="e973da69febfea096ab94690b44bf976482788a1b5e070df373b4f27697d57d4"
 REDIS_URL="https://github.com/redis/redis/archive/refs/tags/${REDIS_TAG}.tar.gz"
@@ -84,7 +90,10 @@ per-file original hashes and the adapted support hash are recorded with results.
 The runner kills its fixture process group after every unit. Managed mode requires
 a native Tcl interpreter; --tls also generates real CA/server/client certificates.
 
-  --suite redis|valkey    which release's suite to run (default: redis)
+  --suite redis|valkey|vectorset
+                          which release's suite to run (default: redis); vectorset runs
+                          the vector set unit of Redis 8.10.3 through test/conformance/vectorset.sh,
+                          see ./test/conformance/vectorset.sh --help for its options
   --units a,b,c           units to run (default: the curated in-scope list of the suite)
   --tags "..."            suite tag filter; prefix a tag with - to exclude it
                           (default: "$DEFAULT_TAGS"; pass "" to run every tag)

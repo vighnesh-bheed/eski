@@ -1,6 +1,6 @@
 {
-  "src/acl.odin": "98010977db4d109b94265befe5f7aa93c62922857c1efb9450f1549142a4731a",
-  "src/config_table.odin": "11165c9c8fae2537fdfb69b9b42a11c1c5c41162f1da9269e5659019c40faa1a",
+  "src/acl.odin": "73a9716920fc00186f1775b494dd958ec66df860d24d7da07a3bdbe17c141f8a",
+  "src/config_table.odin": "d7346faece95ffe750a1b990012ae0c5a6a3c6995862688c54d534db50b22b11",
   "src/integer/parse.odin": "167a31664bdfb2a967b6c84281d05e6b72ca3074cd749daeb1c6189ffe9b51f1",
   "src/listpack/allocator.odin": "3cc857148aa9a011d2a16ff521caea53539f002986168b47b40e298e00865c1e",
   "src/listpack/codec.odin": "036ba1d83ca688e55cb8bdfd597fba63dd99f05a10afa6b676685c6b8c37f25c",

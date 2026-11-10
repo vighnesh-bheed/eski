@@ -25,11 +25,16 @@ cmd_copy :: proc(c: ^Conn, argv: [][]u8) {
 		reply_int(c, 0)
 		return
 	}
-	if db_find_in(target, destination) != nil {
-		if !replace {
-			reply_int(c, 0)
-			return
-		}
+	exists := db_find_in(target, destination) != nil
+	if exists && !replace {
+		reply_int(c, 0)
+		return
+	}
+	if found := db_find_notouch(source); found != nil && entry_type(found) == .Vectorset {
+		reply_error(c, ERR_VSET_COPY)
+		return
+	}
+	if exists {
 		db_remove_in(target, destination)
 		block_note_removed()
 	}

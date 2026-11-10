@@ -1,8 +1,8 @@
 # Command inventory
 
-Generated from a temporary instance of the built executable using `COMMAND DOCS`, `COMMAND LIST` and `COMMAND COUNT`. The inventory contains 237 top-level commands and 333 names including subcommands. Metadata describes the protocol surface; the [command-group pages](README.md) and [conformance record](conformance.md) define implemented behavior and remaining gaps. Lua scripts, Function libraries and debugging have the scope documented in [scripting](scripting.md). Replication and clustering remain outside the node scope.
+Generated from a temporary instance of the built executable using `COMMAND DOCS`, `COMMAND LIST` and `COMMAND COUNT`. The inventory contains 251 top-level commands and 352 names including subcommands. Metadata describes the protocol surface; the [command-group pages](README.md) and [conformance record](conformance.md) define implemented behavior and remaining gaps. Lua scripts, Function libraries and debugging have the scope documented in [scripting](scripting.md). Replication and clustering remain outside the node scope.
 
-Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test/readme_tables.py --check`. Use `--server HOST:PORT` to inspect an existing instance without starting one. The canonical command-metadata SHA256 is `59394b4b9174331baa6663ff0177594986147848923e37b9a4f14b9f368638b3`.
+Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test/readme_tables.py --check`. Use `--server HOST:PORT` to inspect an existing instance without starting one. The canonical command-metadata SHA256 is `e03fbd1de1c13b7dec13a5cc328b6deddbb720af8028422607936b8fb63d7f59`.
 
 ## Bitmap
 
@@ -168,6 +168,24 @@ Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test
 | `RPUSH` | `<key> <element> ...` | Appends one or more elements to a list. Creates the key if it doesn't exist. |
 | `RPUSHX` | `<key> <element> ...` | Appends an element to a list only when the list exists. |
 
+## Module
+
+| Command | Arguments | Metadata summary |
+| --- | --- | --- |
+| `VADD` | `<key> [REDUCE <dim>] (FP32 \| VALUES) <vector> <element> [CAS] [(NOQUANT \| BIN \| Q8)] [EF <build-exploration-factor>] [SETATTR <attributes>] [M <numlinks>]` | Stores a vector under an element name, creating the vector set on first use and replacing the vector of an element that is already present. |
+| `VCARD` | `<key>` | Counts the elements stored in a vector set, answering 0 for a missing key. |
+| `VDIM` | `<key>` | Reports how many components each stored vector has, which after a REDUCE projection is the reduced size. |
+| `VEMB` | `<key> <element> [RAW]` | Reads back the stored vector of an element as numbers, or with RAW in the encoded form the set keeps. |
+| `VGETATTR` | `<key> <element>` | Fetches the JSON text attached to an element, or null when the element carries none. |
+| `VINFO` | `<key>` | Describes the quantization, dimensions, element and attribute counts and graph parameters of a vector set. |
+| `VISMEMBER` | `<key> <element>` | Tells whether the named element belongs to the vector set at the key. |
+| `VLINKS` | `<key> <element> [WITHSCORES]` | Lists, for each graph layer the element sits on, the elements it links to, optionally with their similarity scores. |
+| `VRANDMEMBER` | `<key> [<count>]` | Picks an element at random, or with a count that many, all distinct when the count is positive and possibly repeated when it is negative. |
+| `VRANGE` | `<key> <start> <end> [<count>]` | Lists the element names that sort between two bounds, in byte order, up to an optional count. |
+| `VREM` | `<key> <element>` | Takes the named element, its vector and its attribute out of the set, and deletes the key when no element is left. |
+| `VSETATTR` | `<key> <element> <json>` | Replaces the JSON text attached to an existing element, and clears it when given an empty string. |
+| `VSIM` | `<key> (ELE \| FP32 \| VALUES) <vector_or_element> [WITHSCORES] [WITHATTRIBS] [COUNT <count>] [EPSILON <max_distance>] [EF <search-exploration-factor>] [FILTER <expression>] [FILTER-EF <max-filtering-effort>] [TRUTH] [NOTHREAD]` | Searches a vector set for the elements closest to a query vector or to an existing element. |
+
 ## Pubsub
 
 | Command | Arguments | Metadata summary |
@@ -272,6 +290,12 @@ Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test
 | `MEMORY PURGE` | — | Asks the allocator to release memory. |
 | `MEMORY STATS` | — | Returns details about memory usage. |
 | `MEMORY USAGE` | `<key> [SAMPLES <count>]` | Estimates the memory usage of a key. |
+| `MODULE` | — | A container for module commands. |
+| `MODULE HELP` | — | Returns helpful text about the different subcommands. |
+| `MODULE LIST` | — | Returns all loaded modules. |
+| `MODULE LOAD` | `<path> [<arg> ...]` | Loads a module. |
+| `MODULE LOADEX` | `<path> [CONFIG <name> <value> ...] [ARGS <args> ...]` | Loads a module using extended parameters. |
+| `MODULE UNLOAD` | `<name>` | Unloads a module. |
 | `MONITOR` | — | Listens for all requests received by the server in real-time. |
 | `SAVE` | — | Synchronously saves the database(s) to disk. |
 | `SHUTDOWN` | `[(NOSAVE \| SAVE)] [NOW] [FORCE] [ABORT]` | Synchronously saves the database(s) to disk and shuts down the server. |

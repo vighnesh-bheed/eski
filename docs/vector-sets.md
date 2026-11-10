@@ -1,0 +1,25 @@
+# Vector sets
+
+A vector set maps binary-safe element names to vectors and indexes them in an HNSW graph for similarity search. `VADD` adds an element or replaces its vector, `VREM` removes one, `VSETATTR` and `VGETATTR` manage a JSON attribute per element, and `VSIM` returns the elements closest to a vector or to another element. `VCARD`, `VDIM`, `VEMB`, `VLINKS`, `VINFO`, `VISMEMBER`, `VRANDMEMBER` and `VRANGE` inspect a set. The first successful `VADD` creates the key and removing the last element deletes it; any of these commands answers `WRONGTYPE` for a key of another type.
+
+```sh
+redis-cli -p 6399 VADD demo:docs VALUES 3 0.1 0.9 0.2 intro SETATTR '{"year":2024}'
+redis-cli -p 6399 VADD demo:docs VALUES 3 0.8 0.1 0.3 setup SETATTR '{"year":2026}'
+redis-cli -p 6399 VSIM demo:docs VALUES 3 0.1 0.8 0.3 WITHSCORES COUNT 5 FILTER '.year > 2025'
+```
+
+Vectors arrive as `VALUES n x1 ... xn` or as a little-endian float32 blob after `FP32`. They are normalised and stored as signed 8-bit codes by default, as float32 with `NOQUANT` or as one bit per component with `BIN`. The quantisation, the link count `M` and a `REDUCE` projection are fixed when the set is created, and every later `VADD` must repeat them when they differ from the defaults. Scores run from 0 for opposite directions to 1 for the same direction. `VSIM` returns ten elements unless `COUNT` says otherwise, searches with an exploration factor of 100 unless `EF` says otherwise, keeps scores of at least one minus `EPSILON`, and with `TRUTH` scans every element and orders equal scores by insertion. `FILTER` takes an expression over the attribute's top-level fields; elements without an attribute never match. `NOTHREAD` and `CAS` are accepted and run inline in this release.
+
+`REDUCE` projects every input onto a fixed pattern of Hadamard signs. The projection preserves vector lengths exactly only when the reduced dimension is at most the largest power of two that divides the input dimension; other shapes are accepted, as the reference accepts them, but their rows are not orthogonal.
+
+`TYPE` reports `vectorset` and `OBJECT ENCODING` reports `raw`. `MEMORY USAGE` is exact, the dataset counts in `used_memory`, eviction policies select vector sets like other keys and `VADD` is refused with an out-of-memory error above `maxmemory`. Expiry, `DEL`, `UNLINK`, lazy freeing, `RENAME`, `MOVE`, `SWAPDB`, `DUMP`, `RESTORE`, `SCAN ... TYPE vectorset` and the flush commands work as for other types. `COPY` answers `ERR not supported for this module key` and `SORT` answers `WRONGTYPE`. The vector commands publish no keyspace events of their own; key creation and read misses publish `new` and `keymiss` as for every type, and writes invalidate `WATCH` and client tracking as soon as they reach the key, whatever their outcome.
+
+Snapshots store a vector set as a module-type value named `eski-vset` with encoding version 1, holding Eski's own vector set encoding, and loading rebuilds the graph. `DUMP` payloads use the same framing, so the reference and Eski each refuse the other's payloads and snapshot files cleanly. The append-only file receives `VADD`, `VREM` and `VSETATTR` as written whenever they change the set, including a `VADD` that replaces an existing vector, which the reference neither logs nor counts as a change. A rewrite without the RDB preamble writes each vector set as `RESTORE` of its payload followed by `PEXPIREAT` when it expires, so the rewritten file reloads the same set; the reference fails such a rewrite.
+
+The commands carry upper-case names, the `module` flag, the `module` group and no ACL categories, as on the reference, so per-command rules such as `+vadd` grant them and category rules never do. `MODULE LIST` reports one entry named `vectorset` with version 1 so that clients can detect the commands, while `HELLO` and the `INFO` module section stay empty and `MODULE LOAD` always fails. `CONFIG SET vset-force-single-threaded-execution` accepts `yes` or `no` with no effect, and pattern forms of `CONFIG GET` leave it out like Eski's other settings that the 7.4 server lacks. Vector commands always run on the coordinator; the keyspace workers never hold a vector set.
+
+Graph-dependent results differ from the reference by design: the order of equal scores outside `TRUTH`, the members kept when `COUNT` cuts a group of equal scores, `VLINKS` neighbour lists and levels, `VINFO` max-level and vset-uid, `VRANDMEMBER` selections, payload bytes, serialized lengths and memory sizes.
+
+Verify with `bash test/vectorset/compare.sh`, `./test/conformance/run.sh --suite vectorset --baseline test/conformance/baseline-vectorset.json`, `python3 -I test/vectorset/memory.py` and `bash test/run_packages.sh`. The [command reference](commands.md) lists supported forms and [build, run and test](build-run-test.md#vector-set-checks) describes the checks.
+
+Eski is an independent project, not affiliated with, endorsed or certified by Redis Ltd. Redis is a registered trademark of Redis Ltd.; any rights therein are reserved to Redis Ltd.

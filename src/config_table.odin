@@ -214,7 +214,7 @@ special_mc_port := Config_Special{config_mc_port_set, config_mc_port_get, config
 special_mc_item_size := Config_Special{config_mc_item_size_set, config_mc_item_size_get, config_mc_item_size_rewrite}
 special_databases := Config_Special{config_databases_set, config_databases_get, config_databases_rewrite}
 
-CONFIG_TABLE_LEN :: 197
+CONFIG_TABLE_LEN :: 198
 
 configs: [CONFIG_TABLE_LEN]Config
 
@@ -244,6 +244,7 @@ config_table_init :: proc() {
 		{name = "lazyfree-lazy-server-del", type = .Bool, def = 0, store = &cfg.lazyfree_lazy_server_del},
 		{name = "lazyfree-lazy-user-del", type = .Bool, def = 0, store = &cfg.lazyfree_lazy_user_del},
 		{name = "lazyfree-lazy-user-flush", type = .Bool, def = 0, store = &cfg.lazyfree_lazy_user_flush},
+		{name = "vset-force-single-threaded-execution", type = .Bool, flags = {.Hidden}, def = 0, store = &vset_force_single_threaded},
 		{name = "repl-disable-tcp-nodelay", type = .Bool, def = 0, store = &cfg.repl_disable_tcp_nodelay},
 		{name = "repl-diskless-sync", type = .Bool, def = 1, store = &cfg.repl_diskless_sync},
 		{name = "aof-rewrite-incremental-fsync", type = .Bool, def = 1, store = &aof.incremental_fsync},

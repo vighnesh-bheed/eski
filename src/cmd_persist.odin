@@ -11,6 +11,7 @@ import lr "lua_runtime"
 import st "settype"
 import sm "streamtype"
 import zt "zsettype"
+import vt "vsettype"
 import "sysclock"
 
 PERSIST_FAILED_SAVE_BACKOFF :: 5
@@ -138,7 +139,7 @@ persist_write_names := [?]string {
 	"setex", "setnx", "setrange", "sinterstore", "smove", "sort", "spop", "srem", "sunionstore", "swapdb", "unlink",
 	"xack", "xadd", "xautoclaim", "xclaim", "xdel", "xgroup", "xreadgroup", "xsetid", "xtrim", "zadd", "zdiffstore",
 	"zincrby", "zinterstore", "zmpop", "zpopmax", "zpopmin", "zrangestore", "zrem", "zremrangebylex",
-	"zremrangebyrank", "zremrangebyscore", "zunionstore",
+	"zremrangebyrank", "zremrangebyscore", "zunionstore", "VADD", "VREM", "VSETATTR",
 }
 
 @(private = "file")
@@ -307,6 +308,8 @@ persist_type_byte :: proc "contextless" (v: Slot_Value) -> u8 {
 		return ht.rdb_type(cast(ht.Hash)v.obj)
 	case .Stream:
 		return sm.rdb_type(cast(sm.Stream)v.obj)
+	case .Vectorset:
+		return rdb.TYPE_MODULE_2
 	}
 	return rdb.TYPE_STRING
 }
@@ -332,6 +335,8 @@ persist_write_value :: proc(w: ^rdb.Writer, key: []u8, v: Slot_Value, with_key: 
 		ht.rdb_save(w, cast(ht.Hash)v.obj)
 	case .Stream:
 		sm.rdb_save(w, cast(sm.Stream)v.obj)
+	case .Vectorset:
+		vset_rdb_save(w, cast(vt.Vset)v.obj)
 	}
 	return !w.failed
 }
@@ -733,6 +738,13 @@ persist_load_object :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> (v: Loa
 			rdb.corrupt(r, "holds module data with an unreadable module id")
 			return
 		}
+		if id == VSET_RDB_MODULE_ID {
+			if vs := vset_rdb_load(r); vs != nil {
+				v.type = .Vectorset
+				v.obj = vs
+			}
+			return
+		}
 		name: [9]u8
 		rdb.corrupt(r, "holds data of unknown module type '", 0, false, rdb.module_name_by_id(id, &name))
 		rdb.corrupt_append(r, "'")
@@ -771,6 +783,8 @@ persist_attach :: proc(e: ^Entry, key: []u8, v: Loaded_Value) {
 		s := cast(sm.Stream)v.obj
 		s.acct = sm.memory_usage(s)
 		stream_copy_attach(e, v.obj)
+	case .Vectorset:
+		vset_attach(e, cast(vt.Vset)v.obj)
 	}
 }
 
@@ -1681,6 +1695,7 @@ Digest_Tag :: enum u8 {
 	Hash,
 	Stream,
 	Key,
+	Vectorset,
 }
 
 @(private = "file")
@@ -1804,6 +1819,38 @@ digest_stream :: proc(h: ^blake2b.Context, s: sm.Stream) {
 }
 
 @(private = "file")
+digest_vset :: proc(h: ^blake2b.Context, s: vt.Vset) {
+	p := vt.params_of(s)
+	digest_word(h, u64(p.quant))
+	digest_word(h, u64(p.dim))
+	digest_word(h, u64(p.input_dim))
+	digest_word(h, u64(p.m))
+	total: Digest
+	it := vt.element_iterator(s)
+	for {
+		slot, more := vt.next_element(&it)
+		if !more {
+			break
+		}
+		eh: blake2b.Context
+		digest_begin(&eh, .Vectorset)
+		digest_text(&eh, vt.element_name(s, slot))
+		raw := vt.raw_embedding(s, slot)
+		digest_text(&eh, raw.data)
+		digest_word(&eh, u64(transmute(u32)raw.norm))
+		digest_word(&eh, u64(transmute(u32)raw.range) if raw.has_range else 0)
+		if text, ok := vt.element_attribute(s, slot); ok {
+			digest_word(&eh, 1)
+			digest_text(&eh, transmute([]u8)text)
+		} else {
+			digest_word(&eh, 0)
+		}
+		digest_accumulate(&total, digest_close(&eh))
+	}
+	blake2b.update(h, total[:])
+}
+
+@(private = "file")
 digest_of_value :: proc(v: Slot_Value) -> Digest {
 	h: blake2b.Context
 	if v.type == .String || v.obj == nil {
@@ -1830,6 +1877,9 @@ digest_of_value :: proc(v: Slot_Value) -> Digest {
 	case .Stream:
 		digest_begin(&h, .Stream)
 		digest_stream(&h, cast(sm.Stream)v.obj)
+	case .Vectorset:
+		digest_begin(&h, .Vectorset)
+		digest_vset(&h, cast(vt.Vset)v.obj)
 	case:
 		blake2b.init(&h, DIGEST_BYTES)
 	}

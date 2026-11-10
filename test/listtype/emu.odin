@@ -144,7 +144,7 @@ lookup :: proc(m: ^Model, key: []u8) -> ^Key {
 	case .String:
 		k.kind = .String
 		k.str = inproc_clone(e.val)
-	case .Set, .Zset, .Hash, .Stream:
+	case .Set, .Zset, .Hash, .Stream, .Vectorset:
 		k.kind = .String
 	}
 	name := string(inproc_clone(key))

@@ -101,6 +101,9 @@ hash_key_ref_move :: proc "contextless" (ref: rawptr, registry: ^ht.Registry) {
 }
 
 object_release :: proc "contextless" (type: Obj_Type, obj: rawptr) -> int {
+	if type == .Vectorset {
+		return vset_object_release(obj)
+	}
 	if type != .Hash || obj == nil {
 		return 0
 	}
@@ -112,6 +115,9 @@ object_release :: proc "contextless" (type: Obj_Type, obj: rawptr) -> int {
 }
 
 object_move :: proc "contextless" (type: Obj_Type, obj: rawptr, from: ^Db, to: ^Db) -> int {
+	if type == .Vectorset {
+		return vset_object_acct(obj)
+	}
 	if type != .Hash || obj == nil {
 		return 0
 	}

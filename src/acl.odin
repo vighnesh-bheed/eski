@@ -356,6 +356,12 @@ acl_lookup_name :: proc(name: []u8) -> int {
 	for b, i in name {
 		buf[i] = lower(b)
 	}
+	if id := acl_doc_index(string(buf[:len(name)])); id >= 0 {
+		return id
+	}
+	for b, i in name {
+		buf[i] = b - 32 if b >= 'a' && b <= 'z' else b
+	}
 	return acl_doc_index(string(buf[:len(name)]))
 }
 

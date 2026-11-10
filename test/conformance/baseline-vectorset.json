@@ -1,0 +1,304 @@
+{
+  "schema": 2,
+  "generated_at": "2026-11-08T01:41:33Z",
+  "suite": {
+    "name": "vectorset",
+    "tag": "8.10.3",
+    "sha256": "85ae62e175cc76f638015fa18cb384b549b6808a765425d9e9d47466f69532ea",
+    "url": "https://github.com/redis/redis/archive/refs/tags/8.10.3.tar.gz",
+    "external_skip_lifted": "",
+    "fixture_mode": "external",
+    "fixture_receipt": "",
+    "tags": "",
+    "server": "bin/eski on 127.0.0.1:6662",
+    "tcl": "",
+    "known_failures": "test/conformance/known-failures.txt",
+    "runner": "python 3.14.8 with redis-py 8.1.0",
+    "titles_from": "test/conformance/reference-vectorset.json",
+    "extracted": "modules/vector-sets/test.py modules/vector-sets/tests",
+    "exclusions_file": "test/conformance/vectorset-exclusions.json",
+    "exclusions": [
+      {
+        "unit": "modules/vector-sets",
+        "test": "Comprehensive Replication Test with mixed operations",
+        "reason": "Replication is outside Eski's single-node scope. The runner skips this test when nothing answers on its replica port, and the harness always passes a closed port, so the test is recorded as skipped on every server."
+      },
+      {
+        "unit": "modules/vector-sets",
+        "test": "AOF rewrite of a vector set without aof_rewrite fails gracefully",
+        "reason": "The reference has no append-only rewrite form for vector sets, so a rewrite with aof-use-rdb-preamble no fails there and the test expects that failure. Eski rewrites each vector set exactly, as RESTORE of its serialized payload followed by the usual PEXPIREAT, so the rewrite succeeds and reloading the file gives back the same set; no VADD sequence reproduces the stored quantized vectors, norms and graph sequence numbers, which is why the payload form is used. The test therefore fails on Eski by design."
+      }
+    ]
+  },
+  "units": {
+    "modules/vector-sets": {
+      "unit": "modules/vector-sets",
+      "status": "failed",
+      "passed": 41,
+      "failed": 1,
+      "skipped": 1,
+      "skipped_by_tag": 0,
+      "errored": 0,
+      "seconds": 44,
+      "suite_exit_code": 1,
+      "log": "test/conformance/results/logs-vectorset-20261108T014049Z/vector-sets.log",
+      "failing_tests": [
+        "AOF rewrite of a vector set without aof_rewrite fails gracefully"
+      ],
+      "known_failing_tests": [
+        "AOF rewrite of a vector set without aof_rewrite fails gracefully"
+      ],
+      "failures": [
+        {
+          "test": "AOF rewrite of a vector set without aof_rewrite fails gracefully",
+          "reason": "AOF rewrite of a type without aof_rewrite should fail",
+          "message": "AOF rewrite of a type without aof_rewrite should fail"
+        }
+      ],
+      "errors": [],
+      "warnings": [],
+      "tests": {
+        "AOF rewrite of a vector set without aof_rewrite fails gracefully": {
+          "passed": 0,
+          "failed": 1,
+          "skipped": 0
+        },
+        "VADD, VDIM, VCARD basic usage": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "VSIM reported distance makes sense with 4D vectors": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "Binary quantization: verify vectorized vs scalar paths produce consistent results": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "[regression] DEBUG DIGEST-VALUE with attributes": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "[regression] VADD VALUES absurdly large dim rejected": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "[regression] VADD VALUES dim > MAX_DIM rejected": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "[regression] VSIM VALUES dim > MAX_DIM rejected": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "[regression] VADD enforces reduce_dim <= dim": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "VSIM EPSILON option filtering": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "VREM last item deletes key": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "VSIM FILTER expressions basic functionality": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "[regression] MEMORY USAGE with attributes": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "Q8 quantization: VSIM reported distance makes sense with 4D vectors": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "Q8 quantization: verify vectorized vs scalar paths produce consistent results": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "[regression] VADD CAS SETATTR keeps attribute accounting": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "VEMB Command": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "VISMEMBER basic functionality": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "[regression] VRANDMEMBER ping-pong": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "VRANDMEMBER COUNT=LLONG_MIN is rejected, not crashing": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "VRANDMEMBER basic functionality": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "VRANGE basic functionality and iteration": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "[regression] VSIM duplicate FILTER should not leak memory": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "[regression] VSIM FILTER expr freed on option parse error": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "VSIM WITHATTRIBS/WITHSCORES functionality testing": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "Dimension Reduction": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "VSIM Limit EF Search": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "[regression] VADD VALUES dim == MAX_DIM accepted": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "[regression] VSIM VALUES dim == MAX_DIM accepted": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "[regression] Dimension Validation with Projection": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "vset-force-single-threaded-execution configuration testing": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "Concurrent VADD with CAS": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "Concurrent VSIM and DEL operations": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "Deletion and graph state after deletion": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "VADD vector update with cluster relocation": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "Concurrent VSIM and VREM operations": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "VSIM FILTER EF parameter comparison": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "VSIM FILTER selectivity performance benchmark": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "Concurrent VADD/DEL/VSIM operations stress test": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "Large Scale Comparison": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "VSIM FILTER comprehensive functionality testing": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        },
+        "Comprehensive Replication Test with mixed operations": {
+          "passed": 0,
+          "failed": 0,
+          "skipped": 1
+        },
+        "HNSW Persistence": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 0
+        }
+      }
+    }
+  },
+  "totals": {
+    "units_run": 1,
+    "units_out_of_scope": 0,
+    "passed": 41,
+    "failed": 1,
+    "skipped": 1,
+    "errored": 0,
+    "known_failures": 1
+  },
+  "failing_tests": [
+    "modules/vector-sets::AOF rewrite of a vector set without aof_rewrite fails gracefully"
+  ],
+  "unexpected_failures": [],
+  "failure_reasons": [
+    {
+      "reason": "AOF rewrite of a type without aof_rewrite should fail",
+      "count": 1,
+      "units": [
+        "modules/vector-sets"
+      ]
+    }
+  ],
+  "mode": "strict",
+  "baseline": null,
+  "exit_code": 0
+}

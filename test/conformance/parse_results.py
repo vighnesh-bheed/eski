@@ -37,7 +37,16 @@ SECTION_STARTS = (
     "Killing still running",
 )
 SUMMARY_SCHEMA = 2
-SUITES = ("redis", "valkey")
+SUITES = ("redis", "valkey", "vectorset")
+VSET_RULE = re.compile(r"^=+$")
+VSET_INLINE = re.compile(r"^(.*): (OK|ERR|FAIL|FAILED|ERROR) \(([0-9.]+)s\)$")
+VSET_ALONE = re.compile(r"^(OK|ERR|FAIL|FAILED|ERROR) \(([0-9.]+)s\)$")
+VSET_SKIP = re.compile(r"^(.*): SKIPPING$")
+VSET_SUMMARY = re.compile(r"^Test Summary: (\d+)/(\d+) tests passed$")
+VSET_TALLY = re.compile(r"^\d+ TESTS (FAILED|SKIPPED)!$")
+VSET_CONTINUATION = ("Traceback (most recent call last):", "During handling of the above exception", "The above exception was the direct cause")
+VSET_ARGS_TAIL = re.compile(r"(, with args beginning with:).*$")
+VSET_UNPRINTABLE = re.compile(r"[^\x20-\x7e]")
 SUITE_PREFIX = re.compile(r"^([A-Za-z0-9_.-]+):(?!:)(.*)$")
 
 
@@ -211,13 +220,159 @@ def parse_log(text):
     return result
 
 
+def short_failure(text):
+    text = VSET_UNPRINTABLE.sub("?", VSET_ARGS_TAIL.sub(r"\1 ...", text.strip()))
+    return text[:200]
+
+
+def vectorset_title(line):
+    if line.endswith(":"):
+        return line[:-1].strip()
+    if ": " in line:
+        return line.split(": ", 1)[0].strip()
+    return line.strip()
+
+
+def vectorset_known_start(line, titles):
+    best = None
+    for title in titles:
+        if line == title + ":" or line.startswith(title + ": "):
+            if best is None or len(title) > len(best):
+                best = title
+    return best
+
+
+def traceback_continues(lines, i):
+    j = i
+    while j < len(lines) and not lines[j].strip():
+        j += 1
+    if j >= len(lines):
+        return False, j
+    return lines[j].startswith(VSET_CONTINUATION) or lines[j][:1].isspace(), j
+
+
+def parse_vectorset_log(text, titles=()):
+    result = new_unit_result()
+    titles = [t for t in titles if t]
+    lines = [strip_ansi(raw).rstrip("\r") for raw in text.splitlines()]
+    n = len(lines)
+    i = 0
+    rules = 0
+    while i < n and rules < 2:
+        if VSET_RULE.match(lines[i]):
+            rules += 1
+        i += 1
+    if rules < 2:
+        i = 0
+    start = None
+    summary = None
+    error = None
+
+    def record(title, status):
+        entry = test_entry(result, title)
+        if status == "OK":
+            entry["passed"] += 1
+            result["passed"] += 1
+        elif status == "SKIP":
+            entry["skipped"] += 1
+            result["skipped"] += 1
+        else:
+            entry["failed"] += 1
+            result["failed"] += 1
+            failure = {"test": title, "reason": "", "message": ""}
+            result["failures"].append(failure)
+            return failure
+        return None
+
+    while i < n:
+        line = lines[i]
+        stripped = line.strip()
+        i += 1
+        summary_match = VSET_SUMMARY.match(stripped)
+        if summary_match:
+            summary = (int(summary_match.group(1)), int(summary_match.group(2)))
+            result["ended"] = True
+            error = None
+            continue
+        if VSET_TALLY.match(stripped):
+            continue
+        if error is not None and error["phase"] == "message":
+            if line.startswith("Error: "):
+                text_line = short_failure(line[len("Error: "):])
+                error["failure"]["reason"] = text_line
+                error["failure"]["message"] = text_line
+                error["phase"] = "body"
+                continue
+            if not stripped:
+                continue
+            error["phase"] = "body"
+        skip = VSET_SKIP.match(line)
+        inline = VSET_INLINE.match(line)
+        if skip or inline:
+            if start is not None and titles:
+                result["errored"] += 1
+                result["errors"].append({"kind": "incomplete-test", "reason": "a test started without a result", "message": short_failure(start)})
+            start = None
+            if skip:
+                record(skip.group(1).strip(), "SKIP")
+                error = None
+            else:
+                failure = record(inline.group(1).strip(), inline.group(2))
+                error = {"failure": failure, "phase": "message"} if failure else None
+            continue
+        known = vectorset_known_start(line, titles) if titles else None
+        if known is not None:
+            if start is not None:
+                result["errored"] += 1
+                result["errors"].append({"kind": "incomplete-test", "reason": "a test started without a result", "message": short_failure(start)})
+            start = known
+            error = None
+            continue
+        alone = VSET_ALONE.match(stripped)
+        if alone and start is not None:
+            failure = record(start, alone.group(1))
+            start = None
+            error = {"failure": failure, "phase": "message"} if failure else None
+            continue
+        if error is not None:
+            if titles:
+                continue
+            if line == "Traceback:":
+                error["phase"] = "traceback"
+                continue
+            if not stripped and error["phase"] == "traceback":
+                more, j = traceback_continues(lines, i)
+                if more:
+                    i = j
+                    continue
+                error = None
+                i = j
+            elif not stripped and error["phase"] == "body":
+                if i < n and lines[i] == "Traceback:":
+                    continue
+                error = None
+            continue
+        if start is None and stripped and not titles and not result["ended"] and not VSET_RULE.match(stripped) and not line.startswith(("WARNING: ", "Replication tests will be skipped")):
+            start = vectorset_title(line)
+    if start is not None:
+        result["errored"] += 1
+        result["errors"].append({"kind": "incomplete-test", "reason": "the run stopped inside a test", "message": short_failure(start)})
+    if summary is not None:
+        passed, total = summary
+        result["final_failed_count"] = total - passed - result["skipped"]
+        if passed != result["passed"]:
+            result["errors"].append({"kind": "count-mismatch", "reason": "parsed %d passes but the runner reported %d" % (result["passed"], passed), "message": ""})
+            result["errored"] += 1
+    return result
+
+
 def canonical_unit(name):
     name = name.strip()
     if name.startswith("tests/"):
         name = name[len("tests/"):]
     if name.endswith(".tcl"):
         name = name[:-len(".tcl")]
-    if name.startswith(("unit/", "integration/")):
+    if name.startswith(("unit/", "integration/", "modules/")):
         return name
     return "unit/" + name
 
@@ -349,14 +504,14 @@ def unit_status(result, row):
     return "ok"
 
 
-def build_unit(row, known, root):
+def build_unit(row, known, root, log_parser=None):
     canonical = row["canonical"]
     if row["action"] == "skip":
         result = new_unit_result()
     else:
         try:
             with open(row["log"], encoding="utf-8", errors="replace") as handle:
-                result = parse_log(handle.read())
+                result = (log_parser or parse_log)(handle.read())
         except OSError:
             result = new_unit_result()
             result["errors"].append({"kind": "missing-log", "reason": "no suite output was captured", "message": row["log"]})
@@ -509,10 +664,10 @@ def compare_baseline(baseline, units):
     }
 
 
-def build_summary(rows, known, root, info, baseline=None, baseline_path=None):
+def build_summary(rows, known, root, info, baseline=None, baseline_path=None, log_parser=None):
     units = {}
     for row in rows:
-        units[display_unit(row["canonical"])] = build_unit(row, known, root)
+        units[display_unit(row["canonical"])] = build_unit(row, known, root, log_parser)
     ran = [u for u in units.values() if u["status"] != "out-of-scope"]
     totals = {
         "units_run": len(ran),
@@ -574,6 +729,11 @@ def render_table(summary):
     return "\n".join(out)
 
 
+def known_list(summary):
+    suite = summary.get("suite") or {}
+    return os.path.basename(suite.get("exclusions_file") or "") or "known-failures.txt"
+
+
 def render_report(summary, summary_path):
     name, tag = suite_identity(summary)
     lines = [render_table(summary), ""]
@@ -599,7 +759,7 @@ def render_report(summary, summary_path):
         base = comparison.get("baseline_suite") or {}
         lines.append("Mode: baseline. The run fails only when a test that passed in %s, recorded with %s, does not pass now." % (
             comparison["path"], suite_label(base.get("name"), base.get("tag"))))
-        lines.append("Strict mode, used when --baseline is not given, fails on any failing test or unit error not listed in known-failures.txt.")
+        lines.append("Strict mode, used when --baseline is not given, fails on any failing test or unit error not listed in %s." % known_list(summary))
         if base.get("tag") != tag:
             lines.append("Warning: the baseline was recorded with %s %s and this run used %s %s." % (
                 base.get("name"), base.get("tag"), name, tag))
@@ -613,7 +773,7 @@ def render_report(summary, summary_path):
             lines.append("  REGRESSION %s::%s (passed %d before, %d now, %s)" % (
                 item["unit"], item["test"], item["baseline_passed"], item["current_passed"], item["now"]))
     else:
-        lines.append("Mode: strict. The run fails on any failing test or unit error not listed in known-failures.txt.")
+        lines.append("Mode: strict. The run fails on any failing test or unit error not listed in %s." % known_list(summary))
         lines.append("Baseline mode, enabled with --baseline <summary.json>, fails only on tests that passed in the baseline and do not pass now.")
         unexpected = summary["unexpected_failures"]
         lines.append("Unexpected failures: %d." % len(unexpected))
@@ -669,8 +829,30 @@ def cmd_check_baseline(args):
     return 0
 
 
+def read_exclusions(path):
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, list):
+        raise ValueError("%s must hold a list of exclusions" % path)
+    out = []
+    for item in data:
+        if not isinstance(item, dict) or not all(isinstance(item.get(k), str) and item.get(k) for k in ("unit", "test", "reason")):
+            raise ValueError("%s: every exclusion needs a unit, a test and a reason" % path)
+        out.append({"unit": item["unit"], "test": item["test"], "reason": item["reason"]})
+    return out
+
+
 def cmd_summarize(args):
     known = read_known(args.known, args.suite_name)
+    exclusions = []
+    if args.exclusions:
+        try:
+            exclusions = read_exclusions(args.exclusions)
+        except (OSError, ValueError) as exc:
+            print("conformance: could not read exclusions: %s" % exc, file=sys.stderr)
+            return 2
+        for item in exclusions:
+            known["tests"].append((canonical_unit(item["unit"]), item["test"]))
     rows = read_meta(args.meta)
     baseline = None
     if args.baseline:
@@ -691,7 +873,27 @@ def cmd_summarize(args):
         "tcl": args.tcl,
         "known_failures": relative(args.known, args.root),
     }
-    summary = build_summary(rows, known, args.root, info, baseline, relative(args.baseline, args.root) if args.baseline else None)
+    log_parser = None
+    if args.suite_name == "vectorset":
+        titles = []
+        if args.titles and os.path.exists(args.titles):
+            try:
+                with open(args.titles, encoding="utf-8") as handle:
+                    recorded = json.load(handle)
+                for unit in recorded.get("units", {}).values():
+                    titles.extend(unit.get("tests", {}).keys())
+            except (OSError, ValueError, AttributeError) as exc:
+                print("conformance: could not read test titles from %s: %s" % (args.titles, exc), file=sys.stderr)
+                return 2
+
+        def log_parser(text):
+            return parse_vectorset_log(text, titles)
+        info["runner"] = args.runner
+        info["titles_from"] = relative(args.titles, args.root) if titles else ""
+        info["extracted"] = args.extracted
+        info["exclusions_file"] = relative(args.exclusions, args.root) if args.exclusions else ""
+        info["exclusions"] = exclusions
+    summary = build_summary(rows, known, args.root, info, baseline, relative(args.baseline, args.root) if args.baseline else None, log_parser)
     for path in [args.out, args.latest] + (args.extra or []):
         write_json(path, summary)
     print(render_report(summary, relative(args.latest, args.root)))
@@ -731,6 +933,10 @@ def main(argv=None):
     p_sum.add_argument("--tags", default="")
     p_sum.add_argument("--server", default="")
     p_sum.add_argument("--tcl", default="")
+    p_sum.add_argument("--exclusions")
+    p_sum.add_argument("--runner", default="")
+    p_sum.add_argument("--extracted", default="")
+    p_sum.add_argument("--titles")
     p_sum.set_defaults(func=cmd_summarize)
     args = parser.parse_args(argv)
     return args.func(args)

@@ -1,0 +1,12 @@
+[
+  {
+    "unit": "modules/vector-sets",
+    "test": "Comprehensive Replication Test with mixed operations",
+    "reason": "Replication is outside Eski's single-node scope. The runner skips this test when nothing answers on its replica port, and the harness always passes a closed port, so the test is recorded as skipped on every server."
+  },
+  {
+    "unit": "modules/vector-sets",
+    "test": "AOF rewrite of a vector set without aof_rewrite fails gracefully",
+    "reason": "The reference has no append-only rewrite form for vector sets, so a rewrite with aof-use-rdb-preamble no fails there and the test expects that failure. Eski rewrites each vector set exactly, as RESTORE of its serialized payload followed by the usual PEXPIREAT, so the rewrite succeeds and reloading the file gives back the same set; no VADD sequence reproduces the stored quantized vectors, norms and graph sequence numbers, which is why the payload form is used. The test therefore fails on Eski by design."
+  }
+]

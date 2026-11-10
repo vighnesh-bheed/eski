@@ -14,6 +14,7 @@ import rx "rax"
 import st "settype"
 import sm "streamtype"
 import zt "zsettype"
+import vt "vsettype"
 import "sysclock"
 
 AOF_ITEMS_PER_EMITTED_COMMAND :: 64
@@ -1264,6 +1265,13 @@ aof_emit_direct :: proc(c: ^Conn, argv: [][]u8) {
 	aof_write_argv(db.id, argv)
 }
 
+aof_emit_explicit :: proc(c: ^Conn, argv: [][]u8, write: bool) {
+	if write {
+		aof_emit_direct(c, argv)
+	}
+	aof_explicit = true
+}
+
 aof_mc_set :: proc(key: []u8, val: []u8, at: i64, keepttl: bool) {
 	if !aof.feed {
 		return
@@ -2198,9 +2206,9 @@ aof_tx_precheck_queue :: proc(c: ^Conn) {
 		}
 		mode := -1
 		sp := txs.spans[q.first]
-		if sp[0] >= 0 && sp[1] >= 0 && sp[0] + sp[1] <= len(txs.bytes) && eq_nocase(txs.bytes[sp[0]:sp[0] + sp[1]], q.cmd.name) {
+		if sp[0] >= 0 && sp[1] >= 0 && sp[0] + sp[1] <= len(txs.bytes) && eq_fold(txs.bytes[sp[0]:sp[0] + sp[1]], transmute([]u8)q.cmd.name) {
 			mode = 0
-		} else if sp[0] >= 0 && sp[1] >= sp[0] && sp[1] <= len(txs.bytes) && eq_nocase(txs.bytes[sp[0]:sp[1]], q.cmd.name) {
+		} else if sp[0] >= 0 && sp[1] >= sp[0] && sp[1] <= len(txs.bytes) && eq_fold(txs.bytes[sp[0]:sp[1]], transmute([]u8)q.cmd.name) {
 			mode = 1
 		}
 		if mode < 0 {
@@ -3813,6 +3821,8 @@ aof_rewrite_value :: proc(w: ^rdb.Writer, key: []u8, v: Slot_Value) {
 		aof_rewrite_hash(w, key, cast(ht.Hash)v.obj, u64(max(aof_now_ms(), 0)))
 	case .Stream:
 		aof_rewrite_stream(w, key, cast(sm.Stream)v.obj)
+	case .Vectorset:
+		vset_aof_rewrite(w, key, cast(vt.Vset)v.obj)
 	}
 }
 

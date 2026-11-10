@@ -765,6 +765,7 @@ keyspace_try :: proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8) -> bool {
 	cmd := slot.cmd
 	stats := slot.stats
 	restore := op == .Key && cmd.name == "restore"
+	if restore && len(argv) > 3 && vset_payload_module(argv[3]) { keyspace_fence(); return false }
 	relocate := op == .Key && (cmd.name == "copy" || cmd.name == "move")
 	if (op >= .Hset && op <= .Hpersist) || restore { keyspace_timed = true }
 	if op == .Setex || op == .Psetex || op == .Getex || op == .Expire || op == .Pexpire || op == .Expireat || op == .Pexpireat || (op == .Set && len(argv) > 3) { keyspace_timed = true }
