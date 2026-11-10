@@ -89,11 +89,11 @@ cmd_sunsubscribe :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 cmd_publish :: proc(c: ^Conn, argv: [][]u8) {
-	reply_int(c, i64(ps_publish(argv[1], argv[2], .Channel)))
+	reply_int(c, i64(ps_publish(argv[1], argv[2], .Channel, access_publish_label())))
 }
 
 cmd_spublish :: proc(c: ^Conn, argv: [][]u8) {
-	reply_int(c, i64(ps_publish(argv[1], argv[2], .Shard)))
+	reply_int(c, i64(ps_publish(argv[1], argv[2], .Shard, access_publish_label())))
 }
 
 reply_pubsub_pong :: proc(c: ^Conn, argv: [][]u8) {
@@ -112,6 +112,9 @@ pubsub_channel_list :: proc(c: ^Conn, argv: [][]u8, kind: Ps_Kind) {
 	filtered := len(argv) > 2
 	for _, e in ps_maps[kind] {
 		if filtered && !glob_match(argv[2], e.name, false) {
+			continue
+		}
+		if labels_on && ps_entry_visible(e) == 0 {
 			continue
 		}
 		append(&ps_matched, e)
@@ -134,8 +137,22 @@ pubsub_numsub :: proc(c: ^Conn, argv: [][]u8, kind: Ps_Kind) {
 	for name in names {
 		reply_bulk(c, name)
 		e := ps_maps[kind][string(name)]
-		reply_int(c, i64(len(e.subs)) if e != nil else 0)
+		reply_int(c, i64(ps_entry_visible(e)) if e != nil else 0)
 	}
+}
+
+@(private = "file")
+pubsub_numpat :: proc() -> int {
+	if !labels_on {
+		return len(ps_maps[.Pattern])
+	}
+	n := 0
+	for _, e in ps_maps[.Pattern] {
+		if ps_entry_visible(e) > 0 {
+			n += 1
+		}
+	}
+	return n
 }
 
 @(private = "file")
@@ -165,7 +182,7 @@ cmd_pubsub :: proc(c: ^Conn, argv: [][]u8) {
 			reply_wrong_args(c, "pubsub|numpat")
 			return
 		}
-		reply_int(c, i64(len(ps_maps[.Pattern])))
+		reply_int(c, i64(pubsub_numpat()))
 	case eq_nocase(sub, "shardchannels"):
 		c.last_cmd = "pubsub|shardchannels"
 		if len(argv) > 3 {

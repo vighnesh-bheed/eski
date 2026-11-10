@@ -214,7 +214,7 @@ special_mc_port := Config_Special{config_mc_port_set, config_mc_port_get, config
 special_mc_item_size := Config_Special{config_mc_item_size_set, config_mc_item_size_get, config_mc_item_size_rewrite}
 special_databases := Config_Special{config_databases_set, config_databases_get, config_databases_rewrite}
 
-CONFIG_TABLE_LEN :: 198
+CONFIG_TABLE_LEN :: 205
 
 configs: [CONFIG_TABLE_LEN]Config
 
@@ -418,6 +418,13 @@ config_table_init :: proc() {
 		{name = "latency-tracking-info-percentiles", type = .Special, flags = {.Multi_Arg}, special = &special_percentiles},
 		{name = "memcached-port", type = .Special, flags = {.Immutable, .Hidden}, special = &special_mc_port},
 		{name = "memcached-max-item-size", type = .Special, flags = {.Immutable, .Hidden}, special = &special_mc_item_size},
+		{name = "label-levels", type = .Special, flags = {.Hidden}, special = &special_label_levels, apply = label_scheme_apply},
+		{name = "label-compartments", type = .Special, flags = {.Hidden}, special = &special_label_compartments, apply = label_scheme_apply},
+		{name = "label-trust-levels", type = .Special, flags = {.Hidden}, special = &special_label_trusts, apply = label_scheme_apply},
+		{name = "label-audit-file", type = .Str, flags = {.Immutable, .Hidden}, store = &label_audit_file},
+		{name = "label-token-audience", type = .Str, flags = {.Hidden}, store = &label_token_audience},
+		{name = "label-context-idle-timeout", type = .Num, flags = {.Hidden}, def = 3600, lo = 1, hi = u64(INT_MAX_CFG), store = &label_context_idle},
+		{name = "label-context-max-per-login", type = .Num, flags = {.Hidden}, def = 1000, lo = 1, hi = u64(INT_MAX_CFG), store = &label_context_cap},
 	}
 	#assert(len(t) == CONFIG_TABLE_LEN)
 	configs = t

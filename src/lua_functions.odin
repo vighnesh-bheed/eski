@@ -405,7 +405,7 @@ lua_library_publish :: proc(library: ^Lua_Library) {
 lua_function_stats :: proc(client: ^Conn) {
 	reply_map(client, 2)
 	reply_bulk_str(client, "running_script")
-	if lua_active == nil || !lua_active.function {
+	if lua_active == nil || !lua_active.function || !access_busy_sees_script() {
 		reply_null(client)
 	} else {
 		reply_map(client, 3)

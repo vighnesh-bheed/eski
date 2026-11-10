@@ -44,6 +44,8 @@ Acl_Rule_Error :: enum u8 {
 	Malformed_Hash,
 	Duplicate_User,
 	Subcommand_First_Arg,
+	Labels_Off,
+	Bad_Label,
 }
 
 Acl_User_Flag :: enum u8 {
@@ -103,6 +105,7 @@ Acl_User :: struct {
 	root:            ^Acl_Selector,
 	added_selectors: [dynamic]^Acl_Selector,
 	unrestricted:    bool,
+	labels:          Acl_Label_Rules,
 }
 
 Acl_Channel_Kind :: enum u8 {
@@ -219,6 +222,8 @@ acl_rule_error_text := [Acl_Rule_Error]string {
 	.Malformed_Hash         = "The password hash must be exactly 64 characters and contain only lowercase hexadecimal characters",
 	.Duplicate_User         = "Duplicate user found. A user can only be defined once in config files",
 	.Subcommand_First_Arg   = "Allowing first-arg of a subcommand is not supported",
+	.Labels_Off             = "Labels are not configured on this server",
+	.Bad_Label              = "Invalid label rule",
 }
 
 @(private = "file")
@@ -872,6 +877,7 @@ acl_user_clear :: proc(u: ^Acl_User) {
 @(private = "file")
 acl_user_free :: proc(u: ^Acl_User) {
 	acl_user_clear(u)
+	acl_label_rules_free(&u.labels)
 	delete(u.password_hashes)
 	delete(u.added_selectors)
 	delete(u.username)
@@ -882,6 +888,7 @@ acl_user_free :: proc(u: ^Acl_User) {
 acl_user_copy_into :: proc(dst: ^Acl_User, src: ^Acl_User) {
 	acl_user_clear(dst)
 	dst.attributes = src.attributes
+	acl_label_rules_copy(&dst.labels, &src.labels)
 	append(&dst.password_hashes, ..src.password_hashes[:])
 	dst.root = acl_selector_copy(src.root)
 	for s in src.added_selectors {
@@ -998,6 +1005,7 @@ acl_apply_user_keyword :: proc(u: ^Acl_User, keyword: Acl_User_Keyword) {
 		acl_drop_added_selectors(u)
 	case .Reset:
 		clear(&u.password_hashes)
+		acl_label_rules_reset(&u.labels)
 		u.attributes = {.Disabled, .Sanitize}
 		acl_drop_added_selectors(u)
 		acl_apply_selector_keyword(u.root, .Reset_Keys)
@@ -1036,6 +1044,9 @@ acl_apply_rule :: proc(u: ^Acl_User, rule: []u8) -> Acl_Rule_Error {
 			acl_apply_user_keyword(u, w.keyword)
 			return .None
 		}
+	}
+	if e, handled := acl_label_rule(&u.labels, rule); handled {
+		return e
 	}
 	switch rule[0] {
 	case '>', '<', '#', '!':
@@ -1181,6 +1192,7 @@ acl_describe_user :: proc(b: ^[dynamic]u8, u: ^Acl_User) {
 		sb_bytes(b, pw[:])
 		sb_byte(b, ' ')
 	}
+	acl_label_describe(b, &u.labels)
 	acl_describe_selector(b, u.root)
 	for s in u.added_selectors {
 		sb_str(b, " (")
@@ -1419,6 +1431,9 @@ acl_auth_required :: #force_inline proc(c: ^Conn) -> bool {
 
 @(private = "file")
 acl_set_conn_user :: proc(c: ^Conn, u: ^Acl_User, authed: bool) {
+	if c.user != u {
+		access_user_changed(c)
+	}
 	c.user = u
 	c.authed = authed
 	if authed {
@@ -1723,7 +1738,6 @@ acl_selector_loses_channels :: proc(s: ^Acl_Selector, granted: [][]u8) -> bool {
 	return lost
 }
 
-@(private = "file")
 acl_evict_conn :: proc(c: ^Conn, self: ^Conn) {
 	acl_set_conn_user(c, acl_default, false)
 	c.close_after = true
@@ -1804,6 +1818,11 @@ acl_setuser_apply :: proc(self: ^Conn, existing: ^Acl_User, username: []u8, args
 	acl_user_copy_into(existing, draft)
 	acl_user_free(draft)
 	return ""
+}
+
+acl_label_changed :: proc(self: ^Conn, event: string, username: []u8, rules: [][]u8) {
+	access_acl_changed(self)
+	label_audit_acl(self, event, username, rules)
 }
 
 acl_update_default_password :: proc(password: string) {
@@ -2235,6 +2254,7 @@ acl_cmd_setuser :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	acl_refresh_all()
+	acl_label_changed(c, "acl-setuser", username, argv[3:])
 	reply_ok(c)
 }
 
@@ -2264,6 +2284,8 @@ acl_cmd_deluser :: proc(c: ^Conn, argv: [][]u8) {
 				acl_evict_conn(other, c)
 			}
 		}
+		label_contexts_drop_owner(u.username)
+		acl_label_changed(c, "acl-deluser", u.username, nil)
 		acl_user_free(u)
 		deleted += 1
 	}
@@ -2278,7 +2300,7 @@ acl_cmd_getuser :: proc(c: ^Conn, argv: [][]u8) {
 		reply_null(c)
 		return
 	}
-	reply_map(c, 6)
+	reply_map(c, 9 if labels_on else 6)
 	reply_bulk_str(c, "flags")
 	n := 0
 	for f in Acl_User_Flag {
@@ -2286,11 +2308,17 @@ acl_cmd_getuser :: proc(c: ^Conn, argv: [][]u8) {
 			n += 1
 		}
 	}
+	if labels_on {
+		n += acl_label_flag_count(&u.labels)
+	}
 	reply_set(c, n)
 	for f in Acl_User_Flag {
 		if f in u.attributes {
 			reply_bulk_str(c, acl_user_flag_names[f])
 		}
+	}
+	if labels_on {
+		acl_label_reply_flags(c, &u.labels)
 	}
 	reply_bulk_str(c, "passwords")
 	reply_array(c, len(u.password_hashes))
@@ -2304,6 +2332,9 @@ acl_cmd_getuser :: proc(c: ^Conn, argv: [][]u8) {
 	for s in u.added_selectors {
 		reply_map(c, 3)
 		acl_reply_selector(c, s)
+	}
+	if labels_on {
+		acl_label_reply_fields(c, &u.labels)
 	}
 }
 
@@ -2352,6 +2383,7 @@ acl_cmd_load :: proc(c: ^Conn, argv: [][]u8) {
 		reply_error_bytes(c, scratch[:])
 		return
 	}
+	acl_label_changed(c, "acl-load", nil, nil)
 	reply_ok(c)
 }
 

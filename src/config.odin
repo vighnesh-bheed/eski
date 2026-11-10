@@ -667,6 +667,8 @@ config_cmd_set :: proc(c: ^Conn, argv: [][]u8) {
 		}
 		return
 	}
+	label_scheme_checkpoint()
+	defer label_scheme_abandon()
 	for i in 0 ..< n {
 		old_values[i] = clone_string_temp(config_value_string(set_cfgs[i]))
 	}
@@ -707,6 +709,7 @@ config_cmd_set :: proc(c: ^Conn, argv: [][]u8) {
 			return
 		}
 	}
+	label_scheme_committed(c)
 	reply_ok(c)
 }
 
@@ -883,6 +886,7 @@ cmd_config :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 config_init :: proc() {
+	access_init()
 	config_table_init()
 	for &cf in configs {
 		switch cf.type {
@@ -1675,6 +1679,9 @@ config_save_set :: proc(args: [][]u8) -> (bool, string) {
 	if len(a) & 1 != 0 {
 		return false, "Invalid save parameters"
 	}
+	if e := label_persistence_refusal(len(a) > 0); e != "" {
+		return false, e
+	}
 	for s, j in a {
 		v, ok := c_strtol_full(s)
 		if !ok || (j & 1 == 0 && v < 1) || (j & 1 == 1 && v < 0) {
@@ -2086,6 +2093,9 @@ config_appendonly_set :: proc(args: [][]u8) -> (bool, string) {
 	if v == config_appendonly_value() {
 		return false, ""
 	}
+	if e := label_persistence_refusal(v); e != "" {
+		return false, e
+	}
 	aof.wanted = v
 	return true, ""
 }
@@ -2341,7 +2351,7 @@ config_check_shutdown_flags :: proc(v: i64, s: []u8) -> string {
 	if v & SHUTDOWN_NOSAVE != 0 && v & SHUTDOWN_SAVE != 0 {
 		return "shutdown options SAVE and NOSAVE can't be used simultaneously"
 	}
-	return ""
+	return label_persistence_refusal(v & SHUTDOWN_SAVE != 0)
 }
 
 proc_title_expand :: proc(b: ^[dynamic]u8, template: []u8, title: string) -> bool {
@@ -2684,6 +2694,7 @@ clients_timeout_cron :: proc() {
 }
 
 config_startup :: proc() {
+	label_scheme_startup()
 	process_title_init()
 	if cfg.logfile != "" {
 		buf: [4096]u8

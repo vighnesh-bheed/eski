@@ -1,11 +1,13 @@
-import Labels.Marking
+import Labels.MarkingTrust
 import Labels.Intern
 
 namespace Labels
 
 def codecMagic : List Nat := [69, 83, 76, 84]
 
-def codecVersion : Nat := 1
+def codecVersion : Nat := 2
+
+def codecUntrusted : Nat := 1
 
 def u16 (v : Nat) : List Nat := [v % 256, v / 256]
 
@@ -13,13 +15,15 @@ def encName (n : List Nat) : List Nat := n.length :: n
 
 def encNames (ns : List (List Nat)) : List Nat := u16 ns.length ++ (ns.map encName).flatten
 
-def encLabel (l : Label) : List Nat := l.level :: (u16 (idsOf l.comps compLimit).length ++ idsOf l.comps compLimit)
+def encLabel (l : TLabel) : List Nat :=
+  l.sec.level :: l.trust :: (u16 (idsOf l.sec.comps compLimit).length ++ idsOf l.sec.comps compLimit)
 
-def encode (c : Config) (t : List Label) : List Nat :=
-  codecMagic ++ [codecVersion] ++ encNames c.levels ++ encNames c.comps ++ u16 t.length ++ (t.map encLabel).flatten
+def encode (c : TConfig) (t : List TLabel) : List Nat :=
+  codecMagic ++ [codecVersion] ++ encNames c.base.levels ++ encNames c.base.comps ++ encNames c.trusts ++
+    u16 t.length ++ (t.map encLabel).flatten
 
-def encodeChecked (c : Config) (t : List Label) : Option (List Nat) :=
-  if t.head? = some bottom ∧ t.all (labelValid c) = true then some (encode c t) else none
+def encodeChecked (c : TConfig) (t : List TLabel) : Option (List Nat) :=
+  if t.head? = some tbottom ∧ t.all (labelValidT c) = true then some (encode c t) else none
 
 inductive DErr
   | truncated
@@ -27,10 +31,12 @@ inductive DErr
   | badVersion
   | badLevelCount
   | badCompCount
+  | badTrustCount
   | badName
   | dupName
   | badLabelCount
   | badLevel
+  | badTrust
   | badComp
   | notBottom
   | dupLabel
@@ -63,32 +69,49 @@ def idsOk (C : Nat) : Nat → List Nat → Bool
   | _, [] => true
   | lo, x :: xs => decide (x < C) && decide (lo ≤ x) && idsOk C (x + 1) xs
 
-def readLabels (L C : Nat) : Nat → Bool → List Label → List Nat → Except DErr (List Label × List Nat)
+def readTrust (wide : Bool) (T : Nat) (s : List Nat) : Except DErr (Nat × List Nat) :=
+  if wide then
+    match s with
+    | [] => .error .truncated
+    | t :: rest => if trustCount T ≤ t then .error .badTrust else .ok (t, rest)
+  else .ok (0, s)
+
+def readLabels (L C T : Nat) (wide : Bool) : Nat → Bool → List TLabel → List Nat → Except DErr (List TLabel × List Nat)
   | 0, _, acc, s => .ok (acc, s)
   | k + 1, first, acc, s =>
     match s with
     | [] => .error .truncated
-    | lv :: s1 =>
+    | lv :: s0 =>
       if L ≤ lv then .error .badLevel
-      else match readU16 s1 with
+      else match readTrust wide T s0 with
+      | .error e => .error e
+      | .ok (tr, s1) =>
+        match readU16 s1 with
         | none => .error .truncated
         | some (n, s2) =>
           if C < n then .error .badComp
           else if s2.length < n then .error .truncated
           else if !idsOk C 0 (s2.take n) then .error .badComp
           else if first then
-            (if (⟨lv, ofIds (s2.take n)⟩ : Label) ≠ bottom then .error .notBottom
-             else readLabels L C k false acc (s2.drop n))
-          else if (⟨lv, ofIds (s2.take n)⟩ : Label) ∈ acc then .error .dupLabel
-          else readLabels L C k false (acc ++ [⟨lv, ofIds (s2.take n)⟩]) (s2.drop n)
+            (if (⟨⟨lv, ofIds (s2.take n)⟩, tr⟩ : TLabel) ≠ tbottom then .error .notBottom
+             else readLabels L C T wide k false acc (s2.drop n))
+          else if (⟨⟨lv, ofIds (s2.take n)⟩, tr⟩ : TLabel) ∈ acc then .error .dupLabel
+          else readLabels L C T wide k false (acc ++ [⟨⟨lv, ofIds (s2.take n)⟩, tr⟩]) (s2.drop n)
 
-def decode (s : List Nat) : Except DErr (Config × List Label) :=
+def readTrustNames (wide : Bool) (s : List Nat) : Except DErr (List (List Nat) × List Nat) :=
+  if wide then
+    match readU16 s with
+    | none => .error .truncated
+    | some (T, s) => if trustLimit < T then .error .badTrustCount else readNames T [] s
+  else .ok ([], s)
+
+def decode (s : List Nat) : Except DErr (TConfig × List TLabel) :=
   if s.length < 4 then .error .truncated
   else if s.take 4 ≠ codecMagic then .error .badMagic
   else match s.drop 4 with
   | [] => .error .truncated
   | v :: s =>
-    if v ≠ codecVersion then .error .badVersion
+    if v ≠ codecVersion ∧ v ≠ codecUntrusted then .error .badVersion
     else match readU16 s with
     | none => .error .truncated
     | some (L, s) =>
@@ -103,15 +126,18 @@ def decode (s : List Nat) : Except DErr (Config × List Label) :=
           else match readNames C levels s with
           | .error e => .error e
           | .ok (comps, s) =>
-            match readU16 s with
-            | none => .error .truncated
-            | some (n, s) =>
-              if n = 0 then .error .badLabelCount
-              else match readLabels L C n true [bottom] s with
-              | .error e => .error e
-              | .ok (labels, s) => if s ≠ [] then .error .trailing else .ok (⟨levels, comps⟩, labels)
+            match readTrustNames (v == codecVersion) s with
+            | .error e => .error e
+            | .ok (trusts, s) =>
+              match readU16 s with
+              | none => .error .truncated
+              | some (n, s) =>
+                if n = 0 then .error .badLabelCount
+                else match readLabels L C trusts.length (v == codecVersion) n true [tbottom] s with
+                | .error e => .error e
+                | .ok (labels, s) => if s ≠ [] then .error .trailing else .ok (⟨⟨levels, comps⟩, trusts⟩, labels)
 
-def TableValid (c : Config) (t : List Label) : Prop := TableOk t ∧ ∀ l ∈ t, LabelOk c l
+def TableValid (c : TConfig) (t : List TLabel) : Prop := TableOk t ∧ ∀ l ∈ t, LabelOkT c l
 
 theorem readU16_u16 (v : Nat) (rest : List Nat) : readU16 (u16 v ++ rest) = some (v, rest) := by
   simp only [u16, List.cons_append, List.nil_append, readU16, Option.some.injEq, Prod.mk.injEq, and_true]
@@ -187,32 +213,34 @@ theorem idsOf_below {m C : Nat} (hC : C ≤ compLimit) (hm : m < 2 ^ C) : (idsOf
   rw [idsOf_restrict m hC hm]
   exact idsOf_length m C
 
-theorem comps_fit {c : Config} (hc : ConfigOk c) {l : Label} (hl : LabelOk c l) : l.comps < 2 ^ compLimit :=
-  Nat.lt_of_lt_of_le hl.2 (Nat.pow_le_pow_right (by decide) hc.1.2.1)
+theorem comps_fit {c : TConfig} (hc : TConfigOk c) {l : TLabel} (hl : LabelOkT c l) : l.sec.comps < 2 ^ compLimit :=
+  Nat.lt_of_lt_of_le hl.1.2 (Nat.pow_le_pow_right (by decide) hc.1.1.2.1)
 
-theorem readLabel_step (c : Config) (hc : ConfigOk c) (l : Label) (hl : LabelOk c l) (first : Bool) (k : Nat)
-    (acc : List Label) (rest : List Nat) :
-    readLabels c.levels.length c.comps.length (k + 1) first acc (encLabel l ++ rest) =
+theorem readLabel_step (c : TConfig) (hc : TConfigOk c) (l : TLabel) (hl : LabelOkT c l) (first : Bool) (k : Nat)
+    (acc : List TLabel) (rest : List Nat) :
+    readLabels c.base.levels.length c.base.comps.length c.trusts.length true (k + 1) first acc (encLabel l ++ rest) =
       if first then
-        (if l ≠ bottom then .error .notBottom else readLabels c.levels.length c.comps.length k false acc rest)
+        (if l ≠ tbottom then .error .notBottom
+         else readLabels c.base.levels.length c.base.comps.length c.trusts.length true k false acc rest)
       else if l ∈ acc then .error .dupLabel
-      else readLabels c.levels.length c.comps.length k false (acc ++ [l]) rest := by
-  have hlen := idsOf_below hc.1.2.1 hl.2
-  have hok := idsOk_idsOf l.comps hc.1.2.1 hl.2
-  have hof : (⟨l.level, ofIds (idsOf l.comps compLimit)⟩ : Label) = l := by
+      else readLabels c.base.levels.length c.base.comps.length c.trusts.length true k false (acc ++ [l]) rest := by
+  have hlen := idsOf_below hc.1.1.2.1 hl.1.2
+  have hok := idsOk_idsOf l.sec.comps hc.1.1.2.1 hl.1.2
+  have hof : (⟨⟨l.sec.level, ofIds (idsOf l.sec.comps compLimit)⟩, l.trust⟩ : TLabel) = l := by
     rw [ofIds_idsOf (comps_fit hc hl)]
-  have hnotlv : ¬ c.levels.length ≤ l.level := Nat.not_le.2 hl.1
-  have hnotc : ¬ c.comps.length < (idsOf l.comps compLimit).length := Nat.not_lt.2 hlen
-  have hr := readU16_u16 (idsOf l.comps compLimit).length (idsOf l.comps compLimit ++ rest)
-  simp only [encLabel, List.cons_append, List.append_assoc, readLabels, hnotlv, ↓reduceIte, hr, hnotc,
-    List.length_append, Nat.not_lt.2 (Nat.le_add_right _ _), List.take_left', List.drop_left', hok,
+  have hnotlv : ¬ c.base.levels.length ≤ l.sec.level := Nat.not_le.2 hl.1.1
+  have hnott : ¬ trustCount c.trusts.length ≤ l.trust := Nat.not_le.2 hl.2
+  have hnotc : ¬ c.base.comps.length < (idsOf l.sec.comps compLimit).length := Nat.not_lt.2 hlen
+  have hr := readU16_u16 (idsOf l.sec.comps compLimit).length (idsOf l.sec.comps compLimit ++ rest)
+  simp only [encLabel, List.cons_append, List.append_assoc, readLabels, readTrust, hnotlv, hnott, ↓reduceIte, hr,
+    hnotc, List.length_append, Nat.not_lt.2 (Nat.le_add_right _ _), List.take_left', List.drop_left', hok,
     Bool.not_true, Bool.false_eq_true, hof]
 
-theorem readLabels_enc (c : Config) (hc : ConfigOk c) :
-    ∀ (ls : List Label) (acc : List Label) (rest : List Nat),
-      (∀ l ∈ ls, LabelOk c l) → (acc ++ ls).Nodup →
-      readLabels c.levels.length c.comps.length ls.length false acc ((ls.map encLabel).flatten ++ rest) =
-        .ok (acc ++ ls, rest) := by
+theorem readLabels_enc (c : TConfig) (hc : TConfigOk c) :
+    ∀ (ls : List TLabel) (acc : List TLabel) (rest : List Nat),
+      (∀ l ∈ ls, LabelOkT c l) → (acc ++ ls).Nodup →
+      readLabels c.base.levels.length c.base.comps.length c.trusts.length true ls.length false acc
+        ((ls.map encLabel).flatten ++ rest) = .ok (acc ++ ls, rest) := by
   intro ls
   induction ls with
   | nil => intro acc rest _ _; simp [readLabels]
@@ -228,41 +256,52 @@ theorem readLabels_enc (c : Config) (hc : ConfigOk c) :
     rw [ih (acc ++ [l]) rest (fun m hm => hv m (List.mem_cons_of_mem _ hm)) (by simpa using hn)]
     simp
 
-theorem decode_encode {c : Config} {t : List Label} (hc : ConfigOk c) (ht : TableValid c t) :
+theorem decode_encode {c : TConfig} {t : List TLabel} (hc : TConfigOk c) (ht : TableValid c t) :
     decode (encode c t) = .ok (c, t) := by
   obtain ⟨⟨h0, hnd, hlim⟩, hv⟩ := ht
   have hc' := hc
-  obtain ⟨⟨hL, hC, hcan, hnames⟩, hpos⟩ := hc
+  obtain ⟨⟨⟨hL, hC, hcan, hnames⟩, hpos⟩, hT, htcan, htnd⟩ := hc
   match t, h0, hnd, hlim, hv with
   | b :: rest, h0, hnd, hlim, hv =>
     simp only [List.getElem?_cons_zero, Option.some.injEq] at h0
     subst h0
-    have hlevels := readNames_enc c.levels []
-      (u16 c.comps.length ++ ((c.comps.map encName).flatten ++ (u16 (rest.length + 1) ++
-        (encLabel bottom ++ (rest.map encLabel).flatten))))
+    have hlevels := readNames_enc c.base.levels []
+      (u16 c.base.comps.length ++ ((c.base.comps.map encName).flatten ++ (u16 c.trusts.length ++
+        ((c.trusts.map encName).flatten ++ (u16 (rest.length + 1) ++
+        (encLabel tbottom ++ (rest.map encLabel).flatten))))))
       (fun n hn => hcan n (List.mem_append_left _ hn)) (by simpa using (List.nodup_append.1 hnames).1)
-    have hcomps := readNames_enc c.comps c.levels
-      (u16 (rest.length + 1) ++ (encLabel bottom ++ (rest.map encLabel).flatten))
+    have hcomps := readNames_enc c.base.comps c.base.levels
+      (u16 c.trusts.length ++ ((c.trusts.map encName).flatten ++ (u16 (rest.length + 1) ++
+        (encLabel tbottom ++ (rest.map encLabel).flatten))))
       (fun n hn => hcan n (List.mem_append_right _ hn)) hnames
-    have hlab := readLabels_enc c hc' rest [bottom] [] (fun l hl => hv l (List.mem_cons_of_mem _ hl)) hnd
-    have hfirst := readLabel_step c hc' bottom (hv bottom List.mem_cons_self) true rest.length [bottom]
+    have htrusts := readNames_enc c.trusts []
+      (u16 (rest.length + 1) ++ (encLabel tbottom ++ (rest.map encLabel).flatten))
+      htcan (by simpa using htnd)
+    have hlab := readLabels_enc c hc' rest [tbottom] [] (fun l hl => hv l (List.mem_cons_of_mem _ hl)) hnd
+    have hfirst := readLabel_step c hc' tbottom (hv tbottom List.mem_cons_self) true rest.length [tbottom]
       ((rest.map encLabel).flatten)
-    have hbot : ¬ (bottom ≠ bottom) := fun h => h rfl
+    have hbot : ¬ (tbottom ≠ tbottom) := fun h => h rfl
     simp only [hbot, ↓reduceIte] at hfirst
     simp only [List.append_nil, List.singleton_append] at hlab
-    have r1 := readU16_u16 c.levels.length ((c.levels.map encName).flatten ++ (u16 c.comps.length ++
-      ((c.comps.map encName).flatten ++ (u16 (rest.length + 1) ++ (encLabel bottom ++ (rest.map encLabel).flatten)))))
-    have r2 := readU16_u16 c.comps.length ((c.comps.map encName).flatten ++
-      (u16 (rest.length + 1) ++ (encLabel bottom ++ (rest.map encLabel).flatten)))
-    have r3 := readU16_u16 (rest.length + 1) (encLabel bottom ++ (rest.map encLabel).flatten)
-    have hL0 : ¬ (c.levels.length = 0 ∨ levelLimit < c.levels.length) := by omega
-    have hC0 : ¬ compLimit < c.comps.length := by omega
+    have r1 := readU16_u16 c.base.levels.length ((c.base.levels.map encName).flatten ++ (u16 c.base.comps.length ++
+      ((c.base.comps.map encName).flatten ++ (u16 c.trusts.length ++ ((c.trusts.map encName).flatten ++
+      (u16 (rest.length + 1) ++ (encLabel tbottom ++ (rest.map encLabel).flatten)))))))
+    have r2 := readU16_u16 c.base.comps.length ((c.base.comps.map encName).flatten ++
+      (u16 c.trusts.length ++ ((c.trusts.map encName).flatten ++
+      (u16 (rest.length + 1) ++ (encLabel tbottom ++ (rest.map encLabel).flatten)))))
+    have rt := readU16_u16 c.trusts.length ((c.trusts.map encName).flatten ++
+      (u16 (rest.length + 1) ++ (encLabel tbottom ++ (rest.map encLabel).flatten)))
+    have r3 := readU16_u16 (rest.length + 1) (encLabel tbottom ++ (rest.map encLabel).flatten)
+    have hL0 : ¬ (c.base.levels.length = 0 ∨ levelLimit < c.base.levels.length) := by omega
+    have hC0 : ¬ compLimit < c.base.comps.length := by omega
+    have hT0 : ¬ trustLimit < c.trusts.length := by omega
     have hn0 : ¬ (rest.length + 1 = 0) := by omega
     unfold decode encode encNames
-    simp only [codecMagic, codecVersion, List.append_assoc, List.cons_append, List.nil_append, List.length_cons,
+    simp only [codecMagic, List.append_assoc, List.cons_append, List.nil_append, List.length_cons,
       List.map_cons, List.flatten_cons, List.take_succ_cons, List.take_zero, List.drop_succ_cons, List.drop_zero]
-    simp only [List.length_append, Nat.not_lt.2 (Nat.le_add_left 4 _), ↓reduceIte, ne_eq,
-      not_true_eq_false, r1, hL0, hlevels, r2, hC0, hcomps, r3, hn0, hfirst, hlab]
+    simp only [List.length_append, Nat.not_lt.2 (Nat.le_add_left 4 _), ↓reduceIte, beq_self_eq_true,
+      readTrustNames, r1, hL0, hlevels, r2, hC0, hcomps, rt, hT0, htrusts, r3, hn0, hfirst, hlab, ne_eq,
+      not_true_eq_false, false_and]
 
 def Bytes (s : List Nat) : Prop := ∀ b ∈ s, b < 256
 
@@ -415,16 +454,29 @@ theorem idsOf_ofIds {C : Nat} {ids : List Nat} (h : idsOk C 0 ids = true) (hC : 
   rw [this]
   exact filter_range_ids compLimit 0 ids (by simpa using idsOk_bound h hC)
 
-theorem readLabel_inv {C : Nat} (hC : C ≤ compLimit) (lv : Nat) {s1 s2 : List Nat} {n : Nat}
+theorem readTrust_inv {T : Nat} {s0 s1 : List Nat} {tr : Nat} (h : readTrust true T s0 = .ok (tr, s1)) :
+    s0 = tr :: s1 := by
+  unfold readTrust at h
+  simp only [↓reduceIte] at h
+  match s0, h with
+  | t :: rest, h =>
+    simp only at h
+    split at h
+    · simp at h
+    · simp only [Except.ok.injEq, Prod.mk.injEq] at h
+      obtain ⟨rfl, rfl⟩ := h
+      rfl
+
+theorem readLabel_inv {C : Nat} (hC : C ≤ compLimit) (lv tr : Nat) {s1 s2 : List Nat} {n : Nat}
     (hr : readU16 s1 = some (n, s2)) (hb : Bytes s1) (hlen : ¬ s2.length < n) (hok : idsOk C 0 (s2.take n) = true) :
-    lv :: s1 = encLabel ⟨lv, ofIds (s2.take n)⟩ ++ s2.drop n := by
+    lv :: tr :: s1 = encLabel ⟨⟨lv, ofIds (s2.take n)⟩, tr⟩ ++ s2.drop n := by
   have hs1 := readU16_inv hr hb
   have hl : (s2.take n).length = n := List.length_take_of_le (Nat.le_of_not_lt hlen)
   simp only [encLabel, idsOf_ofIds hok hC, hl, List.cons_append, List.append_assoc, List.take_append_drop]
   rw [hs1]
 
-theorem readLabels_inv {L C : Nat} (hC : C ≤ compLimit) : ∀ (k : Nat) (acc : List Label) (s : List Nat) (t : List Label)
-    (r : List Nat), readLabels L C k false acc s = .ok (t, r) → Bytes s →
+theorem readLabels_inv {L C T : Nat} (hC : C ≤ compLimit) : ∀ (k : Nat) (acc : List TLabel) (s : List Nat)
+    (t : List TLabel) (r : List Nat), readLabels L C T true k false acc s = .ok (t, r) → Bytes s →
       ∃ ls, s = (ls.map encLabel).flatten ++ r ∧ t = acc ++ ls ∧ ls.length = k := by
   intro k
   induction k with
@@ -436,11 +488,50 @@ theorem readLabels_inv {L C : Nat} (hC : C ≤ compLimit) : ∀ (k : Nat) (acc :
   | succ k ih =>
     intro acc s t r h hb
     match s, h with
-    | lv :: s1, h =>
+    | lv :: s0, h =>
       simp only [readLabels] at h
       split at h
       · simp at h
       · split at h
+        · simp at h
+        · rename_i tr s1 htr
+          have hs0 := readTrust_inv htr
+          split at h
+          · simp at h
+          · rename_i n s2 hr
+            split at h
+            · simp at h
+            · split at h
+              · simp at h
+              · rename_i hlen
+                split at h
+                · simp at h
+                · rename_i hok
+                  simp only [Bool.false_eq_true, ↓reduceIte] at h
+                  split at h
+                  · simp at h
+                  · have hok' : idsOk C 0 (s2.take n) = true := by
+                      revert hok; cases idsOk C 0 (s2.take n) <;> simp
+                    subst hs0
+                    have he := readLabel_inv hC lv tr hr (bytes_cons (bytes_cons hb)) hlen hok'
+                    obtain ⟨ls, hs, ht, hk⟩ := ih _ _ t r h (by rw [he] at hb; exact bytes_suffix hb)
+                    refine ⟨⟨⟨lv, ofIds (s2.take n)⟩, tr⟩ :: ls, ?_, ?_, by simp [hk]⟩
+                    · rw [he, hs]; simp
+                    · rw [ht]; simp
+
+theorem readLabels_first_inv {L C T : Nat} (hC : C ≤ compLimit) {k : Nat} {acc : List TLabel} {s : List Nat}
+    {t : List TLabel} {r : List Nat} (h : readLabels L C T true (k + 1) true acc s = .ok (t, r)) (hb : Bytes s) :
+    ∃ ls, s = ((tbottom :: ls).map encLabel).flatten ++ r ∧ t = acc ++ ls ∧ ls.length = k := by
+  match s, h with
+  | lv :: s0, h =>
+    simp only [readLabels] at h
+    split at h
+    · simp at h
+    · split at h
+      · simp at h
+      · rename_i tr s1 htr
+        have hs0 := readTrust_inv htr
+        split at h
         · simp at h
         · rename_i n s2 hr
           split at h
@@ -451,51 +542,40 @@ theorem readLabels_inv {L C : Nat} (hC : C ≤ compLimit) : ∀ (k : Nat) (acc :
               split at h
               · simp at h
               · rename_i hok
-                simp only [Bool.false_eq_true, ↓reduceIte] at h
+                simp only [↓reduceIte] at h
                 split at h
                 · simp at h
-                · have hok' : idsOk C 0 (s2.take n) = true := by revert hok; cases idsOk C 0 (s2.take n) <;> simp
-                  have he := readLabel_inv hC lv hr (bytes_cons hb) hlen hok'
-                  obtain ⟨ls, hs, ht, hk⟩ := ih _ _ t r h (by rw [he] at hb; exact bytes_suffix hb)
-                  refine ⟨⟨lv, ofIds (s2.take n)⟩ :: ls, ?_, ?_, by simp [hk]⟩
-                  · rw [he, hs]; simp
-                  · rw [ht]; simp
+                · rename_i hbot
+                  have hbot' : (⟨⟨lv, ofIds (s2.take n)⟩, tr⟩ : TLabel) = tbottom := by
+                    revert hbot; simp
+                  have hok' : idsOk C 0 (s2.take n) = true := by
+                    revert hok; cases idsOk C 0 (s2.take n) <;> simp
+                  subst hs0
+                  have he := readLabel_inv hC lv tr hr (bytes_cons (bytes_cons hb)) hlen hok'
+                  rw [hbot'] at he
+                  obtain ⟨ls, hs, ht, hk⟩ := readLabels_inv hC k acc _ t r h (by rw [he] at hb; exact bytes_suffix hb)
+                  refine ⟨ls, ?_, ht, hk⟩
+                  rw [he, hs]
+                  simp
 
-theorem readLabels_first_inv {L C : Nat} (hC : C ≤ compLimit) {k : Nat} {acc : List Label} {s : List Nat}
-    {t : List Label} {r : List Nat} (h : readLabels L C (k + 1) true acc s = .ok (t, r)) (hb : Bytes s) :
-    ∃ ls, s = ((bottom :: ls).map encLabel).flatten ++ r ∧ t = acc ++ ls ∧ ls.length = k := by
-  match s, h with
-  | lv :: s1, h =>
-    simp only [readLabels] at h
+theorem readTrustNames_inv {s r : List Nat} {ns : List (List Nat)} (h : readTrustNames true s = .ok (ns, r))
+    (hb : Bytes s) : s = encNames ns ++ r ∧ (∀ n ∈ ns, nameCanonical n = true) ∧ ns.Nodup ∧ ns.length ≤ trustLimit := by
+  unfold readTrustNames at h
+  simp only [↓reduceIte] at h
+  split at h
+  · simp at h
+  · rename_i T s1 hr
     split at h
     · simp at h
-    · split at h
-      · simp at h
-      · rename_i n s2 hr
-        split at h
-        · simp at h
-        · split at h
-          · simp at h
-          · rename_i hlen
-            split at h
-            · simp at h
-            · rename_i hok
-              simp only [↓reduceIte] at h
-              split at h
-              · simp at h
-              · rename_i hbot
-                have hbot' : (⟨lv, ofIds (s2.take n)⟩ : Label) = bottom := by
-                  revert hbot; simp
-                have hok' : idsOk C 0 (s2.take n) = true := by revert hok; cases idsOk C 0 (s2.take n) <;> simp
-                have he := readLabel_inv hC lv hr (bytes_cons hb) hlen hok'
-                rw [hbot'] at he
-                obtain ⟨ls, hs, ht, hk⟩ := readLabels_inv hC k acc _ t r h (by rw [he] at hb; exact bytes_suffix hb)
-                refine ⟨ls, ?_, ht, hk⟩
-                rw [he, hs]
-                simp
+    · rename_i hT
+      have e1 := readU16_inv hr hb
+      obtain ⟨e2, hl, hc, hn⟩ := readNames_inv T [] s1 ns r h List.nodup_nil
+      refine ⟨?_, hc, by simpa using hn, by omega⟩
+      rw [e1, e2]
+      simp [encNames, hl]
 
-theorem encode_decode {s : List Nat} {c : Config} {t : List Label} (h : decode s = .ok (c, t)) (hb : Bytes s) :
-    encode c t = s := by
+theorem encode_decode {s : List Nat} {c : TConfig} {t : List TLabel} (h : decode s = .ok (c, t)) (hb : Bytes s)
+    (hv2 : (s.drop 4).head? = some codecVersion) : encode c t = s := by
   unfold decode at h
   split at h
   · simp at h
@@ -506,10 +586,12 @@ theorem encode_decode {s : List Nat} {c : Config} {t : List Label} (h : decode s
       split at h
       · simp at h
       · rename_i v s' hdrop
+        rw [hdrop] at hv2
+        simp only [List.head?_cons, Option.some.injEq] at hv2
+        subst hv2
         split at h
         · simp at h
-        · rename_i hv
-          split at h
+        · split at h
           · simp at h
           · rename_i L s1 hr1
             split at h
@@ -528,48 +610,139 @@ theorem encode_decode {s : List Nat} {c : Config} {t : List Label} (h : decode s
                     · rename_i comps s4 hn2
                       split at h
                       · simp at h
-                      · rename_i n s5 hr3
+                      · rename_i trusts s4t hnt
                         split at h
                         · simp at h
-                        · rename_i hn0
+                        · rename_i n s5 hr3
                           split at h
+                          · simp at h
+                          · rename_i hn0
+                            split at h
+                            · simp at h
+                            · rename_i labels s6 hl
+                              split at h
+                              · simp at h
+                              · rename_i hs6
+                                simp only [Except.ok.injEq, Prod.mk.injEq] at h
+                                obtain ⟨rfl, rfl⟩ := h
+                                have hs6' : s6 = [] := by simpa using hs6
+                                subst hs6'
+                                have hsplit : s = codecMagic ++ (codecVersion :: s') := by
+                                  rw [← hdrop, ← List.take_append_drop 4 s]
+                                  simp only [List.take_append_drop]
+                                  have : s.take 4 = codecMagic := by simpa using hmag
+                                  rw [← this, List.take_append_drop]
+                                have hb1 : Bytes s' := by rw [hsplit] at hb; exact bytes_cons (bytes_suffix hb)
+                                have e1 := readU16_inv hr1 hb1
+                                have hb2 : Bytes s1 := by rw [e1] at hb1; exact bytes_suffix hb1
+                                obtain ⟨e2, hL, _, hnl⟩ := readNames_inv L [] s1 levels s2 hn1 List.nodup_nil
+                                have hb3 : Bytes s2 := by rw [e2] at hb2; exact bytes_suffix hb2
+                                have e3 := readU16_inv hr2 hb3
+                                have hb4 : Bytes s3 := by rw [e3] at hb3; exact bytes_suffix hb3
+                                obtain ⟨e4, hCl, _, _⟩ := readNames_inv C levels s3 comps s4 hn2 (by simpa using hnl)
+                                have hb5 : Bytes s4 := by rw [e4] at hb4; exact bytes_suffix hb4
+                                simp only [beq_self_eq_true] at hnt
+                                obtain ⟨et, _, _, _⟩ := readTrustNames_inv hnt hb5
+                                have hb5t : Bytes s4t := by rw [et] at hb5; exact bytes_suffix hb5
+                                have e5 := readU16_inv hr3 hb5t
+                                have hb6 : Bytes s5 := by rw [e5] at hb5t; exact bytes_suffix hb5t
+                                obtain ⟨k, rfl⟩ : ∃ k, n = k + 1 := ⟨n - 1, by omega⟩
+                                have hC' : C ≤ compLimit := Nat.le_of_not_lt hC
+                                simp only [beq_self_eq_true] at hl
+                                obtain ⟨ls, e6, ht, hk⟩ := readLabels_first_inv hC' hl hb6
+                                subst ht
+                                rw [hsplit, e1, e2, e3, e4, et, e5, e6]
+                                simp only [encode, encNames, hL, hCl, hk, List.append_nil, List.map_cons, List.flatten_cons,
+                                  List.append_assoc, List.cons_append, List.nil_append, List.length_cons]
+
+theorem decode_injective {s1 s2 : List Nat} {c : TConfig} {t : List TLabel} (h1 : decode s1 = .ok (c, t))
+    (h2 : decode s2 = .ok (c, t)) (hb1 : Bytes s1) (hb2 : Bytes s2) (hv1 : (s1.drop 4).head? = some codecVersion)
+    (hv2 : (s2.drop 4).head? = some codecVersion) : s1 = s2 := by
+  rw [← encode_decode h1 hb1 hv1, ← encode_decode h2 hb2 hv2]
+
+theorem readLabels_narrow {L C T : Nat} : ∀ (k : Nat) (first : Bool) (acc : List TLabel) (s : List Nat)
+    (t : List TLabel) (r : List Nat), readLabels L C T false k first acc s = .ok (t, r) →
+      (∀ l ∈ acc, l.trust = 0) → ∀ l ∈ t, l.trust = 0 := by
+  intro k
+  induction k with
+  | zero =>
+    intro first acc s t r h hacc
+    simp only [readLabels, Except.ok.injEq, Prod.mk.injEq] at h
+    obtain ⟨rfl, rfl⟩ := h
+    exact hacc
+  | succ k ih =>
+    intro first acc s t r h hacc
+    match s, h with
+    | lv :: s0, h =>
+      simp only [readLabels, readTrust, Bool.false_eq_true, ↓reduceIte] at h
+      split at h
+      · simp at h
+      · split at h
+        · simp at h
+        · rename_i n s2 _
+          split at h
+          · simp at h
+          · split at h
+            · simp at h
+            · split at h
+              · simp at h
+              · split at h
+                · split at h
+                  · simp at h
+                  · exact ih false acc _ t r h hacc
+                · split at h
+                  · simp at h
+                  · refine ih false _ _ t r h ?_
+                    intro l hl
+                    simp only [List.mem_append, List.mem_singleton] at hl
+                    rcases hl with hl | rfl
+                    · exact hacc l hl
+                    · rfl
+
+theorem decode_untrusted {s : List Nat} {c : TConfig} {t : List TLabel} (h : decode s = .ok (c, t))
+    (hv1 : (s.drop 4).head? = some codecUntrusted) : c.trusts = [] ∧ ∀ l ∈ t, l.trust = 0 := by
+  unfold decode at h
+  split at h
+  · simp at h
+  · split at h
+    · simp at h
+    · split at h
+      · simp at h
+      · rename_i v s' hdrop
+        rw [hdrop] at hv1
+        simp only [List.head?_cons, Option.some.injEq] at hv1
+        subst hv1
+        have hw : (codecUntrusted == codecVersion) = false := by decide
+        simp only [hw, readTrustNames, Bool.false_eq_true, ↓reduceIte] at h
+        split at h
+        · simp at h
+        · split at h
+          · simp at h
+          · split at h
+            · simp at h
+            · split at h
+              · simp at h
+              · split at h
+                · simp at h
+                · split at h
+                  · simp at h
+                  · split at h
+                    · simp at h
+                    · split at h
+                      · simp at h
+                      · split at h
+                        · simp at h
+                        · split at h
                           · simp at h
                           · rename_i labels s6 hl
                             split at h
                             · simp at h
-                            · rename_i hs6
-                              simp only [Except.ok.injEq, Prod.mk.injEq] at h
+                            · simp only [Except.ok.injEq, Prod.mk.injEq] at h
                               obtain ⟨rfl, rfl⟩ := h
-                              have hs6' : s6 = [] := by simpa using hs6
-                              subst hs6'
-                              have hsplit : s = codecMagic ++ (v :: s') := by
-                                rw [← hdrop, ← List.take_append_drop 4 s]
-                                simp only [List.take_append_drop]
-                                have : s.take 4 = codecMagic := by simpa using hmag
-                                rw [← this, List.take_append_drop]
-                              have hv1 : v = 1 := by simpa [codecVersion] using hv
-                              subst hv1
-                              have hb1 : Bytes s' := by rw [hsplit] at hb; exact bytes_cons (bytes_suffix hb)
-                              have e1 := readU16_inv hr1 hb1
-                              have hb2 : Bytes s1 := by rw [e1] at hb1; exact bytes_suffix hb1
-                              obtain ⟨e2, hL, _, hnl⟩ := readNames_inv L [] s1 levels s2 hn1 List.nodup_nil
-                              have hb3 : Bytes s2 := by rw [e2] at hb2; exact bytes_suffix hb2
-                              have e3 := readU16_inv hr2 hb3
-                              have hb4 : Bytes s3 := by rw [e3] at hb3; exact bytes_suffix hb3
-                              obtain ⟨e4, hCl, _, _⟩ := readNames_inv C levels s3 comps s4 hn2 (by simpa using hnl)
-                              have hb5 : Bytes s4 := by rw [e4] at hb4; exact bytes_suffix hb4
-                              have e5 := readU16_inv hr3 hb5
-                              have hb6 : Bytes s5 := by rw [e5] at hb5; exact bytes_suffix hb5
-                              obtain ⟨k, rfl⟩ : ∃ k, n = k + 1 := ⟨n - 1, by omega⟩
-                              have hC' : C ≤ compLimit := Nat.le_of_not_lt hC
-                              obtain ⟨ls, e6, ht, hk⟩ := readLabels_first_inv hC' hl hb6
-                              subst ht
-                              rw [hsplit, e1, e2, e3, e4, e5, e6]
-                              simp only [encode, encNames, hL, hCl, hk, List.append_nil, List.map_cons, List.flatten_cons,
-                                codecVersion, List.append_assoc, List.cons_append, List.nil_append, List.length_cons]
-
-theorem decode_injective {s1 s2 : List Nat} {c : Config} {t : List Label} (h1 : decode s1 = .ok (c, t))
-    (h2 : decode s2 = .ok (c, t)) (hb1 : Bytes s1) (hb2 : Bytes s2) : s1 = s2 := by
-  rw [← encode_decode h1 hb1, ← encode_decode h2 hb2]
+                              refine ⟨rfl, readLabels_narrow _ _ _ _ _ _ hl ?_⟩
+                              intro l hl
+                              simp only [List.mem_singleton] at hl
+                              subst hl
+                              rfl
 
 end Labels

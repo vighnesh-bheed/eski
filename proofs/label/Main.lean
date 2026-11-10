@@ -33,12 +33,12 @@ def joinOr (xs : List String) : String := if xs.isEmpty then "-" else String.int
 def parseIds (s : String) : Except String (List Nat) :=
   if s == "-" then .ok [] else (s.splitOn ",").mapM parseNat
 
-def parseLabel (s : String) : Except String Label :=
+def parseLabel (s : String) : Except String TLabel :=
   match s.splitOn ":" with
-  | [lv, ids] => do return ⟨← parseNat lv, ofIds (← parseIds ids)⟩
+  | [lv, ids, tr] => do return ⟨⟨← parseNat lv, ofIds (← parseIds ids)⟩, ← parseNat tr⟩
   | _ => .error ("invalid label " ++ s)
 
-def showLabel (l : Label) : String := s!"{l.level}:{joinOr ((idsOf l.comps compLimit).map toString)}"
+def showLabel (l : TLabel) : String := s!"{l.sec.level}:{joinOr ((idsOf l.sec.comps compLimit).map toString)}:{l.trust}"
 
 def bit (b : Bool) : String := if b then "1" else "0"
 
@@ -51,6 +51,7 @@ def cfgErr : CfgErr → String
   | .duplicateName => "duplicate"
   | .tooManyLevels => "toomanylevels"
   | .tooManyComps => "toomanycomps"
+  | .tooManyTrusts => "toomanytrusts"
 
 def pErr : PErr → String
   | .empty => "empty"
@@ -62,6 +63,8 @@ def pErr : PErr → String
   | .emptyComp => "emptycomp"
   | .unknownComp => "unknowncomp"
   | .dupComp => "dupcomp"
+  | .emptyTrust => "emptytrust"
+  | .unknownTrust => "unknowntrust"
 
 def dErr : DErr → String
   | .truncated => "truncated"
@@ -69,10 +72,12 @@ def dErr : DErr → String
   | .badVersion => "badversion"
   | .badLevelCount => "badlevelcount"
   | .badCompCount => "badcompcount"
+  | .badTrustCount => "badtrustcount"
   | .badName => "badname"
   | .dupName => "dupname"
   | .badLabelCount => "badlabelcount"
   | .badLevel => "badlevel"
+  | .badTrust => "badtrust"
   | .badComp => "badcomp"
   | .notBottom => "notbottom"
   | .dupLabel => "duplabel"
@@ -81,23 +86,27 @@ def dErr : DErr → String
 def wv : WV → String
   | .allowed => "allowed"
   | .aboveClearance => "above"
-  | .writeDown => "down"
+  | .notSession => "notsession"
 
 def mv : MV → String
   | .allowed => "allowed"
   | .notVisible => "hidden"
-  | .writeDown => "down"
+  | .notSession => "notsession"
 
 def hexWord (n : Nat) : String := String.ofList (Nat.toDigits 16 n)
 
 def showVis (v : Vis) : String := s!"V|{v.built}|{joinOr (v.words.map hexWord)}"
 
 structure St where
-  cfg : Config := ⟨[], []⟩
-  table : List Label := tableInit
-  vis : Vis := build bottom tableInit
+  cfg : TConfig := ⟨⟨[], []⟩, []⟩
+  table : List TLabel := tableInit
+  vis : Vis := build tbottom tableInit
   ctr : Ctr := ctrInit
-  subj : Subject := subjectMake bottom
+  subj : Subject := subjectMake tbottom
+  aenv : AEnv := ⟨⟨⟨[], []⟩, []⟩, [], 3600, 1000, 0, [], []⟩
+  adyn : ADyn := ⟨[], [], 0, []⟩
+
+def cfgCounts (c : TConfig) : String := s!"{c.base.levels.length}|{c.base.comps.length}|{c.trusts.length}"
 
 def filterSpec (c : Char) : Option Bool :=
   if c == 'p' then some true else if c == 'n' then none else some false
@@ -122,32 +131,111 @@ def bruteRow (v : Vis) (k : Nat) (q : Int) (points : List Int) (labels : List Na
   let res := bruteForce points.length (fun _ => true) (gateAccept v labels) dist k
   s!"B|{joinOr (res.map fun c => s!"{c.id}:{c.d}")}"
 
+def nameList (s : String) : Except String (List (List Nat)) :=
+  if s == "-" then .ok [] else (s.splitOn ",").mapM unhex
+
+def optHex (s : String) : Except String (Option (List Nat)) :=
+  if s == "-" then .ok none else do return some (← unhex s)
+
+def fixedHandle : List Nat := word "0123456789abcdef0123456789abcdef"
+
+def parseArg (s : String) : Except String Arg :=
+  match s.splitOn ":" with
+  | ["x", h] => do return .lit (← unhex h)
+  | ["h", n] => do return .handle (← parseNat n)
+  | ["H", n] => do return .handle (← parseNat n)
+  | ["t", n] => do return .token (← parseNat n)
+  | ["o"] => .ok (.lit fixedHandle)
+  | _ => .error ("invalid argument " ++ s)
+
+def parseHRef (s : String) : Except String (Option HRef) :=
+  match s.splitOn ":" with
+  | ["-"] => .ok none
+  | ["s"] => .ok (some .shaped)
+  | ["m"] => .ok (some .malformed)
+  | ["h", n] => do return some (.handle (← parseNat n))
+  | _ => .error ("invalid context reference " ++ s)
+
+def buildCfg (levels comps trusts : List (List Nat)) : Except String TConfig := do
+  let mut base : Config := ⟨[], []⟩
+  for n in levels do
+    match addLevel base n with
+    | .ok c => base := c
+    | .error _ => throw "level rejected"
+  for n in comps do
+    match addComp base n with
+    | .ok c => base := c
+    | .error _ => throw "compartment rejected"
+  let mut tc : TConfig := ⟨base, []⟩
+  for n in trusts do
+    match addTrust tc n with
+    | .ok c => tc := c
+    | .error _ => throw "trust rejected"
+  return tc
+
+def ctxText : Option ACtx → String
+  | some x => s!"h{x.handle}"
+  | none => "-"
+
+def arrivalText : Arrival → String
+  | .ok l inner x => s!"ok:{showLabel l}:{inner.length}:{ctxText x}"
+  | .refused m => s!"no:{m}"
+
+def replyText (tc : TConfig) : Reply → String
+  | .ok => "OK"
+  | .err m => m
+  | .handle n => s!"h{n}"
+  | .info l => s!"info:{hex ((format tc.base l.sec).getD [])}:{hex (tc.trusts.getD l.trust [])}"
+  | .queued => "queued"
+  | .exec => "exec"
+  | .none => "-"
+
+def connText (D : ADyn) (id : Nat) : String :=
+  match connOf D id with
+  | none => "-"
+  | some c => s!"{bit c.inMulti}{bit c.dirty}{bit c.explicit}:{if c.explicit then showLabel c.session else "-"}:{showLabel c.bound}"
+
+def ruleClear (s : String) : Except String (Bool × Option Label) :=
+  if s == "*" then .ok (true, none) else if s == "-" then .ok (false, none) else do return (false, some (← parseLabel s).sec)
+
+def ruleTrust (s : String) : Except String (Bool × Option Nat) :=
+  if s == "*" then .ok (true, none) else if s == "-" then .ok (false, none) else do return (false, some (← parseNat s))
+
 def step (st : St) (f : List String) : Except String (St × String) := do
   match f with
-  | ["CR"] => return ({ st with cfg := ⟨[], []⟩ }, "CR")
+  | ["CR"] => return ({ st with cfg := ⟨⟨[], []⟩, []⟩ }, "CR")
   | ["CL", h] =>
-    match addLevel st.cfg (← unhex h) with
-    | .ok c => return ({ st with cfg := c }, s!"CL|ok|{c.levels.length}|{c.comps.length}|{hex (c.levels.getLast?.getD [])}")
-    | .error e => return (st, s!"CL|{cfgErr e}|{st.cfg.levels.length}|{st.cfg.comps.length}|-")
+    match addLevel st.cfg.base (← unhex h) with
+    | .ok c =>
+      let n := { st.cfg with base := c }
+      return ({ st with cfg := n }, s!"CL|ok|{cfgCounts n}|{hex (c.levels.getLast?.getD [])}")
+    | .error e => return (st, s!"CL|{cfgErr e}|{cfgCounts st.cfg}|-")
   | ["CC", h] =>
-    match addComp st.cfg (← unhex h) with
-    | .ok c => return ({ st with cfg := c }, s!"CC|ok|{c.levels.length}|{c.comps.length}|{hex (c.comps.getLast?.getD [])}")
-    | .error e => return (st, s!"CC|{cfgErr e}|{st.cfg.levels.length}|{st.cfg.comps.length}|-")
+    match addComp st.cfg.base (← unhex h) with
+    | .ok c =>
+      let n := { st.cfg with base := c }
+      return ({ st with cfg := n }, s!"CC|ok|{cfgCounts n}|{hex (c.comps.getLast?.getD [])}")
+    | .error e => return (st, s!"CC|{cfgErr e}|{cfgCounts st.cfg}|-")
+  | ["CT", h] =>
+    match addTrust st.cfg (← unhex h) with
+    | .ok c => return ({ st with cfg := c }, s!"CT|ok|{cfgCounts c}|{hex (c.trusts.getLast?.getD [])}")
+    | .error e => return (st, s!"CT|{cfgErr e}|{cfgCounts st.cfg}|-")
   | ["M", h] =>
-    match parse st.cfg (← unhex h) with
+    match parseT st.cfg (← unhex h) with
     | .ok l =>
-      match format st.cfg l with
+      match formatT st.cfg l with
       | some s => return (st, s!"M|ok|{showLabel l}|{hex s}")
       | none => return (st, s!"M|ok|{showLabel l}|unformattable")
     | .error e => return (st, s!"M|{pErr e.err}|{e.offset}|{e.length}")
   | ["F", l] =>
-    match format st.cfg (← parseLabel l) with
+    match formatT st.cfg (← parseLabel l) with
     | some s => return (st, s!"F|{hex s}")
     | none => return (st, "F|invalid")
   | ["L", a, b] =>
     let a ← parseLabel a
     let b ← parseLabel b
-    return (st, s!"L|{bit (dom a b)}|{bit (dom b a)}|{showLabel (join a b)}|{showLabel (meet a b)}")
+    return (st, s!"L|{bit (domT a b)}|{bit (domT b a)}|{showLabel (joinT a b)}|{showLabel (meetT a b)}|" ++
+      s!"{bit (ceilingAdmits a b)}|{bit (ceilingAdmits b a)}|{rcmp a b}")
   | ["TR"] => return ({ st with table := tableInit }, "TR|1")
   | ["TI", l] =>
     let l ← parseLabel l
@@ -165,7 +253,7 @@ def step (st : St) (f : List String) : Except String (St × String) := do
     | none => return (st, "E|invalid")
   | ["D", h] =>
     match decode (← unhex h) with
-    | .ok (c, t) => return (st, s!"D|ok|{c.levels.length}|{c.comps.length}|{t.length}|{hex (encode c t)}")
+    | .ok (c, t) => return (st, s!"D|ok|{cfgCounts c}|{t.length}|{hex (encode c t)}")
     | .error e => return (st, s!"D|{dErr e}")
   | ["V", l] =>
     let v := build (← parseLabel l) st.table
@@ -202,6 +290,43 @@ def step (st : St) (f : List String) : Except String (St × String) := do
     | .error .invalid => return (st, s!"NS|invalid|{st.ctr.total}")
     | .error .underflow => return (st, s!"NS|underflow|{st.ctr.total}")
   | ["NV"] => return (st, s!"NV|{visibleTotal st.ctr st.vis}|{joinOr (st.ctr.counts.map toString)}")
+  | ["AX", lv, cm, tr, aud, idle, cap] =>
+    let tc ← buildCfg (← nameList lv) (← nameList cm) (← nameList tr)
+    let e : AEnv := ⟨tc, ← unhex aud, ← parseNat idle, ← parseNat cap, st.aenv.now, [], []⟩
+    return ({ st with aenv := e, adyn := ⟨[], [], 0, []⟩ }, s!"AX|{cfgCounts tc}")
+  | ["AU", login, clr, tr, pc, rt, keys, _] =>
+    let login ← unhex login
+    let (ct, cl) ← ruleClear clr
+    let (tt, tl) ← ruleTrust tr
+    let r : LRules := ⟨ct, cl, tt, tl, pc == "1", rt == "1", ← parseIds keys⟩
+    let e := { st.aenv with users := (login, r) :: st.aenv.users.filter (·.1 != login) }
+    return ({ st with aenv := e, adyn := { st.adyn with cache := [] } },
+      s!"AU|{showLabel (ceilingFor e login)}|{bit r.perCommand}|{bit r.requireToken}|{r.keys.length}")
+  | ["AC", id, login] =>
+    let c : AConn := ⟨← unhex login, false, tbottom, false, false, tbottom⟩
+    return ({ st with adyn := { st.adyn with conns := st.adyn.conns ++ [(← parseNat id, c)] } }, s!"AC|{id}")
+  | ["AT", now] => return ({ st with aenv := { st.aenv with now := ← parseNat now } }, s!"AT|{now}")
+  | ["AO", n, secret, marking, trust, expires, aud, ctx, flaw] =>
+    let sp : TokSpec := ⟨← parseNat secret, ← optHex marking, ← optHex trust, ← unhex expires, ← optHex aud,
+      ← parseHRef ctx, ← parseNat flaw⟩
+    return ({ st with aenv := { st.aenv with tokens := st.aenv.tokens ++ [(← parseNat n, sp)] } }, s!"AO|{n}")
+  | ["AW"] =>
+    let cs := ctxSweep st.aenv.idle st.aenv.now st.adyn.ctxs
+    return ({ st with adyn := { st.adyn with ctxs := cs } }, s!"AW|{cs.length}")
+  | ["AQ", id, a] =>
+    let a ← parseArg a
+    match connOf st.adyn (← parseNat id) with
+    | none => throw "unknown connection"
+    | some c =>
+      let (x, D) := findIn st.aenv st.adyn c.login (hrefOf a)
+      return ({ st with adyn := D }, s!"AQ|{ctxText x}|{D.ctxs.length}")
+  | "AS" :: args => return (st, s!"AS|{bit (scriptDenied (← args.mapM parseArg))}")
+  | kind :: id :: args =>
+    if kind == "AR" || kind == "AH" then do
+      let id ← parseNat id
+      let (a, r, D) := request st.aenv st.adyn id (← args.mapM parseArg)
+      return ({ st with adyn := D }, s!"{kind}|{arrivalText a}|{replyText st.aenv.cfg r}|{connText D id}|{D.ctxs.length}")
+    else throw ("unknown case " ++ String.intercalate " " f)
   | _ => throw ("unknown case " ++ String.intercalate " " f)
 
 def main (args : List String) : IO Unit := do

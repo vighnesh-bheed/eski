@@ -2,7 +2,7 @@
 
 ## Build
 
-The server uses Linux system calls and epoll. Its host implementation is Odin and its embedded Lua runtime is C, with the Lua MIT notice retained in [third-party notices](../THIRD_PARTY_NOTICES.md#lua515). The supplied container build targets Linux amd64 and pins its compiler archive and distribution packages in [Dockerfile](../Dockerfile). Native builds need Odin, clang, OpenSSL 3 and libunwind development libraries, GNU ar, sha256sum, flock and Python. On Ubuntu, the library development packages are `libssl-dev` and `libunwind-dev`; libunwind also depends on liblzma. Build scripts choose `ODIN` when set, then `odin` on PATH, then `$HOME/odin/current/odin`. The compiler selected must be executable; clang must be on PATH.
+The server uses Linux system calls and epoll. Its host implementation is Odin and its embedded Lua runtime is C, with the Lua MIT notice retained in [third-party notices](../THIRD_PARTY_NOTICES.md#lua515). The supplied container build targets Linux amd64 and pins its compiler archive and distribution packages in [Dockerfile](../Dockerfile). Native builds need Odin, clang, OpenSSL 3 and libunwind development libraries, GNU ar, sha256sum, flock and Python. On Ubuntu, the library development packages are `libssl-dev` and `libunwind-dev`; libunwind also depends on liblzma. The label test driver also needs the `openssl` command line of OpenSSL 3, which signs its tokens; on Ubuntu it is the `openssl` package. Build scripts choose `ODIN` when set, then `odin` on PATH, then `$HOME/odin/current/odin`. The compiler selected must be executable; clang must be on PATH.
 
 Run from the repository root:
 

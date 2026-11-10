@@ -1,6 +1,7 @@
 package main
 
 import "core:container/queue"
+import lb "label"
 
 SLOWLOG_KEPT_ARGS :: 32
 SLOWLOG_KEPT_BYTES :: 128
@@ -15,6 +16,7 @@ Slowlog_Entry :: struct {
 	buf:   []u8,
 	peer:  []u8,
 	name:  []u8,
+	label: lb.Id,
 }
 
 @(private = "file")
@@ -179,6 +181,7 @@ slowlog_push :: proc(c: ^Conn, st: ^Cmd_Stats, argv: [][]u8, us: i64) {
 		copy(e.spans, slowlog_spans[:])
 		e.peer = e.buf[peer_at:name_at]
 		e.name = e.buf[name_at:]
+		e.label = access.id if labels_on else lb.BOTTOM_ID
 		queue.push_back(&slowlog, e)
 	}
 	for i64(queue.len(slowlog)) > cfg.slowlog_max_len {
@@ -227,7 +230,9 @@ cmd_slowlog :: proc(c: ^Conn, argv: [][]u8) {
 		slowlog_reset()
 		reply_ok(c)
 	case argc == 2 && eq_nocase(sub, "len"):
-		reply_int(c, i64(queue.len(slowlog)))
+		reply_int(c, i64(slowlog_visible_len()))
+	case (argc == 2 || argc == 3) && eq_nocase(sub, "get") && labels_on:
+		slowlog_get_labelled(c, argv)
 	case (argc == 2 || argc == 3) && eq_nocase(sub, "get"):
 		count: i64 = 10
 		total := i64(queue.len(slowlog))
@@ -256,6 +261,59 @@ cmd_slowlog :: proc(c: ^Conn, argv: [][]u8) {
 		}
 	case:
 		reply_subcommand_syntax_error(c, sub, "SLOWLOG")
+	}
+}
+
+@(private = "file")
+slowlog_entry_visible :: proc(e: ^Slowlog_Entry) -> bool {
+	return !labels_on || access.top || access_visible(e.label)
+}
+
+@(private = "file")
+slowlog_visible_len :: proc() -> int {
+	if !labels_on {
+		return queue.len(slowlog)
+	}
+	n := 0
+	for k in 0 ..< queue.len(slowlog) {
+		if slowlog_entry_visible(queue.get(&slowlog, k)) {
+			n += 1
+		}
+	}
+	return n
+}
+
+@(private = "file")
+slowlog_get_labelled :: proc(c: ^Conn, argv: [][]u8) {
+	total := slowlog_visible_len()
+	count := 10
+	if len(argv) == 3 {
+		v, ok := parse_i64(argv[2])
+		if !ok || v < -1 {
+			reply_error(c, ERR_SLOWLOG_COUNT)
+			return
+		}
+		count = total if v == -1 else int(min(v, i64(total)))
+	}
+	count = min(count, total)
+	reply_array(c, count)
+	sent := 0
+	for k := queue.len(slowlog) - 1; k >= 0 && sent < count; k -= 1 {
+		e := queue.get(&slowlog, k)
+		if !slowlog_entry_visible(e) {
+			continue
+		}
+		sent += 1
+		reply_array(c, 6)
+		reply_int(c, e.id)
+		reply_int(c, e.time)
+		reply_int(c, e.us)
+		reply_array(c, len(e.spans))
+		for sp in e.spans {
+			reply_bulk(c, e.buf[sp[0]:][:sp[1]])
+		}
+		reply_bulk(c, e.peer)
+		reply_bulk(c, e.name)
 	}
 }
 

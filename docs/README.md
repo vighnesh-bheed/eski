@@ -29,6 +29,7 @@ Start with [build, run and test](build-run-test.md) and [architecture](architect
 | Optional datatype workers and LCS compute workers | [Threading](threading.md) |
 | Configuration, introspection, memory limits and eviction | [Server management](server.md) |
 | Users, selectors, key patterns and authentication | [ACL](acl.md) |
+| Label schemes, clearances, contexts and signed levels | [Labels](labels.md) |
 | Snapshots, append-only files and payload transfer | [Persistence](persistence.md) |
 | Shared-keyspace text endpoint | [Memcached](memcached.md) |
 

@@ -326,7 +326,7 @@ lua_inner :: proc(run: ^Lua_Invocation, argv: [][]u8) {
 		stat_reject(hot, argv)
 		return
 	}
-	if !lua_handler_allowed(cmd, spec) {
+	if !lua_handler_allowed(cmd, spec) || label_script_denied(cmd, argv) {
 		lua_inner_reject(run, "ERR This command is not allowed from script")
 		stat_reject(hot, argv)
 		return
@@ -345,6 +345,13 @@ lua_inner :: proc(run: ^Lua_Invocation, argv: [][]u8) {
 		lua_inner_reject(run, string(message[:]))
 		stat_reject(hot, argv)
 		return
+	}
+	if labels_on {
+		if refusal := access_command_refusal(cmd, argv); refusal != "" {
+			lua_inner_reject(run, refusal)
+			stat_reject(hot, argv)
+			return
+		}
 	}
 	writing := lua_command_writes(cmd, spec, argv)
 	if run.readonly && writing {

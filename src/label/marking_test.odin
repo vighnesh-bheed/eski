@@ -38,6 +38,17 @@ MARKING_CASES := [?]Marking_Case {
 	{"SECRET//S\nI", .Invalid_Byte, 9, 1},
 	{"SECRET\x7f", .Invalid_Byte, 6, 1},
 	{"SECR\xc3\x89T", .Invalid_Byte, 4, 1},
+	{"SECRET;TRUSTED", .None, 0, 0},
+	{"SECRET//SI ; vetted ", .None, 0, 0},
+	{"SECRET;", .Empty_Trust, 7, 0},
+	{"SECRET; \t", .Empty_Trust, 7, 0},
+	{";TRUSTED", .Empty_Level, 0, 0},
+	{" ;TRUSTED", .Empty_Level, 0, 0},
+	{"SECRET;TRUSTY", .Unknown_Trust, 7, 6},
+	{"SECRET; trusted;web", .Unknown_Trust, 8, 11},
+	{"SECRET;TRUSTED//SI", .Unknown_Trust, 7, 11},
+	{"SECRET//;WEB", .Empty_Compartment, 8, 0},
+	{"SECRT;WEB", .Unknown_Level, 0, 5},
 }
 
 @(test)
@@ -62,9 +73,10 @@ markings_report_precise_errors :: proc(t: ^testing.T) {
 @(test)
 format_is_canonical_and_round_trips :: proc(t: ^testing.T) {
 	c: Config
-	wide_config(t, &c, LEVEL_LIMIT, COMPARTMENT_LIMIT)
+	wide_config(t, &c, LEVEL_LIMIT, COMPARTMENT_LIMIT, TRUST_LIMIT)
 	defer config_destroy(&c)
 	top, _ := config_top(&c)
+	top.trust = 2
 	text, ok := format(&c, top)
 	defer delete(text)
 	testing.expect(t, ok)
@@ -73,7 +85,7 @@ format_is_canonical_and_round_trips :: proc(t: ^testing.T) {
 	testing.expect(t, f.error == .None && back == top)
 	r := Rng{0xF0_4A7}
 	for _ in 0 ..< 5_000 {
-		l := random_label(&r, LEVEL_LIMIT, COMPARTMENT_LIMIT, 20)
+		l := random_label(&r, LEVEL_LIMIT, COMPARTMENT_LIMIT, 20, TRUST_LIMIT)
 		s := label_text(&c, l)
 		testing.expect_value(t, len(s), format_length(&c, l))
 		parsed, pf := parse(&c, s)
@@ -87,6 +99,9 @@ format_is_canonical_and_round_trips :: proc(t: ^testing.T) {
 	_, ok = format(&us, bad)
 	testing.expect(t, !ok)
 	bad.level = 0
+	bad.trust = 3
+	testing.expect_value(t, format_length(&us, bad), -1)
+	bad.trust = 0
 	compartment_add(&bad, 5)
 	testing.expect_value(t, format_length(&us, bad), -1)
 }
@@ -126,6 +141,10 @@ reference_parse :: proc(c: ^Config, text: string) -> (l: Label, f: Parse_Failure
 	for i in 0 ..< len(compartments) {
 		compartments[i] = config_compartment_name(c, i)
 	}
+	trusts := make([]string, len(c.trusts), context.temp_allocator)
+	for i in 0 ..< len(trusts) {
+		trusts[i] = config_trust_name(c, i)
+	}
 	if len(text) > MARKING_MAX {
 		return {}, {.Too_Long, MARKING_MAX, len(text) - MARKING_MAX}
 	}
@@ -134,6 +153,27 @@ reference_parse :: proc(c: ^Config, text: string) -> (l: Label, f: Parse_Failure
 			return {}, {.Invalid_Byte, i, 1}
 		}
 	}
+	semi := strings.index_byte(text, ';')
+	if semi < 0 {
+		return reference_secrecy(levels, compartments, text, false)
+	}
+	l, f = reference_secrecy(levels, compartments, text[:semi], true)
+	if f.error != .None {
+		return {}, f
+	}
+	at, n := reference_span(text, semi + 1, len(text))
+	if n == 0 {
+		return {}, {.Empty_Trust, at, 0}
+	}
+	k := reference_find(trusts, text[semi + 1:])
+	if k < 0 {
+		return {}, {.Unknown_Trust, at, n}
+	}
+	l.trust = u8(k)
+	return l, {}
+}
+
+reference_secrecy :: proc(levels, compartments: []string, text: string, suffixed: bool) -> (l: Label, f: Parse_Failure) {
 	parts := strings.split(text, "/", context.temp_allocator)
 	starts := make([]int, len(parts), context.temp_allocator)
 	for i in 1 ..< len(parts) {
@@ -141,7 +181,7 @@ reference_parse :: proc(c: ^Config, text: string) -> (l: Label, f: Parse_Failure
 	}
 	at, n := reference_span(text, 0, len(parts[0]))
 	if n == 0 {
-		return {}, {.Empty if len(parts) == 1 else .Empty_Level, at, 0}
+		return {}, {.Empty if len(parts) == 1 && !suffixed else .Empty_Level, at, 0}
 	}
 	level := reference_find(levels, parts[0])
 	if level < 0 {
@@ -201,6 +241,11 @@ FUZZ_PIECES := [?]string {
 	"-",
 	"_",
 	"a",
+	";",
+	";",
+	"web",
+	"Vetted",
+	"TRUSTED",
 }
 
 fuzz_marking :: proc(r: ^Rng, b: ^strings.Builder) -> string {
@@ -229,6 +274,10 @@ structured_marking :: proc(r: ^Rng, b: ^strings.Builder) -> string {
 			strings.write_string(b, COMPARTMENT_SEPARATORS[rng_below(r, len(COMPARTMENT_SEPARATORS))])
 		}
 		strings.write_string(b, FUZZ_PIECES[6 + rng_below(r, 7)])
+	}
+	if rng_below(r, 3) == 0 {
+		strings.write_string(b, ";" if rng_below(r, 2) == 0 else " ; ")
+		strings.write_string(b, FUZZ_PIECES[len(FUZZ_PIECES) - 1 - rng_below(r, 4)])
 	}
 	return strings.to_string(b^)
 }

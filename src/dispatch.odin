@@ -226,7 +226,15 @@ execute :: #force_inline proc(c: ^Conn, argv: [][]u8) {
 	execute_slot(c, argv, lookup_entry(argv[0]))
 }
 
-execute_slot :: proc(c: ^Conn, argv: [][]u8, slot: ^Cmd_Slot) {
+execute_slot :: proc(c: ^Conn, argv_in: [][]u8, slot_in: ^Cmd_Slot) {
+	argv, slot := argv_in, slot_in
+	if labels_on {
+		ok: bool
+		argv, slot, ok = access_enter(c, argv, slot)
+		if !ok {
+			return
+		}
+	}
 	resolved := slot.cmd if slot != nil else nil
 	diagnostics_command_begin(resolved.name if resolved != nil else "unknown", argv)
 	defer diagnostics_command_end()

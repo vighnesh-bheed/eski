@@ -99,6 +99,7 @@ conn_reset :: proc(c: ^Conn) {
 	c.reply -= {.Off, .Skip_Next}
 	c.flags = {}
 	acl_conn_reset(c)
+	access_user_changed(c)
 }
 
 cmd_reset :: proc(c: ^Conn, argv: [][]u8) {
@@ -506,6 +507,9 @@ client_filter_match :: proc(f: ^Client_Filter, other: ^Conn, self: ^Conn) -> boo
 	if f.skipme && other == self {
 		return false
 	}
+	if labels_on && other != self && !access_sees_conn(other) {
+		return false
+	}
 	if f.id != 0 && f.id != other.id {
 		return false
 	}
@@ -530,7 +534,7 @@ client_list_by_ids :: proc(c: ^Conn, argv: [][]u8) -> bool {
 	}
 	for raw in wanted {
 		id, _ := parse_i64(raw)
-		if target := conn_by_id(id); target != nil {
+		if target := conn_by_id(id); target != nil && (!labels_on || target == c || access_sees_conn(target)) {
 			client_info_line(&scratch, target, c, argv)
 		}
 	}
@@ -759,6 +763,9 @@ client_unblock :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	target := conn_by_id(id)
+	if target != nil && labels_on && target != c && !access_sees_conn(target) {
+		target = nil
+	}
 	if target == nil || target.blocked == .None || target.blocked == .Lazyfree {
 		reply_int(c, 0)
 		return

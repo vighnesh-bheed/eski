@@ -41,9 +41,9 @@ theorem gate_range {v : Vis} {labels : List Nat} {slot : Nat} (h : labels.length
   unfold gateAccept
   rw [List.getElem?_eq_none h]
 
-theorem gate_exact {t : List Label} {v : Vis} (hv : VisOk t v) (labels : List Nat) (slot : Nat) :
+theorem gate_exact {t : List TLabel} {v : Vis} (hv : VisOk t v) (labels : List Nat) (slot : Nat) :
     gateAccept v labels slot = true ↔
-      ∃ id, labels[slot]? = some id ∧ id < t.length ∧ dom v.reader (t.getD id bottom) = true := by
+      ∃ id, labels[slot]? = some id ∧ id < t.length ∧ domT v.reader (t.getD id tbottom) = true := by
   unfold gateAccept
   split
   · rename_i hn; simp [hn]
@@ -54,9 +54,9 @@ theorem gate_exact {t : List Label} {v : Vis} (hv : VisOk t v) (labels : List Na
     · intro ⟨h1, h2⟩; exact ⟨id, rfl, h1, h2⟩
     · intro ⟨_, he, h1, h2⟩; subst he; exact ⟨h1, h2⟩
 
-theorem gate_dominated {t : List Label} {v : Vis} (hv : VisOk t v) {labels : List Nat} {slot : Nat}
+theorem gate_dominated {t : List TLabel} {v : Vis} (hv : VisOk t v) {labels : List Nat} {slot : Nat}
     (h : gateAccept v labels slot = true) :
-    ∃ id, labels[slot]? = some id ∧ id < t.length ∧ dom v.reader (t.getD id bottom) = true :=
+    ∃ id, labels[slot]? = some id ∧ id < t.length ∧ domT v.reader (t.getD id tbottom) = true :=
   (gate_exact hv labels slot).1 h
 
 theorem filter_exact {A : Type} (v : Vis) (labels : List Nat) (f : FilterGate A) (slot : Nat) :
@@ -90,13 +90,14 @@ theorem filter_open {A : Type} (v : Vis) (labels : List Nat) (slot : Nat) :
   rw [filter_exact]
   simp [filterPasses]
 
-theorem gate_subject {t : List Label} (s : Subject) {labels : List Nat} {slot : Nat}
+theorem gate_subject {t : List TLabel} {s : Subject} (hs : SubjectOk s) {labels : List Nat} {slot : Nat}
     (h : gateAccept (build (reader s) t) labels slot = true) :
-    ∃ id, labels[slot]? = some id ∧ id < t.length ∧ mayRead s (t.getD id bottom) = true ∧
-      dom s.clearance (t.getD id bottom) = true := by
+    ∃ id, labels[slot]? = some id ∧ id < t.length ∧ mayRead s (t.getD id tbottom) = true ∧
+      dom s.clearance.sec (t.getD id tbottom).sec = true := by
   obtain ⟨id, hid, hlt, hd⟩ := gate_dominated (build_ok (reader s) t) h
   have hr : (build (reader s) t).reader = reader s := by unfold build; rw [refresh_reader]
   rw [hr] at hd
-  exact ⟨id, hid, hlt, hd, read_clearance hd⟩
+  have hread : mayRead s (t.getD id tbottom) = true := (read_iff hs _).2 hd
+  exact ⟨id, hid, hlt, hread, read_clearance hread⟩
 
 end Labels

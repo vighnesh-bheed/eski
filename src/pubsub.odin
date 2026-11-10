@@ -1,5 +1,7 @@
 package main
 
+import lb "label"
+
 PS_REJECT_TAIL :: "': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"
 
 @(private = "file")
@@ -247,11 +249,33 @@ ps_reply_notice :: proc(c: ^Conn, kind: Ps_Kind, sub: bool, name: []u8, has_name
 }
 
 @(private = "file")
-ps_deliver :: proc(e: ^Ps_Entry, frame: []u8) -> int {
+ps_deliver :: proc(e: ^Ps_Entry, frame: []u8, msg: lb.Id) -> int {
+	if labels_on {
+		return ps_deliver_labelled(e, frame, msg)
+	}
 	for t in e.subs {
 		ps_emit(t, frame)
 	}
 	return len(e.subs)
+}
+
+@(private = "file")
+ps_deliver_labelled :: #force_no_inline proc(e: ^Ps_Entry, frame: []u8, msg: lb.Id) -> int {
+	l, ok := access_label_of(msg)
+	if !ok {
+		return 0
+	}
+	counted := 0
+	for t in e.subs {
+		if !access_subscriber_sees(t, l) {
+			continue
+		}
+		ps_emit(t, frame)
+		if access_conn_session(t) == access.label {
+			counted += 1
+		}
+	}
+	return counted
 }
 
 @(private = "file")
@@ -272,19 +296,19 @@ ps_build :: proc(kind: Ps_Kind, pattern: []u8, channel: []u8, message: []u8) -> 
 	return b[:]
 }
 
-ps_publish :: proc(channel: []u8, message: []u8, kind: Ps_Kind) -> int {
+ps_publish :: proc(channel: []u8, message: []u8, kind: Ps_Kind, msg: lb.Id = lb.BOTTOM_ID) -> int {
 	receivers := 0
 	if kind == .Shard {
 		if e := ps_maps[.Shard][string(channel)]; e != nil {
-			receivers += ps_deliver(e, ps_build(.Shard, nil, channel, message))
+			receivers += ps_deliver(e, ps_build(.Shard, nil, channel, message), msg)
 		}
 	} else if len(ps_maps[.Channel]) > 0 || len(ps_patterns) > 0 {
 		if e := ps_maps[.Channel][string(channel)]; e != nil {
-			receivers += ps_deliver(e, ps_build(.Channel, nil, channel, message))
+			receivers += ps_deliver(e, ps_build(.Channel, nil, channel, message), msg)
 		}
 		for p in ps_patterns {
 			if glob_match(p.name, channel, false) {
-				receivers += ps_deliver(p, ps_build(.Pattern, p.name, channel, message))
+				receivers += ps_deliver(p, ps_build(.Pattern, p.name, channel, message), msg)
 			}
 		}
 	}
@@ -299,8 +323,21 @@ ps_publish :: proc(channel: []u8, message: []u8, kind: Ps_Kind) -> int {
 	return receivers
 }
 
-pubsub_publish :: proc(channel: []u8, message: []u8) -> int {
-	return ps_publish(channel, message, .Channel)
+pubsub_publish :: proc(channel: []u8, message: []u8, msg: lb.Id = lb.BOTTOM_ID) -> int {
+	return ps_publish(channel, message, .Channel, msg)
+}
+
+ps_entry_visible :: proc(e: ^Ps_Entry) -> int {
+	if !labels_on || access.top {
+		return len(e.subs)
+	}
+	n := 0
+	for t in e.subs {
+		if access_counts_subscriber(t) {
+			n += 1
+		}
+	}
+	return n
 }
 
 ps_allowed :: proc(cmd: ^Command) -> bool {

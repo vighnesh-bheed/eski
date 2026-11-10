@@ -52,6 +52,7 @@ def hit_key(h):
 class Scheme:
     def __init__(self, labels):
         self.labels = labels
+        self.decisive = 0
 
     def sees(self, r, d):
         lr, ld = self.labels[r], self.labels[d]
@@ -71,6 +72,8 @@ class Scheme:
         return -1 if x < y else (1 if x > y else 0)
 
     def resolve(self, own, ls):
+        if own in ls and any(l != own and self.sees(own, l) and self.rank(l) > self.rank(own) for l in ls):
+            self.decisive += 1
         best = None
         for l in ls:
             if l == own:
@@ -382,7 +385,8 @@ def spec_of(tok):
 
 STAT_KEYS = ('labelled_sessions', 'plain_sessions', 'labelled_writes', 'labelled_searches', 'graph_searches',
              'tied_results', 'refusals', 'forced_copies', 'samples', 'hidden_bursts', 'conversions',
-             'merge_rows', 'resolution_rows', 'independence_rows', 'compatibility_rows')
+             'merge_rows', 'resolution_rows', 'independence_rows', 'compatibility_rows', 'trusted_labels',
+             'own_rule_decisive')
 
 
 def labelled_corpus(rng, emit, stats):
@@ -391,12 +395,16 @@ def labelled_corpus(rng, emit, stats):
     names = [b''] + [f'n{i}'.encode() for i in range(18)] + [b'n1x', b'm']
 
     def scheme_labels():
-        if rng.randrange(2) == 0:
+        kind = rng.randrange(3)
+        if kind == 0:
             out = [(0, 0, 0), (0, 1, 0), (0, 2, 0), (0, 4, 0), (0, 8, 0), (1, 3, 0), (1, 12, 0), (2, 15, 0)]
             return out[:1] + rng.sample(out[1:5], 4) + rng.sample(out[5:], 3)
+        if kind == 1:
+            out = [(0, 0, 0), (0, 0, 1), (0, 1, 0), (0, 1, 1), (0, 2, 2), (1, 3, 0), (1, 3, 1), (1, 3, 2), (2, 15, 0)]
+            return out[:1] + rng.sample(out[1:5], 3) + rng.sample(out[5:], 3)
         out = [(0, 0, 0)]
         while len(out) < rng.randrange(4, 9):
-            lab = (rng.randrange(3), rng.randrange(16), 0)
+            lab = (rng.randrange(3), rng.randrange(16), rng.randrange(3) if rng.randrange(2) else 0)
             if lab not in out:
                 out.append(lab)
         return out
@@ -533,7 +541,10 @@ def labelled_corpus(rng, emit, stats):
         stats['resolution_rows'] += 1
 
     for session in range(36):
+        if session:
+            stats['own_rule_decisive'] += sch.decisive
         labels = scheme_labels()
+        stats['trusted_labels'] += sum(1 for lab in labels if lab[2])
         sch = Scheme(labels)
         emit('ZT ' + ' '.join(f'{a}:{b}:{c}' for a, b, c in labels), f'ZT|{len(labels)}')
         flat, shrink = rng.choice([(3, 0), (4, 1), (6, 2), (512, 128)])
@@ -615,3 +626,4 @@ def labelled_corpus(rng, emit, stats):
             search_case(s, rd, 'merge_rows')
             emit(f'ZC {rd}', s.row_card(rd))
             stats['resolution_rows'] += 1
+    stats['own_rule_decisive'] += sch.decisive

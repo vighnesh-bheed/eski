@@ -1132,6 +1132,7 @@ def corpus():
 
     labelled_corpus(rng, emit, stats)
     assert stats['refusals'] > 0 and stats['forced_copies'] > 0 and stats['hidden_bursts'] > 0
+    assert stats['trusted_labels'] > 0 and stats['own_rule_decisive'] > 0
     assert stats['conversions'] > 0 and stats['graph_searches'] > 0 and stats['tied_results'] > 0
     stats['rows'] = len(expected)
     assert stats['non_orthogonal_shapes'] > 0 and stats['epoch_wraps'] > 0 and stats['dirty_padding_pairs'] > 0
@@ -1226,7 +1227,9 @@ def negative_controls(expected):
              'extra': '\n'.join(expected + [expected[0]]) + '\n'}
     kinds = {}
     for i, row in enumerate(expected):
-        kinds.setdefault(row.split('|')[0], i)
+        kind = row.split('|')[0]
+        if kind not in kinds or row.count('|') > expected[kinds[kind]].count('|'):
+            kinds[kind] = i
     for kind, i in sorted(kinds.items()):
         cells = expected[i].split('|')
         for column in range(1, len(cells)):

@@ -19,8 +19,8 @@
   "src/termstats/termstats.odin": "4e2aee1d7aa2549e8a2440a8ea311a384d09167c47559e245ee9787e9914e274",
   "src/label/counters.odin": "0420e2b882d79cf84bb29333b959dd26ac2dae6f8b693157f979012bb9c764c4",
   "src/label/visibility.odin": "eaacfbb5326143f0fad0bf65afaa22251d92a49af577d288b2c9cef707d98043",
-  "src/label/table.odin": "37f9e0bd559d035ac98a58065dd9fbcefc259b2d2c709aa2ab15e61d6bbcbd04",
-  "src/label/label.odin": "f87d08933a15ff338f8ce9fa42d5f84ca992a6a5df0109478a48bcd81ba85fed",
+  "src/label/table.odin": "463a20b1ac1d02bb56159e0e2876d41cd9d24b491319b41ce3656140aef1c6ce",
+  "src/label/label.odin": "7a4167d27d4201abed8b7705d88551ddc14ffa7d0fe1d55cdb57fc14de0e6e5d",
   "src/bm25std/bm25std.odin": "a6e834d2a7be4bec2a022e48c278d13c0e2bc81121641f5c747f8610eb3ea101",
   "src/rrf/rrf.odin": "c5e4c490fb365738a48ea478dc461762942d4f264c8db5b152b8be7b53ad3777"
 }

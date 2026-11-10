@@ -116,6 +116,9 @@ monitor_emit :: proc(c: ^Conn, argv: [][]u8, redacted: []int) {
 		if m.close_after || m.reply & {.Off, .Held} != {} {
 			continue
 		}
+		if labels_on && !access_monitor_sees(m) {
+			continue
+		}
 		p := wb_reserve(m, n)
 		intrinsics.mem_copy_non_overlapping(p, raw_data(b^), n)
 		m.wlen += n

@@ -22,9 +22,10 @@ PROJECTS = {
                          'merge', 'resolution', 'independence', 'compatibility'],
                'proof_only': ['filter'], 'odin_option': True,
                'description': 'Vector projection, quantisation, heaps, visited set, graph links and twins, arena free list and filter programs, and the labelled vector set: partition merge, name resolution and views, label independence and labels-off compatibility'},
-    'label': {'areas': ['lattice', 'marking', 'interning', 'persistence', 'visibility', 'admission', 'rules', 'counters'],
+    'label': {'areas': ['lattice', 'marking', 'interning', 'persistence', 'visibility', 'admission', 'rules', 'counters',
+                        'contexts', 'arrival'],
               'odin_option': True,
-              'description': 'Access label lattice, markings, interning, persistence, visibility bitsets, search admission, read and write rules and partitioned counters'},
+              'description': 'Access label lattice, markings, interning, persistence, visibility bitsets, search admission, read and write rules, partitioned counters, context handles and command arrival'},
     'postings': {'areas': ['svbyte', 'sorted', 'roaring', 'cursors', 'phrases', 'statistics', 'scoring'],
                  'odin_option': True,
                  'description': 'Stream VByte codec, sorted-array kernels, Roaring bitmaps and their serialization, cursor algebra, phrase windows, label-partitioned term statistics and ranking formulas'},
@@ -110,6 +111,8 @@ def validate_receipt(name, path):
         raise RuntimeError(f'{name}: manifest disagrees with kernel inventory')
     executables = {'lean': PROOFS / name / '.lake' / 'build' / 'bin' / (name + '_model'),
                    'odin': path.parent / 'odin_bridge'}
+    if name == 'label':
+        executables['arrival_odin'] = path.parent / 'arrival_bridge'
     if any(receipt['executable_sha256'].get(binary) != digest(executable) for binary, executable in executables.items()):
         raise RuntimeError(f'{name}: executable changed after comparisons')
     evidence = receipt.get('area_evidence')

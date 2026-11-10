@@ -11,6 +11,7 @@ client_metadata_memory :: proc "contextless" (c: ^Conn) -> int {
 		n += size_of(Ps_State) + cap(s.deferred) + cap(s.trk_prefixes) * size_of([]u8) + s.metadata_shared
 		for kind in Ps_Kind { n += cap(s.lists[kind]) * size_of(^Ps_Entry) }
 	}
+	if c.label != nil { n += size_of(Access_Conn) }
 	return n
 }
 
@@ -18,9 +19,11 @@ client_metadata_sync :: proc(c: ^Conn) {
 	before := 0
 	if c.tx != nil { before += c.tx.metadata_accounted }
 	if c.pubsub != nil { before += c.pubsub.metadata_accounted }
+	if c.label != nil { before += c.label.accounted }
 	after := client_metadata_memory(c)
 	if c.tx != nil { c.tx.metadata_accounted = size_of(Tx_State) + cap(c.tx.watched) * size_of(Watched_Key) + c.tx.watch_shared }
-	if c.pubsub != nil { c.pubsub.metadata_accounted = after - (c.tx.metadata_accounted if c.tx != nil else 0) }
+	if c.label != nil { c.label.accounted = size_of(Access_Conn) }
+	if c.pubsub != nil { c.pubsub.metadata_accounted = after - (c.tx.metadata_accounted if c.tx != nil else 0) - (c.label.accounted if c.label != nil else 0) }
 	client_metadata_total += after - before
 	if client_buckets_on { client_bucket_track(c) }
 }

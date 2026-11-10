@@ -530,8 +530,8 @@ z_step :: proc(z: ^Z_State, fields: []string, b: ^strings.Builder) {
 		for tok, i in fields[1:] {
 			parts := strings.split(tok, ":")
 			defer delete(parts)
-			assert(len(parts) == 3 && nat(parts[2]) == 0)
-			l := lbl.Label{level = u8(nat(parts[0]))}
+			assert(len(parts) == 3 && nat(parts[2]) < lbl.TRUST_LIMIT)
+			l := lbl.Label{level = u8(nat(parts[0])), trust = u8(nat(parts[2]))}
 			l.compartments[0] = word(parts[1])
 			id, err := lbl.table_intern(&z.table, l)
 			assert(err == .None && int(id) == i)

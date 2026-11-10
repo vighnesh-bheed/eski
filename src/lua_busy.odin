@@ -58,7 +58,11 @@ lua_busy_dispatch :: proc(client: ^Conn, argv: [][]u8) {
 		client.reply = client.reply - {.Skip_Next} + {.Skip}
 	}
 	pending := client.wlen-client.wpos
-	lua_busy_dispatch_inner(client, argv)
+	if labels_on {
+		access_busy_dispatch(client, argv)
+	} else {
+		lua_busy_dispatch_inner(client, argv)
+	}
 	if client.reply & {.Off, .Skip, .Held} != {} {
 		client.wlen = client.wpos+pending
 	}
@@ -129,6 +133,11 @@ lua_busy_dispatch_inner :: proc(client: ^Conn, argv: [][]u8) {
 	start := mono_now()
 	client.last_cmd = cmd.name
 	switch {
+	case (cmd.handler == cmd_script || (cmd.handler == cmd_function && eq_nocase(argv[1], "kill"))) && !access_busy_sees_script():
+		stat_cur = nil
+		reply_error(client, ERR_LABEL_SCRIPT)
+		stat_reject(hot, argv)
+		return
 	case cmd.handler == cmd_script:
 		lua_kill(client, false)
 	case cmd.handler == cmd_function && eq_nocase(argv[1], "kill"):

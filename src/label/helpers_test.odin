@@ -20,8 +20,11 @@ rng_below :: proc(r: ^Rng, n: int) -> int {
 	return int(rng_next(r) % u64(n))
 }
 
-random_label :: proc(r: ^Rng, levels, compartments: int, density := 4) -> (l: Label) {
+random_label :: proc(r: ^Rng, levels, compartments: int, density := 4, trusts := 1) -> (l: Label) {
 	l.level = u8(rng_below(r, levels))
+	if trusts > 1 {
+		l.trust = u8(rng_below(r, trusts))
+	}
 	if compartments == 0 {
 		return l
 	}
@@ -33,7 +36,8 @@ random_label :: proc(r: ^Rng, levels, compartments: int, density := 4) -> (l: La
 }
 
 small_label :: proc(index: int) -> (l: Label) {
-	l.level = u8(index >> 4)
+	l.level = u8(index >> 4 & 3)
+	l.trust = u8(index >> 6)
 	for c in 0 ..< 4 {
 		if index >> uint(c) & 1 != 0 {
 			compartment_add(&l, c)
@@ -44,9 +48,13 @@ small_label :: proc(index: int) -> (l: Label) {
 
 SMALL_LABELS :: 64
 
+SMALL_TRUSTED_LABELS :: 192
+
 US_LEVELS := [?]string{"UNCLASSIFIED", "CONFIDENTIAL", "SECRET", "TOP SECRET"}
 
 US_COMPARTMENTS := [?]string{"SI", "TK", "HCS", "G", "NOFORN"}
+
+US_TRUSTS := [?]string{"WEB", "VETTED", "TRUSTED"}
 
 us_config :: proc(t: ^testing.T, c: ^Config) {
 	config_init(c)
@@ -56,9 +64,12 @@ us_config :: proc(t: ^testing.T, c: ^Config) {
 	for name in US_COMPARTMENTS {
 		testing.expect_value(t, config_add_compartment(c, name), Config_Error.None)
 	}
+	for name in US_TRUSTS {
+		testing.expect_value(t, config_add_trust(c, name), Config_Error.None)
+	}
 }
 
-wide_config :: proc(t: ^testing.T, c: ^Config, levels, compartments: int) {
+wide_config :: proc(t: ^testing.T, c: ^Config, levels, compartments: int, trusts := 0) {
 	config_init(c)
 	for i in 0 ..< levels {
 		name := fmt.tprintf("L%d", i)
@@ -67,6 +78,10 @@ wide_config :: proc(t: ^testing.T, c: ^Config, levels, compartments: int) {
 	for i in 0 ..< compartments {
 		name := fmt.tprintf("C%d", i)
 		testing.expect_value(t, config_add_compartment(c, name), Config_Error.None)
+	}
+	for i in 0 ..< trusts {
+		name := fmt.tprintf("T%d", i)
+		testing.expect_value(t, config_add_trust(c, name), Config_Error.None)
 	}
 }
 

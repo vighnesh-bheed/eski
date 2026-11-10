@@ -13,7 +13,7 @@ Table :: struct {
 }
 
 label_hash :: #force_inline proc "contextless" (l: Label) -> u64 {
-	h := u64(l.level) * 0x9E37_79B9_7F4A_7C15 + 0xD6E8_FEB8_6659_FD93
+	h := (u64(l.level) | u64(l.trust) << 8) * 0x9E37_79B9_7F4A_7C15 + 0xD6E8_FEB8_6659_FD93
 	for w in l.compartments {
 		h = (h ~ w) * 0xBF58_476D_1CE4_E5B9
 		h ~= h >> 31

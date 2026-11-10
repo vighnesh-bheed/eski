@@ -51,6 +51,7 @@ inductive CfgErr
   | duplicateName
   | tooManyLevels
   | tooManyComps
+  | tooManyTrusts
 deriving DecidableEq, Repr
 
 def nameCheck (c : Config) (raw : List Nat) : Except CfgErr (List Nat) :=
@@ -283,6 +284,8 @@ inductive PErr
   | emptyComp
   | unknownComp
   | dupComp
+  | emptyTrust
+  | unknownTrust
 deriving DecidableEq, Repr
 
 structure Failure where

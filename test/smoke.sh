@@ -3675,7 +3675,7 @@ def run(port, steps):
             ok = all(ch in "0123456789abcdef" for ch in items) and not items.startswith("-")
             notes.append("genpass %s len=%d hex=%s" % (step[2], len(items), ok) if not items.startswith("-") else "genpass %s %s" % (step[2], items))
         elif op == "cat":
-            items = conns[step[1]].array("ACL CAT " + step[2] + "\r\n")
+            items = [x for x in conns[step[1]].array("ACL CAT " + step[2] + "\r\n") if x.split("|")[0] not in ("label", "context")]
             notes.append("cat %s %s" % (step[2], ",".join(sorted(items))))
         time.sleep(SETTLE)
         for c in conns.values():
@@ -4583,6 +4583,10 @@ def run(proto):
     j, r = Conn(ESKI, proto), Conn(REF, proto)
     module = set(names_of(j.cmd("COMMAND", "LIST", "FILTERBY", "MODULE", "vectorset")))
     check(len(module) == 13, "resp%d COMMAND LIST FILTERBY MODULE vectorset lists %d commands" % (proto, len(module)))
+    own = set(n for n in names_of(j.cmd("COMMAND", "LIST")) if n.split("|")[0] in ("label", "context"))
+    check(len(own) == 10, "resp%d COMMAND LIST lists %d label and context commands" % (proto, len(own)))
+    extra = len(module) + len([n for n in own if "|" not in n])
+    module = module | own
     jl = [n for n in names_of(j.cmd("COMMAND", "LIST")) if n not in module]
     rl = names_of(r.cmd("COMMAND", "LIST"))
     check(jl, "resp%d COMMAND LIST is empty" % proto)
@@ -4596,7 +4600,7 @@ def run(proto):
         subs_r = sorted(x for x in rl if x.startswith(n + "|"))
         check(subs_j == subs_r, "resp%d subcommands of %s: eski %s redis %s" % (proto, n, subs_j, subs_r))
     count = j.cmd("COMMAND", "COUNT")
-    check(count == (":", str(len(top) + len(module)).encode()), "resp%d COMMAND COUNT %r for %d commands" % (proto, count, len(top) + len(module)))
+    check(count == (":", str(len(top) + extra).encode()), "resp%d COMMAND COUNT %r for %d commands" % (proto, count, len(top) + extra))
     for n in jl:
         a, b = j.cmd("COMMAND", "INFO", n), r.cmd("COMMAND", "INFO", n)
         check(ser(canon_info(a[1][0])) == ser(canon_info(b[1][0])), "resp%d COMMAND INFO %s differs" % (proto, n))
@@ -4606,7 +4610,7 @@ def run(proto):
         a, b = j.cmd(*args), r.cmd(*args)
         ra = dict((x[1][0][1].decode(), ser(canon_info(x))) for x in a[1] if x[1][0][1].decode() not in module)
         rb = dict((x[1][0][1].decode(), ser(canon_info(x))) for x in b[1])
-        check(len(a[1]) == len(top) + len(module) and sorted(ra) == sorted(top), "resp%d %s lists other commands" % (proto, " ".join(args)))
+        check(len(a[1]) == len(top) + extra and sorted(ra) == sorted(top), "resp%d %s lists other commands" % (proto, " ".join(args)))
         bad = [n for n in ra if ra[n] != rb.get(n)]
         check(not bad, "resp%d %s entries differ: %s" % (proto, " ".join(args), bad[:10]))
     a, b = j.cmd("COMMAND", "DOCS"), r.cmd("COMMAND", "DOCS")

@@ -1,16 +1,19 @@
 {
-  "src/label/label.odin": "f87d08933a15ff338f8ce9fa42d5f84ca992a6a5df0109478a48bcd81ba85fed",
-  "src/label/config.odin": "7321143141493d46965d13513f3f36bfebd877e52aac764ff45c5b3be8de867d",
-  "src/label/marking.odin": "5e49061509d1b6d2f24d2f929ae194ff09add4edd40d449e578c592770cb643e",
-  "src/label/table.odin": "37f9e0bd559d035ac98a58065dd9fbcefc259b2d2c709aa2ab15e61d6bbcbd04",
-  "src/label/codec.odin": "afce4900fd57751f8c6db0cf383c84e2585c2a1f1c1791d7734ad5d4b7b18ac5",
+  "src/label/label.odin": "7a4167d27d4201abed8b7705d88551ddc14ffa7d0fe1d55cdb57fc14de0e6e5d",
+  "src/label/config.odin": "0ea9a5b26345497fc89a19f170240a90eb3174edaa1a320545fef0cbcfb8b537",
+  "src/label/marking.odin": "5c2a4d0a04203f4e845dad9d24407f1c3871ff8768da4c8134364141e573a8e0",
+  "src/label/table.odin": "463a20b1ac1d02bb56159e0e2876d41cd9d24b491319b41ce3656140aef1c6ce",
+  "src/label/codec.odin": "2d3d5458aee00af6a261f6aaf366eadaba74772e21797cca9ace609ddb45e710",
   "src/label/visibility.odin": "eaacfbb5326143f0fad0bf65afaa22251d92a49af577d288b2c9cef707d98043",
   "src/label/gate.odin": "7aad2213330b0ec69fb8a9d5ce7e005946160eba75a9dfebeae20c452d4266a8",
-  "src/label/rules.odin": "3df330e0856b5d53143ed95f35b1d13784845673e329cbdda940daa551ee89f5",
+  "src/label/rules.odin": "393db4dd9dc1bed02c8250593f0e09b5a6120ba7e9de3b371a9c20e33f4e5a50",
   "src/label/counters.odin": "0420e2b882d79cf84bb29333b959dd26ac2dae6f8b693157f979012bb9c764c4",
   "src/hnsw/index.odin": "5ce88edf9f338bd4e40037768feaf2989f52d12f8dd89ebcdc1b9ebc9909e67a",
   "src/hnsw/search.odin": "f37533d6314c1fa60d8ac28f5f628a7c10efd3db9f898cd5e78163884c61ba9d",
   "src/hnsw/scratch.odin": "7cb92f3818cd25f378636abe1f4d5568730c8f0106e3a6e9a160e474da93602c",
   "src/hnsw/heap.odin": "c6e30aeceb58b6e4d6beb54c6c8595f7e26114ef5905bd3e144470f53e87259d",
-  "src/vfilter/evaluate.odin": "7b98d9309022dde6000e7b1f6bc9015cd4d570a358ae0e59d3ec45ae55541b85"
+  "src/vfilter/evaluate.odin": "7b98d9309022dde6000e7b1f6bc9015cd4d570a358ae0e59d3ec45ae55541b85",
+  "src/access.odin": "6389dbca3f6549eb4a4aa8e1f4fd912f0506d83ad028003ff0b0525ba7de32bc",
+  "src/cmd_label.odin": "705b464e5fa42036e5f463e5d3c33ba2af62be787fbc8468085eb60ee29a70a8",
+  "src/multi.odin": "78bc62ec308d3aa1dd8a39ee09d333325e29d203ed46f6d6c0ce5443fc46c752"
 }

@@ -1,9 +1,9 @@
-import Labels.Lattice
+import Labels.Trust
 
 namespace Labels
 
 structure Vis where
-  reader : Label
+  reader : TLabel
   words : List Nat
   built : Nat
 deriving DecidableEq, Repr
@@ -12,15 +12,15 @@ def testAt (ws : List Nat) (i : Nat) : Bool := (ws.getD (i / 64) 0).testBit (i %
 
 def visible (v : Vis) (i : Nat) : Bool := decide (i < v.built) && testAt v.words i
 
-def domBit (a b : Label) : Nat := if dom a b then 1 else 0
+def domBit (a b : TLabel) : Nat := if domT a b then 1 else 0
 
 def orBits (f : Nat → Nat) (acc : Nat) (js : List Nat) : Nat :=
   js.foldl (fun acc j => acc ||| f j <<< (j % 64)) acc
 
-def chunk (reader : Label) (t : List Label) (i stop : Nat) : Nat :=
-  orBits (fun j => domBit reader (t.getD j bottom)) 0 (List.range' i (stop - i))
+def chunk (reader : TLabel) (t : List TLabel) (i stop : Nat) : Nat :=
+  orBits (fun j => domBit reader (t.getD j tbottom)) 0 (List.range' i (stop - i))
 
-def fill (reader : Label) (t : List Label) (n : Nat) : Nat → Nat → List Nat → List Nat
+def fill (reader : TLabel) (t : List TLabel) (n : Nat) : Nat → Nat → List Nat → List Nat
   | 0, _, ws => ws
   | fuel + 1, i, ws =>
     if n ≤ i then ws
@@ -31,17 +31,17 @@ def fill (reader : Label) (t : List Label) (n : Nat) : Nat → Nat → List Nat 
 
 def wordsFor (n : Nat) : Nat := (n + 63) / 64
 
-def refresh (t : List Label) (v : Vis) : Vis :=
+def refresh (t : List TLabel) (v : Vis) : Vis :=
   if t.length ≤ v.built then v
   else
     let ws := v.words ++ List.replicate (wordsFor t.length - v.words.length) 0
     { v with words := fill v.reader t t.length (t.length - v.built) v.built ws, built := t.length }
 
-def build (reader : Label) (t : List Label) : Vis := refresh t ⟨reader, [], 0⟩
+def build (reader : TLabel) (t : List TLabel) : Vis := refresh t ⟨reader, [], 0⟩
 
-def VisOk (t : List Label) (v : Vis) : Prop :=
+def VisOk (t : List TLabel) (v : Vis) : Prop :=
   v.built = t.length ∧ v.words.length = wordsFor t.length ∧
-  (∀ k, testAt v.words k = (decide (k < t.length) && dom v.reader (t.getD k bottom))) ∧
+  (∀ k, testAt v.words k = (decide (k < t.length) && domT v.reader (t.getD k tbottom))) ∧
   ∀ w ∈ v.words, w < 2 ^ 64
 
 theorem one_testBit (q : Nat) : Nat.testBit 1 q = decide (q = 0) := by
@@ -82,18 +82,18 @@ theorem orBits_lt (f : Nat → Nat) (hf : ∀ j, f j ≤ 1) (js : List Nat) (acc
     · rw [h0, Nat.zero_mul]; exact Nat.two_pow_pos 64
     · rw [h1, Nat.one_mul]; exact Nat.lt_of_le_of_lt this (by decide)
 
-theorem domBit_le (a b : Label) : domBit a b ≤ 1 := by
+theorem domBit_le (a b : TLabel) : domBit a b ≤ 1 := by
   unfold domBit; split <;> decide
 
-theorem domBit_one (a b : Label) : domBit a b = 1 ↔ dom a b = true := by
+theorem domBit_one (a b : TLabel) : domBit a b = 1 ↔ domT a b = true := by
   unfold domBit; split <;> simp_all
 
-theorem chunk_testBit (reader : Label) (t : List Label) (i stop k : Nat)
+theorem chunk_testBit (reader : TLabel) (t : List TLabel) (i stop k : Nat)
     (hw : k / 64 = i / 64) (hs : stop ≤ (i / 64 + 1) * 64) :
-    (chunk reader t i stop).testBit (k % 64) = (decide (i ≤ k ∧ k < stop) && dom reader (t.getD k bottom)) := by
+    (chunk reader t i stop).testBit (k % 64) = (decide (i ≤ k ∧ k < stop) && domT reader (t.getD k tbottom)) := by
   unfold chunk
   rw [orBits_testBit _ (fun j => domBit_le _ _), Nat.zero_testBit, Bool.false_or]
-  cases hd : dom reader (t.getD k bottom)
+  cases hd : domT reader (t.getD k tbottom)
   · simp only [Bool.and_false]
     rw [List.any_eq_false]
     intro j hj
@@ -119,10 +119,10 @@ theorem chunk_testBit (reader : Label) (t : List Label) (i stop k : Nat)
       have : j = k := by omega
       omega
 
-theorem chunk_lt (reader : Label) (t : List Label) (i stop : Nat) : chunk reader t i stop < 2 ^ 64 :=
+theorem chunk_lt (reader : TLabel) (t : List TLabel) (i stop : Nat) : chunk reader t i stop < 2 ^ 64 :=
   orBits_lt _ (fun j => domBit_le _ _) _ 0 (by decide)
 
-theorem chunk_high (reader : Label) (t : List Label) (i stop p : Nat) (hp : 64 ≤ p) :
+theorem chunk_high (reader : TLabel) (t : List TLabel) (i stop p : Nat) (hp : 64 ≤ p) :
     (chunk reader t i stop).testBit p = false :=
   Nat.testBit_lt_two_pow (Nat.lt_of_lt_of_le (chunk_lt reader t i stop) (Nat.pow_le_pow_right (by decide) hp))
 
@@ -132,7 +132,7 @@ theorem getD_set_self (ws : List Nat) (w x : Nat) (h : w < ws.length) : (ws.set 
 theorem getD_set_other (ws : List Nat) (w v x : Nat) (h : w ≠ v) : (ws.set w x).getD v 0 = ws.getD v 0 := by
   simp [List.getD_eq_getElem?_getD, List.getElem?_set_ne h]
 
-theorem fill_length (reader : Label) (t : List Label) (n fuel i : Nat) (ws : List Nat) :
+theorem fill_length (reader : TLabel) (t : List TLabel) (n fuel i : Nat) (ws : List Nat) :
     (fill reader t n fuel i ws).length = ws.length := by
   induction fuel generalizing i ws with
   | zero => rfl
@@ -142,7 +142,7 @@ theorem fill_length (reader : Label) (t : List Label) (n fuel i : Nat) (ws : Lis
     · rfl
     · rw [ih, List.length_set]
 
-theorem fill_bound (reader : Label) (t : List Label) (n fuel i : Nat) (ws : List Nat) (h : ∀ w ∈ ws, w < 2 ^ 64) :
+theorem fill_bound (reader : TLabel) (t : List TLabel) (n fuel i : Nat) (ws : List Nat) (h : ∀ w ∈ ws, w < 2 ^ 64) :
     ∀ w ∈ fill reader t n fuel i ws, w < 2 ^ 64 := by
   induction fuel generalizing i ws with
   | zero => exact h
@@ -169,10 +169,10 @@ theorem split_range (x d : Bool) (i stop n k : Nat) (h1 : i ≤ stop) (h2 : stop
   rw [← Bool.decide_or]
   exact decide_eq_decide.2 e
 
-theorem fill_testAt (reader : Label) (t : List Label) (n fuel i : Nat) (ws : List Nat)
+theorem fill_testAt (reader : TLabel) (t : List TLabel) (n fuel i : Nat) (ws : List Nat)
     (hlen : wordsFor n ≤ ws.length) (hfuel : n - i ≤ fuel) (k : Nat) :
     testAt (fill reader t n fuel i ws) k =
-      (testAt ws k || (decide (i ≤ k ∧ k < n) && dom reader (t.getD k bottom))) := by
+      (testAt ws k || (decide (i ≤ k ∧ k < n) && domT reader (t.getD k tbottom))) := by
   induction fuel generalizing i ws with
   | zero =>
     simp only [fill]
@@ -212,19 +212,19 @@ theorem testAt_append_zeros (ws : List Nat) (m k : Nat) : testAt (ws ++ List.rep
 theorem wordsFor_mono {a b : Nat} (h : a ≤ b) : wordsFor a ≤ wordsFor b := by
   unfold wordsFor; omega
 
-theorem prefix_getD {t t' : List Label} (h : t <+: t') {k : Nat} (hk : k < t.length) :
-    t'.getD k bottom = t.getD k bottom := by
+theorem prefix_getD {t t' : List TLabel} (h : t <+: t') {k : Nat} (hk : k < t.length) :
+    t'.getD k tbottom = t.getD k tbottom := by
   obtain ⟨u, rfl⟩ := h
   simp [List.getD_eq_getElem?_getD, List.getElem?_append_left hk]
 
-theorem empty_ok (reader : Label) : VisOk [] ⟨reader, [], 0⟩ := by
+theorem empty_ok (reader : TLabel) : VisOk [] ⟨reader, [], 0⟩ := by
   refine ⟨rfl, rfl, fun k => ?_, fun w hw => by simp at hw⟩
   simp [testAt]
 
-theorem refresh_reader (t : List Label) (v : Vis) : (refresh t v).reader = v.reader := by
+theorem refresh_reader (t : List TLabel) (v : Vis) : (refresh t v).reader = v.reader := by
   unfold refresh; split <;> rfl
 
-theorem refresh_ok {t t' : List Label} {v : Vis} (h : VisOk t v) (hp : t <+: t') : VisOk t' (refresh t' v) := by
+theorem refresh_ok {t t' : List TLabel} {v : Vis} (h : VisOk t v) (hp : t <+: t') : VisOk t' (refresh t' v) := by
   obtain ⟨hb, hl, ht, hw⟩ := h
   unfold refresh
   split
@@ -255,11 +255,11 @@ theorem refresh_ok {t t' : List Label} {v : Vis} (h : VisOk t v) (hp : t <+: t')
       · exact hw w hm
       · rw [List.eq_of_mem_replicate hm]; exact Nat.two_pow_pos 64
 
-theorem build_ok (reader : Label) (t : List Label) : VisOk t (build reader t) :=
+theorem build_ok (reader : TLabel) (t : List TLabel) : VisOk t (build reader t) :=
   refresh_ok (empty_ok reader) (List.nil_prefix)
 
-theorem word_testBit {t : List Label} {v : Vis} (h : VisOk t v) (j p : Nat) (hp : p < 64) :
-    (v.words.getD j 0).testBit p = (decide (64 * j + p < t.length) && dom v.reader (t.getD (64 * j + p) bottom)) := by
+theorem word_testBit {t : List TLabel} {v : Vis} (h : VisOk t v) (j p : Nat) (hp : p < 64) :
+    (v.words.getD j 0).testBit p = (decide (64 * j + p < t.length) && domT v.reader (t.getD (64 * j + p) tbottom)) := by
   have := h.2.2.1 (64 * j + p)
   unfold testAt at this
   have e1 : (64 * j + p) / 64 = j := by omega
@@ -267,7 +267,7 @@ theorem word_testBit {t : List Label} {v : Vis} (h : VisOk t v) (j p : Nat) (hp 
   rw [e1, e2] at this
   exact this
 
-theorem visok_unique {t : List Label} {v w : Vis} (hv : VisOk t v) (hw : VisOk t w) (hr : v.reader = w.reader) :
+theorem visok_unique {t : List TLabel} {v w : Vis} (hv : VisOk t v) (hw : VisOk t w) (hr : v.reader = w.reader) :
     v = w := by
   cases v with
   | mk rv wv bv =>
@@ -293,18 +293,18 @@ theorem visok_unique {t : List Label} {v w : Vis} (hv : VisOk t v) (hw : VisOk t
         Nat.testBit_lt_two_pow (Nat.lt_of_lt_of_le (hw.2.2.2 _ (List.getElem_mem h2)) (Nat.pow_le_pow_right (by decide) hp))]
   rw [hwords]
 
-theorem refresh_eq_build {t t' : List Label} {v : Vis} (h : VisOk t v) (hp : t <+: t') :
+theorem refresh_eq_build {t t' : List TLabel} {v : Vis} (h : VisOk t v) (hp : t <+: t') :
     refresh t' v = build v.reader t' :=
   visok_unique (refresh_ok h hp) (build_ok v.reader t') (by rw [refresh_reader]; unfold build; rw [refresh_reader])
 
-theorem visible_spec {t : List Label} {v : Vis} (h : VisOk t v) (k : Nat) :
-    visible v k = (decide (k < t.length) && dom v.reader (t.getD k bottom)) := by
+theorem visible_spec {t : List TLabel} {v : Vis} (h : VisOk t v) (k : Nat) :
+    visible v k = (decide (k < t.length) && domT v.reader (t.getD k tbottom)) := by
   unfold visible
   rw [h.2.2.1, h.1]
   cases decide (k < t.length) <;> rfl
 
-theorem visible_build (reader : Label) (t : List Label) (k : Nat) :
-    visible (build reader t) k = (decide (k < t.length) && dom reader (t.getD k bottom)) := by
+theorem visible_build (reader : TLabel) (t : List TLabel) (k : Nat) :
+    visible (build reader t) k = (decide (k < t.length) && domT reader (t.getD k tbottom)) := by
   have := visible_spec (build_ok reader t) k
   rw [this]
   unfold build; rw [refresh_reader]
@@ -313,8 +313,8 @@ theorem stale_closed (v : Vis) (k : Nat) (h : v.built ≤ k) : visible v k = fal
   unfold visible
   rw [decide_eq_false (Nat.not_lt.2 h), Bool.false_and]
 
-theorem visible_after_growth {t t' : List Label} {v : Vis} (h : VisOk t v) (hp : t <+: t') (k : Nat) :
-    visible (refresh t' v) k = (decide (k < t'.length) && dom v.reader (t'.getD k bottom)) := by
+theorem visible_after_growth {t t' : List TLabel} {v : Vis} (h : VisOk t v) (hp : t <+: t') (k : Nat) :
+    visible (refresh t' v) k = (decide (k < t'.length) && domT v.reader (t'.getD k tbottom)) := by
   rw [visible_spec (refresh_ok h hp), refresh_reader]
 
 end Labels

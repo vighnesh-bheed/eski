@@ -2,7 +2,9 @@ package label
 
 CODEC_MAGIC :: "ESLT"
 
-CODEC_VERSION :: u8(1)
+CODEC_VERSION :: u8(2)
+
+CODEC_VERSION_UNTRUSTED :: u8(1)
 
 Codec_Error :: enum u8 {
 	None,
@@ -11,11 +13,13 @@ Codec_Error :: enum u8 {
 	Bad_Version,
 	Bad_Level_Count,
 	Bad_Compartment_Count,
+	Bad_Trust_Count,
 	Bad_Name,
 	Duplicate_Name,
 	Bad_Label_Count,
 	Bad_Level,
 	Bad_Compartment,
+	Bad_Trust,
 	Not_Bottom,
 	Duplicate_Label,
 	Trailing,
@@ -53,9 +57,9 @@ read_bytes :: proc "contextless" (r: ^Reader, n: int) -> ([]u8, bool) {
 }
 
 encoded_size :: proc "contextless" (c: ^Config, t: ^Table) -> int {
-	n := len(CODEC_MAGIC) + 1 + 2 + len(c.levels) + 2 + len(c.compartments) + len(c.text) + 2
+	n := len(CODEC_MAGIC) + 1 + 2 + len(c.levels) + 2 + len(c.compartments) + 2 + len(c.trusts) + len(c.text) + 2
 	for l in t.labels {
-		n += 3 + compartment_count(l)
+		n += 4 + compartment_count(l)
 	}
 	return n
 }
@@ -86,7 +90,7 @@ put_names :: proc(out: ^[dynamic]u8, c: ^Config, names: []Name) -> bool {
 }
 
 put_label :: proc(out: ^[dynamic]u8, l: Label) -> bool {
-	if !put_u8(out, l.level) || !put_u16(out, compartment_count(l)) {
+	if !put_u8(out, l.level) || !put_u8(out, l.trust) || !put_u16(out, compartment_count(l)) {
 		return false
 	}
 	for i := compartment_next(l, 0); i < COMPARTMENT_LIMIT; i = compartment_next(l, i + 1) {
@@ -101,7 +105,7 @@ put_all :: proc(out: ^[dynamic]u8, c: ^Config, t: ^Table) -> bool {
 	if _, err := append(out, CODEC_MAGIC); err != nil {
 		return false
 	}
-	if !put_u8(out, CODEC_VERSION) || !put_names(out, c, c.levels[:]) || !put_names(out, c, c.compartments[:]) || !put_u16(out, len(t.labels)) {
+	if !put_u8(out, CODEC_VERSION) || !put_names(out, c, c.levels[:]) || !put_names(out, c, c.compartments[:]) || !put_names(out, c, c.trusts[:]) || !put_u16(out, len(t.labels)) {
 		return false
 	}
 	for l in t.labels {
@@ -132,7 +136,7 @@ encode :: proc(c: ^Config, t: ^Table, out: ^[dynamic]u8) -> Codec_Error {
 	return .None
 }
 
-read_name :: proc(r: ^Reader, c: ^Config, names: ^[dynamic]Name) -> Codec_Error {
+read_name :: proc(r: ^Reader, c: ^Config, names: ^[dynamic]Name, own_namespace := false) -> Codec_Error {
 	length, ok := read_u8(r)
 	if !ok {
 		return .Truncated
@@ -144,7 +148,11 @@ read_name :: proc(r: ^Reader, c: ^Config, names: ^[dynamic]Name) -> Codec_Error 
 	if !name_canonical(string(bytes)) {
 		return .Bad_Name
 	}
-	if config_name_used(c, string(bytes)) {
+	if own_namespace {
+		if _, used := names_find(c, names[:], string(bytes)); used {
+			return .Duplicate_Name
+		}
+	} else if config_name_used(c, string(bytes)) {
 		return .Duplicate_Name
 	}
 	if name_store(c, names, bytes) != .None {
@@ -166,7 +174,7 @@ decode_into :: proc(data: []u8, c: ^Config, t: ^Table) -> Codec_Error {
 	if !has_version {
 		return .Truncated
 	}
-	if version != CODEC_VERSION {
+	if version != CODEC_VERSION && version != CODEC_VERSION_UNTRUSTED {
 		return .Bad_Version
 	}
 	levels, has_levels := read_u16(&r)
@@ -193,6 +201,22 @@ decode_into :: proc(data: []u8, c: ^Config, t: ^Table) -> Codec_Error {
 			return e
 		}
 	}
+	trusts := 0
+	if version == CODEC_VERSION {
+		has_trusts: bool
+		trusts, has_trusts = read_u16(&r)
+		if !has_trusts {
+			return .Truncated
+		}
+		if trusts > TRUST_LIMIT {
+			return .Bad_Trust_Count
+		}
+		for _ in 0 ..< trusts {
+			if e := read_name(&r, c, &c.trusts, true); e != .None {
+				return e
+			}
+		}
+	}
 	count, has_count := read_u16(&r)
 	if !has_count {
 		return .Truncated
@@ -208,6 +232,17 @@ decode_into :: proc(data: []u8, c: ^Config, t: ^Table) -> Codec_Error {
 		if int(level) >= levels {
 			return .Bad_Level
 		}
+		trust := u8(0)
+		if version == CODEC_VERSION {
+			has_trust: bool
+			trust, has_trust = read_u8(&r)
+			if !has_trust {
+				return .Truncated
+			}
+			if int(trust) >= max(1, trusts) {
+				return .Bad_Trust
+			}
+		}
 		n, has_n := read_u16(&r)
 		if !has_n {
 			return .Truncated
@@ -219,7 +254,7 @@ decode_into :: proc(data: []u8, c: ^Config, t: ^Table) -> Codec_Error {
 		if !has_ids {
 			return .Truncated
 		}
-		l := Label{level = level}
+		l := Label{level = level, trust = trust}
 		previous := -1
 		for id in ids {
 			if int(id) >= compartments || int(id) <= previous {

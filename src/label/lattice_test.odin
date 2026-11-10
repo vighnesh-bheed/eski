@@ -101,3 +101,63 @@ compartment_helpers_cover_every_word :: proc(t: ^testing.T) {
 	_, bad = label_make(0, 300)
 	testing.expect(t, !bad)
 }
+
+@(test)
+trust_is_reversed_in_admission_and_in_the_lattice :: proc(t: ^testing.T) {
+	for i in 0 ..< SMALL_TRUSTED_LABELS {
+		a := small_label(i)
+		testing.expect(t, dominates(a, a))
+		for j in 0 ..< SMALL_TRUSTED_LABELS {
+			b := small_label(j)
+			want := a.level >= b.level && a.trust <= b.trust
+			for x in 0 ..< 4 {
+				if compartment_has(b, x) && !compartment_has(a, x) {
+					want = false
+				}
+			}
+			testing.expect_value(t, dominates(a, b), want)
+			if dominates(a, b) && dominates(b, a) {
+				testing.expect(t, a == b)
+			}
+			up := join(a, b)
+			down := meet(a, b)
+			testing.expect(t, dominates(up, a) && dominates(up, b))
+			testing.expect(t, dominates(a, down) && dominates(b, down))
+			testing.expect(t, up.trust == min(a.trust, b.trust) && down.trust == max(a.trust, b.trust))
+			testing.expect(t, join(a, meet(a, b)) == a && meet(a, join(a, b)) == a)
+			admitted := b.level <= a.level && b.trust <= a.trust
+			for x in 0 ..< 4 {
+				if compartment_has(b, x) && !compartment_has(a, x) {
+					admitted = false
+				}
+			}
+			testing.expect_value(t, ceiling_admits(a, b), admitted)
+			order := resolution_compare(a, b)
+			testing.expect_value(t, order, -resolution_compare(b, a))
+			if a.level != b.level {
+				testing.expect_value(t, order > 0, a.level > b.level)
+			} else if compartment_count(a) != compartment_count(b) {
+				testing.expect_value(t, order > 0, compartment_count(a) > compartment_count(b))
+			} else {
+				testing.expect_value(t, order, 1 if a.trust > b.trust else (-1 if a.trust < b.trust else 0))
+			}
+		}
+		testing.expect(t, ceiling_admits(a, ceiling_session(a)))
+		testing.expect(t, ceiling_session(a).trust == 0 && ceiling_session(a).level == a.level && ceiling_session(a).compartments == a.compartments)
+	}
+	r := Rng{0x7A05_7}
+	for _ in 0 ..< 20_000 {
+		a := random_label(&r, LEVEL_LIMIT, COMPARTMENT_LIMIT, 12, TRUST_LIMIT)
+		b := random_label(&r, LEVEL_LIMIT, COMPARTMENT_LIMIT, 12, TRUST_LIMIT)
+		c := random_label(&r, LEVEL_LIMIT, COMPARTMENT_LIMIT, 12, TRUST_LIMIT)
+		up := join(a, b)
+		down := meet(a, b)
+		testing.expect_value(t, dominates(c, a) && dominates(c, b), dominates(c, up))
+		testing.expect_value(t, dominates(a, c) && dominates(b, c), dominates(down, c))
+		testing.expect(t, meet(a, join(b, c)) == join(meet(a, b), meet(a, c)))
+		testing.expect(t, join(join(a, b), c) == join(a, join(b, c)))
+		if dominates(a, b) && dominates(b, c) {
+			testing.expect(t, dominates(a, c))
+		}
+	}
+}

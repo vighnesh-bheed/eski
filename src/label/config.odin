@@ -10,6 +10,8 @@ Config_Error :: enum u8 {
 	Duplicate_Name,
 	Too_Many_Levels,
 	Too_Many_Compartments,
+	Too_Many_Trusts,
+	Unknown_Index,
 	Out_Of_Memory,
 }
 
@@ -22,6 +24,7 @@ Config :: struct {
 	text:         [dynamic]u8,
 	levels:       [dynamic]Name,
 	compartments: [dynamic]Name,
+	trusts:       [dynamic]Name,
 }
 
 Normal :: struct {
@@ -33,12 +36,14 @@ config_init :: proc(c: ^Config, allocator := context.allocator) {
 	c.text = make([dynamic]u8, 0, 0, allocator)
 	c.levels = make([dynamic]Name, 0, 0, allocator)
 	c.compartments = make([dynamic]Name, 0, 0, allocator)
+	c.trusts = make([dynamic]Name, 0, 0, allocator)
 }
 
 config_destroy :: proc(c: ^Config) {
 	delete(c.text)
 	delete(c.levels)
 	delete(c.compartments)
+	delete(c.trusts)
 	c^ = Config{}
 }
 
@@ -124,6 +129,21 @@ config_compartment_count :: #force_inline proc "contextless" (c: ^Config) -> int
 	return len(c.compartments)
 }
 
+config_trust_count :: #force_inline proc "contextless" (c: ^Config) -> int {
+	return max(1, len(c.trusts))
+}
+
+config_trust_name :: proc "contextless" (c: ^Config, trust: int) -> string {
+	if trust < 0 || trust >= len(c.trusts) {
+		return ""
+	}
+	return config_name(c, c.trusts[trust])
+}
+
+config_labelled :: proc "contextless" (c: ^Config) -> bool {
+	return len(c.levels) > 1 || len(c.compartments) > 0 || len(c.trusts) > 1
+}
+
 config_level_name :: proc "contextless" (c: ^Config, level: int) -> string {
 	if level < 0 || level >= len(c.levels) {
 		return ""
@@ -161,6 +181,14 @@ config_find_compartment :: proc "contextless" (c: ^Config, raw: string) -> (int,
 		return -1, false
 	}
 	return names_find(c, c.compartments[:], normal_text(&normal))
+}
+
+config_find_trust :: proc "contextless" (c: ^Config, raw: string) -> (int, bool) {
+	normal: Normal
+	if !normalise(raw, &normal) {
+		return -1, false
+	}
+	return names_find(c, c.trusts[:], normal_text(&normal))
 }
 
 config_name_used :: proc "contextless" (c: ^Config, canonical: string) -> bool {
@@ -220,8 +248,96 @@ config_add_compartment :: proc(c: ^Config, raw: string) -> Config_Error {
 	return name_store(c, &c.compartments, normal.bytes[:normal.length])
 }
 
+trust_check :: proc "contextless" (c: ^Config, raw: string, normal: ^Normal) -> Config_Error {
+	if !normalise(raw, normal) {
+		return .Name_Too_Long
+	}
+	if normal.length == 0 {
+		return .Empty_Name
+	}
+	if !name_canonical(normal_text(normal)) {
+		return .Invalid_Name
+	}
+	if _, used := names_find(c, c.trusts[:], normal_text(normal)); used {
+		return .Duplicate_Name
+	}
+	return .None
+}
+
+config_add_trust :: proc(c: ^Config, raw: string) -> Config_Error {
+	if len(c.trusts) >= TRUST_LIMIT {
+		return .Too_Many_Trusts
+	}
+	normal: Normal
+	if e := trust_check(c, raw, &normal); e != .None {
+		return e
+	}
+	return name_store(c, &c.trusts, normal.bytes[:normal.length])
+}
+
+name_replace :: proc(c: ^Config, names: []Name, index: int, canonical: []u8) -> Config_Error {
+	offset := len(c.text)
+	if _, err := append(&c.text, ..canonical); err != nil {
+		resize(&c.text, offset)
+		return .Out_Of_Memory
+	}
+	names[index] = Name{u32(offset), u32(len(canonical))}
+	return .None
+}
+
+config_rename_level :: proc(c: ^Config, index: int, raw: string) -> Config_Error {
+	if index < 0 || index >= len(c.levels) {
+		return .Unknown_Index
+	}
+	normal: Normal
+	if !normalise(raw, &normal) {
+		return .Name_Too_Long
+	}
+	if normal_text(&normal) == config_name(c, c.levels[index]) {
+		return .None
+	}
+	if e := name_check(c, raw, &normal); e != .None {
+		return e
+	}
+	return name_replace(c, c.levels[:], index, normal.bytes[:normal.length])
+}
+
+config_rename_compartment :: proc(c: ^Config, index: int, raw: string) -> Config_Error {
+	if index < 0 || index >= len(c.compartments) {
+		return .Unknown_Index
+	}
+	normal: Normal
+	if !normalise(raw, &normal) {
+		return .Name_Too_Long
+	}
+	if normal_text(&normal) == config_name(c, c.compartments[index]) {
+		return .None
+	}
+	if e := name_check(c, raw, &normal); e != .None {
+		return e
+	}
+	return name_replace(c, c.compartments[:], index, normal.bytes[:normal.length])
+}
+
+config_rename_trust :: proc(c: ^Config, index: int, raw: string) -> Config_Error {
+	if index < 0 || index >= len(c.trusts) {
+		return .Unknown_Index
+	}
+	normal: Normal
+	if !normalise(raw, &normal) {
+		return .Name_Too_Long
+	}
+	if normal_text(&normal) == config_name(c, c.trusts[index]) {
+		return .None
+	}
+	if e := trust_check(c, raw, &normal); e != .None {
+		return e
+	}
+	return name_replace(c, c.trusts[:], index, normal.bytes[:normal.length])
+}
+
 config_valid :: proc "contextless" (c: ^Config, l: Label) -> bool {
-	if int(l.level) >= len(c.levels) {
+	if int(l.level) >= len(c.levels) || int(l.trust) >= config_trust_count(c) {
 		return false
 	}
 	return compartment_highest(l) < len(c.compartments)

@@ -363,7 +363,7 @@ keyspace_eligible :: proc(c: ^Conn) -> bool {
 	if lua_active != nil {
 		return false
 	}
-	return keyspace_threads > 0 && keyspace_max_memory > 0 && !keyspace_in_fence && !keyspace_replay_needed && c.fd >= 0 && c.kind == .Redis && c.db != nil && c.compute == nil && c.keyspace_inflight < KEYSPACE_CONN_DEPTH && c.blocked == .None && !c.held && !c.close_after && c.ps - {.Tracking} == {} && .Multi not_in c.txf && tx_exec_conn == nil && !deny_blocking && (ps_exec == nil || ps_exec == c) && !ps_hooked && memory_worker_admissible() && !pst.loading && !pst.serve_while_loading && !pst.in_child && !aof.loading
+	return keyspace_threads > 0 && keyspace_max_memory > 0 && !labels_on && !keyspace_in_fence && !keyspace_replay_needed && c.fd >= 0 && c.kind == .Redis && c.db != nil && c.compute == nil && c.keyspace_inflight < KEYSPACE_CONN_DEPTH && c.blocked == .None && !c.held && !c.close_after && c.ps - {.Tracking} == {} && .Multi not_in c.txf && tx_exec_conn == nil && !deny_blocking && (ps_exec == nil || ps_exec == c) && !ps_hooked && memory_worker_admissible() && !pst.loading && !pst.serve_while_loading && !pst.in_child && !aof.loading
 }
 
 keyspace_start :: proc() -> bool {

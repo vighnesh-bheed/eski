@@ -40,8 +40,8 @@ def sumBelow (f : Nat → Nat) : Nat → Nat
 def visibleTotal (c : Ctr) (v : Vis) : Nat :=
   sumBelow (fun i => if visible v i then c.counts.getD i 0 else 0) (min c.counts.length v.built)
 
-def dominatedSum (reader : Label) (t : List Label) (c : Ctr) : Nat :=
-  sumBelow (fun i => if dom reader (t.getD i bottom) then ctrGet c i else 0) t.length
+def dominatedSum (reader : TLabel) (t : List TLabel) (c : Ctr) : Nat :=
+  sumBelow (fun i => if domT reader (t.getD i tbottom) then ctrGet c i else 0) t.length
 
 def CtrOk (c : Ctr) : Prop := c.total = sumBelow (ctrGet c) c.counts.length ∧ c.total ≤ u64Max
 
@@ -190,10 +190,10 @@ theorem visibleTotal_le {c : Ctr} (h : CtrOk c) (v : Vis) : visibleTotal c v ≤
         sumBelow_le (fun i _ => by unfold ctrGet; split <;> omega)
     _ ≤ sumBelow (ctrGet c) c.counts.length := sumBelow_mono (Nat.min_le_left _ _)
 
-theorem build_reader (reader : Label) (t : List Label) : (build reader t).reader = reader := by
+theorem build_reader (reader : TLabel) (t : List TLabel) : (build reader t).reader = reader := by
   unfold build; rw [refresh_reader]
 
-theorem visibleTotal_spec {t : List Label} {v : Vis} {c : Ctr} (hv : VisOk t v) (hl : c.counts.length ≤ t.length) :
+theorem visibleTotal_spec {t : List TLabel} {v : Vis} {c : Ctr} (hv : VisOk t v) (hl : c.counts.length ≤ t.length) :
     visibleTotal c v = dominatedSum v.reader t c := by
   unfold visibleTotal dominatedSum
   rw [hv.1, Nat.min_eq_left hl]
@@ -205,13 +205,13 @@ theorem visibleTotal_spec {t : List Label} {v : Vis} {c : Ctr} (hv : VisOk t v) 
   have : i < t.length := by omega
   simp only [decide_eq_true this, Bool.true_and, ctrGet]
 
-theorem visibleTotal_build {t : List Label} {c : Ctr} (reader : Label) (hl : c.counts.length ≤ t.length) :
+theorem visibleTotal_build {t : List TLabel} {c : Ctr} (reader : TLabel) (hl : c.counts.length ≤ t.length) :
     visibleTotal c (build reader t) = dominatedSum reader t c := by
   rw [visibleTotal_spec (build_ok reader t) hl, build_reader]
 
-theorem visibleTotal_noninterference {t : List Label} {v : Vis} {c c' : Ctr} (hv : VisOk t v)
+theorem visibleTotal_noninterference {t : List TLabel} {v : Vis} {c c' : Ctr} (hv : VisOk t v)
     (hl : c.counts.length ≤ t.length) (hl' : c'.counts.length ≤ t.length)
-    (hagree : ∀ i, i < t.length → dom v.reader (t.getD i bottom) = true → ctrGet c i = ctrGet c' i) :
+    (hagree : ∀ i, i < t.length → domT v.reader (t.getD i tbottom) = true → ctrGet c i = ctrGet c' i) :
     visibleTotal c v = visibleTotal c' v := by
   rw [visibleTotal_spec hv hl, visibleTotal_spec hv hl']
   unfold dominatedSum
@@ -221,18 +221,18 @@ theorem visibleTotal_noninterference {t : List Label} {v : Vis} {c c' : Ctr} (hv
   · rename_i hd; exact hagree i hi hd
   · rfl
 
-theorem visibleTotal_mono {t : List Label} {c : Ctr} {r1 r2 : Label} (hr : dom r1 r2 = true)
+theorem visibleTotal_mono {t : List TLabel} {c : Ctr} {r1 r2 : TLabel} (hr : domT r1 r2 = true)
     (hl : c.counts.length ≤ t.length) : visibleTotal c (build r2 t) ≤ visibleTotal c (build r1 t) := by
   rw [visibleTotal_build r1 hl, visibleTotal_build r2 hl]
   unfold dominatedSum
   apply sumBelow_le
   intro i _
-  cases h2 : dom r2 (t.getD i bottom)
+  cases h2 : domT r2 (t.getD i tbottom)
   · simp only [Bool.false_eq_true, ↓reduceIte]; exact Nat.zero_le _
-  · rw [dom_trans hr h2]; simp
+  · rw [domT_trans hr h2]; simp
 
-theorem visibleTotal_top {t : List Label} {c : Ctr} {reader : Label} (h : CtrOk c) (hl : c.counts.length ≤ t.length)
-    (hall : ∀ i, i < t.length → dom reader (t.getD i bottom) = true) : visibleTotal c (build reader t) = c.total := by
+theorem visibleTotal_top {t : List TLabel} {c : Ctr} {reader : TLabel} (h : CtrOk c) (hl : c.counts.length ≤ t.length)
+    (hall : ∀ i, i < t.length → domT reader (t.getD i tbottom) = true) : visibleTotal c (build reader t) = c.total := by
   rw [visibleTotal_build reader hl, h.1]
   unfold dominatedSum
   rw [← sumBelow_zero_tail (f := ctrGet c) (n := c.counts.length) hl (fun i hi => getD_beyond _ _ hi)]

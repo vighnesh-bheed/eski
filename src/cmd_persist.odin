@@ -438,6 +438,10 @@ persist_child_progress :: proc(processed: i64) {
 
 @(private = "file")
 persist_save_internal :: proc(filename: string) -> bool {
+	if access_writes_refused() {
+		plog(LOG_WARNING, "RDB save refused: ", LABEL_PERSISTENCE_ON)
+		return false
+	}
 	tbuf: [64]u8
 	temp := persist_temp_name(linux.getpid(), tbuf[:])
 	tcbuf: [80]u8
@@ -510,6 +514,10 @@ persist_rdb_save :: proc() -> bool {
 
 persist_bgsave :: proc() -> bool {
 	keyspace_fence()
+	if access_writes_refused() {
+		plog(LOG_WARNING, "Background save refused: ", LABEL_PERSISTENCE_ON)
+		return false
+	}
 	if pst.child_pid > 0 {
 		return false
 	}

@@ -85,6 +85,7 @@ Conn :: struct {
 	keyspace_token: u64,
 	keyspace_ready: bool,
 	keyspace_waiting: bool,
+	label:       ^Access_Conn,
 }
 
 Server :: struct {
@@ -547,6 +548,9 @@ conn_close :: proc(c: ^Conn) {
 	}
 	if c.tx != nil {
 		tx_conn_closed(c)
+	}
+	if c.label != nil {
+		access_conn_closed(c)
 	}
 	transport_connection_close(c)
 	linux.close(c.fd)
@@ -1025,6 +1029,9 @@ server_cron :: proc() {
 	}
 	config_update_dynamic_hz()
 	stats_cron()
+	if len(label_contexts) > 0 {
+		label_context_cron()
+	}
 }
 
 ignore_sigpipe :: proc() {

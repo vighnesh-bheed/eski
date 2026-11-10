@@ -1,5 +1,7 @@
 package main
 
+import lb "label"
+
 Notify_Class :: enum u16 {
 	Keyspace,
 	Keyevent,
@@ -120,7 +122,7 @@ notify_put_db :: proc(b: ^[dynamic]u8, dbid: int) {
 }
 
 @(cold)
-notify_publish :: #force_no_inline proc(event: string, key: []u8, dbid: int) {
+notify_publish :: #force_no_inline proc(event: string, key: []u8, dbid: int, key_label := lb.BOTTOM_ID) {
 	if len(ps_maps[.Channel]) == 0 && len(ps_patterns) == 0 {
 		return
 	}
@@ -131,7 +133,7 @@ notify_publish :: #force_no_inline proc(event: string, key: []u8, dbid: int) {
 		notify_put_db(b, dbid)
 		append(b, "__:")
 		append(b, ..key)
-		ps_publish(b[:], transmute([]u8)event, .Channel)
+		ps_publish(b[:], transmute([]u8)event, .Channel, key_label)
 	}
 	if .Keyevent in notify_config {
 		clear(b)
@@ -139,7 +141,7 @@ notify_publish :: #force_no_inline proc(event: string, key: []u8, dbid: int) {
 		notify_put_db(b, dbid)
 		append(b, "__:")
 		append(b, event)
-		ps_publish(b[:], key, .Channel)
+		ps_publish(b[:], key, .Channel, key_label)
 	}
 	if cap(b) > NOTIFY_CHAN_KEEP {
 		delete(b^)

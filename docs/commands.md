@@ -1,8 +1,8 @@
 # Command inventory
 
-Generated from a temporary instance of the built executable using `COMMAND DOCS`, `COMMAND LIST` and `COMMAND COUNT`. The inventory contains 251 top-level commands and 352 names including subcommands. Metadata describes the protocol surface; the [command-group pages](README.md) and [conformance record](conformance.md) define implemented behavior and remaining gaps. Lua scripts, Function libraries and debugging have the scope documented in [scripting](scripting.md). Replication and clustering remain outside the node scope.
+Generated from a temporary instance of the built executable using `COMMAND DOCS`, `COMMAND LIST` and `COMMAND COUNT`. The inventory contains 253 top-level commands and 362 names including subcommands. Metadata describes the protocol surface; the [command-group pages](README.md) and [conformance record](conformance.md) define implemented behavior and remaining gaps. Lua scripts, Function libraries and debugging have the scope documented in [scripting](scripting.md). Replication and clustering remain outside the node scope.
 
-Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test/readme_tables.py --check`. Use `--server HOST:PORT` to inspect an existing instance without starting one. The canonical command-metadata SHA256 is `e03fbd1de1c13b7dec13a5cc328b6deddbb720af8028422607936b8fb63d7f59`.
+Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test/readme_tables.py --check`. Use `--server HOST:PORT` to inspect an existing instance without starting one. The canonical command-metadata SHA256 is `c2ed26d52de89c91c80e34f6bbbbe276c1dbb1238fa6692228f0003511f2bcdf`.
 
 ## Bitmap
 
@@ -40,8 +40,18 @@ Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test
 | `CLIENT TRACKINGINFO` | — | Returns information about server-assisted client-side caching for the connection. |
 | `CLIENT UNBLOCK` | `<client-id> [(TIMEOUT \| ERROR)]` | Unblocks a client blocked by a blocking command from a different connection. |
 | `CLIENT UNPAUSE` | — | Resumes processing commands from paused clients. |
+| `CONTEXT` | — | A container for commands that manage label contexts. |
+| `CONTEXT CREATE` | `[LEVEL <marking>] [TRUST <trust>]` | Creates a context with a fixed label, bound to the current login, and returns its handle. |
+| `CONTEXT DROP` | `<handle>` | Ends a context. |
+| `CONTEXT HELP` | — | Returns helpful text about the different subcommands. |
+| `CONTEXT INFO` | `<handle>` | Returns the marking and trust of a context. |
 | `ECHO` | `<message>` | Returns the given string. |
 | `HELLO` | `[<protover> [AUTH <username> <password>] [SETNAME <clientname>]]` | Handshakes with the server. |
+| `LABEL` | — | A container for commands that set the label a command runs at. |
+| `LABEL AS` | `(<marking> [TRUST <trust>] [CONTEXT <handle>] \| CONTEXT <handle> \| TOKEN <token>) <command> [<arg> ...]` | Runs one command at a label given by a marking, a context or a signed label token. |
+| `LABEL HELP` | — | Returns helpful text about the different subcommands. |
+| `LABEL SESSION` | `<marking> [TRUST <trust>]` | Sets the label of the connection's later commands. |
+| `LABEL WHOAMI` | — | Returns the login, its clearance and the label of the current command. |
 | `PING` | `[<message>]` | Returns the server's liveliness response. |
 | `QUIT` | — | Closes the connection. |
 | `RESET` | — | Resets the connection. |

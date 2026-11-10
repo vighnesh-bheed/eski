@@ -6,6 +6,8 @@ LEVEL_LIMIT :: 256
 
 COMPARTMENT_LIMIT :: 256
 
+TRUST_LIMIT :: 256
+
 COMPARTMENT_WORDS :: COMPARTMENT_LIMIT / 64
 
 NAME_MAX :: 64
@@ -25,6 +27,7 @@ Compartments :: [COMPARTMENT_WORDS]u64
 Label :: struct {
 	compartments: Compartments,
 	level:        u8,
+	trust:        u8,
 }
 
 BOTTOM :: Label{}
@@ -47,11 +50,12 @@ dominance_bit :: #force_inline proc "contextless" (a, b: Label) -> u64 {
 	for w in 0 ..< COMPARTMENT_WORDS {
 		missing |= b.compartments[w] &~ a.compartments[w]
 	}
-	return u64(a.level >= b.level) & u64(missing == 0)
+	return u64(a.level >= b.level) & u64(missing == 0) & u64(a.trust <= b.trust)
 }
 
 join :: proc "contextless" (a, b: Label) -> (r: Label) {
 	r.level = max(a.level, b.level)
+	r.trust = min(a.trust, b.trust)
 	for w in 0 ..< COMPARTMENT_WORDS {
 		r.compartments[w] = a.compartments[w] | b.compartments[w]
 	}
@@ -60,6 +64,7 @@ join :: proc "contextless" (a, b: Label) -> (r: Label) {
 
 meet :: proc "contextless" (a, b: Label) -> (r: Label) {
 	r.level = min(a.level, b.level)
+	r.trust = max(a.trust, b.trust)
 	for w in 0 ..< COMPARTMENT_WORDS {
 		r.compartments[w] = a.compartments[w] & b.compartments[w]
 	}
@@ -128,4 +133,30 @@ label_make :: proc "contextless" (level: int, compartments: ..int) -> (l: Label,
 		}
 	}
 	return l, true
+}
+
+ceiling_admits :: proc "contextless" (ceiling, l: Label) -> bool {
+	missing := u64(0)
+	for w in 0 ..< COMPARTMENT_WORDS {
+		missing |= l.compartments[w] &~ ceiling.compartments[w]
+	}
+	return l.level <= ceiling.level && missing == 0 && l.trust <= ceiling.trust
+}
+
+ceiling_session :: proc "contextless" (ceiling: Label) -> Label {
+	return Label{compartments = ceiling.compartments, level = ceiling.level}
+}
+
+resolution_compare :: proc "contextless" (a, b: Label) -> int {
+	if a.level != b.level {
+		return 1 if a.level > b.level else -1
+	}
+	ca, cb := compartment_count(a), compartment_count(b)
+	if ca != cb {
+		return 1 if ca > cb else -1
+	}
+	if a.trust != b.trust {
+		return 1 if a.trust > b.trust else -1
+	}
+	return 0
 }

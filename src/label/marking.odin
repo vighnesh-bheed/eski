@@ -13,6 +13,8 @@ Parse_Error :: enum u8 {
 	Empty_Compartment,
 	Unknown_Compartment,
 	Duplicate_Compartment,
+	Empty_Trust,
+	Unknown_Trust,
 }
 
 Parse_Failure :: struct {
@@ -23,6 +25,15 @@ Parse_Failure :: struct {
 
 marking_byte :: #force_inline proc "contextless" (b: u8) -> bool {
 	return b == '\t' || b >= 0x20 && b <= 0x7E
+}
+
+semicolon_from :: proc "contextless" (text: string, from: int) -> int {
+	for i in from ..< len(text) {
+		if text[i] == ';' {
+			return i
+		}
+	}
+	return len(text)
 }
 
 slash_from :: proc "contextless" (text: string, from: int) -> int {
@@ -49,15 +60,7 @@ trimmed :: proc "contextless" (text: string, from, to: int) -> (at: int, length:
 	return first, last - first
 }
 
-parse :: proc "contextless" (c: ^Config, text: string) -> (l: Label, failure: Parse_Failure) {
-	if len(text) > MARKING_MAX {
-		return {}, {.Too_Long, MARKING_MAX, len(text) - MARKING_MAX}
-	}
-	for i in 0 ..< len(text) {
-		if !marking_byte(text[i]) {
-			return {}, {.Invalid_Byte, i, 1}
-		}
-	}
+parse_secrecy :: proc "contextless" (c: ^Config, text: string) -> (l: Label, failure: Parse_Failure) {
 	slash := slash_from(text, 0)
 	at, n := trimmed(text, 0, slash)
 	if n == 0 {
@@ -99,6 +102,38 @@ parse :: proc "contextless" (c: ^Config, text: string) -> (l: Label, failure: Pa
 	}
 }
 
+parse :: proc "contextless" (c: ^Config, text: string) -> (l: Label, failure: Parse_Failure) {
+	if len(text) > MARKING_MAX {
+		return {}, {.Too_Long, MARKING_MAX, len(text) - MARKING_MAX}
+	}
+	for i in 0 ..< len(text) {
+		if !marking_byte(text[i]) {
+			return {}, {.Invalid_Byte, i, 1}
+		}
+	}
+	end := semicolon_from(text, 0)
+	l, failure = parse_secrecy(c, text[:end])
+	if failure.error == .Empty && end < len(text) {
+		failure.error = .Empty_Level
+	}
+	if failure.error != .None {
+		return {}, failure
+	}
+	if end == len(text) {
+		return l, {}
+	}
+	at, n := trimmed(text, end + 1, len(text))
+	if n == 0 {
+		return {}, {.Empty_Trust, at, 0}
+	}
+	trust, found := config_find_trust(c, text[end + 1:])
+	if !found {
+		return {}, {.Unknown_Trust, at, n}
+	}
+	l.trust = u8(trust)
+	return l, {}
+}
+
 format_length :: proc "contextless" (c: ^Config, l: Label) -> int {
 	if !config_valid(c, l) {
 		return -1
@@ -108,6 +143,9 @@ format_length :: proc "contextless" (c: ^Config, l: Label) -> int {
 	for i := compartment_next(l, 0); i < COMPARTMENT_LIMIT; i = compartment_next(l, i + 1) {
 		n += int(c.compartments[i].length) + (2 if count == 0 else 1)
 		count += 1
+	}
+	if l.trust > 0 {
+		n += 1 + int(c.trusts[l.trust].length)
 	}
 	return n
 }
@@ -122,6 +160,10 @@ format_builder :: proc(b: ^strings.Builder, c: ^Config, l: Label) -> bool {
 		strings.write_string(b, "//" if count == 0 else "/")
 		strings.write_string(b, config_name(c, c.compartments[i]))
 		count += 1
+	}
+	if l.trust > 0 {
+		strings.write_byte(b, ';')
+		strings.write_string(b, config_name(c, c.trusts[l.trust]))
 	}
 	return true
 }

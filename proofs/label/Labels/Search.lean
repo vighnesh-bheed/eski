@@ -337,10 +337,10 @@ theorem bruteForce_noninterference (n : Nat) (live live' accept : Nat → Bool) 
   · simp
   · rw [hl s ha, hd s ha]
 
-theorem search_dominated {t : List Label} (reader : Label) (labels : List Nat) (E : Env)
+theorem search_dominated {t : List TLabel} (reader : TLabel) (labels : List Nat) (E : Env)
     (he : E.accept = gateAccept (build reader t) labels) (ep : Cand) (k fuel : Nat) :
     ∀ r ∈ searchFiltered E ep k fuel,
-      ∃ id, labels[r.id]? = some id ∧ id < t.length ∧ dom reader (t.getD id bottom) = true := by
+      ∃ id, labels[r.id]? = some id ∧ id < t.length ∧ domT reader (t.getD id tbottom) = true := by
   intro r hr
   have ha := searchFiltered_sound E ep k fuel r hr
   rw [he] at ha
@@ -349,10 +349,10 @@ theorem search_dominated {t : List Label} (reader : Label) (labels : List Nat) (
   rw [hr'] at h3
   exact ⟨id, h1, h2, h3⟩
 
-theorem search_filter_dominated {A : Type} {t : List Label} (reader : Label) (labels : List Nat) (f : FilterGate A)
+theorem search_filter_dominated {A : Type} {t : List TLabel} (reader : TLabel) (labels : List Nat) (f : FilterGate A)
     (E : Env) (he : E.accept = filterAccept (build reader t) labels f) (ep : Cand) (k fuel : Nat) :
     ∀ r ∈ searchFiltered E ep k fuel,
-      (∃ id, labels[r.id]? = some id ∧ id < t.length ∧ dom reader (t.getD id bottom) = true) ∧
+      (∃ id, labels[r.id]? = some id ∧ id < t.length ∧ domT reader (t.getD id tbottom) = true) ∧
         filterPasses f r.id = true := by
   intro r hr
   have ha := searchFiltered_sound E ep k fuel r hr
@@ -362,13 +362,13 @@ theorem search_filter_dominated {A : Type} {t : List Label} (reader : Label) (la
   rw [hr'] at h3
   exact ⟨⟨id, h1, h2, h3⟩, ha.2⟩
 
-theorem search_within_clearance {t : List Label} (s : Subject) (labels : List Nat) (E : Env)
+theorem search_within_clearance {t : List TLabel} {s : Subject} (hs : SubjectOk s) (labels : List Nat) (E : Env)
     (he : E.accept = gateAccept (build (reader s) t) labels) (ep : Cand) (k fuel : Nat) :
     ∀ r ∈ searchFiltered E ep k fuel,
-      ∃ id, labels[r.id]? = some id ∧ id < t.length ∧ dom s.clearance (t.getD id bottom) = true := by
+      ∃ id, labels[r.id]? = some id ∧ id < t.length ∧ dom s.clearance.sec (t.getD id tbottom).sec = true := by
   intro r hr
   obtain ⟨id, h1, h2, h3⟩ := search_dominated (reader s) labels E he ep k fuel r hr
-  exact ⟨id, h1, h2, read_clearance h3⟩
+  exact ⟨id, h1, h2, read_clearance ((read_iff hs _).2 h3)⟩
 
 def demoAdj : Nat → List Nat
   | 0 => [1, 2]

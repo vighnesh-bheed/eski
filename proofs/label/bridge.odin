@@ -66,11 +66,14 @@ ids_list :: proc(s: string) -> [dynamic]int {
 label_of :: proc(s: string) -> lb.Label {
 	parts := strings.split(s, ":")
 	defer delete(parts)
-	assert(len(parts) == 2)
+	assert(len(parts) == 3)
 	ids := ids_list(parts[1])
 	defer delete(ids)
 	l, ok := lb.label_make(nat(parts[0]), ..ids[:])
 	assert(ok)
+	trust := nat(parts[2])
+	assert(trust < lb.TRUST_LIMIT)
+	l.trust = u8(trust)
 	return l
 }
 
@@ -87,6 +90,7 @@ write_label :: proc(b: ^strings.Builder, l: lb.Label) {
 	if first {
 		strings.write_byte(b, '-')
 	}
+	fmt.sbprintf(b, ":%d", l.trust)
 }
 
 write_bool :: proc(b: ^strings.Builder, v: bool) {
@@ -109,6 +113,10 @@ config_error :: proc(e: lb.Config_Error) -> string {
 		return "toomanylevels"
 	case .Too_Many_Compartments:
 		return "toomanycomps"
+	case .Too_Many_Trusts:
+		return "toomanytrusts"
+	case .Unknown_Index:
+		return "unknownindex"
 	case .Out_Of_Memory:
 		return "oom"
 	}
@@ -137,6 +145,10 @@ parse_error :: proc(e: lb.Parse_Error) -> string {
 		return "unknowncomp"
 	case .Duplicate_Compartment:
 		return "dupcomp"
+	case .Empty_Trust:
+		return "emptytrust"
+	case .Unknown_Trust:
+		return "unknowntrust"
 	}
 	return "?"
 }
@@ -153,6 +165,8 @@ codec_error :: proc(e: lb.Codec_Error) -> string {
 		return "badlevelcount"
 	case .Bad_Compartment_Count:
 		return "badcompcount"
+	case .Bad_Trust_Count:
+		return "badtrustcount"
 	case .Bad_Name:
 		return "badname"
 	case .Duplicate_Name:
@@ -161,6 +175,8 @@ codec_error :: proc(e: lb.Codec_Error) -> string {
 		return "badlabelcount"
 	case .Bad_Level:
 		return "badlevel"
+	case .Bad_Trust:
+		return "badtrust"
 	case .Bad_Compartment:
 		return "badcomp"
 	case .Not_Bottom:
@@ -179,8 +195,8 @@ write_verdict :: proc(v: lb.Write_Verdict) -> string {
 		return "allowed"
 	case .Above_Clearance:
 		return "above"
-	case .Write_Down:
-		return "down"
+	case .Not_Session:
+		return "notsession"
 	}
 	return "?"
 }
@@ -191,8 +207,8 @@ modify_verdict :: proc(v: lb.Modify_Verdict) -> string {
 		return "allowed"
 	case .Not_Visible:
 		return "hidden"
-	case .Write_Down:
-		return "down"
+	case .Not_Session:
+		return "notsession"
 	}
 	return "?"
 }
@@ -380,17 +396,27 @@ main :: proc() {
 			lb.config_destroy(&cfg)
 			lb.config_init(&cfg)
 			strings.write_string(&b, "CR")
-		case "CL", "CC":
+		case "CL", "CC", "CT":
 			raw := unhex(f[1])
 			defer delete(raw)
-			e := lb.config_add_level(&cfg, string(raw)) if f[0] == "CL" else lb.config_add_compartment(&cfg, string(raw))
-			fmt.sbprintf(&b, "%s|%s|%d|%d|", f[0], config_error(e), lb.config_level_count(&cfg), lb.config_compartment_count(&cfg))
+			e: lb.Config_Error
+			switch f[0] {
+			case "CL":
+				e = lb.config_add_level(&cfg, string(raw))
+			case "CC":
+				e = lb.config_add_compartment(&cfg, string(raw))
+			case:
+				e = lb.config_add_trust(&cfg, string(raw))
+			}
+			fmt.sbprintf(&b, "%s|%s|%d|%d|%d|", f[0], config_error(e), lb.config_level_count(&cfg), lb.config_compartment_count(&cfg), len(cfg.trusts))
 			if e != .None {
 				strings.write_byte(&b, '-')
 			} else if f[0] == "CL" {
 				write_hex(&b, transmute([]u8)lb.config_level_name(&cfg, lb.config_level_count(&cfg) - 1))
-			} else {
+			} else if f[0] == "CC" {
 				write_hex(&b, transmute([]u8)lb.config_compartment_name(&cfg, lb.config_compartment_count(&cfg) - 1))
+			} else {
+				write_hex(&b, transmute([]u8)lb.config_trust_name(&cfg, len(cfg.trusts) - 1))
 			}
 		case "M":
 			raw := unhex(f[1])
@@ -430,6 +456,11 @@ main :: proc() {
 			write_label(&b, lb.join(x, y))
 			strings.write_byte(&b, '|')
 			write_label(&b, lb.meet(x, y))
+			strings.write_byte(&b, '|')
+			write_bool(&b, lb.ceiling_admits(x, y))
+			strings.write_byte(&b, '|')
+			write_bool(&b, lb.ceiling_admits(y, x))
+			fmt.sbprintf(&b, "|%d", lb.resolution_compare(x, y))
 		case "TR":
 			lb.table_destroy(&table)
 			assert(lb.table_init(&table) == .None)
@@ -473,7 +504,7 @@ main :: proc() {
 			again := make([dynamic]u8)
 			defer delete(again)
 			assert(lb.encode(&dc, &dt, &again) == .None)
-			fmt.sbprintf(&b, "D|ok|%d|%d|%d|", lb.config_level_count(&dc), lb.config_compartment_count(&dc), lb.table_count(&dt))
+			fmt.sbprintf(&b, "D|ok|%d|%d|%d|%d|", lb.config_level_count(&dc), lb.config_compartment_count(&dc), len(dc.trusts), lb.table_count(&dt))
 			write_hex(&b, again[:])
 			lb.config_destroy(&dc)
 			lb.table_destroy(&dt)

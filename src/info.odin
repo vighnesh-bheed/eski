@@ -607,5 +607,98 @@ cmd_info :: proc(c: ^Conn, argv: [][]u8) {
 	b := &scratch
 	clear(b)
 	info_generate(b, info_select(argv))
+	if labels_on && !access.top {
+		info_redact(b)
+	}
 	reply_verbatim(c, b[:])
+}
+
+@(private = "file")
+info_redact_value :: proc(out: ^[dynamic]u8, value: []u8) {
+	digits, dots, other := 0, 0, 0
+	for ch, i in value {
+		switch {
+		case ch >= '0' && ch <= '9':
+			digits += 1
+		case ch == '.':
+			dots += 1
+		case ch == '-' && i == 0:
+		case:
+			other += 1
+		}
+	}
+	last := value[len(value) - 1] if len(value) > 0 else 0
+	switch {
+	case digits > 0 && other == 0:
+		sb_str(out, "0.00" if dots > 0 else "0")
+	case digits > 0 && other == 1 && last == '%':
+		sb_str(out, "0.00%")
+	case digits > 0 && other == 1 && (last == 'B' || last == 'K' || last == 'M' || last == 'G' || last == 'T' || last == 'P'):
+		sb_str(out, "0B")
+	case:
+		sb_bytes(out, value)
+	}
+}
+
+info_redact :: proc(b: ^[dynamic]u8) {
+	text := make([]u8, len(b), context.temp_allocator)
+	copy(text, b[:])
+	clear(b)
+	section := ""
+	clients := 0
+	for other in srv.conns {
+		if other != nil && access_sees_conn(other) {
+			clients += 1
+		}
+	}
+	start := 0
+	for start < len(text) {
+		stop := start
+		for stop < len(text) && text[stop] != '\n' {
+			stop += 1
+		}
+		line := text[start:stop]
+		next := min(stop + 1, len(text))
+		start = next
+		body := line[:len(line) - 1] if len(line) > 0 && line[len(line) - 1] == '\r' else line
+		if len(body) > 2 && body[0] == '#' && body[1] == ' ' {
+			section = string(body[2:])
+			sb_bytes(b, text[stop - len(line):next])
+			continue
+		}
+		colon := -1
+		for ch, i in body {
+			if ch == ':' {
+				colon = i
+				break
+			}
+		}
+		switch section {
+		case "Clients", "Memory", "Persistence", "Stats", "Replication", "CPU":
+		case "Commandstats", "Errorstats", "Latencystats", "Debug":
+			if colon >= 0 {
+				continue
+			}
+			sb_bytes(b, text[stop - len(line):next])
+			continue
+		case:
+			sb_bytes(b, text[stop - len(line):next])
+			continue
+		}
+		if colon < 0 {
+			sb_bytes(b, text[stop - len(line):next])
+			continue
+		}
+		name := body[:colon]
+		sb_bytes(b, body[:colon + 1])
+		if string(name) == "connected_clients" {
+			sb_int(b, i64(clients))
+		} else {
+			info_redact_value(b, body[colon + 1:])
+		}
+		sb_bytes(b, line[len(body):])
+		if next > stop {
+			sb_byte(b, '\n')
+		}
+	}
 }

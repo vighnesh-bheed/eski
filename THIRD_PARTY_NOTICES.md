@@ -146,9 +146,9 @@ src/config_table.odin: the parameter table of config_table_init, including the o
 
 src/cmd_command.odin: reply_info and reply_info_flags from addReplyCommandInfo, addReplyFlagsForCommand and addReplyCommandFlags, reply_key_specs and reply_key_flags from addReplyCommandKeySpecs and addReplyFlagsForKeyArgs, reply_args from addReplyCommandArgList and addReplyFlagsForArg, reply_docs from addReplyCommandDocs, addReplyCommandHistory, addReplyDocFlagsForCommand and addReplyCommandSubCommands, spec_movable from populateCommandLegacyRangeSpec, lookup_by_name and lookup_by_argv from lookupCommandBySdsLogic, lookupCommandLogic and lookupSubcommand, command_list, list_walk and list_match from commandListCommand, commandListWithFilter, commandListWithoutFilter and shouldFilterFromCommandList, reply_all_info, command_info, command_docs, command_count and command_help_lines from commandCommand, commandInfoCommand, commandDocsCommand, commandCountCommand and commandHelpCommand, and the unknown subcommand path from processCommand in src/server.c; acl_names, the category replies and acl_cat_by_name from ACLDefaultCommandCategories, addReplyCommandCategories and ACLGetCommandCategoryFlagByName in src/acl.c; getkeys_reply from getKeysSubcommandImpl in src/server.c; find_keys, spec_has_keys, keys_from_specs, keys_generic and keys_from_proc from getKeysFromCommandWithSpecs, doesCommandHaveKeys, getKeysUsingKeySpecs, genericGetKeys and the key procedures of SINTERCARD, ZUNION, ZINTER, ZDIFF and their STORE forms, EVAL, FCALL, LMPOP, BLMPOP, ZMPOP, BZMPOP, SORT, SORT_RO, MIGRATE, GEORADIUS, XREAD, SET and BITFIELD in src/db.c.
 
-src/keyspec.odin: the arity, flags, legacy key range and key specifications of every command that predates the vector set commands from the command definitions in src/commands/*.json, checked entry by entry against the reference's COMMAND INFO replies by black box comparison; the entries of the thirteen vector set commands follow the COMMAND INFO replies of the reference's vector set module, server 8.10.3, by black box comparison; and generic_get_keys and command_keys from genericGetKeys, getKeysUsingLegacyRangeSpec and the key procedures of SINTERCARD, ZUNION, ZINTER, ZDIFF and their STORE forms, EVAL, FCALL, LMPOP, BLMPOP, ZMPOP, SORT, SORT_RO, MIGRATE, GEORADIUS, XREAD, SET and BITFIELD in src/db.c.
+src/keyspec.odin: the arity, flags, legacy key range and key specifications of every command that predates the vector set and label commands from the command definitions in src/commands/*.json, checked entry by entry against the reference's COMMAND INFO replies by black box comparison; the entries of the thirteen vector set commands follow the COMMAND INFO replies of the reference's vector set module, server 8.10.3, by black box comparison, and the entries of the context and label commands are Eski's own; and generic_get_keys and command_keys from genericGetKeys, getKeysUsingLegacyRangeSpec and the key procedures of SINTERCARD, ZUNION, ZINTER, ZDIFF and their STORE forms, EVAL, FCALL, LMPOP, BLMPOP, ZMPOP, SORT, SORT_RO, MIGRATE, GEORADIUS, XREAD, SET and BITFIELD in src/db.c.
 
-src/command_docs.odin: generated from the command definitions in src/commands/*.json following the conventions of utils/generate-command-code.py, with the group names of its COMMAND_GROUP_STR, then adjusted entry by entry to the reference's replies by black box comparison. Of the 379 entries that predate the vector set commands, the summaries of 27 are not Valkey text. Eighteen of them, cluster, cluster|failover, cluster|replicas, cluster|replicate, cluster|slaves, hello, lolwut, migrate, object|encoding, object|freq, object|idletime, readonly, readwrite, replicaof, shutdown, slaveof, swapdb and waitaof, have Valkey counterparts worded differently and are identical to the command definitions in src/commands/*.json of the Redis 7.2.4 release, which are distributed under the BSD 3-Clause License with the notice "Copyright (c) 2006-2020, Salvatore Sanfilippo" of that release's COPYING file; the complexity texts of append, command, command|list, dump, restore and restore-asking and the history lists of bgsave, bitcount, client|list, cluster|setslot, hello, set and zscan are likewise the Redis 7.2.4 text. The other nine, hexpire, hexpireat, hexpiretime, hpersist, hpexpire, hpexpireat, hpexpiretime, hpttl and httl, are hash field expiration commands that Valkey lacks and the Redis 7.2.4 release does not define; their summaries and complexity texts are written for Eski, as is the 7.4.0 history line of client|kill, and the smoke test exempts the summary, complexity and history fields of exactly those ten entries from its byte comparison of COMMAND DOCS replies against the reference container, server version 7.4.11, while their argument structures, tokens, versions and categories still follow the reference's observable output. The Redis 7.2.4 release and its archive hash are recorded in the Redis BSD 3-Clause section below. Beyond those, the deprecation flags of cluster|slots and the slowlog family, the argument lists of bgsave, bitcount, client|kill, client|list, cluster|setslot, set, shutdown and zscan, and the key specification notes of georadius, georadiusbymember, xread and xreadgroup follow the reference server's observable COMMAND DOCS and COMMAND INFO output. The summaries of the remaining 352 of those entries are the Valkey 8.1.10 text. The thirteen entries added with the vector set commands, VADD, VCARD, VDIM, VEMB, VGETATTR, VINFO, VISMEMBER, VLINKS, VRANDMEMBER, VRANGE, VREM, VSETATTR and VSIM, which src/vsetargs/meta.odin repeats as data, contain no Valkey text: they carry summaries written for Eski, and the since versions, group, module name and argument structures of the COMMAND DOCS replies of the reference's vector set module, server 8.10.3 in the image the vector set checks pin, taken by black box comparison and compared byte for byte by test/vectorset with the summary left out, and like the reference's entries they have no ACL categories. The smoke test leaves all thirteen entries out of its comparison with the 7.4.11 container.
+src/command_docs.odin: generated from the command definitions in src/commands/*.json following the conventions of utils/generate-command-code.py, with the group names of its COMMAND_GROUP_STR, then adjusted entry by entry to the reference's replies by black box comparison. Of the 379 entries that predate the vector set and label commands, the summaries of 27 are not Valkey text. Eighteen of them, cluster, cluster|failover, cluster|replicas, cluster|replicate, cluster|slaves, hello, lolwut, migrate, object|encoding, object|freq, object|idletime, readonly, readwrite, replicaof, shutdown, slaveof, swapdb and waitaof, have Valkey counterparts worded differently and are identical to the command definitions in src/commands/*.json of the Redis 7.2.4 release, which are distributed under the BSD 3-Clause License with the notice "Copyright (c) 2006-2020, Salvatore Sanfilippo" of that release's COPYING file; the complexity texts of append, command, command|list, dump, restore and restore-asking and the history lists of bgsave, bitcount, client|list, cluster|setslot, hello, set and zscan are likewise the Redis 7.2.4 text. The other nine, hexpire, hexpireat, hexpiretime, hpersist, hpexpire, hpexpireat, hpexpiretime, hpttl and httl, are hash field expiration commands that Valkey lacks and the Redis 7.2.4 release does not define; their summaries and complexity texts are written for Eski, as is the 7.4.0 history line of client|kill, and the smoke test exempts the summary, complexity and history fields of exactly those ten entries from its byte comparison of COMMAND DOCS replies against the reference container, server version 7.4.11, while their argument structures, tokens, versions and categories still follow the reference's observable output. The Redis 7.2.4 release and its archive hash are recorded in the Redis BSD 3-Clause section below. Beyond those, the deprecation flags of cluster|slots and the slowlog family, the argument lists of bgsave, bitcount, client|kill, client|list, cluster|setslot, set, shutdown and zscan, and the key specification notes of georadius, georadiusbymember, xread and xreadgroup follow the reference server's observable COMMAND DOCS and COMMAND INFO output. The summaries of the remaining 352 of those entries are the Valkey 8.1.10 text. The 23 entries added with the vector set and label commands contain no Valkey text. The thirteen vector set entries, VADD, VCARD, VDIM, VEMB, VGETATTR, VINFO, VISMEMBER, VLINKS, VRANDMEMBER, VRANGE, VREM, VSETATTR and VSIM, which src/vsetargs/meta.odin repeats as data, carry summaries written for Eski, and the since versions, group, module name and argument structures of the COMMAND DOCS replies of the reference's vector set module, server 8.10.3 in the image the vector set checks pin, taken by black box comparison and compared byte for byte by test/vectorset with the summary left out, and like the reference's entries they have no ACL categories. The ten entries of the context and label commands, which exist only in Eski, are written for Eski, and the smoke test leaves all 23 entries out of its comparison with the 7.4.11 container.
 
 src/monitor.odin: monitor_emit from replicationFeedMonitors in src/replication.c, cmd_monitor from monitorCommand, monitor_skips and the feed placement from call and monitor_rejects from the replica check of processCommand in src/server.c, monitor_remove from the monitor branch of clearClientConnectionState in src/networking.c, and command_redactions from the redaction in authCommand in src/acl.c, helloCommand in src/networking.c, migrateCommand in src/cluster.c and configSetCommand in src/config.c. src/cmd_connection.odin: the O flag from catClientInfoString in src/networking.c.
 
@@ -1591,6 +1591,56 @@ LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
 ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+## Odin Ed25519 implementation
+
+src/cmd_label.odin verifies the Ed25519 signatures of label tokens with the core:crypto/ed25519 package of the Odin release named in the Odin runtime and standard library section above, so that package is present in every build; proofs/label/arrival_bridge.odin uses it as well. It reaches core:crypto/_edwards25519, core:crypto/sha2 and core:crypto/_subtle, and the field arithmetic of core:crypto/_fiat/field_curve25519/field51.odin and core:crypto/_fiat/field_scalar25519/field64.odin. Those two files state that they are derived primarily from the machine generated Go output of the fiat-crypto project, https://github.com/mit-plv/fiat-crypto , which offers three licences, of which the Odin port chose the BSD 1-Clause License; both carry the first notice below. core:crypto/_subtle/subtle.odin, the constant-time helpers that the group and scalar code calls and that core:crypto itself also imports, carries the second notice. The other files of those packages are under the Odin licence reproduced above.
+
+The BSD 1-Clause License (BSD-1-Clause)
+
+Copyright (c) 2015-2020 the fiat-crypto authors (see the AUTHORS file)
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+    1. Redistributions of source code must retain the above copyright
+       notice, this list of conditions and the following disclaimer.
+
+THIS SOFTWARE IS PROVIDED BY the fiat-crypto authors "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL Berkeley Software Design,
+Inc. BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Copyright (c) 2016 Thomas Pornin <pornin@bolet.org>
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+  1. Redistributions of source code must retain the above copyright
+     notice, this list of conditions and the following disclaimer.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHORS “AS IS” AND ANY EXPRESS OR
+IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## SplitMix64 and xoshiro256** generators
 
