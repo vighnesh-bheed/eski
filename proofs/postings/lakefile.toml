@@ -1,0 +1,11 @@
+name = "eski-postings"
+version = "0.1.0"
+defaultTargets = ["Postings", "postings_model"]
+moreLeanArgs = ["-j1"]
+
+[[lean_lib]]
+name = "Postings"
+
+[[lean_exe]]
+name = "postings_model"
+root = "Main"

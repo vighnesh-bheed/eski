@@ -24,6 +24,15 @@ PROJECTS = {
     'label': {'areas': ['lattice', 'marking', 'interning', 'persistence', 'visibility', 'admission', 'rules', 'counters'],
               'odin_option': True,
               'description': 'Access label lattice, markings, interning, persistence, visibility bitsets, search admission, read and write rules and partitioned counters'},
+    'postings': {'areas': ['svbyte', 'sorted', 'roaring', 'cursors', 'phrases', 'statistics', 'scoring'],
+                 'odin_option': True,
+                 'description': 'Stream VByte codec, sorted-array kernels, Roaring bitmaps and their serialization, cursor algebra, phrase windows, label-partitioned term statistics and ranking formulas'},
+    'text': {'areas': ['classes', 'tokenizer', 'folding', 'stopwords', 'analysis'],
+             'odin_option': True,
+             'description': 'Byte classes, document tokenizer, Unicode 17.0.0 lower-casing and folding, stop-word tables and the analysis position and stem rules'},
+    'query': {'areas': ['lexer', 'parser', 'reference'],
+              'odin_option': True,
+              'description': 'Query lexer and parser fragment for terms, patterns, unions, intersections, negation, optional terms and groups in dialects 1 and 2, checked against recorded reference output'},
 }
 ALLOWED_AXIOMS = {'propext', 'Classical.choice', 'Quot.sound'}
 

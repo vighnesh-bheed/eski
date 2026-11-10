@@ -15,6 +15,8 @@ The vector packages have their own project, [Vectors](vector/README.md), which t
 
 The access labels have their own project, [Labels](label/README.md), which the aggregate runner includes after the vector project. It covers the label lattice, the marking parser and formatter, the label table and its persistence encoding, the visibility bitsets, the accept adapters with a transcription of the filtered search of `src/hnsw`, the read and write rules and the label-partitioned counters in `src/label`. Its receipt also names its areas.
 
+The retrieval leaves have three projects, which the aggregate runner includes after the label project. [Postings](postings/README.md) covers the Stream VByte codec, the sorted-array kernels, the Roaring bitmaps and their serialization, the cursor algebra and phrase windows of `src/postings` and `src/retrieve`, the label-partitioned term statistics and the BM25STD and RRF formulas. [Text](text/README.md) covers the byte classes, the document tokenizer, the Unicode 17.0.0 lower-casing and fold, the stop-word tables and the analysis position and stem rules in `src/text`. [Query](query/README.md) covers a fragment of the `src/ftquery` lexer and parser in dialects 1 and 2 and compares it with recorded reference output. Their receipts name their areas. `src/prefix` is not yet modelled.
+
 ## Recorded coverage
 
 The first phase contains 278 named contract theorems. The complete kernel inventory additionally checks generated declarations. The comparison counts below use different units and should be read by row.
@@ -41,7 +43,7 @@ From the repository root:
 LEAN_BIN_DIR=/absolute/path/lean-4.35.0-linux/bin python3 -I proofs/verify.py --odin /absolute/path/odin
 ```
 
-The aggregate runner verifies projects sequentially: `storage`, `effects`, `encoding`, `bitfield`, `vector` and then `label`. `--odin` puts the named compiler first on the `PATH` every project uses and is passed to the vector and label verifiers, which otherwise find Odin through `ODIN`, `PATH` or `~/odin/current/odin`. Use `--clean` for a fresh rebuild, `--project storage` or `--project bitfield vector` to select projects, `--list` to show the grouping and `--output /absolute/path` to select an artifact directory. Default artifacts remain under ignored `proofs/.build/phase-one/`, with a separate project log and receipt plus an aggregate receipt. The aggregate receipt is produced only after every selected project succeeds and its theorem assumptions, source fingerprints, per-area evidence and executable identities pass validation. The first-phase projects report numbered items and need comparison rows in every area. The vector project reports the named areas `projection`, `quantisation`, `heaps`, `visited`, `graph`, `arena` and `filter`; `filter` is proof only and must report zero comparison rows, and every other area must report some. The label project reports the named areas `lattice`, `marking`, `interning`, `persistence`, `visibility`, `admission`, `rules` and `counters`, and every one must report comparison rows. The aggregate receipt lists the numbered items under `items` and the named areas under `areas`.
+The aggregate runner verifies projects sequentially: `storage`, `effects`, `encoding`, `bitfield`, `vector`, `label`, `postings`, `text` and then `query`. The text project reads the pinned Unicode 17.0.0 `UnicodeData.txt` and `SpecialCasing.txt` from `third_party/unicode/ucd-17.0.0`, as its [instructions](text/README.md) describe. `--odin` puts the named compiler first on the `PATH` every project uses and is passed to the vector, label, postings, text and query verifiers, which otherwise find Odin through `ODIN`, `PATH` or `~/odin/current/odin`. Use `--clean` for a fresh rebuild, `--project storage` or `--project bitfield vector` to select projects, `--list` to show the grouping and `--output /absolute/path` to select an artifact directory. Default artifacts remain under ignored `proofs/.build/phase-one/`, with a separate project log and receipt plus an aggregate receipt. The aggregate receipt is produced only after every selected project succeeds and its theorem assumptions, source fingerprints, per-area evidence and executable identities pass validation. The first-phase projects report numbered items and need comparison rows in every area. The vector project reports the named areas `projection`, `quantisation`, `heaps`, `visited`, `graph`, `arena` and `filter`; `filter` is proof only and must report zero comparison rows, and every other area must report some. The label project reports the named areas `lattice`, `marking`, `interning`, `persistence`, `visibility`, `admission`, `rules` and `counters`, and every one must report comparison rows. The postings project reports `svbyte`, `sorted`, `roaring`, `cursors`, `phrases`, `statistics` and `scoring`, the text project `classes`, `tokenizer`, `folding`, `stopwords` and `analysis`, and the query project `lexer`, `parser` and `reference`; every one must report comparison rows. The aggregate receipt lists the numbered items under `items` and the named areas under `areas`.
 
 ## Vector packages
 
@@ -91,6 +93,72 @@ python3 -I proofs/label/verify.py --lean-bin /absolute/path/lean-4.35.0-linux/bi
 ```
 
 Artifacts and `receipt.json` default to ignored `proofs/label/.build/`; through the aggregate runner they go to `proofs/.build/phase-one/label/`. These checks passed on 6 November 2026 with Lean 4.35.0 and Odin dev-2026-10-nightly:84bc3fc against the sources pinned in [source-sha256.json](label/source-sha256.json), together with the bitfield and vector projects through `proofs/verify.py --project bitfield vector label`.
+
+## Postings and ranking
+
+The postings project contains 286 named contract theorems and 1,400 kernel-checked theorems. Its comparison rows run the Lean model and the actual imported `svbyte`, `sorted`, `roaring`, `postings`, `retrieve`, `termstats`, `label`, `bm25std` and `rrf` procedures on one deterministic case file and check both against independent Python expectations.
+
+| Area | Named theorems | Actual Odin comparison evidence |
+| --- | --- | --- |
+| Stream VByte | 41 | 2,300 rows over 18,777 values: encodes, delta encodes, the incremental writer and decodes of arbitrary byte strings through the reference and the dispatched kernels |
+| Sorted kernels | 29 | 2,700 rows comparing the reference, merge, galloping, dispatched and AVX2 intersections, counts, unions, differences and bound searches |
+| Roaring | 93 | 3,855 rows over arrays, 491 bitsets and 194 run containers, set operations, run optimisation, iteration, serialization and 662 decodes, 409 accepted |
+| Cursors | 36 | 3,420 rows over 1,568 posting lists and 700 query trees with deletions and required field masks |
+| Phrases | 31 | 2,501 window rows and 500 phrase trees, with ordered, unordered and disjoint-position cases |
+| Statistics | 33 | 2,120 rows of term and document operations with 1,296 hidden-partition operations, underflows and visible totals |
+| Scoring | 23 | 4,701 rows of idf, BM25STD terms, query-tree scores, RRF fusion and top-k collection compared bit for bit |
+
+The proofs establish that the codec round-trips and accepts only shortest encodings; that each sorted kernel and each Roaring operation equals its set operation and that Roaring iteration is strictly increasing; that deserialization inverts serialization and returns only well-formed bitmaps, never reads the offset table and re-encodes the non-canonical inputs it accepts to a stable form; that the cursor drains produce exactly the intersection, union and difference without repeats; that the ordered phrase window is exact and the unordered sweep is sound, and complete only when the lists share no position; that visible term statistics are sums over visible label partitions and do not change when only hidden partitions change, except that an addition can be refused at the u64 ceiling of the shared total because of hidden counts; and that BM25STD and RRF have the stated monotonicity and bounds over rationals. Floating-point results, the block codec, the SIMD kernels and the cost ordering are compared, not proved.
+
+From the repository root:
+
+```sh
+python3 -I proofs/postings/verify.py --lean-bin /absolute/path/lean-4.35.0-linux/bin --odin /absolute/path/odin
+```
+
+Artifacts and `receipt.json` default to ignored `proofs/postings/.build/`; through the aggregate runner they go to `proofs/.build/phase-one/postings/`. These checks passed on 7 November 2026 with Lean 4.35.0 and Odin dev-2026-10-nightly:84bc3fc against the sources pinned in [source-sha256.json](postings/source-sha256.json).
+
+## Text analysis
+
+The text project contains 74 named contract theorems and 253 kernel-checked theorems. Its comparison rows run the Lean model and the actual imported `text` and `stem_english` procedures on one deterministic case file and check both against independent Python expectations that read the Unicode files themselves.
+
+| Area | Named theorems | Actual Odin comparison evidence |
+| --- | --- | --- |
+| Byte classes | 6 | All 256 bytes of the class table and the control test |
+| Tokenizer | 12 | 3,029 sources with separators, removed and escaped bytes, NUL, high bytes and UTF-8, printing every token with its offsets and tail |
+| Folding | 14 | 4,506 folds including every mapped code point and tails that complete a sequence, 8,192 table rows covering all 2^21 code points, 1,514 encoder round trips and 1,010 trie forms |
+| Stop words | 24 | 99 tables, default, empty and custom with duplicates, case variants, empty and long words, printing every slot, and 2,250 lookups and query drops |
+| Analysis | 18 | 4,913 English stems against the vendored Snowball list and 2,459 analyses with no stemmer, the English stemmer and a stand-in, over every stop-word table |
+
+The proofs establish the separator, removal, end and escape rules over all bytes; that the tokenizer's texts are exactly the non-empty pieces of a simple splitting specification and contain no control bytes; that the UTF-8 encoder and decoder are inverse on scalar values and the fold is the encoded lower-case sequence of the decoded units, with the ASCII path and the NUL stop exact; that the stop-word table holds exactly the sorted, de-duplicated folded words and never answers yes for a non-member, with the default list proved complete; and that analysis numbers kept words consecutively from the field base, skips stop words only when their folded form is non-empty, and adds a `+` stem term at the word's position exactly when the folded term has at least the minimum length and the stem differs. The lower-casing table against Unicode 17.0.0 and Porter2 are compared, not proved.
+
+From the repository root:
+
+```sh
+python3 -I proofs/text/verify.py --lean-bin /absolute/path/lean-4.35.0-linux/bin --odin /absolute/path/odin
+```
+
+Artifacts and `receipt.json` default to ignored `proofs/text/.build/`; through the aggregate runner they go to `proofs/.build/phase-one/text/`. These checks passed on 7 November 2026 with Lean 4.35.0 and Odin dev-2026-10-nightly:84bc3fc against the sources pinned in [source-sha256.json](text/source-sha256.json).
+
+## Query parser
+
+The query project contains 54 named contract theorems and 231 kernel-checked theorems. Its comparison rows run the Lean model and the actual imported `ftquery` lexer, parser and EXPLAIN printer on one deterministic case file and check both against independent Python expectations and, for recorded cases, against the reference output recorded in the package's test data.
+
+| Area | Named theorems | Actual Odin comparison evidence |
+| --- | --- | --- |
+| Lexer | 9 | 1,028 token streams with kinds, offsets, texts and near texts |
+| Parser | 22 | 8,780 parses of 4,001 generated queries in dialects 1 to 3, including syntax errors with their offsets |
+| Reference | 23 | 191 recorded reference cases in the fragment, reproduced by the Python model, the Lean model and the Odin parser |
+
+The proofs establish that the node constructors denote conjunction, disjunction and complement of their operands, with null as identity, in both dialects, including the dialect 2 right merge; that every token stream ends with one closing token; the binding-power facts that decide precedence in each dialect; and 23 evaluated parses that fix the dialect differences, the pattern binding, stop-word removal and the error offsets. The rest of the grammar, the stack limits and the stem expansion are outside the fragment.
+
+From the repository root:
+
+```sh
+python3 -I proofs/query/verify.py --lean-bin /absolute/path/lean-4.35.0-linux/bin --odin /absolute/path/odin
+```
+
+Artifacts and `receipt.json` default to ignored `proofs/query/.build/`; through the aggregate runner they go to `proofs/.build/phase-one/query/`. These checks passed on 7 November 2026 with Lean 4.35.0 and Odin dev-2026-10-nightly:84bc3fc against the sources pinned in [source-sha256.json](query/source-sha256.json).
 
 ## Audit coverage
 

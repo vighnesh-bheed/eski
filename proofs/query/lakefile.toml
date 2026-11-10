@@ -1,0 +1,11 @@
+name = "eski-query"
+version = "0.1.0"
+defaultTargets = ["Queries", "query_model"]
+moreLeanArgs = ["-j1"]
+
+[[lean_lib]]
+name = "Queries"
+
+[[lean_exe]]
+name = "query_model"
+root = "Main"

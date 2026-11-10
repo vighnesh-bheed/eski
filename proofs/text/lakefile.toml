@@ -1,0 +1,11 @@
+name = "eski-text"
+version = "0.1.0"
+defaultTargets = ["Texts", "text_model"]
+moreLeanArgs = ["-j1"]
+
+[[lean_lib]]
+name = "Texts"
+
+[[lean_exe]]
+name = "text_model"
+root = "Main"

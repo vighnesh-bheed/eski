@@ -1,0 +1,59 @@
+import Queries.Tree
+import Queries.Lexer
+import Queries.Parser
+import Queries.Facts
+
+#print axioms Queries.denAll_append
+#print axioms Queries.denAny_append
+#print axioms Queries.mkAnd_null_left
+#print axioms Queries.mkAnd_null_right
+#print axioms Queries.mkOr_null_left
+#print axioms Queries.mkOr_null_right
+#print axioms Queries.mkAnd_den
+#print axioms Queries.mkOr_den
+#print axioms Queries.mkNot_den
+#print axioms Queries.mkNot_null
+#print axioms Queries.mkOpt_den
+#print axioms Queries.mkAnd_ne_null
+#print axioms Queries.mkOr_ne_null
+#print axioms Queries.mkAnd_left_flat
+#print axioms Queries.mkAnd_right_merge_two
+#print axioms Queries.mkAnd_right_nested_one
+#print axioms Queries.mkOr_right_merge_two
+#print axioms Queries.isLower_pos
+#print axioms Queries.starStep_emit
+#print axioms Queries.wordStep_emit
+#print axioms Queries.lexStep_emit
+#print axioms Queries.lexStep_stop
+#print axioms Queries.lexAux_last
+#print axioms Queries.lexAux_ne_nil
+#print axioms Queries.lexAux_body
+#print axioms Queries.lex_shape
+#print axioms Queries.rulePower_none
+#print axioms Queries.or_weakest_two
+#print axioms Queries.or_strongest_one
+#print axioms Queries.patterns_bind_tighter_two
+#print axioms Queries.negation_scope_one
+#print axioms Queries.minus_groups_one
+#print axioms Queries.minus_binds_term_two
+#print axioms Queries.tilde_groups_one
+#print axioms Queries.tilde_binds_term_two
+#print axioms Queries.or_below_and_one
+#print axioms Queries.or_below_and_two
+#print axioms Queries.or_chain_flat_one
+#print axioms Queries.or_chain_flat_two
+#print axioms Queries.group_nested_one
+#print axioms Queries.group_merged_two
+#print axioms Queries.prefix_inside_negation_two
+#print axioms Queries.stop_word_empty
+#print axioms Queries.stop_word_dropped_one
+#print axioms Queries.stop_word_dropped_two
+#print axioms Queries.double_negation
+#print axioms Queries.negated_group
+#print axioms Queries.patterns_merge_two
+#print axioms Queries.patterns_append_one
+#print axioms Queries.empty_query
+#print axioms Queries.open_group_error
+#print axioms Queries.close_group_error
+#print axioms Queries.dangling_or_error
+#print axioms Queries.bare_star_unsupported

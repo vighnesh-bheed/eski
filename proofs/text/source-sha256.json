@@ -1,0 +1,13 @@
+{
+  "src/text/classes.odin": "85cc7c8e375c546c724eb6e56c81b9fd0797120943bef2407b55875675ab00df",
+  "src/text/tokenize.odin": "2ff579ca0d4d6b5d94eb9369022d6d4ceb29fd6cbfb2f2fdf4a05e5afa891cc7",
+  "src/text/fold.odin": "e57bd2780118fd5fab6ac1a71ecd66cef30301bdf07fd11ecfe93335b193876e",
+  "src/text/lower_table.odin": "be2d2d1d1cf0889102e21afe8f723df37340cf3e27f5b9c6e80085e8550e2a5b",
+  "src/text/stopwords.odin": "ea7a0f9509375c891991c8b0afc0f0b6df6879110708e7026cf3b0ef84dc5bc1",
+  "src/text/analyze.odin": "7772940d4d719bd3d2852983c02312298bbb18d85faa6557ce6513b3e579c6bb",
+  "src/text/text.odin": "b647a97917c1fc6f3d48b28e1dd47971c27825797f4029171bbf6d250b8198b2",
+  "src/text/language.odin": "a0c9cedeea4dba7226f218843aab97da6698d97cac15dc2168db025283518834",
+  "src/stem_english/stem.odin": "1361bd9bff9f125294c6d14bd20da57de53607e3e55d0063d9dee9828d27af22",
+  "src/stem_english/testdata/voc.txt": "fe09ef577f1c8e4872b79a4f6995e62d782bbdbcda03f65a5ddd3e07b8b0044f",
+  "src/stem_english/testdata/output.txt": "50db3ba9d30f828d40734cb00a0ea459bb2a607e0678aab30538f2c67d568c77"
+}
