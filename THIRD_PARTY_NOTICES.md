@@ -1510,3 +1510,22 @@ the lack of copyright legally problematic, you have too many
 lawyers.
 
 As usual, this software is provided "as is", without any warranty.
+
+## SplitMix64 and xoshiro256** generators
+
+Several Eski procedures draw pseudorandom numbers or mix hash values with the SplitMix64 generator of Guy L. Steele Jr., Doug Lea and Christine H. Flood, "Fast Splittable Pseudorandom Number Generators", OOPSLA 2014, in the form of Sebastiano Vigna's reference program, https://prng.di.unimi.it/splitmix.c : a state advanced by 0x9E3779B97F4A7C15 and an output function with the multipliers 0xBF58476D1CE4E5B9 and 0x94D049BB133111EB and the shifts 30, 27 and 31. In the vector set code this is splitmix64 in src/vmath/project.odin; earlier code uses the same generator in src/settype/table.odin, src/memcached.odin, src/memory.odin, src/hll/selftest.odin, src/hdr/model_test.odin and the generators under test. rng_seed and rng_next in src/vmath/project.odin implement xoshiro256** of David Blackman and Sebastiano Vigna, "Scrambled Linear Pseudorandom Number Generators", ACM Transactions on Mathematical Software 47(4), 2021, following its reference program, https://prng.di.unimi.it/xoshiro256starstar.c , seeded through SplitMix64, and rng_gaussian draws normal variates from it with the polar method of Marsaglia and Bray, 1964. Both reference programs carry the terms below, the first written in 2015 by Sebastiano Vigna and the second in 2018 by David Blackman and Sebastiano Vigna.
+
+To the extent possible under law, the author has dedicated all copyright
+and related and neighboring rights to this software to the public domain
+worldwide.
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR
+IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
