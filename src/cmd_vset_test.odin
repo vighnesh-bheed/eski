@@ -1,8 +1,10 @@
 package main
 
 import "base:runtime"
+import "core:fmt"
 import "core:strings"
 import "core:testing"
+import ow "owner"
 import "rdb"
 import va "vsetargs"
 import vt "vsettype"
@@ -108,7 +110,8 @@ vt_args_equal :: proc(a: []va.Cmd_Arg, b: []Cmd_Arg) -> bool {
 vset_module_type_id_names_eski :: proc(t: ^testing.T) {
 	name: [9]u8
 	testing.expect_value(t, rdb.module_name_by_id(VSET_RDB_MODULE_ID, &name), VSET_RDB_TYPE_NAME)
-	testing.expect_value(t, VSET_RDB_MODULE_ID & 1023, u64(1))
+	testing.expect_value(t, VSET_RDB_MODULE_ID & 1023, u64(2))
+	testing.expect_value(t, VSET_RDB_MODULE_ID_V1 & 1023, u64(1))
 	reference: [9]u8
 	testing.expect_value(t, rdb.module_name_by_id(0xbde72da2bb1eb400, &reference), "vectorset")
 	testing.expect(t, VSET_RDB_MODULE_ID != 0xbde72da2bb1eb400)
@@ -440,4 +443,229 @@ vset_vlinks_lists_twins_on_small_sets :: proc(t: ^testing.T) {
 			}
 		}
 	}
+}
+
+@(private = "file")
+vt_payload :: proc(t: ^Vset_Test, key: string) -> []u8 {
+	dumped := vt_run(t, cmd_dump, "DUMP", key)
+	whole := vt_bulk(dumped)
+	at := strings.index(string(whole), "EVS")
+	if at < 0 {
+		return nil
+	}
+	return whole[at:len(whole) - 1 - VSET_DUMP_TRAILER]
+}
+
+@(private = "file")
+vt_fill :: proc(t: ^Vset_Test, key: string, n: int) {
+	for i in 0 ..< n {
+		a := f32(i % 7) / 7
+		b := f32(i % 5) / 5
+		vt_run(t, cmd_vadd, "VADD", key, "VALUES", "3", fmt.tprintf("%f", a), fmt.tprintf("%f", b), fmt.tprintf("%d", i), fmt.tprintf("e%d", i))
+	}
+}
+
+@(test)
+vset_restore_is_refused_only_when_its_reservation_exceeds_a_limit :: proc(t: ^testing.T) {
+	v: Vset_Test
+	vt_open(&v)
+	defer vt_close(&v)
+	vt_fill(&v, "a", 120)
+	payload := vt_payload(&v, "a")
+	need := vt.payload_reserve(payload)
+	testing.expect(t, len(payload) > 100 && need > len(payload))
+	kept_limit := maxmemory_bytes
+	kept_on := owners_on
+	kept_owner := access.owner
+	kept_entry := access.owner_entry
+	defer {
+		maxmemory_bytes = kept_limit
+		owners_on = kept_on
+		access.owner = kept_owner
+		access.owner_entry = kept_entry
+	}
+	maxmemory_bytes = 0
+	testing.expect_value(t, vset_restore_refused(payload), "")
+	maxmemory_bytes = u64(need)
+	testing.expect_value(t, vset_restore_refused(payload), "")
+	maxmemory_bytes = u64(need) - 1
+	testing.expect_value(t, vset_restore_refused(payload), ERR_OOM)
+	s, err := vset_payload_decode(payload, VSET_RDB_MODULE_ID)
+	testing.expect_value(t, err, vt.Decode_Error.Too_Large)
+	testing.expect(t, s == nil)
+	testing.expect_value(t, vset_restore_refusal, ERR_OOM)
+	pst.loading = true
+	testing.expect_value(t, vset_restore_refused(payload), "")
+	s, err = vset_payload_decode(payload, VSET_RDB_MODULE_ID)
+	testing.expect_value(t, err, vt.Decode_Error.None)
+	testing.expect_value(t, vset_restore_refusal, "")
+	if s != nil {
+		vt.destroy(s)
+	}
+	pst.loading = false
+	aof.loading = true
+	testing.expect_value(t, vset_restore_refused(payload), "")
+	aof.loading = false
+	maxmemory_bytes = 0
+	s, err = vset_payload_decode(payload, VSET_RDB_MODULE_ID)
+	testing.expect_value(t, err, vt.Decode_Error.None)
+	testing.expect_value(t, vset_restore_refusal, "")
+	if s != nil {
+		vt.destroy(s)
+	}
+	entry: Owner_Entry
+	entry.keyspace.quota_set = true
+	entry.keyspace.quota = i64(need) - 1
+	owners_on = true
+	access.owner = ow.Owner(7)
+	access.owner_entry = &entry
+	testing.expect_value(t, vset_restore_refused(payload), ERR_OWNER_QUOTA_OOM)
+	s, err = vset_payload_decode(payload, VSET_RDB_MODULE_ID)
+	testing.expect_value(t, err, vt.Decode_Error.Too_Large)
+	testing.expect_value(t, vset_restore_refusal, ERR_OWNER_QUOTA_OOM)
+	entry.keyspace.quota = i64(need)
+	testing.expect_value(t, vset_restore_refused(payload), "")
+	entry.keyspace.quota = 0
+	testing.expect_value(t, vset_restore_refused(payload), "")
+	access.owner = ow.SHARED
+	entry.keyspace.quota = 1
+	testing.expect_value(t, vset_restore_refused(payload), "")
+	vset_restore_refusal = ""
+}
+
+@(test)
+vset_restore_of_a_payload_within_the_limits_succeeds_at_the_memory_limit :: proc(t: ^testing.T) {
+	v: Vset_Test
+	vt_open(&v)
+	defer vt_close(&v)
+	vt_fill(&v, "a", 120)
+	payload := vt_payload(&v, "a")
+	whole := vt_bulk(vt_run(&v, cmd_dump, "DUMP", "a"))
+	need := vt.payload_reserve(payload)
+	vt_fill(&v, "pad", 600)
+	kept_limit := maxmemory_bytes
+	defer maxmemory_bytes = kept_limit
+	maxmemory_bytes = u64(need) + 1
+	testing.expectf(t, db_used_memory > int(maxmemory_bytes), "the server is past its limit: %d used, %d allowed", db_used_memory, maxmemory_bytes)
+	restore := vt_args("RESTORE", "b", "0", "")
+	restore[3] = whole
+	testing.expect_value(t, vt_call(&v, cmd_restore, restore), "+OK\r\n")
+	testing.expect_value(t, vt_run(&v, cmd_vcard, "VCARD", "b"), ":120\r\n")
+}
+
+@(test)
+vset_payload_must_be_a_plain_string_inside_the_module_value :: proc(t: ^testing.T) {
+	v: Vset_Test
+	vt_open(&v)
+	defer vt_close(&v)
+	vt_fill(&v, "a", 60)
+	payload := vt_payload(&v, "a")
+	forms := [3]string{"plain", "compressed", "integer"}
+	for form in 0 ..< 3 {
+		w: rdb.Writer
+		rdb.writer_init_mem(&w, form == 1, false)
+		rdb.put_len(&w, VSET_MODULE_OPCODE_STRING)
+		body := payload
+		switch form {
+		case 0:
+			rdb.put_len(&w, u64(len(body)))
+			rdb.put_raw(&w, body)
+		case 1:
+			zeros := make([]u8, 4000, context.temp_allocator)
+			rdb.put_string(&w, zeros)
+		case 2:
+			rdb.put_string(&w, transmute([]u8)string("1234"))
+		}
+		r: rdb.Reader
+		rdb.reader_init_mem(&r, rdb.writer_bytes(&w), false)
+		data, good := vset_rdb_value(&r)
+		if form == 0 {
+			testing.expect(t, good && string(data) == string(payload))
+		} else {
+			testing.expectf(t, !good, "%s: the string is refused", forms[form])
+			testing.expectf(t, strings.contains(rdb.reader_reason(&r), "plain string"), "%s: the reason is %q", forms[form], rdb.reader_reason(&r))
+		}
+		rdb.reader_destroy(&r)
+		rdb.writer_destroy(&w)
+	}
+}
+
+@(test)
+vset_seed_is_drawn_only_when_a_graph_is_rebuilt :: proc(t: ^testing.T) {
+	v: Vset_Test
+	vt_open(&v)
+	defer vt_close(&v)
+	vt_fill(&v, "a", 60)
+	current := vt_payload(&v, "a")
+	old, _ := vt.serialize_v1_bytes(vt_set("a"))
+	defer delete(old)
+	kept, held := vset_seed_get()
+	defer if held {
+		vset_seed_put(kept)
+	} else {
+		vset_seed_clear()
+	}
+	vset_seed_clear()
+	_, err := vset_payload_decode(old[:len(old) / 2], VSET_RDB_MODULE_ID_V1)
+	testing.expect(t, err != .None)
+	_, drawn := vset_seed_get()
+	testing.expect(t, !drawn, "a refused payload draws no seed")
+	trailing := make([]u8, len(old) + 1, context.temp_allocator)
+	copy(trailing, old)
+	_, err = vset_payload_decode(trailing, VSET_RDB_MODULE_ID_V1)
+	testing.expect(t, err != .None)
+	_, drawn = vset_seed_get()
+	testing.expect(t, !drawn, "a payload refused after its elements were read draws no seed")
+	s, derr := vset_payload_decode(current, VSET_RDB_MODULE_ID)
+	testing.expect_value(t, derr, vt.Decode_Error.None)
+	if s != nil {
+		vt.destroy(s)
+	}
+	_, drawn = vset_seed_get()
+	testing.expect(t, !drawn, "a payload that carries its graph draws no seed")
+	s, derr = vset_payload_decode(old, VSET_RDB_MODULE_ID_V1)
+	testing.expect_value(t, derr, vt.Decode_Error.None)
+	if s != nil {
+		vt.destroy(s)
+	}
+	_, drawn = vset_seed_get()
+	testing.expect(t, drawn, "a payload whose graph is rebuilt draws the seed")
+}
+
+@(test)
+vset_dataset_seed_follows_the_stream_seed_setting :: proc(t: ^testing.T) {
+	v: Vset_Test
+	vt_open(&v)
+	defer vt_close(&v)
+	kept_seed, kept_held := vset_seed_get()
+	kept_setting := label_stream_seed
+	defer {
+		label_stream_seed = kept_setting
+		if kept_held {
+			vset_seed_put(kept_seed)
+		} else {
+			vset_seed_clear()
+		}
+	}
+	key := transmute([]u8)string("graphs")
+	label_stream_seed = 77
+	vset_seed_clear()
+	first := vset_seed_current()
+	first_creation := vset_plain_seed(key)
+	vset_seed_clear()
+	second := vset_seed_current()
+	testing.expect(t, first != 0 && first == second, "the same setting gives the same dataset seed")
+	testing.expect_value(t, vset_plain_seed(key), first_creation)
+	label_stream_seed = 78
+	vset_seed_clear()
+	testing.expect(t, vset_seed_current() != first, "another setting gives another dataset seed")
+	label_stream_seed = 77
+	vset_seed_put(5)
+	testing.expect_value(t, vset_seed_current(), u64(5))
+	label_stream_seed = 0
+	vset_seed_clear()
+	a := vset_seed_current()
+	vset_seed_clear()
+	b := vset_seed_current()
+	testing.expect(t, a != 0 && b != 0 && a != b, "without the setting each draw is random")
 }

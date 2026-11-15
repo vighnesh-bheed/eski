@@ -252,14 +252,14 @@ theorem indexInv_step (ops : PartOps N V P) (names : P → List N) (laws : NameL
           exact indexInv_insert names s inv _ n _ hm (Or.inl ⟨p, hp, laws.insert p n v⟩)
         · rename_i hp
           have h := indexInv_insert names s inv c.label n
-            (ops.insert (ops.create (ops.output (ops.advance (s.stream c.label)))) n v) hm
+            (ops.insert (ops.create ops.seed) n v) hm
             (Or.inr ⟨hp, by
-              have := laws.insert (ops.create (ops.output (ops.advance (s.stream c.label)))) n v
+              have := laws.insert (ops.create ops.seed) n v
               rw [laws.create] at this
               simpa using this⟩)
           apply indexInv_congr names _ _ _ _ h
-          · funext l; simp [setIndex, setPart, setStream]
-          · funext m; simp [setIndex, setPart, setStream]
+          · funext l; simp [setIndex, setPart]
+          · funext m; simp [setIndex, setPart]
   | set n v =>
     simp only
     by_cases hm : c.label ∈ s.index n

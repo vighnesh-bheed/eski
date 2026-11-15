@@ -1205,6 +1205,7 @@ class OKeys(Keys):
         self.login = 'any'
         self.tx = None
         self.quotas = set()
+        self.forgets = 0
 
     def sees(self, r, d):
         return osees(r, d)
@@ -1433,7 +1434,9 @@ class OKeys(Keys):
                 if not cs:
                     del self.names[dd][name]
         self.note('forgot')
-        return re.compile(re.escape(f'E|*6^$4^keys^:{n}^$8^elements^:0^$5^bytes^:') + r'\d+\^')
+        self.forgets += 1
+        return re.compile(re.escape(f'E|*8^$4^keys^:{n}^$8^elements^:0^$5^bytes^:') + r'\d+\^' +
+                          re.escape(f'$8^sequence^:{self.forgets}^'))
 
     def c_config(self, d, W, *args):
         return OK
@@ -2439,6 +2442,14 @@ def owner_mutants():
                         del m.ever[d][o]
         m.tidy = tidy
 
+    def forget_reply_without_sequence(m):
+        original = m.c_forget
+
+        def c_forget(d, W, o):
+            original(d, W, o)
+            return re.compile(r'E\|\*6\^.*')
+        m.c_forget = c_forget
+
     def declassify_element_leaves_target(m):
         original = m.decl_element
 
@@ -2452,7 +2463,7 @@ def owner_mutants():
                                     inuse_names_other_owner, forget_leaves_copy, forget_touches_other_owner,
                                     scan_counts_other_owner, dbsize_counts_other_owner, randomkey_other_owner,
                                     label_quota_across_owners, flush_naming_ignored, list_dropped_with_last_partition,
-                                    declassify_element_leaves_target)}
+                                    declassify_element_leaves_target, forget_reply_without_sequence)}
 
 
 def osimulate_with(items, expect, mutant):

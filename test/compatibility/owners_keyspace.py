@@ -19,6 +19,7 @@ OPERATOR = ('on', 'nopass', '~*', '&*', '+@all', 'clearance:*', 'trust:*', 'owne
 WRONGTYPE = 'WRONGTYPE Operation against a key holding the wrong kind of value'
 TOP_ERROR = 'ERR this command needs a label that dominates the whole label scheme'
 QUOTA_OOM = "OOM command not allowed when used memory > 'owner-quota'."
+LABEL_QUOTA_OOM = "OOM command not allowed when used memory > 'label-quota'."
 PARTITION_LIMIT = 'ERR owner partition limit reached'
 SHARED = ''
 LEVELS = {'U': 0, 'C': 1, 'S': 2}
@@ -1495,7 +1496,7 @@ class NonInterference(unittest.TestCase):
 
     def run_world(self, seed, interleave):
         arguments = ('--keyspace-threads', str(KEYSPACE_THREADS), '--memcached-port', '0', '--owners', 'yes', '--label-stream-seed', '5',
-                     '--lfu-log-factor', '0') + SCHEME
+                     '--lfu-log-factor', '0', '--lfu-decay-time', '0') + SCHEME
         server = Server(BINARY, workers=0, arguments=arguments)
         server.start()
         try:
@@ -1569,6 +1570,222 @@ class NonInterference(unittest.TestCase):
             finally:
                 server.close()
         self.assertNotEqual(world(False), world(True))
+
+
+class VectorOwnerCharges(unittest.TestCase):
+    PROBES = 80
+
+    def start(self, extra=()):
+        arguments = ('--keyspace-threads', str(KEYSPACE_THREADS), '--memcached-port', '0', '--owners', 'yes', '--label-stream-seed', '91') + SCHEME + tuple(extra)
+        server = Server(BINARY, workers=0, arguments=arguments)
+        server.start()
+        c = Client(server.port)
+        c.call('ACL', 'SETUSER', 'default', *OPERATOR)
+        return server, c
+
+    def call(self, c, label, owner, *arguments):
+        c.send(*prefix(label, owner), *arguments)
+        value = c.reply()
+        return str(value) if isinstance(value, ServerError) else value
+
+    def bytes_of(self, c, owner):
+        value = self.call(c, 'S//A/B', SHARED, 'OWNERS', 'INFO', owner)
+        return dict(zip(value[0::2], value[1::2]))[b'bytes']
+
+    def world(self, plan):
+        server, c = self.start()
+        try:
+            rng = random.Random(3)
+
+            def vector():
+                return ['%.3f' % rng.uniform(-1, 1) for _ in range(3)]
+
+            def other(label, owner, count, tag):
+                for i in range(count):
+                    self.call(c, label, owner, 'VADD', 'k', 'VALUES', 3, *vector(), '%s-other-element-%04d' % (tag, i))
+
+            mine = [vector() for _ in range(60)]
+            if 'before' in plan:
+                other('C', 'u2', 40, 'b')
+                other('S', SHARED, 10, 's')
+            for i, x in enumerate(mine):
+                self.call(c, 'C', 'u1', 'VADD', 'k', 'VALUES', 3, *x, 'mine-%s-%d' % ('n' * (i % 23), i), 'SETATTR', '{"pad":"%s"}' % ('p' * (i * 7 % 61)))
+                if 'interleaved' in plan:
+                    other('C', 'u7', 1 + i % 3, 'i%d' % i)
+                if 'between' in plan and i == 5:
+                    other('C', 'u3', 25, 'm')
+                    other('S//A', 'u3', 15, 'h')
+            if 'after' in plan:
+                other('C', 'u2', 300, 'a')
+                other('C', SHARED, 30, 'c')
+            if 'removed' in plan:
+                other('C', 'u4', 30, 'r')
+                for i in range(30):
+                    self.call(c, 'C', 'u4', 'VREM', 'k', 'r-other-element-%04d' % i)
+            if 'forgotten' in plan:
+                other('C', 'u5', 30, 'f')
+                self.call(c, 'S//A/B', SHARED, 'OWNERS', 'FORGET', 'u5')
+            if 'expired' in plan:
+                other('C', 'u6', 20, 'e')
+                self.call(c, 'C', 'u6', 'PEXPIRE', 'k', 30)
+                time.sleep(0.2)
+                self.call(c, 'C', 'u6', 'EXISTS', 'k')
+            used = self.bytes_of(c, 'u1')
+            memory = self.call(c, 'C', 'u1', 'MEMORY', 'USAGE', 'k')
+            self.call(c, 'C', 'u1', 'VREM', 'k', 'mine-nnn-3')
+            self.call(c, 'C', 'u1', 'VADD', 'k', 'VALUES', 3, *mine[3], 'mine-nnn-3', 'SETATTR', '{"a":1}')
+            after_writes = self.bytes_of(c, 'u1')
+            self.call(c, 'S//A/B', SHARED, 'OWNERS', 'QUOTA', 'u1', 'LIMIT', after_writes + 3000)
+            replies = [self.call(c, 'C', 'u1', 'SET', 'probe%d' % i, 'x' * 100) for i in range(self.PROBES)]
+            c.close()
+            return used, memory, after_writes, replies
+        finally:
+            server.close()
+
+    def test_other_users_and_hidden_labels_leave_a_user_quota_alone(self):
+        quiet = self.world(())
+        self.assertIn('OK', quiet[3])
+        self.assertIn(QUOTA_OOM, quiet[3])
+        for plan in (('before',), ('between',), ('interleaved',), ('after',), ('removed',), ('forgotten',), ('expired',), ('before', 'between', 'interleaved', 'after', 'removed', 'forgotten', 'expired')):
+            self.assertEqual(self.world(plan), quiet, plan)
+
+    def eviction_world(self, hidden, over):
+        server, c = self.start(('--maxmemory-policy', 'volatile-ttl', '--maxmemory-samples', '64'))
+        try:
+            rng = random.Random(4)
+
+            def vector():
+                return ['%.3f' % rng.uniform(-1, 1) for _ in range(3)]
+
+            for i in range(10):
+                self.call(c, 'C', SHARED, 'VADD', 'k', 'VALUES', 3, *vector(), 'low%d' % i)
+            self.call(c, 'C', SHARED, 'PEXPIRE', 'k', 100000000)
+            for i in range(8):
+                self.call(c, 'C', SHARED, 'VADD', 'one%d' % i, 'VALUES', 3, *vector(), 'e')
+                self.call(c, 'C', SHARED, 'PEXPIRE', 'one%d' % i, 200000000 + i * 10000000)
+            for i in range(6):
+                self.call(c, 'C', SHARED, 'SET', 's%d' % i, 'v' * 200, 'PX', 400000000 + i * 10000000)
+            if hidden:
+                side = random.Random(9)
+
+                def aside():
+                    return ['%.3f' % side.uniform(-1, 1) for _ in range(3)]
+
+                for i in range(3):
+                    self.assertEqual(self.call(c, 'C', 'u1', 'VADD', 'k', 'VALUES', 3, *aside(), 'mine%d' % i), 1)
+                    self.assertEqual(self.call(c, 'S', SHARED, 'VADD', 'k', 'VALUES', 3, *aside(), 'high%d' % i), 1)
+                for i in range(0, 8, 2):
+                    self.assertEqual(self.call(c, 'C', 'u2', 'VADD', 'one%d' % i, 'VALUES', 3, *aside(), 'theirs'), 1)
+            use = self.call(c, 'S//A/B', SHARED, 'LABEL', 'QUOTA', 'C')[1]
+            self.call(c, 'S//A/B', SHARED, 'LABEL', 'QUOTA', 'C', 'LIMIT', max(1, use - over))
+            replies = [self.call(c, 'C', SHARED, 'SET', 'probe', 'x') for _ in range(3)]
+            keys = sorted(self.call(c, 'C', SHARED, 'KEYS', '*'))
+            left = self.call(c, 'S//A/B', SHARED, 'LABEL', 'QUOTA', 'C')[1]
+            c.close()
+            return use, replies, keys, left
+        finally:
+            server.close()
+
+    def test_label_quota_eviction_ignores_users_and_hidden_labels(self):
+        seen = set()
+        for over in (400, 1200, 2400, 4000, 7000, 12000, 400000):
+            quiet = self.eviction_world(False, over)
+            self.assertEqual(self.eviction_world(True, over), quiet, over)
+            use, replies, keys, left = quiet
+            seen.add(len(keys))
+            if any(reply != 'OK' for reply in replies):
+                self.assertEqual(replies, [LABEL_QUOTA_OOM] * 3, over)
+                self.assertEqual(keys, [], over)
+            else:
+                self.assertLessEqual(left, use - over + 600, over)
+                self.assertIn(b'probe', keys, over)
+        self.assertGreater(len(seen), 3, seen)
+
+    def test_users_who_leave_give_back_their_room_in_a_set(self):
+        server, c = self.start(('--appendonly', 'yes'))
+        try:
+            rng = random.Random(12)
+            users = ['u%03d' % i for i in range(400)]
+            self.assertEqual(self.call(c, 'C', SHARED, 'VADD', 'k', 'VALUES', 3, '0', '1', '0', 'shared'), 1)
+            for user in users:
+                self.assertEqual(self.call(c, 'C', user, 'VADD', 'k', 'VALUES', 3, *['%.3f' % rng.uniform(-1, 1) for _ in range(3)], 'e'), 1)
+            survivor = users[-1]
+            held = [c]
+            for i in range(30):
+                self.call(c, 'C', survivor, 'VADD', 'k', 'VALUES', 3, *['%.3f' % rng.uniform(-1, 1) for _ in range(3)], 'x%d' % i)
+            self.call(c, 'S', survivor, 'VADD', 'k', 'VALUES', 3, '1', '0', '0', 'x3')
+
+            def reads():
+                c = held[0]
+                return (self.call(c, 'C', survivor, 'MEMORY', 'USAGE', 'k'), self.bytes_of(c, survivor),
+                        self.call(c, 'C', survivor, 'VCARD', 'k'), self.call(c, 'S', survivor, 'VCARD', 'k'),
+                        self.call(c, 'C', survivor, 'VSIM', 'k', 'ELE', 'x7', 'COUNT', 8),
+                        self.call(c, 'S', survivor, 'VSIM', 'k', 'VALUES', 3, '1', '0', '0', 'COUNT', 8, 'WITHSCORES'),
+                        self.call(c, 'C', survivor, 'VLINKS', 'k', 'x7'),
+                        sorted(self.call(c, 'S', survivor, 'VRANGE', 'k', '-', '+', -1)))
+            before = reads()
+            for count, user in enumerate(users[:-1]):
+                self.assertEqual(self.call(c, 'C', user, 'VREM', 'k', 'e'), 1)
+                if count % 100 == 99:
+                    self.assertEqual(reads(), before, count)
+            self.assertEqual(reads(), before)
+            self.assertEqual(self.call(c, 'C', survivor, 'VREM', 'k', 'x3'), 1)
+            self.assertEqual(self.call(c, 'S', survivor, 'VCARD', 'k'), 31)
+            self.call(c, 'C', survivor, 'VADD', 'k', 'VALUES', 3, '1', '0', '0', 'x3')
+            after = reads()
+            self.assertEqual(after[0:4], before[0:4])
+            self.assertEqual(self.call(c, 'S//A/B', SHARED, 'DEBUG', 'LOADAOF'), 'OK')
+            self.assertEqual(reads(), after)
+            self.assertEqual(self.call(c, 'S//A/B', SHARED, 'DEBUG', 'RELOAD'), 'OK')
+            self.assertEqual(reads(), after)
+            c.close()
+            server.stop()
+            server.start()
+            c = Client(server.port)
+            c.call('ACL', 'SETUSER', 'default', *OPERATOR)
+            held[0] = c
+            restarted = reads()
+            self.assertEqual(restarted, after)
+            c.close()
+        finally:
+            server.close()
+
+    def test_one_scope_does_not_move_another_scope_figure(self):
+        for other_first in (False, True):
+            server, c = self.start()
+            try:
+                rng = random.Random(4)
+
+                def vector():
+                    return ['%.3f' % rng.uniform(-1, 1) for _ in range(3)]
+
+                def others(start, stop):
+                    for i in range(start, stop):
+                        self.call(c, 'C', 'u2', 'VADD', 'k', 'VALUES', 3, *vector(), 'their-element-with-a-long-name-%05d' % i)
+                        self.call(c, 'C', SHARED, 'VADD', 'k', 'VALUES', 3, *vector(), 'shared-element-with-a-long-name-%05d' % i)
+                if other_first:
+                    others(0, 200)
+                for i in range(20):
+                    self.call(c, 'C', 'u1', 'VADD', 'k', 'VALUES', 3, *vector(), 'mine%d' % i)
+                    self.call(c, 'S', SHARED, 'VADD', 'k', 'VALUES', 3, *vector(), 'high%d' % i)
+                mine = self.bytes_of(c, 'u1')
+                high = self.call(c, 'S//A/B', SHARED, 'LABEL', 'QUOTA', 'S')[1]
+                for i in range(200, 600, 50):
+                    others(i, i + 50)
+                    self.assertEqual(self.bytes_of(c, 'u1'), mine, (other_first, i))
+                    self.assertEqual(self.call(c, 'S//A/B', SHARED, 'LABEL', 'QUOTA', 'S')[1], high, (other_first, i))
+                for i in range(0, 600, 2):
+                    self.call(c, 'C', 'u2', 'VREM', 'k', 'their-element-with-a-long-name-%05d' % i)
+                    self.call(c, 'C', SHARED, 'VREM', 'k', 'shared-element-with-a-long-name-%05d' % i)
+                self.assertEqual(self.bytes_of(c, 'u1'), mine, other_first)
+                self.call(c, 'S//A/B', SHARED, 'OWNERS', 'FORGET', 'u2')
+                self.assertEqual(self.call(c, 'C', SHARED, 'DEL', 'k'), 1)
+                self.assertEqual(self.bytes_of(c, 'u1'), mine, other_first)
+                self.assertEqual(self.call(c, 'S//A/B', SHARED, 'LABEL', 'QUOTA', 'S')[1], high, other_first)
+                self.assertEqual(self.call(c, 'C', 'u1', 'VCARD', 'k'), 20)
+                c.close()
+            finally:
+                server.close()
 
 
 def main():

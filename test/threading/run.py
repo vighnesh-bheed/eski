@@ -233,12 +233,15 @@ class Threading(unittest.TestCase):
             before = compute_info(client)
             self.assertEqual(client.call('LCS', a, b, 'LEN'), len(value))
             after = compute_info(client)
-            self.assertEqual(after['compute_jobs_submitted'], before['compute_jobs_submitted'])
+            self.assertEqual(after['compute_jobs_submitted']-before['compute_jobs_submitted'], 1)
+            self.assertEqual(after['compute_jobs_completed']-before['compute_jobs_completed'], 1)
             self.assertGreater(after['compute_sync_fallbacks'], before['compute_sync_fallbacks'])
+            self.assertEqual(after['compute_jobs_pending'], 0)
             self.assertEqual(after['compute_memory_reserved'], 0)
         with Server(BINARY, workers=1, memory=80 << 20) as limited:
             admin = limited.client()
             a, b, value = self.pair(4096, 'pressure', admin)
+            before = compute_info(admin)
             clients = [limited.client() for _ in range(5)]
             for client in clients:
                 client.send('LCS', a, b, 'LEN')
@@ -250,7 +253,11 @@ class Threading(unittest.TestCase):
             values = wait_for(lambda: row if (row := compute_info(admin))['compute_jobs_pending'] == 0 else None,
                               label='limited pool drain')
             self.assertEqual(values['compute_memory_reserved'], 0)
-            self.assertGreater(values['compute_sync_fallbacks'], 0)
+            self.assertEqual(values['compute_jobs_submitted']-before['compute_jobs_submitted'], 5)
+            self.assertEqual(values['compute_jobs_completed']-before['compute_jobs_completed'], 5)
+            fallbacks = values['compute_sync_fallbacks']-before['compute_sync_fallbacks']
+            self.assertGreater(fallbacks, 0)
+            self.assertLess(fallbacks, 5)
 
     def test_monitor_and_accounting_complete_once_in_admission_order(self):
         a, b, value = self.pair(6144, 'tracked')
@@ -372,9 +379,11 @@ class Threading(unittest.TestCase):
                 admin.call(command)
                 self.assertEqual(client.reply(), len(value))
                 wait_for(lambda: info(admin, 'persistence').get(flag) == '0', label=command+' completion')
-                before = compute_info(admin)['compute_jobs_submitted']
+                before = compute_info(admin)
                 self.assertEqual(admin.call('LCS', a, b, 'LEN'), len(value))
-                self.assertGreater(compute_info(admin)['compute_jobs_submitted'], before)
+                after = compute_info(admin)
+                self.assertGreater(after['compute_jobs_submitted'], before['compute_jobs_submitted'])
+                self.assertEqual(after['compute_sync_fallbacks'], before['compute_sync_fallbacks'])
                 self.idle(admin)
             admin.send('SHUTDOWN', 'NOSAVE')
             persistent.process.wait(timeout=10)

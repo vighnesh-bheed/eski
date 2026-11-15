@@ -635,7 +635,7 @@ config_cmd_set :: proc(c: ^Conn, argv: [][]u8) {
 			invalid = true
 			continue
 		}
-		if pst.loading && .Deny_Loading in cf.flags {
+		if pst.loading && .Deny_Loading in cf.flags && !(aof.loading && c == aof.fake && labels_on && aof_scheme_setting(name)) {
 			deny_loading = true
 			invalid = true
 			continue
@@ -669,12 +669,17 @@ config_cmd_set :: proc(c: ^Conn, argv: [][]u8) {
 	}
 	label_scheme_checkpoint()
 	defer label_scheme_abandon()
+	scheme_was_on := labels_on
 	for i in 0 ..< n {
 		old_values[i] = clone_string_temp(config_value_string(set_cfgs[i]))
 	}
+	scheme_changed := make([dynamic]^Config, context.temp_allocator)
 	for i in 0 ..< n {
 		cf := set_cfgs[i]
 		changed, e := config_set_value(cf, argv[3 + i * 2])
+		if changed && e == "" && aof_scheme_setting(transmute([]u8)cf.name) {
+			append(&scheme_changed, cf)
+		}
 		if e != "" {
 			msg := clone_string_temp(e)
 			config_restore(set_cfgs[:i + 1], old_values[:i + 1])
@@ -696,6 +701,16 @@ config_cmd_set :: proc(c: ^Conn, argv: [][]u8) {
 		}
 	}
 	for a, k in applies {
+		if a == label_scheme_apply && k < len(applies) - 1 {
+			owner := apply_owner[k]
+			ordered_remove(&applies, k)
+			ordered_remove(&apply_owner, k)
+			append(&applies, label_scheme_apply)
+			append(&apply_owner, owner)
+			break
+		}
+	}
+	for a, k in applies {
 		if e := a(); e != "" {
 			msg := clone_string_temp(e)
 			plog(LOG_WARNING, "Failed applying new configuration. Possibly related to new ", set_names[apply_owner[k]], " setting. Restoring previous settings.")
@@ -707,6 +722,11 @@ config_cmd_set :: proc(c: ^Conn, argv: [][]u8) {
 			}
 			config_reply_set_error(c, set_names[apply_owner[k]], msg)
 			return
+		}
+	}
+	if scheme_was_on {
+		for cf in scheme_changed {
+			aof_scheme_changed(c, cf.name, config_value_string(cf))
 		}
 	}
 	label_scheme_committed(c)
@@ -1679,9 +1699,6 @@ config_save_set :: proc(args: [][]u8) -> (bool, string) {
 	if len(a) & 1 != 0 {
 		return false, "Invalid save parameters"
 	}
-	if e := label_persistence_refusal(len(a) > 0); e != "" {
-		return false, e
-	}
 	for s, j in a {
 		v, ok := c_strtol_full(s)
 		if !ok || (j & 1 == 0 && v < 1) || (j & 1 == 1 && v < 0) {
@@ -2351,7 +2368,7 @@ config_check_shutdown_flags :: proc(v: i64, s: []u8) -> string {
 	if v & SHUTDOWN_NOSAVE != 0 && v & SHUTDOWN_SAVE != 0 {
 		return "shutdown options SAVE and NOSAVE can't be used simultaneously"
 	}
-	return label_persistence_refusal(v & SHUTDOWN_SAVE != 0)
+	return ""
 }
 
 proc_title_expand :: proc(b: ^[dynamic]u8, template: []u8, title: string) -> bool {
@@ -2707,6 +2724,7 @@ config_startup :: proc() {
 		}
 		log_fd = fd
 	}
+	seal_load_keys()
 	supervised := runtime_supervised_requested()
 	if cfg.daemonize && !supervised {
 		daemonize()

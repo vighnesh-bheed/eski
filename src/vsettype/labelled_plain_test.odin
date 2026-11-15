@@ -63,7 +63,7 @@ plain_sets_read_the_same_through_the_labelled_api :: proc(t: ^testing.T) {
 		free_all(context.temp_allocator)
 	}
 	testing.expect_value(t, view_memory(&v), expected_view_memory(s, &bottom, &sc))
-	testing.expect_value(t, view_memory(&v), VIEW_BASE_BYTES + part_content_bytes(s, &s.core))
+	testing.expect_value(t, view_memory(&v), part_content_bytes(s, &s.core))
 	top := lattice_access(&l, 2)
 	top.top = true
 	tv, _ := view_open(s, &top, &sc)

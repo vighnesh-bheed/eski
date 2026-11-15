@@ -3,6 +3,7 @@ package rdb
 import "base:intrinsics"
 import "base:runtime"
 import "core:sys/linux"
+import "../seal"
 
 READER_BUF :: 1 << 20
 
@@ -44,6 +45,7 @@ Reader :: struct {
 	next_tick:  i64,
 	tick_every: i64,
 	user:       rawptr,
+	seal:       ^seal.File_Reader,
 }
 
 @(private)
@@ -69,6 +71,9 @@ reader_init_file :: proc "contextless" (r: ^Reader, fd: linux.Fd, checksum: bool
 reader_remaining :: proc "contextless" (r: ^Reader) -> i64 {
 	if !r.from_file {
 		return i64(r.end - r.pos)
+	}
+	if r.seal != nil {
+		return seal_remaining(r)
 	}
 	if r.limit > 0 {
 		return r.limit - reader_offset(r)
@@ -242,6 +247,12 @@ fill :: proc "contextless" (r: ^Reader, n: int) -> bool {
 			}
 			want = int(min(i64(want), allowed))
 		}
+		if r.seal != nil {
+			if !seal_fill(r, want) {
+				break
+			}
+			continue
+		}
 		got, err := linux.read(r.fd, r.buf[r.end:r.end + want])
 		if err == .EINTR {
 			continue
@@ -257,6 +268,25 @@ fill :: proc "contextless" (r: ^Reader, n: int) -> bool {
 		r.progress(r)
 	}
 	return r.end - r.pos >= n
+}
+
+@(private)
+seal_remaining :: #force_no_inline proc "contextless" (r: ^Reader) -> i64 {
+	return seal.remaining_bound(r.seal) + i64(r.end - r.pos)
+}
+
+@(private)
+seal_fill :: #force_no_inline proc "contextless" (r: ^Reader, want: int) -> bool {
+	got := seal.read(r.seal, r.buf[r.end:r.end + want])
+	r.end += got
+	if got > 0 {
+		return true
+	}
+	r.eof = true
+	if r.seal.state != .End {
+		corrupt(r, "encrypted segment ", r.seal.segment, true, " of the data file fails its check")
+	}
+	return false
 }
 
 take :: proc "contextless" (r: ^Reader, n: int) -> ([]u8, bool) {

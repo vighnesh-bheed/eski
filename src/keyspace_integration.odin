@@ -882,20 +882,21 @@ keyspace_try :: proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8) -> bool {
 }
 
 keyspace_info :: proc(b: ^[dynamic]u8) {
+	show := !labels_on || access.top
 	info_line_int(b, "keyspace_threads_configured", keyspace_threads)
-	info_line_int(b, "keyspace_threads_active", i64(ks.active_workers(&keyspace_pool)))
-	info_line_int(b, "keyspace_jobs_pending", i64(keyspace_pending))
-	info_line_int(b, "keyspace_memory_used", i64(ks.memory_used(&keyspace_pool)))
-	info_line_int(b, "keyspace_records", i64(keyspace_records))
-	info_line_int(b, "keyspace_jobs_submitted", keyspace_submitted)
-	info_line_int(b, "keyspace_jobs_completed", keyspace_completed)
-	info_line_int(b, "keyspace_gets", keyspace_gets)
-	info_line_int(b, "keyspace_sets", keyspace_sets)
-	info_line_int(b, "keyspace_sync_fallbacks", keyspace_fallbacks)
-	info_line_int(b, "keyspace_inline", keyspace_inline)
-	info_line_int(b, "keyspace_barriers", keyspace_barriers)
-	info_line_int(b, "keyspace_worker_signals", i64(ks.signal_count(&keyspace_pool)))
-	info_line_int(b, "keyspace_worker_nanoseconds", keyspace_worker_ns)
+	info_line_int(b, "keyspace_threads_active", i64(ks.active_workers(&keyspace_pool)) if show else keyspace_threads)
+	info_line_int(b, "keyspace_jobs_pending", i64(keyspace_pending) if show else 0)
+	info_line_int(b, "keyspace_memory_used", i64(ks.memory_used(&keyspace_pool)) if show else 0)
+	info_line_int(b, "keyspace_records", i64(keyspace_records) if show else 0)
+	info_line_int(b, "keyspace_jobs_submitted", keyspace_submitted if show else 0)
+	info_line_int(b, "keyspace_jobs_completed", keyspace_completed if show else 0)
+	info_line_int(b, "keyspace_gets", keyspace_gets if show else 0)
+	info_line_int(b, "keyspace_sets", keyspace_sets if show else 0)
+	info_line_int(b, "keyspace_sync_fallbacks", keyspace_fallbacks if show else 0)
+	info_line_int(b, "keyspace_inline", keyspace_inline if show else 0)
+	info_line_int(b, "keyspace_barriers", keyspace_barriers if show else 0)
+	info_line_int(b, "keyspace_worker_signals", i64(ks.signal_count(&keyspace_pool)) if show else 0)
+	info_line_int(b, "keyspace_worker_nanoseconds", keyspace_worker_ns if show else 0)
 }
 
 Keyspace_Write :: struct {

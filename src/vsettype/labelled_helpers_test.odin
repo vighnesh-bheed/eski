@@ -179,6 +179,10 @@ check_labelled :: proc(t: ^testing.T, s: Vset) -> bool {
 
 check_partition :: proc(t: ^testing.T, s: Vset, p: ^Part_Head) -> bool {
 	ok := true
+	if tl := part_tally(p); tl != nil && tl^ != tally_count(p) {
+		testing.expectf(t, false, "partition %d keeps a running tally %v against a count of %v", p.id, tl^, tally_count(p))
+		ok = false
+	}
 	if int(p.arena.live) != p.count {
 		testing.expectf(t, false, "partition %d arena %d count %d", p.id, p.arena.live, p.count)
 		ok = false
@@ -246,6 +250,19 @@ check_partition :: proc(t: ^testing.T, s: Vset, p: ^Part_Head) -> bool {
 	if c := part_charge(s, p); c != nil && c.bytes != part_block_bytes(p) {
 		testing.expectf(t, false, "partition %d charge %d blocks %d", p.id, c.bytes, part_block_bytes(p))
 		ok = false
+	}
+	if p.kind != .Core {
+		if g := part_graphed(p); g != nil {
+			live := tally_count(p).levels * (g.m + 1)
+			if g.upper_len > hnsw.upper_room(g, live) || g.upper_cap > hnsw.upper_bound(g, live) {
+				testing.expectf(t, false, "partition %d keeps %d of %d pool words for %d live words", p.id, g.upper_len, g.upper_cap, live)
+				ok = false
+			}
+		}
+		if real, charge := part_footprint(s, p), part_content_bytes(s, p); real > charge {
+			testing.expectf(t, false, "partition %d holds %d bytes and is charged %d", p.id, real, charge)
+			ok = false
+		}
 	}
 	return ok
 }

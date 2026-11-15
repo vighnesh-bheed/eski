@@ -84,6 +84,16 @@ Vset_Object :: struct {
 
 Vset :: ^Vset_Object
 
+Write_Hook :: #type proc(s: Vset)
+
+write_hook: Write_Hook
+
+write_fence :: #force_inline proc(s: Vset) {
+	if write_hook != nil && s != nil {
+		write_hook(s)
+	}
+}
+
 Quant :: enum u8 {
 	Q8,
 	NOQUANT,
@@ -188,11 +198,13 @@ create :: proc(p: Params) -> (s: Vset, err: Error) {
 	if s == nil {
 		return nil, .Out_Of_Memory
 	}
+	blocks_note(1)
 	s.ledger.bytes = usable_size(s)
 	s.dim = p.dim
 	s.input_dim = p.input_dim
 	if err = part_init(&s.core, quant_elem(p.quant), p.dim, p.m, p.seed if p.seed != 0 else rand64(), allocator_of(s)); err != .None {
 		runtime.heap_free(s)
+		blocks_note(-1)
 		return nil, err
 	}
 	s.names = rax.create()
@@ -233,6 +245,7 @@ part_release_all :: proc(s: Vset, p: ^Part_Head) {
 }
 
 destroy :: proc(s: Vset) {
+	write_fence(s)
 	if s == nil {
 		return
 	}
@@ -242,6 +255,7 @@ destroy :: proc(s: Vset) {
 	part_release_all(s, &s.core)
 	rax.destroy(s.names)
 	runtime.heap_free(s)
+	blocks_note(-1)
 }
 
 ledger_balance :: proc "contextless" (s: Vset) -> int {

@@ -80,9 +80,9 @@ debug_help := [?]string {
 	"    * DEBUG RELOAD NOSAVE NOFLUSH MERGE: add the contents of an existing RDB",
 	"      file to the database.",
 	"SET-ACTIVE-EXPIRE <0|1>",
-	"    Setting it to 0 disables expiring keys (and hash-fields) in background ",
-	"    when they are not accessed (otherwise the default behavior). Setting it",
-	"    to 1 reenables back the default.",
+	"    With 0 the periodic background sweep that removes expired keys and hash",
+	"    fields is switched off, so they go only when a command touches them.",
+	"    With 1 the sweep runs again, which is the normal state.",
 	"QUICKLIST-PACKED-THRESHOLD <size>",
 	"    Sets the threshold for elements to be inserted as plain vs packed nodes",
 	"    Default value is 1GB, allows values up to 4GB. Setting to 0 restores to default.",
@@ -113,13 +113,29 @@ debug_help := [?]string {
 	"    Print this help.",
 }
 
+@(private = "file")
+DEBUG_HELP_SCOPES_BEFORE :: "ERROR "
+
+@(private = "file")
+debug_help_scopes := [?]string {
+	"DIGEST-SCOPES",
+	"    With a label scheme or owner mode: one hex signature over every copy with its",
+	"    scope, deadline and age, every vector set partition, and the quotas.",
+}
+
 debug_more :: proc(c: ^Conn, argv: [][]u8) -> bool {
 	sub := argv[1]
 	n := len(argv)
 	switch {
 	case n == 2 && eq_nocase(sub, "help"):
-		reply_array(c, len(debug_help))
+		extra := len(debug_help_scopes) if labels_on else 0
+		reply_array(c, len(debug_help) + extra)
 		for line in debug_help {
+			if extra > 0 && len(line) > len(DEBUG_HELP_SCOPES_BEFORE) && line[:len(DEBUG_HELP_SCOPES_BEFORE)] == DEBUG_HELP_SCOPES_BEFORE {
+				for more in debug_help_scopes {
+					reply_simple(c, more)
+				}
+			}
 			reply_simple(c, line)
 		}
 	case n == 3 && eq_nocase(sub, "log"):

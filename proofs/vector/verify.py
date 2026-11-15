@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from kernel_audit import audit as audit_kernel
 import commands as vcommands
 import labelled
+import persist
 from labelled import labelled_corpus, owner_corpus
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -43,6 +44,7 @@ AREAS = {
     'compatibility': ['Plain', 'OwnerPlain'],
     'relabel': ['Relabel', 'LabelSim'],
     'commands': ['Commands'],
+    'persistence': ['Persist'],
 }
 LINK_INPUTS = ['.build/diagnostics/release/libeski-diagnostics.a', '.build/diagnostics/libunwind.so',
                '.build/lua/release/libeslua-runtime.a']
@@ -1146,6 +1148,7 @@ def corpus():
     OWNER_BLOCK.clear()
     OWNER_BLOCK.update(start=owner_start, lines=list(owner_run.lines), twins=twins, singles=singles,
                        sensitivity=sensitivity)
+    persist.persist_corpus(random.Random(SEED ^ 0x9E51), emit, stats)
     assert stats['refusals'] > 0 and stats['forced_copies'] > 0 and stats['hidden_bursts'] > 0
     assert stats['trusted_labels'] > 0 and stats['own_rule_decisive'] > 0
     assert stats['relabel_moves'] > 0 and stats['relabel_refusals'] > 0 and stats['relabel_bytes'] > 0
@@ -1644,6 +1647,18 @@ def model_controls(rows):
     return rejected
 
 
+def persist_controls(rows):
+    got = [r for r in rows if r.startswith('KS|')]
+    rejected = {}
+    for name in persist.CLAUSES:
+        rebuilt = persist.mutant_rows(name)
+        differing = sum(1 for a, b in zip(got, rebuilt) if a != b) + abs(len(got) - len(rebuilt))
+        if not differing:
+            raise AssertionError('model mutant accepted: persist_without_' + name)
+        rejected['persist_without_' + name] = differing
+    return rejected
+
+
 def run():
     parser = argparse.ArgumentParser()
     parser.add_argument('--lean-bin', type=Path, default=Path(os.environ['LEAN_BIN_DIR']) if 'LEAN_BIN_DIR' in os.environ else None)
@@ -1677,6 +1692,7 @@ def run():
     owner_rejected = owner_evidence(odin_rows, stats)
     mutants = model_controls(odin_rows)
     mutants.update(owner_rejected)
+    mutants.update(persist_controls(odin_rows))
     command_stats, command_mutants = command_evidence(command_bridge, output)
     stats.update(command_stats)
     mutants.update(command_mutants)
@@ -1694,7 +1710,8 @@ def run():
                    'compatibility': stats['compatibility_rows'] + stats['owner_compatibility_rows'],
                    'relabel': stats['relabel_rows'] + stats['relabel_bytes'],
                    'commands': stats['command_rows'] + stats['p2_observer_rows'] + stats['p10_rows'] +
-                   stats['command_owner_rows'] + stats['command_owner_twin_rows']}
+                   stats['command_owner_rows'] + stats['command_owner_twin_rows'],
+                   'persistence': stats['persist_rows']}
     if any(comparisons[area] for area in PROOF_ONLY) or any(not comparisons[area] for area in AREAS if area not in PROOF_ONLY):
         raise AssertionError('comparison evidence does not match the proof-only areas')
     area_evidence = {area: {'theorems': sorted(name for name in axioms

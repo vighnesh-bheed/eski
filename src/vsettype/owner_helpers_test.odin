@@ -130,6 +130,9 @@ check_owners :: proc(t: ^testing.T, s: Vset) -> int {
 			fail(t, &ok, "a free owner partition id is in use")
 		}
 	}
+	if bound := max(u32(SET_TABLE_MIN), 2 * u32(live)); idx.part_cap > bound || idx.free_cap > bound {
+		fail(t, &ok, fmt.tprintf("owner partition tables hold %d and %d entries for %d live partitions", idx.part_cap, idx.free_cap, live))
+	}
 	if ledger != idx.ledger.bytes {
 		fail(t, &ok, fmt.tprintf("owner ledger %d against %d", idx.ledger.bytes, ledger))
 	}

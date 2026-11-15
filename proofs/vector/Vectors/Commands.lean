@@ -358,7 +358,7 @@ theorem wstep_stream_other (ops : PartOps N V P) (sees : L → L → Bool) (c : 
     · split <;> simp [setPart]
     · split
       · rfl
-      · split <;> simp [setIndex, setPart, setStream, hl]
+      · split <;> simp [setIndex, setPart]
   | set n v =>
     simp only [wstep]
     split

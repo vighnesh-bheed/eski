@@ -82,6 +82,7 @@ proof_boot :: proc(levels, comps, trusts: string, seed: i64, labelled: bool, own
 	}
 	access_scheme_changed()
 	label_stream_seed = seed
+	vset_seed_put(u64(seed) ~ 0x5EED_DA7A_5EED_DA7A)
 	update_clock()
 	db_init()
 	block_init()

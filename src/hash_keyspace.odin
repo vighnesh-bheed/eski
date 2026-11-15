@@ -117,7 +117,7 @@ object_release :: proc "contextless" (type: Obj_Type, obj: rawptr) -> int {
 
 object_move :: proc "contextless" (type: Obj_Type, obj: rawptr, from: ^Db, to: ^Db) -> int {
 	if type == .Vectorset {
-		return vset_object_acct(obj)
+		return vset_object_moved(obj)
 	}
 	if type != .Hash || obj == nil {
 		return 0
@@ -135,8 +135,14 @@ hash_sort_field :: proc(key: []u8, e: ^Entry, field: []u8) -> (val: []u8, ok: bo
 	if h == nil {
 		return nil, false
 	}
-	v, read := ht.get(h, field, hash_now(), !label_entry_foreign(e))
+	elsewhere := label_entry_foreign(e)
+	v, read := ht.get(h, field, hash_now(), !elsewhere)
 	if .Live not_in read {
+		if elsewhere {
+			if _, _, held := ht.get_raw(h, field); held {
+				sort_stepped_expired = true
+			}
+		}
 		hash_lazy(key, e, h, read)
 		return nil, false
 	}

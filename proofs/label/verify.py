@@ -80,7 +80,9 @@ ARRIVAL_NOTES = ['created', 'create_full', 'dropped', 'swept', 'find_ok', 'find_
                  'refused_noperm_push', 'kill_allowed', 'kill_refused', 'owner_refused_unpinned', 'owner_noperm',
                  'owner_noperm_push', 'owner_kill_same', 'owner_kill_operator', 'owner_kill_refused_shared',
                  'owner_kill_refused_user', 'owner_kill_refused_label', 'vetoed_unpinned', 'vetoed_owner_unpinned',
-                 'refused_operator', 'exec_owner_watch_text', 'refused_owner_persist', 'tx_named', 'token_unnamed']
+                 'refused_operator', 'exec_owner_watch_text', 'refused_owner_persist', 'tx_named', 'token_unnamed',
+                 'refused_migrate', 'refused_persist_at_top', 'refused_top_snapshot', 'refused_top_config', 'open_below_top',
+                 'config_set_open', 'lastsave_start', 'lastsave_saved', 'refused_owner_migrate', 'owner_lastsave_not_operator']
 ARRIVAL_SEMANTIC = {'expired_handle_used': 'find_expired', 'other_login_handle_used': 'find_other_login',
                     'handle_above_clearance_used': 'find_outside_ceiling', 'expired_token_used': 'token_expired',
                     'token_above_clearance_used': 'token_outside_ceiling', 'token_context_mismatch_used': 'token_context_refused',
@@ -97,12 +99,16 @@ ARRIVAL_SEMANTIC = {'expired_handle_used': 'find_expired', 'other_login_handle_u
                     'transaction_owner_ignored': 'refused_owner_transaction', 'operator_top_skipped': 'refused_owner_top',
                     'token_owner_unchecked': 'refused_token_owner', 'context_owner_unchecked': 'refused_context_owner',
                     'owner_watch_ignored': 'exec_owner_watch_refused', 'acl_refusal_skipped': 'refused_noperm',
-                    'owner_acl_refusal_skipped': 'owner_noperm'}
+                    'owner_acl_refusal_skipped': 'owner_noperm', 'snapshot_below_top_accepted': 'refused_top_snapshot',
+                    'config_persistence_accepted': 'refused_top_config', 'migrate_accepted': 'refused_migrate',
+                    'persistence_at_top_accepted': 'refused_persist_at_top'}
 ARRIVAL_COUNT_SEMANTIC = {'mark_drops_watches': 'marked_keeps_watches', 'marked_watch_adds_nothing': 'watch_added_marked'}
 ARRIVAL_VERDICT_SEMANTIC = {'label_kill_rule_skipped': 'kill_refused', 'shared_script_killed_by_user': 'owner_kill_refused_shared',
                             'other_user_script_killed': 'owner_kill_refused_user',
                             'script_killed_below_its_label': 'owner_kill_refused_label',
                             'same_owner_kill_refused': 'owner_kill_same', 'operator_kill_refused': 'owner_kill_operator'}
+ARRIVAL_REPLY_SEMANTIC = {'lastsave_below_top_saved': 'lastsave_start', 'lastsave_at_top_start': 'lastsave_saved',
+                          'lastsave_without_operator_saved': 'owner_lastsave_not_operator'}
 ARRIVAL_PIN_SEMANTIC = {'noperm_push_pins': 'refused_noperm_push', 'owner_noperm_push_pins': 'owner_noperm_push',
                         'owner_refusal_pins': 'owner_refused_unpinned'}
 NAME_PATTERN = re.compile(rb'[A-Z0-9][A-Z0-9_-]*( [A-Z0-9][A-Z0-9_-]*)*')
@@ -1142,7 +1148,8 @@ def arrival_controls(expected, marks):
         if mutated[i] == expected[i]:
             raise AssertionError('semantic negative control does not change its row: ' + name)
         cases['arrival_semantic_' + name] = '\n'.join(mutated) + '\n'
-    for table, change in ((ARRIVAL_VERDICT_SEMANTIC, verdict_flipped), (ARRIVAL_PIN_SEMANTIC, session_pinned)):
+    for table, change in ((ARRIVAL_VERDICT_SEMANTIC, verdict_flipped), (ARRIVAL_PIN_SEMANTIC, session_pinned),
+                          (ARRIVAL_REPLY_SEMANTIC, lastsave_flipped)):
         for name, event in table.items():
             if event not in marks:
                 raise AssertionError('no row for semantic negative control ' + name)
@@ -1174,6 +1181,15 @@ def verdict_flipped(row):
     if cells[0] not in ('AB', 'OB') or cells[2] not in ('0', '1'):
         raise AssertionError('verdict control needs a busy row: ' + row[:200])
     cells[2] = '1' if cells[2] == '0' else '0'
+    return '|'.join(cells)
+
+
+def lastsave_flipped(row):
+    cells = row.split('|')
+    flip = {'lastsave:start': 'lastsave:saved', 'lastsave:saved': 'lastsave:start'}
+    if cells[0] not in ('AR', 'OR') or cells[2] not in flip:
+        raise AssertionError('LASTSAVE control needs a LASTSAVE reply: ' + row[:200])
+    cells[2] = flip[cells[2]]
     return '|'.join(cells)
 
 

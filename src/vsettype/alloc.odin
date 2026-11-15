@@ -14,6 +14,14 @@ foreign libc {
 
 HEAP_ALIGN :: 16
 
+blocks_live: int
+
+blocks_note :: #force_inline proc "contextless" (delta: int) {
+	when ODIN_TEST {
+		intrinsics.atomic_add_explicit(&blocks_live, delta, .Relaxed)
+	}
+}
+
 Ledger :: struct {
 	bytes: int,
 }
@@ -42,6 +50,7 @@ block_alloc :: proc "contextless" (l: ^Ledger, size: int, alignment: int, zero: 
 	}
 	if p != nil {
 		l.bytes += usable_size(p)
+		blocks_note(1)
 	}
 	return p
 }
@@ -52,6 +61,7 @@ block_free :: proc "contextless" (l: ^Ledger, p: rawptr) {
 	}
 	l.bytes -= usable_size(p)
 	runtime.heap_free(p)
+	blocks_note(-1)
 }
 
 block_resize :: proc "contextless" (l: ^Ledger, p: rawptr, old_size: int, size: int, alignment: int, zero: bool) -> rawptr {

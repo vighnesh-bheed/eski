@@ -6,7 +6,6 @@ import "core:slice"
 import "../hnsw"
 import lbl "../label"
 import "../rax"
-import "../vfilter"
 import "../vmath"
 
 NOMINAL_MIN_BYTES :: 24
@@ -569,6 +568,30 @@ view_search :: proc(v: ^View, req: ^Search_Request, scratch: ^Scratch, out: ^[dy
 	if f.err != .None {
 		return f
 	}
+	return view_search_query(v, q, req, sc, out)
+}
+
+view_search_prepare :: proc(v: ^View, req: ^Search_Request, sc: ^Scratch) -> (q: vmath.Query, f: Failure) {
+	if v.size == 0 {
+		if req.kind == .Element {
+			return {}, failure(.Element_Not_Found)
+		}
+		return {}, {}
+	}
+	if q, f = view_query(v, req, sc); f.err != .None {
+		return {}, f
+	}
+	if f = filter_check(req, sc); f.err != .None {
+		return {}, f
+	}
+	return q, {}
+}
+
+view_search_query :: proc(v: ^View, q: vmath.Query, req: ^Search_Request, sc: ^Scratch, out: ^[dynamic]Hit) -> Failure {
+	if v.size == 0 {
+		return {}
+	}
+	f: Failure
 	filter: Filter
 	defer filter_destroy(&filter, sc)
 	filtered := false
@@ -956,7 +979,7 @@ view_memory :: proc "contextless" (v: ^View) -> int {
 	if v.size == 0 {
 		return 0
 	}
-	n := VIEW_BASE_BYTES
+	n := 0
 	for &vp in v.parts {
 		n += part_content_bytes(s, view_head(v, &vp))
 	}
@@ -970,70 +993,107 @@ nominal_bytes :: #force_inline proc "contextless" (size: int) -> int {
 	return max(NOMINAL_MIN_BYTES, (size + NOMINAL_HEADER_BYTES + NOMINAL_ALIGN - 1) &~ (NOMINAL_ALIGN - 1) - NOMINAL_HEADER_BYTES)
 }
 
-part_slot_bytes :: #force_inline proc "contextless" (p: ^Part_Head) -> int {
-	n := size_of(Element) + size_of(u32) + NAME_INDEX_BYTES + p.arena.stride + size_of(f32)
-	if p.arena.elem == .Int8 {
-		n += size_of(f32)
+Detached_View :: struct {
+	view:      View,
+	parts:     []View_Part,
+	proxies:   []Partition,
+	shadows:   []u32,
+	bytes:     int,
+	allocator: runtime.Allocator,
+}
+
+view_detach_bytes :: proc "contextless" (v: ^View, sc: ^Scratch) -> int {
+	proxies := 0
+	shadows := 0
+	for vp in v.parts {
+		if view_proxy_index(sc, vp.part) >= 0 {
+			proxies += 1
+		}
+		shadows += len(vp.shadow)
+	}
+	return len(v.parts) * size_of(View_Part) + proxies * size_of(Partition) + shadows * size_of(u32)
+}
+
+view_elements :: proc "contextless" (v: ^View) -> int {
+	n := 0
+	for vp in v.parts {
+		n += vp.part.count
 	}
 	return n
 }
 
-part_content_bytes :: proc "contextless" (s: Vset, p: ^Part_Head) -> int {
-	n := COMPACT_FIXED_BYTES if p.kind == .Compact else PART_FIXED_BYTES
-	n += p.count * part_slot_bytes(p)
-	for i in 0 ..< p.count {
-		e := &p.elements[p.order[i]]
-		n += nominal_bytes(int(e.len)) + nominal_bytes(vfilter.attribute_size(e.attr))
-	}
-	full := part_full(p)
-	if full == nil || p.mode == .Flat || p.count == 0 {
-		return n
-	}
-	g := &full.graph
-	width := hnsw.link_width(p.count)
-	levels := 0
-	for i in 0 ..< p.count {
-		levels += max(hnsw.node_level(g, p.order[i]), 0)
-	}
-	n += hnsw.LINK_PAD + p.count * hnsw.node_fixed_bytes(g.m, width) + levels * (g.m + 1) * width
-	if g.twins > 0 {
-		n += p.count * size_of(u32)
-	}
-	return n
-}
-
-part_element_encoded_size :: proc "contextless" (p: ^Part_Head, slot: u32) -> int {
-	e := &p.elements[slot]
-	n := varint_size(e.seq) + varint_size(u64(e.len)) + int(e.len) + p.arena.stride + 4
-	if p.arena.elem == .Int8 {
-		n += 4
-	}
-	if e.attr.blob == nil {
-		return n + 1
-	}
-	text := vfilter.attribute_text(e.attr)
-	return n + varint_size(u64(len(text)) + 1) + len(text)
-}
-
-view_serialized_size :: proc "contextless" (v: ^View) -> int {
-	s := v.set
-	if v.size == 0 {
-		return 0
-	}
-	uid: u64
+view_detach :: proc(v: ^View, sc: ^Scratch, allocator: runtime.Allocator) -> (d: Detached_View, ok: bool) {
+	d.allocator = allocator
+	n := len(v.parts)
+	proxies := 0
+	shadows := 0
 	for vp in v.parts {
-		uid += vp.part.graph.node_uid
+		if view_proxy_index(sc, vp.part) >= 0 {
+			proxies += 1
+		}
+		shadows += len(vp.shadow)
 	}
-	n := 3 + 1 + 1 + varint_size(u64(s.dim)) + varint_size(u64(s.input_dim)) + varint_size(u64(s.graph.m)) + varint_size(u64(v.size)) + varint_size(uid)
-	for vp in v.parts {
-		p := vp.part
-		for i in 0 ..< p.count {
-			slot := p.order[i]
-			if len(vp.shadow) > 0 && slot_shadowed(vp.shadow, slot) {
-				continue
-			}
-			n += part_element_encoded_size(p, slot)
+	err: runtime.Allocator_Error
+	if n > 0 {
+		if d.parts, err = make([]View_Part, n, allocator); err != nil {
+			return {}, false
 		}
 	}
-	return n
+	if proxies > 0 {
+		if d.proxies, err = make([]Partition, proxies, allocator); err != nil {
+			view_detached_destroy(&d)
+			return {}, false
+		}
+	}
+	if shadows > 0 {
+		if d.shadows, err = make([]u32, shadows, allocator); err != nil {
+			view_detached_destroy(&d)
+			return {}, false
+		}
+	}
+	k := 0
+	at := 0
+	for vp, i in v.parts {
+		out := View_Part{part = vp.part, base = vp.base, size = vp.size}
+		if view_proxy_index(sc, vp.part) >= 0 {
+			d.proxies[k] = vp.part^
+			out.part = &d.proxies[k]
+			k += 1
+		}
+		if len(vp.shadow) > 0 {
+			copy(d.shadows[at:at + len(vp.shadow)], vp.shadow)
+			out.shadow = d.shadows[at:at + len(vp.shadow)]
+			at += len(vp.shadow)
+		}
+		d.parts[i] = out
+	}
+	d.view = View{set = v.set, parts = d.parts, size = v.size, attrs = v.attrs}
+	d.bytes = n * size_of(View_Part) + proxies * size_of(Partition) + shadows * size_of(u32)
+	return d, true
+}
+
+view_proxy_index :: proc "contextless" (sc: ^Scratch, p: ^Partition) -> int {
+	if len(sc.proxies) == 0 {
+		return -1
+	}
+	lo := uintptr(raw_data(sc.proxies))
+	hi := lo + uintptr(len(sc.proxies) * size_of(Partition))
+	at := uintptr(p)
+	if at < lo || at >= hi {
+		return -1
+	}
+	return int((at - lo) / size_of(Partition))
+}
+
+view_detached_destroy :: proc(d: ^Detached_View) {
+	if d.parts != nil {
+		delete(d.parts, d.allocator)
+	}
+	if d.proxies != nil {
+		delete(d.proxies, d.allocator)
+	}
+	if d.shadows != nil {
+		delete(d.shadows, d.allocator)
+	}
+	d^ = {}
 }

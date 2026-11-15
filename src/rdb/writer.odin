@@ -3,6 +3,7 @@ package rdb
 import "base:intrinsics"
 import "base:runtime"
 import "core:sys/linux"
+import "../seal"
 
 WRITER_BUF :: 1 << 20
 
@@ -26,6 +27,7 @@ Writer :: struct {
 	lzf_context: Lzf_Context,
 	sync_every: i64,
 	synced:     i64,
+	seal:       ^seal.File_Writer,
 }
 
 @(private)
@@ -54,6 +56,17 @@ writer_init_mem :: proc "contextless" (w: ^Writer, compress: bool, checksum: boo
 	w.buf = w_alloc(w.cap)
 	w.compress = compress
 	w.checksum = checksum
+}
+
+writer_seal_finish :: proc "contextless" (w: ^Writer) -> bool {
+	if w.seal == nil {
+		return !w.failed
+	}
+	if !w.failed && !seal.file_finish(w.seal) {
+		w.failed = true
+		w.errno = w.seal.errno
+	}
+	return !w.failed
 }
 
 writer_destroy :: proc "contextless" (w: ^Writer) {
@@ -89,7 +102,19 @@ crc_catch_up :: proc "contextless" (w: ^Writer) {
 }
 
 @(private)
+write_sealed :: #force_no_inline proc "contextless" (w: ^Writer, data: []u8) {
+	if !w.failed && !seal.file_write(w.seal, data) {
+		w.failed = true
+		w.errno = w.seal.errno
+	}
+}
+
+@(private)
 write_all :: proc "contextless" (w: ^Writer, data: []u8) {
+	if w.seal != nil {
+		write_sealed(w, data)
+		return
+	}
 	rest := data
 	for len(rest) > 0 && !w.failed {
 		n, err := linux.write(w.fd, rest)

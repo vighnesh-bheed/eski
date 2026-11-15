@@ -77,7 +77,7 @@ Conn :: struct {
 	mbulk_max:   int,
 	inline_owner: ^Request_Inline_Owner,
 	partial_owner: ^Request_Partial_Owner,
-	compute:     ^Lcs_Task,
+	compute:     ^Compute_Task,
 	compute_token: u64,
 	read_eof:    bool,
 	lua_busy_bytes: int,

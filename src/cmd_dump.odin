@@ -5,6 +5,7 @@ import "core:net"
 import "core:sys/linux"
 import "rdb"
 import "sysclock"
+import vt "vsettype"
 
 ERR_BUSYKEY :: "BUSYKEY Target key name already exists."
 
@@ -174,6 +175,13 @@ cmd_dump :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	v := dump_value_of(e)
+	if labels_on && v.obj != nil && v.type == .Vectorset {
+		a := label_vt_access()
+		if _, seen := vset_view(cast(vt.Vset)v.obj, &a); !seen {
+			reply_null(c)
+			return
+		}
+	}
 	w: rdb.Writer
 	rdb.writer_init_mem(&w, pst.compression, false)
 	defer rdb.writer_destroy(&w)
@@ -234,6 +242,9 @@ restore_options :: proc(c: ^Conn, args: [][]u8) -> (opts: Restore_Options, ok: b
 
 @(private = "file")
 restore_deep :: proc(c: ^Conn) -> bool {
+	if labels_on {
+		return true
+	}
 	if !persist_deep_sanitize(true) {
 		return false
 	}
@@ -312,7 +323,9 @@ cmd_restore :: proc(c: ^Conn, argv: [][]u8) {
 	defer rdb.reader_destroy(&r)
 	v, decoded := restore_decode(&r, payload, deep)
 	if !decoded {
-		reply_error(c, ERR_BAD_DATA_FORMAT)
+		refusal := vset_restore_refusal
+		vset_restore_refusal = ""
+		reply_error(c, refusal if refusal != "" else ERR_BAD_DATA_FORMAT)
 		return
 	}
 	db := cur_db()
@@ -334,7 +347,13 @@ cmd_restore :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	e, _ := db_upsert_timed(key, min(at, MAX_EXPIRE_MS))
-	persist_attach(e, key, v)
+	if labels_on && v.type == .Vectorset {
+		s := cast(vt.Vset)v.obj
+		entry_object_attach(e, s, .Vectorset, .Raw, 0)
+		label_vset_settle(db.id, label_vset_none(), s)
+	} else {
+		persist_attach(e, key, v)
+	}
 	if at != 0 {
 		entry_set_expire(e, min(at, MAX_EXPIRE_MS))
 	}

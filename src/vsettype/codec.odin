@@ -2,13 +2,14 @@ package vsettype
 
 import "base:intrinsics"
 import "base:runtime"
-import "../hnsw"
+import "core:slice"
 import "../rax"
 import "../vfilter"
 import "../vmath"
 
 CODEC_MAGIC :: [3]u8{'E', 'V', 'S'}
-CODEC_VERSION :: u8(1)
+CODEC_VERSION_V1 :: u8(1)
+CODEC_VERSION :: u8(2)
 CODEC_HEADER_MIN :: 3 + 1 + 1 + 5
 CODEC_BUFFER :: 4096
 
@@ -28,6 +29,20 @@ Decode_Error :: enum u8 {
 	Trailing_Bytes,
 	Empty,
 	Out_Of_Memory,
+	Bad_Capacity,
+	Too_Large,
+	Bad_Free_List,
+	Bad_Slot,
+	Bad_Sequence,
+	Bad_Graph,
+	Bad_Link,
+	Asymmetric_Link,
+	Bad_Entry,
+	Bad_Twin,
+	Bad_Rank,
+	Bad_Scope,
+	Bad_Padding,
+	Bad_Object,
 }
 
 Encoder :: struct {
@@ -35,6 +50,7 @@ Encoder :: struct {
 	buf:   [CODEC_BUFFER]u8,
 	n:     int,
 	total: int,
+	dry:   bool,
 }
 
 encoder_flush :: proc(e: ^Encoder) {
@@ -46,6 +62,9 @@ encoder_flush :: proc(e: ^Encoder) {
 
 encoder_bytes :: proc(e: ^Encoder, data: []u8) {
 	e.total += len(data)
+	if e.dry {
+		return
+	}
 	if len(data) > CODEC_BUFFER - e.n {
 		encoder_flush(e)
 		if len(data) >= CODEC_BUFFER {
@@ -108,7 +127,7 @@ codec_refuses :: #force_inline proc "contextless" (s: Vset) -> bool {
 	return s.lab != nil
 }
 
-serialized_size :: proc "contextless" (s: Vset) -> int {
+serialized_size_v1 :: proc "contextless" (s: Vset) -> int {
 	if codec_refuses(s) {
 		return 0
 	}
@@ -119,7 +138,22 @@ serialized_size :: proc "contextless" (s: Vset) -> int {
 	return n
 }
 
+serialized_size :: proc(s: Vset) -> int {
+	if codec_refuses(s) {
+		return 0
+	}
+	return core_plan(s).size
+}
+
 serialize :: proc(s: Vset, sink: Sink) -> int {
+	if codec_refuses(s) {
+		return 0
+	}
+	plan := core_plan(s)
+	return core_write(s, &plan, sink)
+}
+
+serialize_v1 :: proc(s: Vset, sink: Sink) -> int {
 	if codec_refuses(s) {
 		return 0
 	}
@@ -127,7 +161,7 @@ serialize :: proc(s: Vset, sink: Sink) -> int {
 	e := &enc
 	magic := CODEC_MAGIC
 	encoder_bytes(e, magic[:])
-	head := [2]u8{CODEC_VERSION, quant_code(elem_quant(s.arena.elem))}
+	head := [2]u8{CODEC_VERSION_V1, quant_code(elem_quant(s.arena.elem))}
 	encoder_bytes(e, head[:])
 	encoder_varint(e, u64(s.dim))
 	encoder_varint(e, u64(s.input_dim))
@@ -172,9 +206,20 @@ serialize_bytes :: proc(s: Vset, allocator := context.allocator) -> (out: []u8, 
 	if codec_refuses(s) {
 		return nil, .Mode_Not_Implemented
 	}
-	out = make([]u8, serialized_size(s), allocator) or_return
+	plan := core_plan(s)
+	out = make([]u8, plan.size, allocator) or_return
 	b := Byte_Sink{out = out}
-	serialize(s, Sink{ctx = &b, write = byte_sink_write})
+	core_write(s, &plan, Sink{ctx = &b, write = byte_sink_write})
+	return out, nil
+}
+
+serialize_v1_bytes :: proc(s: Vset, allocator := context.allocator) -> (out: []u8, err: runtime.Allocator_Error) {
+	if codec_refuses(s) {
+		return nil, .Mode_Not_Implemented
+	}
+	out = make([]u8, serialized_size_v1(s), allocator) or_return
+	b := Byte_Sink{out = out}
+	serialize_v1(s, Sink{ctx = &b, write = byte_sink_write})
 	return out, nil
 }
 
@@ -239,7 +284,71 @@ element_bytes_min :: proc "contextless" (stride: int, ranged: bool) -> int {
 	return 1 + 1 + stride + 4 + (4 if ranged else 0) + 1
 }
 
+payload_version :: proc "contextless" (data: []u8) -> (version: u8, err: Decode_Error) {
+	if len(data) < 3 {
+		return 0, .Truncated
+	}
+	want := CODEC_MAGIC
+	if data[0] != want[0] || data[1] != want[1] || data[2] != want[2] {
+		return 0, .Bad_Magic
+	}
+	if len(data) < 4 {
+		return 0, .Truncated
+	}
+	if data[3] != CODEC_VERSION_V1 && data[3] != CODEC_VERSION {
+		return 0, .Bad_Version
+	}
+	return data[3], .None
+}
+
 deserialize :: proc(data: []u8, scratch: ^Scratch = nil, seed: u64 = 0) -> (s: Vset, err: Decode_Error) {
+	rebuild: bool
+	if s, rebuild, err = decode_unbuilt(data, scratch); err != .None {
+		return nil, err
+	}
+	if rebuild {
+		if err = build_graph(s, seed, scratch); err != .None {
+			destroy(s)
+			return nil, err
+		}
+	}
+	return s, .None
+}
+
+decode_unbuilt :: proc(data: []u8, scratch: ^Scratch = nil) -> (s: Vset, rebuild: bool, err: Decode_Error) {
+	version: u8
+	if version, err = payload_version(data); err != .None {
+		return nil, false, err
+	}
+	if version == CODEC_VERSION {
+		if s, err = deserialize_graph(data, scratch, 1, false); err != .None {
+			return nil, false, err
+		}
+		return s, s.core.mode == .Flat, .None
+	}
+	if s, err = deserialize_v1(data, scratch); err != .None {
+		return nil, false, err
+	}
+	return s, true, .None
+}
+
+build_graph :: proc(s: Vset, seed: u64, scratch: ^Scratch = nil) -> Decode_Error {
+	if s.core.mode != .Flat {
+		return .None
+	}
+	s.core.graph.rng = seed if seed != 0 else rand64()
+	guard: Scratch_Guard
+	sc := guard_begin(&guard, scratch)
+	defer guard_end(&guard)
+	if part_graduate(s, &s.core, sc) != .None {
+		return .Out_Of_Memory
+	}
+	s.core.mode = .Pinned
+	s.version = 0
+	return .None
+}
+
+deserialize_v1 :: proc(data: []u8, scratch: ^Scratch = nil) -> (s: Vset, err: Decode_Error) {
 	d := Decoder{data = data}
 	magic, ok := decoder_take(&d, 3)
 	if !ok {
@@ -253,17 +362,17 @@ deserialize :: proc(data: []u8, scratch: ^Scratch = nil, seed: u64 = 0) -> (s: V
 	if !got {
 		return nil, .Truncated
 	}
-	if head[0] != CODEC_VERSION {
+	if head[0] != CODEC_VERSION_V1 {
 		return nil, .Bad_Version
 	}
 	if head[1] > u8(Quant.BIN) {
 		return nil, .Bad_Header
 	}
-	p := Params{quant = Quant(head[1]), seed = seed}
+	p := Params{quant = Quant(head[1]), seed = 1}
 	dim_ok, input_ok, m_ok, count_ok, uid_ok: bool
 	p.dim, dim_ok = decoder_int(&d, DIM_MAX)
 	p.input_dim, input_ok = decoder_int(&d, DIM_MAX)
-	p.m, m_ok = decoder_int(&d, M_MAX)
+	p.m, m_ok = decoder_int(&d, CODEC_M_LIMIT)
 	count: int
 	count, count_ok = decoder_int(&d, SLOT_MAX)
 	max_uid: u64
@@ -271,7 +380,7 @@ deserialize :: proc(data: []u8, scratch: ^Scratch = nil, seed: u64 = 0) -> (s: V
 	if !dim_ok || !input_ok || !m_ok || !count_ok || !uid_ok {
 		return nil, .Bad_Header
 	}
-	if !params_valid(p) || max_uid < u64(count) {
+	if !params_valid(p) || max_uid < u64(count) || max_uid >= CODEC_UID_LIMIT {
 		return nil, .Bad_Header
 	}
 	if count == 0 {
@@ -288,6 +397,7 @@ deserialize :: proc(data: []u8, scratch: ^Scratch = nil, seed: u64 = 0) -> (s: V
 	if cerr != .None {
 		return nil, .Out_Of_Memory if cerr == .Out_Of_Memory else .Bad_Header
 	}
+	s.core.mode = .Flat
 	guard: Scratch_Guard
 	sc := guard_begin(&guard, scratch)
 	defer guard_end(&guard)
@@ -299,9 +409,31 @@ deserialize :: proc(data: []u8, scratch: ^Scratch = nil, seed: u64 = 0) -> (s: V
 		destroy(s)
 		return nil, .Trailing_Bytes
 	}
+	if err = sequences_distinct(s); err != .None {
+		destroy(s)
+		return nil, err
+	}
 	s.graph.node_uid = max_uid
 	s.version = 0
 	return s, .None
+}
+
+sequences_distinct :: proc(s: Vset) -> Decode_Error {
+	seqs, merr := make([]u64, s.count)
+	if merr != nil {
+		return .Out_Of_Memory
+	}
+	defer delete(seqs)
+	for i in 0 ..< s.count {
+		seqs[i] = s.elements[s.order[i]].seq
+	}
+	slice.sort(seqs)
+	for i in 1 ..< len(seqs) {
+		if seqs[i] == seqs[i - 1] {
+			return .Bad_Sequence
+		}
+	}
+	return .None
 }
 
 reserve_elements :: proc(s: Vset, count: int) -> bool {
@@ -340,7 +472,7 @@ decode_elements :: proc(s: Vset, d: ^Decoder, count: int, max_uid: u64, sc: ^Scr
 			return .Truncated
 		}
 		if seq > max_uid || seq == 0 {
-			return .Bad_Element
+			return .Bad_Sequence
 		}
 		name_len, len_ok := decoder_int(d, NAME_MAX)
 		if !len_ok {
@@ -403,45 +535,28 @@ decode_one :: proc(s: Vset, name: []u8, vector: []u8, norm: f32, range: f32, tex
 		block_free(&s.ledger, name_copy)
 		return .Out_Of_Memory
 	}
-	gslot, gerr := hnsw.reserve(&s.graph)
-	if gerr != .None || gslot != slot {
-		if gerr == .None {
-			hnsw.release(&s.graph, gslot)
-		}
-		vmath.arena_free(&s.arena, slot)
-		block_free(&s.ledger, name_copy)
-		return .Out_Of_Memory
-	}
+	return decode_flat(s, slot, name, name_copy, vector, norm, range, text, has_attr, seq)
+}
+
+decode_flat :: proc(s: Vset, slot: u32, name: []u8, name_copy: [^]u8, vector: []u8, norm: f32, range: f32, text: []u8, has_attr: bool, seq: u64) -> Decode_Error {
 	if !vmath.arena_set_raw(&s.arena, slot, vector, norm, range) {
-		hnsw.release(&s.graph, slot)
 		vmath.arena_free(&s.arena, slot)
 		block_free(&s.ledger, name_copy)
 		return .Bad_Element
 	}
 	attr: vfilter.Attribute
-	made := true
 	if has_attr {
-		attr, made = make_attribute(s, text, true)
-	}
-	if !made {
-		hnsw.release(&s.graph, slot)
-		vmath.arena_free(&s.arena, slot)
-		block_free(&s.ledger, name_copy)
-		return .Out_Of_Memory
-	}
-	if insert_node(s, slot, EF_DEFAULT, sc) != .None {
-		vmath.arena_free(&s.arena, slot)
-		block_free(&s.ledger, name_copy)
-		if attr.blob != nil {
-			vfilter.attribute_destroy(&attr, allocator_of(s))
+		made: bool
+		if attr, made = make_attribute(s, text, true); !made {
+			vmath.arena_free(&s.arena, slot)
+			block_free(&s.ledger, name_copy)
+			return .Out_Of_Memory
 		}
-		return .Out_Of_Memory
 	}
 	e := &s.elements[slot]
 	e^ = Element{name = name_copy, len = u32(len(name)), seq = seq}
 	replace_attribute(s, e, attr)
 	rax.insert(s.names, name, rawptr(uintptr(slot) + 1))
 	order_append(&s.core, slot)
-	refresh_prefetch(s)
 	return .None
 }

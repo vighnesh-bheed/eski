@@ -184,7 +184,14 @@ insert_element :: proc(s: Vset, name: []u8, vector: []f32, attr: vfilter.Attribu
 	return
 }
 
+part_counter_full :: #force_inline proc "contextless" (p: ^Part_Head) -> bool {
+	return part_uid(p) >= CODEC_UID_LIMIT - 1
+}
+
 part_insert :: proc(s: Vset, p: ^Part_Head, name: []u8, vector: []f32, attr: vfilter.Attribute, ef: int, sc: ^Scratch, cache: ^Distance_Cache = nil) -> (slot: u32, f: Failure) {
+	if part_counter_full(p) {
+		return NIL_SLOT, failure(.Out_Of_Memory)
+	}
 	if err := part_ensure_slot(s, p); err != .None {
 		return NIL_SLOT, failure(err)
 	}
@@ -271,6 +278,9 @@ update_element :: proc(s: Vset, slot: u32, vector: []f32, ef: int, sc: ^Scratch,
 }
 
 part_update :: proc(s: Vset, p: ^Part_Head, slot: u32, vector: []f32, ef: int, sc: ^Scratch, cache: ^Distance_Cache = nil) -> (f: Failure, dropped: bool) {
+	if part_counter_full(p) {
+		return failure(.Out_Of_Memory), false
+	}
 	if err := part_graph_remove(p, slot, sc); err != .None {
 		return failure(err), false
 	}
@@ -317,6 +327,7 @@ guard_end :: proc(g: ^Scratch_Guard) {
 }
 
 add :: proc(s: Vset, req: ^Add_Request, scratch: ^Scratch = nil) -> (added: bool, f: Failure) {
+	write_fence(s)
 	if s.lab != nil {
 		return false, failure(.Invalid_Parameter)
 	}
@@ -375,6 +386,7 @@ apply_add :: proc(s: Vset, req: ^Add_Request, vector: []f32, sc: ^Scratch, cache
 }
 
 remove :: proc(s: Vset, name: []u8, scratch: ^Scratch = nil) -> (removed: bool, emptied: bool, f: Failure) {
+	write_fence(s)
 	slot, ok := find(s, name)
 	if !ok {
 		return false, false, {}
@@ -390,6 +402,7 @@ remove :: proc(s: Vset, name: []u8, scratch: ^Scratch = nil) -> (removed: bool, 
 }
 
 set_attribute :: proc(s: Vset, name: []u8, text: []u8) -> (found: bool, err: Error) {
+	write_fence(s)
 	slot, ok := find(s, name)
 	if !ok {
 		return false, .None

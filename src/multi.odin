@@ -70,6 +70,11 @@ ERR_WATCH_IN_MULTI :: "ERR WATCH inside MULTI is not allowed"
 @(private = "file")
 TX_ARG_SLOT :: 8
 
+@(private = "file")
+TX_QUEUED_ARGUMENT_EXTRA :: REQUEST_ARGUMENT_BYTES - TX_ARG_SLOT
+
+tx_queued_extra: int
+
 tx_multi_count: int
 
 watch_total: int
@@ -125,6 +130,7 @@ tx_shrink :: proc(a: ^[dynamic]$T) {
 tx_clear_queue :: proc(st: ^Tx_State) {
 	tx_mem_total -= st.mem
 	st.mem = 0
+	tx_queued_extra -= len(st.cmds) * QUEUED_COMMAND_BYTES + len(st.spans) * TX_QUEUED_ARGUMENT_EXTRA
 	tx_shrink(&st.cmds)
 	tx_shrink(&st.spans)
 	tx_shrink(&st.bytes)
@@ -251,9 +257,16 @@ command_flags :: proc(cmd: ^Command, argv: [][]u8) -> Cmd_Flags {
 	return spec.flags
 }
 
+command_denies_oom :: proc(cmd: ^Command, argv: [][]u8) -> bool {
+	if .Denyoom in command_flags(cmd, argv) {
+		return true
+	}
+	return lua_is_eval(cmd) && lua_outer_denyoom(cmd, argv)
+}
+
 oom_denied :: proc(c: ^Conn, cmd: ^Command, argv: [][]u8) -> bool {
 	if cmd.handler != cmd_exec {
-		return .Denyoom in command_flags(cmd, argv)
+		return command_denies_oom(cmd, argv)
 	}
 	st := c.tx
 	if st == nil || .Multi not_in c.txf {
@@ -261,7 +274,7 @@ oom_denied :: proc(c: ^Conn, cmd: ^Command, argv: [][]u8) -> bool {
 	}
 	tx_fill_argv(st)
 	for q in st.cmds {
-		if .Denyoom in command_flags(q.cmd, tx_args(st, q)) {
+		if command_denies_oom(q.cmd, tx_args(st, q)) {
 			return true
 		}
 	}
@@ -350,6 +363,7 @@ tx_queue :: proc(c: ^Conn, cmd: ^Command, argv: [][]u8) {
 	append(&st.cmds, Tx_Cmd{cmd, first, len(argv)})
 	st.mem += cost
 	tx_mem_total += cost
+	tx_queued_extra += QUEUED_COMMAND_BYTES + len(argv) * TX_QUEUED_ARGUMENT_EXTRA
 	reply_simple(c, "QUEUED")
 }
 
@@ -434,11 +448,12 @@ tx_run :: proc(c: ^Conn, exec_argv: [][]u8) {
 		}
 		stat_cur = &hot.stats
 		t0 := mono_now()
+		settled := compute_settle_ticks
 		cmd.handler(c, args)
 		if labels_on && access_needs_session(cmd, args) && access_holds_push(c) {
 			access_pin_bound(c)
 		}
-		ticks := mono_now() - t0
+		ticks := compute_own_ticks(t0, settled)
 		if ticks < hot.limit_ticks {
 			#no_bounds_check hot.small[(ticks * mono_mul) >> 32] += 1
 			srv.stat_commands += 1

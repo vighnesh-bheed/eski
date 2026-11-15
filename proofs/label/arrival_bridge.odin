@@ -509,6 +509,20 @@ proof_handler :: proc(c: ^Conn, s: ^Cmd_Slot, inner: [][]u8) -> string {
 	case h == cmd_context && len(inner) >= 2 && (eq_nocase(inner[1], "create") || eq_nocase(inner[1], "info") || eq_nocase(inner[1], "drop")):
 		cmd_context(c, inner)
 		return proof_reply(c, eq_nocase(inner[1], "create"))
+	case h == cmd_lastsave:
+		srv.start_ms = 1_000_000
+		pst.lastsave = 2_000
+		cmd_lastsave(c, inner)
+		out := string(c.wbuf[:c.wlen])
+		c.wlen = 0
+		c.wpos = 0
+		switch out {
+		case ":1000\r\n":
+			return "lastsave:start"
+		case ":2000\r\n":
+			return "lastsave:saved"
+		}
+		panic("unexpected LASTSAVE reply")
 	case:
 		return "-"
 	}

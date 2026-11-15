@@ -21,6 +21,7 @@ LABELS_OFF = 'ERR labels are not configured on this server'
 INVALID = 'ERR invalid label'
 TOP_ERROR = 'ERR this command needs a label that dominates the whole label scheme'
 WRONGTYPE = 'WRONGTYPE Operation against a key holding the wrong kind of value'
+OOM_LABEL = "OOM command not allowed when used memory > 'label-quota'."
 WATCH_REFUSED = "EXECABORT Transaction discarded because of: the command's label differs from the transaction's label"
 
 
@@ -1261,6 +1262,215 @@ class NonInterference(unittest.TestCase):
             self.assertEqual(quiet[0], noisy[0], 'replies, seed %d' % seed)
             self.assertEqual(quiet[1], noisy[1], 'notifications, seed %d' % seed)
             self.assertEqual(quiet[2], noisy[2], 'tracking, seed %d' % seed)
+
+
+class VectorCharges(unittest.TestCase):
+    LOW = 'C'
+    PROBES = 80
+
+    def world(self, plan):
+        server = start_server(('--label-stream-seed', '5'))
+        try:
+            c = Client(server.port)
+            c.call('ACL', 'SETUSER', 'default', 'clearance:*', 'trust:*')
+            rng = random.Random(3)
+
+            def vector():
+                return ['%.3f' % rng.uniform(-1, 1) for _ in range(3)]
+
+            def hidden(label, count, tag):
+                for i in range(count):
+                    c.call(*AS(label), 'VADD', 'k', 'VALUES', 3, *vector(), '%s-hidden-element-%04d' % (tag, i))
+
+            visible = [vector() for _ in range(12)]
+            if 'before' in plan:
+                hidden('S', 40, 'b')
+            for i, x in enumerate(visible):
+                c.call(*AS(self.LOW), 'VADD', 'k', 'VALUES', 3, *x, 'low%d' % i)
+                if 'between' in plan and i == 5:
+                    hidden('C//A', 25, 'm')
+            if 'after' in plan:
+                hidden('S//A', 300, 'a')
+            if 'removed' in plan:
+                hidden('S', 30, 'r')
+                for i in range(30):
+                    c.call(*AS('S'), 'VREM', 'k', 'r-hidden-element-%04d' % i)
+            if 'expired' in plan:
+                hidden('C//B', 20, 'e')
+                c.call(*AS('C//B'), 'PEXPIRE', 'k', 30)
+                time.sleep(0.2)
+                c.call(*AS('C//B'), 'EXISTS', 'k')
+            used = c.call('LABEL', 'QUOTA', self.LOW)[1]
+            memory = c.call(*AS(self.LOW), 'MEMORY', 'USAGE', 'k')
+            c.call(*AS(self.LOW), 'VREM', 'k', 'low3')
+            c.call(*AS(self.LOW), 'VADD', 'k', 'VALUES', 3, *visible[3], 'low3', 'SETATTR', '{"a":1}')
+            after_writes = c.call('LABEL', 'QUOTA', self.LOW)[1]
+            c.call('LABEL', 'QUOTA', self.LOW, 'LIMIT', after_writes + 3000)
+            replies = []
+            for i in range(self.PROBES):
+                c.send(*AS(self.LOW), 'SET', 'probe%d' % i, 'x' * 100)
+                value = c.reply()
+                replies.append(str(value) if isinstance(value, ServerError) else value)
+            c.close()
+            return used, memory, after_writes, replies
+        finally:
+            server.close()
+
+    def test_hidden_partitions_leave_a_lower_label_quota_alone(self):
+        quiet = self.world(())
+        self.assertIn('OK', quiet[3])
+        self.assertTrue(any(r.startswith('OOM') for r in quiet[3] if r != 'OK'), quiet[3])
+        for plan in (('before',), ('between',), ('after',), ('removed',), ('expired',), ('before', 'between', 'after', 'removed', 'expired')):
+            self.assertEqual(self.world(plan), quiet, plan)
+
+    def eviction_world(self, hidden, over, policy='volatile-ttl'):
+        server = start_server(('--label-stream-seed', '5', '--maxmemory-policy', policy, '--maxmemory-samples', '64'))
+        try:
+            c = Client(server.port)
+            c.call('ACL', 'SETUSER', 'default', 'clearance:*', 'trust:*')
+            rng = random.Random(4)
+
+            def vector():
+                return ['%.3f' % rng.uniform(-1, 1) for _ in range(3)]
+
+            for i in range(10):
+                c.call(*AS(self.LOW), 'VADD', 'k', 'VALUES', 3, *vector(), 'low%d' % i)
+            c.call(*AS(self.LOW), 'PEXPIRE', 'k', 100000000)
+            for i in range(8):
+                c.call(*AS(self.LOW), 'VADD', 'one%d' % i, 'VALUES', 3, *vector(), 'e')
+                c.call(*AS(self.LOW), 'PEXPIRE', 'one%d' % i, 200000000 + i * 10000000)
+            for i in range(6):
+                c.call(*AS(self.LOW), 'SET', 's%d' % i, 'v' * 200, 'PX', 400000000 + i * 10000000)
+            if hidden:
+                side = random.Random(9)
+                for i in range(3):
+                    c.call(*AS('S'), 'VADD', 'k', 'VALUES', 3, *['%.3f' % side.uniform(-1, 1) for _ in range(3)], 'high%d' % i)
+                for i in range(0, 8, 2):
+                    c.call(*AS('C//A'), 'VADD', 'one%d' % i, 'VALUES', 3, *['%.3f' % side.uniform(-1, 1) for _ in range(3)], 'hidden')
+            use = c.call('LABEL', 'QUOTA', self.LOW)[1]
+            c.call('LABEL', 'QUOTA', self.LOW, 'LIMIT', max(1, use - over))
+            replies = []
+            for i in range(3):
+                c.send(*AS(self.LOW), 'SET', 'probe', 'x')
+                value = c.reply()
+                replies.append(str(value) if isinstance(value, ServerError) else value)
+            keys = sorted(c.call(*AS(self.LOW), 'KEYS', '*'))
+            left = c.call('LABEL', 'QUOTA', self.LOW)[1]
+            c.close()
+            return use, replies, keys, left
+        finally:
+            server.close()
+
+    def test_label_quota_eviction_ignores_hidden_partitions(self):
+        seen = set()
+        for over in (400, 1200, 2400, 4000, 7000, 12000, 400000):
+            quiet = self.eviction_world(False, over)
+            self.assertEqual(self.eviction_world(True, over), quiet, over)
+            use, replies, keys, left = quiet
+            seen.add(len(keys))
+            if any(reply != 'OK' for reply in replies):
+                self.assertEqual(replies, [OOM_LABEL] * 3, over)
+                self.assertEqual(keys, [], over)
+            else:
+                self.assertLessEqual(left, use - over + 600, over)
+                self.assertIn(b'probe', keys, over)
+        self.assertGreater(len(seen), 3, seen)
+
+    def test_label_quota_refuses_only_when_nothing_evictable_is_left(self):
+        server = start_server(('--label-stream-seed', '5', '--maxmemory-policy', 'volatile-ttl'))
+        try:
+            c = Client(server.port)
+            c.call('ACL', 'SETUSER', 'default', 'clearance:*', 'trust:*')
+            rng = random.Random(4)
+            for i in range(20):
+                c.call(*AS(self.LOW), 'VADD', 'set%02d' % i, 'VALUES', 3, *['%.3f' % rng.uniform(-1, 1) for _ in range(3)], 'e')
+                c.call(*AS(self.LOW), 'PEXPIRE', 'set%02d' % i, 100000000 + i * 1000000)
+            c.call(*AS(self.LOW), 'SET', 'plain', 'v')
+            for over in (1000, 1500, 9000):
+                use = c.call('LABEL', 'QUOTA', self.LOW)[1]
+                c.call('LABEL', 'QUOTA', self.LOW, 'LIMIT', max(1, use - over))
+                for _ in range(3):
+                    self.assertEqual(c.call(*AS(self.LOW), 'SET', 'plain', 'v'), 'OK', over)
+                self.assertLessEqual(c.call('LABEL', 'QUOTA', self.LOW)[1], use - over, over)
+            self.assertGreater(c.call(*AS(self.LOW), 'DBSIZE'), 1)
+            c.call('LABEL', 'QUOTA', self.LOW, 'LIMIT', 1)
+            self.assertEqual(error_of(c, *AS(self.LOW), 'SET', 'plain', 'v'), OOM_LABEL)
+            self.assertEqual(c.call(*AS(self.LOW), 'KEYS', '*'), [b'plain'])
+            self.assertEqual(c.call(*AS(self.LOW), 'TTL', 'plain'), -1)
+            c.close()
+        finally:
+            server.close()
+
+    def test_a_label_is_charged_at_least_what_its_sets_hold(self):
+        server = start_server(('--label-stream-seed', '5'))
+        try:
+            c = Client(server.port)
+            c.call('ACL', 'SETUSER', 'default', 'clearance:*', 'trust:*')
+            rng = random.Random(6)
+            low = AS(self.LOW)
+            top = AS('S//A/B')
+
+            def vector():
+                return ['%.3f' % rng.uniform(-1, 1) for _ in range(3)]
+
+            def covered(key, note):
+                real = c.call(*top, 'MEMORY', 'USAGE', key)
+                charged = c.call(*low, 'MEMORY', 'USAGE', key)
+                self.assertGreaterEqual(charged, real, '%s: %s holds %d bytes and is charged %d' % (note, key, real, charged))
+                return charged
+
+            for i in range(200):
+                key = 'small%03d' % i
+                for j in range(1 + i % 3):
+                    c.call(*low, 'VADD', key, 'VALUES', 3, *vector(), 'e%d%s' % (j, 'n' * (i % 40)))
+                covered(key, 'a small set')
+            names = ['e%d' % i for i in range(600)]
+            c.pipeline([low + ('VADD', 'k', 'VALUES', 3, *vector(), name, 'M', 16) for name in names])
+            c.pipeline([low + ('VREM', 'k', name) for name in names[200:]])
+            names = names[:200]
+            covered('k', 'a graph of 200 elements')
+            links = c.call(*low, 'VLINKS', 'k', names[0])
+            for target in (1, 2, 3, 0):
+                todo = list(names)
+                while todo:
+                    levels = [len(reply) - 1 for reply in c.pipeline([low + ('VLINKS', 'k', name) for name in todo])]
+                    todo = [name for name, level in zip(todo, levels) if level != target]
+                    c.pipeline([low + ('VADD', 'k', 'VALUES', 3, *vector(), name) for name in todo])
+                covered('k', 'every element at level %d' % target)
+            self.assertEqual(c.call(*low, 'VCARD', 'k'), 200)
+            self.assertEqual(len(links), len(c.call(*low, 'VLINKS', 'k', names[0])) + (len(links) - 1))
+            c.close()
+        finally:
+            server.close()
+
+    def test_a_low_writer_does_not_move_a_higher_label_quota(self):
+        for low_first in (False, True):
+            server = start_server(('--label-stream-seed', '5'))
+            try:
+                c = Client(server.port)
+                c.call('ACL', 'SETUSER', 'default', 'clearance:*', 'trust:*')
+                rng = random.Random(4)
+
+                def low(start, stop):
+                    for i in range(start, stop):
+                        c.call(*AS('C'), 'VADD', 'k', 'VALUES', 3, *['%.3f' % rng.uniform(-1, 1) for _ in range(3)], 'low-element-with-a-long-name-%05d' % i)
+                if low_first:
+                    low(0, 200)
+                for i in range(20):
+                    c.call(*AS('S'), 'VADD', 'k', 'VALUES', 3, *['%.3f' % rng.uniform(-1, 1) for _ in range(3)], 'high%d' % i)
+                high = c.call('LABEL', 'QUOTA', 'S')[1]
+                for i in range(200, 600, 50):
+                    low(i, i + 50)
+                    self.assertEqual(c.call('LABEL', 'QUOTA', 'S')[1], high, (low_first, i))
+                for i in range(0, 600, 2):
+                    c.call(*AS('C'), 'VREM', 'k', 'low-element-with-a-long-name-%05d' % i)
+                self.assertEqual(c.call('LABEL', 'QUOTA', 'S')[1], high, low_first)
+                self.assertEqual(c.call(*AS('C'), 'DEL', 'k'), 1)
+                self.assertEqual(c.call('LABEL', 'QUOTA', 'S')[1], high, low_first)
+                self.assertEqual(c.call(*AS('S'), 'VCARD', 'k'), 20)
+                c.close()
+            finally:
+                server.close()
 
 
 def main():

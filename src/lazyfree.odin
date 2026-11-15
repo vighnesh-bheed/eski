@@ -10,6 +10,7 @@ import lt "listtype"
 import rx "rax"
 import st "settype"
 import sm "streamtype"
+import vt "vsettype"
 import zt "zsettype"
 
 LAZYFREE_THRESHOLD :: 64
@@ -295,6 +296,9 @@ lazyfree_object :: #force_no_inline proc "contextless" (type: Obj_Type, obj: raw
 		return 0, false
 	}
 	n = object_acct_of(type, obj)
+	if type == .Vectorset {
+		vset_quiesce(cast(vt.Vset)obj)
+	}
 	if type == .Hash {
 		ht.registry_remove(ht.Hash(obj))
 		ht.maintenance_cancel(ht.Hash(obj))

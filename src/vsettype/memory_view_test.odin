@@ -11,42 +11,88 @@ expected_nominal :: proc(n: int) -> int {
 	if n <= 0 {
 		return 0
 	}
-	return max(24, (n + 23) / 16 * 16 - 8)
+	small := max(24, (n + 23) / 16 * 16 - 8)
+	if n < 131_072 {
+		return small
+	}
+	need := max(32, (n + 23) / 16 * 16)
+	return max(small, (need + 8 + 4095) / 4096 * 4096 - 16)
+}
+
+expected_block :: proc(n: int) -> int {
+	if n <= 0 {
+		return 0
+	}
+	return expected_nominal(n) + 16
+}
+
+expected_aligned :: proc(n: int) -> int {
+	if n <= 0 {
+		return 0
+	}
+	return expected_nominal(n) + 32
 }
 
 expected_part_bytes :: proc(s: Vset, p: ^Part_Head) -> int {
 	vector := s.dim
+	ranges := 0
 	switch quant(s) {
 	case .NOQUANT:
 		vector = 4 * s.dim
 	case .BIN:
 		vector = (s.dim + 63) / 64 * 8
 	case .Q8:
-		vector = s.dim + 4
+		vector = s.dim
+		ranges = 4
 	}
-	n := 208 if p.kind == .Compact else 576
-	n += p.count * (40 + 4 + 24 + 4 + vector)
+	scope := 72 + 24 + 56 + 16 + 8 + 4
+	set := 616 + 56 + 56
+	shared_set := set + 40 + 40
+	owned_set := set + 88 + 40 + 24 + 136
+	n := 0
+	switch {
+	case p.kind == .Compact:
+		n = owned_set + 232 + scope
+	case p.owner != SHARED:
+		n = owned_set + 600 + scope
+	case:
+		n = shared_set + 600 + 16
+	}
 	for i in 0 ..< p.count {
 		e := &p.elements[p.order[i]]
-		n += expected_nominal(int(e.len))
+		n += expected_block(int(e.len)) + 40 + int(e.len)
 		if e.attr.blob != nil {
-			n += expected_nominal(len(e.attr.blob))
+			n += expected_block(len(e.attr.blob))
 		}
 	}
-	if p.kind == .Compact || p.mode == .Flat || p.count == 0 {
+	cap := int(p.arena.cap)
+	if cap > 0 {
+		arena := (cap * vector + 3) / 4 * 4 + cap * (4 + ranges)
+		slots := cap * 2 if cap < 16 else cap + cap / 2 if cap < 64 else cap + cap / 4
+		n += expected_aligned(arena) + expected_block(slots * 40) + expected_block(slots * 4)
+	}
+	if p.kind == .Compact || p.mode == .Flat {
 		return n
 	}
 	g := &(^Partition)(p).graph
-	width := 2 if p.count <= 65_535 else 3 if p.count <= 16_777_215 else 4
+	gc := g.cap
+	if gc == 0 {
+		return n
+	}
+	width := 2 if gc <= 65_535 else 3 if gc <= 16_777_215 else 4
 	levels := 0
 	for i in 0 ..< p.count {
 		if slot := p.order[i]; !hnsw.is_twin(g, slot) {
 			levels += int(g.levels[slot])
 		}
 	}
-	n += 8 + p.count * (2 * g.m * width + 2 + 1 + 4) + levels * (g.m + 1) * width
-	if g.twins > 0 {
-		n += 4 * p.count
+	n += expected_aligned(gc * 2 * g.m * width + 8) + expected_block(2 * gc) + expected_block(gc) + expected_block(4 * gc)
+	live := levels * (g.m + 1)
+	room := max(live + live / 4, gc * (g.m + 1) / 3)
+	words := max(256, room + room / 2)
+	n += expected_block(words * width + 8)
+	if g.twin_link != nil {
+		n += expected_block(4 * gc)
 	}
 	return n
 }
@@ -55,7 +101,7 @@ expected_memory_of :: proc(v: ^View) -> int {
 	if v.size == 0 {
 		return 0
 	}
-	n := 616 + 56
+	n := 0
 	for &vp in v.parts {
 		n += expected_part_bytes(v.set, view_head(v, &vp))
 	}
@@ -194,7 +240,11 @@ below_top_memory_stays_near_the_real_footprint :: proc(t: ^testing.T) {
 			a := lattice_access(&l, 0)
 			got, _ := observed_memory(s, &a, &sc)
 			ratio := f64(got) / f64(memory_usage(s))
-			testing.expectf(t, ratio > 0.75 && ratio < 1.1, "%v dim %d: below-top memory %d against the real %d", q, dim, got, memory_usage(s))
+			near := ratio < 1.3
+			when .Address in ODIN_SANITIZER_FLAGS {
+				near = true
+			}
+			testing.expectf(t, got >= memory_usage(s) && near, "%v dim %d: below-top memory %d against the real %d", q, dim, got, memory_usage(s))
 			destroy(s)
 			free_all(context.temp_allocator)
 		}

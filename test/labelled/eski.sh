@@ -10,6 +10,9 @@ scheme=(--label-levels "UNCLASSIFIED,CONFIDENTIAL,SECRET" --label-compartments "
 owners=()
 case "${ESKI_LABELLED_MODE:-on}" in
 	off)
+		if [ -n "${ESKI_LABELLED_PRINT_LOGIN:-}" ]; then
+			exit 0
+		fi
 		exec "$binary" "$@" "${extra[@]}"
 		;;
 	on|labelled)
@@ -33,6 +36,10 @@ case "${ESKI_LABELLED_MODE:-on}" in
 		exit 2
 		;;
 esac
+if [ -n "${ESKI_LABELLED_PRINT_LOGIN:-}" ]; then
+	printf '%s\n' "${login[*]}"
+	exit 0
+fi
 if [ -n "${ESKI_LABELLED_DIR:-}" ] && { [ $# -eq 0 ] || [ "${1#--}" != "$1" ]; }; then
 	own_dir=1
 	for a in "$@"; do
@@ -46,6 +53,6 @@ if [ -n "${ESKI_LABELLED_DIR:-}" ] && { [ $# -eq 0 ] || [ "${1#--}" != "$1" ]; }
 	fi
 fi
 exec "$binary" "$@" "${extra[@]}" \
-	--save "" --appendonly no --shutdown-on-sigterm default --shutdown-on-sigint default --memcached-port 0 \
+	--shutdown-on-sigterm default --shutdown-on-sigint default --memcached-port 0 \
 	"${owners[@]}" "${scheme[@]}" \
 	--user default on nopass sanitize-payload "~*" "&*" "+@all" "${login[@]}"

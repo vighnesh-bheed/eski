@@ -102,7 +102,6 @@ class LSet:
 
     def insert(self, l, n, mask, spec):
         if l not in self.parts:
-            self.streams[l] = (self.streams[l] + GOLDEN) & M64
             self.parts[l] = {'mode': 'flat', 'uid': 0, 'order': []}
         p = self.parts[l]
         p['uid'] += 1
@@ -734,8 +733,6 @@ class OSet:
 
     def insert(self, x, n, mask, spec):
         if x not in self.parts:
-            k = self.stream_key(x)
-            self.streams[k] = (self.streams[k] + GOLDEN) & M64
             self.parts[x] = {'mode': 'flat', 'uid': 0, 'order': []}
         p = self.parts[x]
         p['uid'] += 1

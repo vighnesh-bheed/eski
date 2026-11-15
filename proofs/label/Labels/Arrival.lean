@@ -13,7 +13,9 @@ def errTransaction : String := "ERR the command's label differs from the transac
 def errNested : String := "ERR LABEL AS cannot wrap LABEL AS or LABEL SESSION"
 def errMismatch : String := "ERR the label differs from the context's label"
 def errTop : String := "ERR this command needs a label that dominates the whole label scheme"
-def errPersistence : String := "ERR persistence is off while a label scheme is configured"
+def errAof : String :=
+  "ERR the append-only file is off while a label scheme is configured; SAVE and BGSAVE write labelled snapshots"
+def errMigrate : String := "ERR MIGRATE is off while a label scheme is configured; move keys with DUMP and RESTORE"
 def wrongArgs (name : String) : String := "ERR wrong number of arguments for '" ++ name ++ "' command"
 def errWrongArgs : String := wrongArgs "label|as"
 def errSyntax : String := "ERR syntax error"
@@ -66,7 +68,7 @@ def knownCommands : List String :=
   ["get", "set", "ping", "echo", "select", "auth", "hello", "quit", "reset", "client", "label", "context", "multi", "exec",
    "discard", "watch", "unwatch", "subscribe", "psubscribe", "ssubscribe", "save", "bgsave", "bgrewriteaof", "dump", "restore",
    "migrate", "debug", "monitor", "swapdb", "latency", "memory", "slowlog", "config", "shutdown", "eval", "publish",
-   "script", "function"]
+   "script", "function", "lastsave"]
 
 def isCmd (args : List Arg) (w : String) : Bool := nameOf args == word w
 
@@ -88,20 +90,41 @@ def needsSession (args : List Arg) : Bool :=
   ["subscribe", "psubscribe", "ssubscribe"].any (isCmd args) ||
     (isCmd args "client" && argIs args 1 "tracking" && argIs args 2 "on")
 
+def persistenceNames : List String :=
+  ["save", "appendonly", "appendfsync", "dir", "dbfilename", "appenddirname", "appendfilename", "stop-writes-on-bgsave-error",
+   "rdbcompression", "rdbchecksum", "key-load-delay", "owners-forget-snapshot-delay"]
+
+def persistencePrefixes : List String := ["aof-", "auto-aof-", "rdb-", "shutdown-"]
+
+def persistenceName (a : Arg) : Bool :=
+  match a with
+  | .lit b => persistenceNames.any (fun n => b.map lowerByte == word n) ||
+      persistencePrefixes.any (fun p => (word p).isPrefixOf (b.map lowerByte))
+  | _ => false
+
+def settingNames : List Arg → List Arg
+  | a :: _ :: rest => a :: settingNames rest
+  | [a] => [a]
+  | [] => []
+
+def configPersistence (args : List Arg) : Bool :=
+  argIs args 1 "set" && (settingNames (args.drop 2)).any persistenceName
+
 def topOnly (args : List Arg) : Bool :=
   ["monitor", "swapdb", "debug", "latency"].any (isCmd args) ||
     (isCmd args "client" && (argIs args 1 "pause" || argIs args 1 "unpause")) ||
     (isCmd args "memory" && (argIs args 1 "stats" || argIs args 1 "doctor" || argIs args 1 "malloc-stats" ||
       argIs args 1 "purge")) ||
     (isCmd args "slowlog" && argIs args 1 "reset") ||
-    (isCmd args "config" && argIs args 1 "resetstat") ||
+    (isCmd args "config" && (argIs args 1 "resetstat" || configPersistence args)) ||
+    ["save", "bgsave", "shutdown"].any (isCmd args) ||
     (isCmd args "function" && (argIs args 1 "load" || argIs args 1 "delete" || argIs args 1 "flush" || argIs args 1 "restore")) ||
     (isCmd args "script" && argIs args 1 "flush")
 
 def persistenceRefused (args : List Arg) : Bool :=
-  ["save", "bgsave", "bgrewriteaof", "dump", "restore", "migrate"].any (isCmd args) ||
-    (isCmd args "debug" && (argIs args 1 "reload" || argIs args 1 "loadaof")) ||
-    (isCmd args "shutdown" && (args.drop 1).any (isWord · "save"))
+  ["bgrewriteaof", "migrate"].any (isCmd args) || (isCmd args "debug" && argIs args 1 "loadaof")
+
+def persistenceText (args : List Arg) : String := if isCmd args "migrate" then errMigrate else errAof
 
 def scriptDenied (args : List Arg) : Bool :=
   (isCmd args "label" && !(argIs args 1 "whoami" || argIs args 1 "help")) ||
@@ -390,7 +413,7 @@ def gate (E : AEnv) (c : AConn) (inner : List Arg) (l : TLabel) (prefixed : Bool
   else if !known inner then none
   else if sessionNeededAt E c inner prefixed then some errSessionNeeded
   else if aclDenies E c.login inner then some (errNoperm c.login (aclTarget inner))
-  else if persistenceRefused inner then some errPersistence
+  else if persistenceRefused inner then some (persistenceText inner)
   else if topOnly inner && !domT l (ttop E.cfg.base.levels.length E.cfg.base.comps.length) then some errTop
   else none
 
@@ -450,6 +473,7 @@ inductive Reply
   | exec
   | nil
   | none
+  | lastsave (start : Bool)
 deriving DecidableEq, Repr
 
 def sessionLabel (E : AEnv) (inner : List Arg) : Except String TLabel :=
@@ -539,6 +563,7 @@ def handleCmd (E : AEnv) (D : ADyn) (id : Nat) (l : TLabel) (inner : List Arg) :
     else if isCmd inner "unwatch" then (.ok, setConn D id (clearWatch c))
     else if isCmd inner "label" && argIs inner 1 "session" then sessionHandler E D id c inner
     else if isCmd inner "context" then contextHandler E D c l inner
+    else if isCmd inner "lastsave" then (.lastsave !(domT l (ttop E.cfg.base.levels.length E.cfg.base.comps.length)), D)
     else (.none, D)
 
 def touch (D : ADyn) (k : List Nat) (w : TLabel) : ADyn :=
@@ -2186,7 +2211,7 @@ theorem handleCmd_unmarkAll (E : AEnv) (D : ADyn) (id : Nat) (l : TLabel) (inner
                 · simp only [h1, h2, h3, h4, h5, h6, ↓reduceIte, Bool.false_eq_true, sessionHandler_unmarkAll]
                 · by_cases h7 : isCmd inner "context" = true
                   · simp only [h1, h2, h3, h4, h5, h6, h7, ↓reduceIte, Bool.false_eq_true, contextHandler_unmarkAll]
-                  · simp [h1, h2, h3, h4, h5, h6, h7]
+                  · by_cases h8 : isCmd inner "lastsave" = true <;> simp [h1, h2, h3, h4, h5, h6, h7, h8]
 
 theorem request_unmarkAll (E : AEnv) (D : ADyn) (id : Nat) (args : List Arg) :
     (request E (unmarkAll D) id args).1 = (request E D id args).1 ∧
@@ -2484,5 +2509,256 @@ theorem session_change_needs_admission {E : AEnv} {D : ADyn} {id : Nat} {args : 
   | ok l inner ctx =>
     refine ⟨l, inner, ctx, rfl, fun hk => ?_⟩
     exact arrive_ok_acl hc hk (Prod.ext ha rfl)
+
+theorem known_of {args : List Arg} {w : String} (hw : w ∈ knownCommands) (h : isCmd args w = true) :
+    known args = true :=
+  List.any_eq_true.2 ⟨w, hw, h⟩
+
+theorem isCmd_ne {args : List Arg} {w v : String} (h : isCmd args w = true) (hne : word w ≠ word v) :
+    isCmd args v = false := by
+  unfold isCmd at *
+  rw [beq_iff_eq] at h
+  rw [h]
+  simpa using hne
+
+theorem persistence_refused_iff (args : List Arg) :
+    persistenceRefused args = true ↔
+      isCmd args "bgrewriteaof" = true ∨ isCmd args "migrate" = true ∨
+        (isCmd args "debug" = true ∧ argIs args 1 "loadaof" = true) := by
+  simp [persistenceRefused, or_assoc]
+
+theorem persistenceRefused_known {args : List Arg} (h : persistenceRefused args = true) : known args = true := by
+  rcases (persistence_refused_iff args).1 h with h | h | ⟨h, -⟩
+  · exact known_of (by simp [knownCommands]) h
+  · exact known_of (by simp [knownCommands]) h
+  · exact known_of (by simp [knownCommands]) h
+
+theorem topOnly_known {args : List Arg} (h : topOnly args = true) : known args = true := by
+  unfold topOnly at h
+  simp only [List.any_cons, List.any_nil, Bool.or_false, Bool.or_eq_true, Bool.and_eq_true] at h
+  rcases h with ((((((((h | h | h | h) | ⟨h, -⟩) | ⟨h, -⟩) | ⟨h, -⟩) | ⟨h, -⟩) | (h | h | h)) | ⟨h, -⟩) | ⟨h, -⟩) <;>
+    exact known_of (by simp [knownCommands]) h
+
+theorem migrate_refused {args : List Arg} (h : isCmd args "migrate" = true) :
+    persistenceRefused args = true ∧ persistenceText args = errMigrate := by
+  refine ⟨(persistence_refused_iff args).2 (Or.inr (Or.inl h)), ?_⟩
+  simp [persistenceText, h]
+
+theorem aof_refused {args : List Arg}
+    (h : isCmd args "bgrewriteaof" = true ∨ (isCmd args "debug" = true ∧ argIs args 1 "loadaof" = true)) :
+    persistenceRefused args = true ∧ persistenceText args = errAof := by
+  rcases h with h | ⟨h, hl⟩
+  · refine ⟨(persistence_refused_iff args).2 (Or.inl h), ?_⟩
+    simp [persistenceText, isCmd_ne h (v := "migrate") (by decide)]
+  · refine ⟨(persistence_refused_iff args).2 (Or.inr (Or.inr ⟨h, hl⟩)), ?_⟩
+    simp [persistenceText, isCmd_ne h (v := "migrate") (by decide)]
+
+theorem snapshot_commands_top {args : List Arg}
+    (h : isCmd args "save" = true ∨ isCmd args "bgsave" = true ∨ isCmd args "shutdown" = true) :
+    topOnly args = true ∧ persistenceRefused args = false := by
+  rcases h with h | h | h
+  · refine ⟨by simp [topOnly, h], ?_⟩
+    simp [persistenceRefused, isCmd_ne h (v := "bgrewriteaof") (by decide), isCmd_ne h (v := "migrate") (by decide),
+      isCmd_ne h (v := "debug") (by decide)]
+  · refine ⟨by simp [topOnly, h], ?_⟩
+    simp [persistenceRefused, isCmd_ne h (v := "bgrewriteaof") (by decide), isCmd_ne h (v := "migrate") (by decide),
+      isCmd_ne h (v := "debug") (by decide)]
+  · refine ⟨by simp [topOnly, h], ?_⟩
+    simp [persistenceRefused, isCmd_ne h (v := "bgrewriteaof") (by decide), isCmd_ne h (v := "migrate") (by decide),
+      isCmd_ne h (v := "debug") (by decide)]
+
+theorem debug_top {args : List Arg} (h : isCmd args "debug" = true) (hl : argIs args 1 "loadaof" = false) :
+    topOnly args = true ∧ persistenceRefused args = false := by
+  refine ⟨by simp [topOnly, h], ?_⟩
+  simp [persistenceRefused, isCmd_ne h (v := "bgrewriteaof") (by decide), isCmd_ne h (v := "migrate") (by decide), hl]
+
+theorem debug_loadaof_both {args : List Arg} (h : isCmd args "debug" = true) (hl : argIs args 1 "loadaof" = true) :
+    topOnly args = true ∧ persistenceRefused args = true := by
+  refine ⟨by simp [topOnly, h], (persistence_refused_iff args).2 (Or.inr (Or.inr ⟨h, hl⟩))⟩
+
+theorem open_commands {args : List Arg}
+    (h : isCmd args "dump" = true ∨ isCmd args "restore" = true ∨ isCmd args "lastsave" = true) :
+    topOnly args = false ∧ persistenceRefused args = false := by
+  rcases h with h | h | h <;>
+    simp [topOnly, persistenceRefused, isCmd_ne h (v := "bgrewriteaof") (by decide), isCmd_ne h (v := "migrate") (by decide),
+      isCmd_ne h (v := "debug") (by decide), isCmd_ne h (v := "monitor") (by decide), isCmd_ne h (v := "swapdb") (by decide),
+      isCmd_ne h (v := "latency") (by decide), isCmd_ne h (v := "client") (by decide), isCmd_ne h (v := "memory") (by decide),
+      isCmd_ne h (v := "slowlog") (by decide), isCmd_ne h (v := "config") (by decide), isCmd_ne h (v := "save") (by decide),
+      isCmd_ne h (v := "bgsave") (by decide), isCmd_ne h (v := "shutdown") (by decide),
+      isCmd_ne h (v := "function") (by decide), isCmd_ne h (v := "script") (by decide)]
+
+theorem config_persistence_top {args : List Arg} (h : isCmd args "config" = true) (hs : configPersistence args = true) :
+    topOnly args = true ∧ persistenceRefused args = false := by
+  refine ⟨by simp [topOnly, h, hs], ?_⟩
+  simp [persistenceRefused, isCmd_ne h (v := "bgrewriteaof") (by decide), isCmd_ne h (v := "migrate") (by decide),
+    isCmd_ne h (v := "debug") (by decide)]
+
+theorem config_other_open {args : List Arg} (h : isCmd args "config" = true) (hs : configPersistence args = false)
+    (hr : argIs args 1 "resetstat" = false) : topOnly args = false ∧ persistenceRefused args = false := by
+  simp [topOnly, persistenceRefused, hs, hr, h, isCmd_ne h (v := "bgrewriteaof") (by decide),
+    isCmd_ne h (v := "migrate") (by decide), isCmd_ne h (v := "debug") (by decide), isCmd_ne h (v := "monitor") (by decide),
+    isCmd_ne h (v := "swapdb") (by decide), isCmd_ne h (v := "latency") (by decide), isCmd_ne h (v := "client") (by decide),
+    isCmd_ne h (v := "memory") (by decide), isCmd_ne h (v := "slowlog") (by decide), isCmd_ne h (v := "save") (by decide),
+    isCmd_ne h (v := "bgsave") (by decide), isCmd_ne h (v := "shutdown") (by decide),
+    isCmd_ne h (v := "function") (by decide), isCmd_ne h (v := "script") (by decide)]
+
+theorem setting_names_at (xs : List Arg) (a : Arg) : a ∈ settingNames xs ↔ ∃ i, xs[2 * i]? = some a := by
+  induction xs using settingNames.induct with
+  | case1 x y rest ih =>
+    simp only [settingNames, List.mem_cons, ih]
+    constructor
+    · rintro (rfl | ⟨i, hi⟩)
+      · exact ⟨0, rfl⟩
+      · exact ⟨i + 1, by simpa [Nat.mul_succ] using hi⟩
+    · rintro ⟨i, hi⟩
+      cases i with
+      | zero => exact Or.inl (by simpa using hi.symm)
+      | succ j => exact Or.inr ⟨j, by simpa [Nat.mul_succ] using hi⟩
+  | case2 x =>
+    simp only [settingNames, List.mem_singleton]
+    constructor
+    · rintro rfl
+      exact ⟨0, rfl⟩
+    · rintro ⟨i, hi⟩
+      cases i with
+      | zero => simpa using hi.symm
+      | succ j => simp [Nat.mul_succ] at hi
+  | case3 => simp [settingNames]
+
+theorem config_persistence_iff (args : List Arg) :
+    configPersistence args = true ↔
+      argIs args 1 "set" = true ∧ ∃ i a, args[2 * i + 2]? = some a ∧ persistenceName a = true := by
+  unfold configPersistence
+  simp only [Bool.and_eq_true, List.any_eq_true, setting_names_at, List.getElem?_drop]
+  constructor
+  · rintro ⟨hs, a, ⟨i, hi⟩, hp⟩
+    exact ⟨hs, i, a, by simpa [Nat.add_comm] using hi, hp⟩
+  · rintro ⟨hs, i, a, hi, hp⟩
+    exact ⟨hs, a, ⟨i, by simpa [Nat.add_comm] using hi⟩, hp⟩
+
+theorem persistence_name_iff (b : List Nat) :
+    persistenceName (.lit b) = true ↔
+      (∃ n ∈ persistenceNames, b.map lowerByte = word n) ∨
+        ∃ p ∈ persistencePrefixes, (word p).isPrefixOf (b.map lowerByte) = true := by
+  simp [persistenceName, List.any_eq_true]
+
+theorem persistence_name_literal (a : Arg) (h : persistenceName a = true) : ∃ b, a = .lit b := by
+  cases a with
+  | lit b => exact ⟨b, rfl⟩
+  | handle n => simp [persistenceName] at h
+  | token n => simp [persistenceName] at h
+
+theorem gate_persistence_wins {E : AEnv} {c : AConn} {inner : List Arg} {l : TLabel} {p : Bool}
+    (hl : ceilingAdmits (ceilingFor E c.login) l = true) (hv : labelValidT E.cfg l = true)
+    (hs : sessionNeededAt E c inner p = false) (ha : aclDenies E c.login inner = false)
+    (hp : persistenceRefused inner = true) : gate E c inner l p = some (persistenceText inner) := by
+  simp [gate, hl, hv, hs, ha, hp, persistenceRefused_known hp]
+
+theorem gate_top_below {E : AEnv} {c : AConn} {inner : List Arg} {l : TLabel} {p : Bool}
+    (hl : ceilingAdmits (ceilingFor E c.login) l = true) (hv : labelValidT E.cfg l = true)
+    (hs : sessionNeededAt E c inner p = false) (ha : aclDenies E c.login inner = false)
+    (hp : persistenceRefused inner = false) (ht : topOnly inner = true)
+    (hn : domT l (ttop E.cfg.base.levels.length E.cfg.base.comps.length) = false) : gate E c inner l p = some errTop := by
+  simp [gate, hl, hv, hs, ha, hp, ht, hn, topOnly_known ht]
+
+theorem gate_open {E : AEnv} {c : AConn} {inner : List Arg} {l : TLabel} {p : Bool}
+    (hl : ceilingAdmits (ceilingFor E c.login) l = true) (hv : labelValidT E.cfg l = true)
+    (hs : sessionNeededAt E c inner p = false) (ha : aclDenies E c.login inner = false)
+    (hp : persistenceRefused inner = false)
+    (ht : topOnly inner = false ∨ domT l (ttop E.cfg.base.levels.length E.cfg.base.comps.length) = true) :
+    gate E c inner l p = none := by
+  rcases ht with ht | ht <;> simp [gate, hl, hv, hs, ha, hp, ht]
+
+theorem gate_none_rules {E : AEnv} {c : AConn} {inner : List Arg} {l : TLabel} {p : Bool} (h : gate E c inner l p = none) :
+    persistenceRefused inner = false ∧
+      (topOnly inner = true → domT l (ttop E.cfg.base.levels.length E.cfg.base.comps.length) = true) := by
+  constructor
+  · cases hp : persistenceRefused inner
+    · rfl
+    · have hk := persistenceRefused_known hp
+      unfold gate at h
+      repeat' (split at h)
+      all_goals simp_all
+  · intro ht
+    cases hd : domT l (ttop E.cfg.base.levels.length E.cfg.base.comps.length)
+    · have hk := topOnly_known ht
+      unfold gate at h
+      repeat' (split at h)
+      all_goals simp_all
+    · rfl
+
+theorem finish_gate {E : AEnv} {D D' : ADyn} {id : Nat} {c : AConn} {inner inner' : List Arg} {l0 l : TLabel}
+    {ctx ctx' : Option ACtx} {p : Bool} (h : arriveFinish E D id c inner l0 ctx p = (.ok l inner' ctx', D')) :
+    inner' = inner ∧ gate E c inner l p = none := by
+  unfold arriveFinish at h
+  split at h
+  · exact (refuse_not_ok h).elim
+  · split at h
+    · exact (refuse_not_ok h).elim
+    · rename_i hg
+      simp only [Prod.mk.injEq, Arrival.ok.injEq] at h
+      obtain ⟨⟨rfl, rfl, rfl⟩, rfl⟩ := h
+      exact ⟨rfl, hg⟩
+
+theorem arrive_rules {E : AEnv} {D D' : ADyn} {id : Nat} {args inner : List Arg} {l : TLabel} {ctx : Option ACtx}
+    (h : arrive E D id args = (.ok l inner ctx, D')) :
+    persistenceRefused inner = false ∧
+      (topOnly inner = true → domT l (ttop E.cfg.base.levels.length E.cfg.base.comps.length) = true) := by
+  unfold arrive at h
+  split at h
+  · simp at h
+  · split at h
+    · split at h
+      · exact (refuse_not_ok h).elim
+      · split at h
+        · exact (refuse_not_ok h).elim
+        · obtain ⟨rfl, hg⟩ := finish_gate h
+          exact gate_none_rules hg
+    · split at h
+      · exact (refuse_not_ok h).elim
+      · obtain ⟨rfl, hg⟩ := finish_gate h
+        exact gate_none_rules hg
+
+theorem arriveVeto_rules {E : AEnv} {D D' : ADyn} {id : Nat} {args inner : List Arg} {l : TLabel} {ctx : Option ACtx}
+    (h : arriveVeto E D id args = (.ok l inner ctx, D')) :
+    persistenceRefused inner = false ∧
+      (topOnly inner = true → domT l (ttop E.cfg.base.levels.length E.cfg.base.comps.length) = true) := by
+  unfold arriveVeto at h
+  split at h
+  · simp at h
+  · split at h
+    · split at h
+      · exact (refuse_not_ok h).elim
+      · split at h
+        · exact (refuse_not_ok h).elim
+        · obtain ⟨-, -, rfl, -, -, -, -, hg⟩ := core_spec h
+          exact gate_none_rules hg
+    · split at h
+      · exact (refuse_not_ok h).elim
+      · obtain ⟨-, -, rfl, -, -, -, -, hg⟩ := core_spec h
+        exact gate_none_rules hg
+
+theorem handleCmd_lastsave {E : AEnv} {D : ADyn} {id : Nat} {l : TLabel} {inner : List Arg} {c : AConn}
+    (hc : connOf D id = some c) (h : isCmd inner "lastsave" = true) :
+    (handleCmd E D id l inner).1 =
+      if c.inMulti then .queued else .lastsave !(domT l (ttop E.cfg.base.levels.length E.cfg.base.comps.length)) := by
+  cases hm : c.inMulti <;>
+    simp [handleCmd, hc, hm, h, immediate, isCmd_ne h (v := "multi") (by decide), isCmd_ne h (v := "exec") (by decide),
+      isCmd_ne h (v := "discard") (by decide), isCmd_ne h (v := "watch") (by decide),
+      isCmd_ne h (v := "unwatch") (by decide), isCmd_ne h (v := "label") (by decide),
+      isCmd_ne h (v := "context") (by decide), isCmd_ne h (v := "quit") (by decide), isCmd_ne h (v := "reset") (by decide)]
+
+theorem refuse_fst_ne {D : ADyn} {id : Nat} {c : AConn} {a : List Arg} {m : String} {l : TLabel} {inner : List Arg}
+    {x : Option ACtx} : (refuse D id c a m).1 ≠ .ok l inner x := by
+  unfold refuse
+  split <;> simp
+
+theorem core_fst_gate {E : AEnv} {D : ADyn} {id : Nat} {c : AConn} {inner0 inner : List Arg} {l0 l : TLabel}
+    {ctx0 ctx : Option ACtx} {p : Bool} (h : (arriveCore E D id c inner0 l0 ctx0 p).1 = .ok l inner ctx) :
+    gate E c inner l p = none := by
+  have h' : arriveCore E D id c inner0 l0 ctx0 p = (.ok l inner ctx, (arriveCore E D id c inner0 l0 ctx0 p).2) :=
+    Prod.ext h rfl
+  obtain ⟨-, -, rfl, -, -, -, -, hg⟩ := core_spec h'
+  exact hg
 
 end Labels

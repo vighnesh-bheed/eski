@@ -5,7 +5,9 @@ import "base:runtime"
 import "core:crypto/blake2b"
 import "core:sys/linux"
 import ht "hashtype"
+import lb "label"
 import lt "listtype"
+import ow "owner"
 import "rdb"
 import lr "lua_runtime"
 import st "settype"
@@ -362,12 +364,82 @@ persist_table_ok :: #force_inline proc "contextless" (t: ^Table) -> bool {
 	return t.ctrl != nil && t.cap > 0 && t.live > 0
 }
 
+persist_write_slot :: proc(w: ^rdb.Writer, db: ^Db, t: ^Table, i: int, lru: bool, lfu: bool, processed: ^i64, labelled: bool) -> bool {
+	kp := &t.slots[i].key
+	vset := kp.small.tag.val_form == FORM_OBJECT && t.slots[i].val.slab.info.type == .Vectorset
+	if vset && labelled && !access_vset_savable(db, cast(vt.Vset)persist_slot_value(db, kp, &t.slots[i].val).obj) {
+		return false
+	}
+	if vset && !labelled && !persist_seed_written {
+		persist_write_seed(w)
+	}
+	expire := slot_deadline(db, t, i)
+	if expire != 0 {
+		rdb.put_u8(w, rdb.OPCODE_EXPIRETIME_MS)
+		rdb.put_ms(w, expire)
+	}
+	if lru || lfu {
+		e := persist_slot_entry(db, t, i)
+		if lru {
+			rdb.put_u8(w, rdb.OPCODE_IDLE)
+			rdb.put_len(w, u64(max(entry_idle_seconds(&e), 0)))
+		} else {
+			rdb.put_u8(w, rdb.OPCODE_FREQ)
+			rdb.put_u8(w, u8(clamp(entry_tally(&e), 0, 255)))
+		}
+	}
+	if vset && labelled {
+		rdb.put_type(w, rdb.TYPE_MODULE_2)
+		rdb.put_string(w, key_bytes(kp, &db.slab))
+		if !access_write_vset(w, db, cast(vt.Vset)persist_slot_value(db, kp, &t.slots[i].val).obj) {
+			return false
+		}
+	} else if !persist_write_value(w, key_bytes(kp, &db.slab), persist_slot_value(db, kp, &t.slots[i].val), true) {
+		return false
+	}
+	processed^ += 1
+	persist_child_progress(processed^)
+	return true
+}
+
+persist_write_table :: proc(w: ^rdb.Writer, db: ^Db, lru: bool, lfu: bool, processed: ^i64, labelled: bool) -> bool {
+	for bank in 0 ..< persist_table_count(db) {
+		t := &db.t[bank]
+		if !persist_table_ok(t) {
+			continue
+		}
+		for g: u64 = 0; g < t.groups; g += 1 {
+			bits := group_full(group_load(t.ctrl, g))
+			for bits != 0 {
+				i := int(g) * GROUP_SLOTS + int(intrinsics.count_trailing_zeros(bits))
+				bits &= bits - 1
+				if !persist_write_slot(w, db, t, i, lru, lfu, processed, labelled) {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
 persist_write_rdb :: proc(w: ^rdb.Writer, aof_base: bool = false) -> bool {
+	persist_seed_written = false
 	rdb.put_header(w, persist_unix_now(), i64(mem_used()), aof_base)
+	mode, labelled := access_save_mode()
+	if labelled && !access_write_header(w, mode) {
+		return false
+	}
 	lua_libraries_save(w)
 	processed: i64 = 0
 	lru := persist_policy_lru()
 	lfu := persist_policy_lfu()
+	if labelled {
+		if !access_write_dbs(w, lru, lfu) {
+			return false
+		}
+		rdb.put_trailer(w)
+		return rdb.writer_flush(w)
+	}
 	for &db, id in dbs {
 		size := db_size_of(&db)
 		if size == 0 {
@@ -378,40 +450,8 @@ persist_write_rdb :: proc(w: ^rdb.Writer, aof_base: bool = false) -> bool {
 		rdb.put_u8(w, rdb.OPCODE_RESIZEDB)
 		rdb.put_len(w, u64(size))
 		rdb.put_len(w, u64(max(db.expires, 0)))
-		for bank in 0 ..< persist_table_count(&db) {
-			t := &db.t[bank]
-			if !persist_table_ok(t) {
-				continue
-			}
-			for g: u64 = 0; g < t.groups; g += 1 {
-				bits := group_full(group_load(t.ctrl, g))
-				for bits != 0 {
-					i := int(g) * GROUP_SLOTS + int(intrinsics.count_trailing_zeros(bits))
-					bits &= bits - 1
-					kp := &t.slots[i].key
-					expire := slot_deadline(&db, t, i)
-					if expire != 0 {
-						rdb.put_u8(w, rdb.OPCODE_EXPIRETIME_MS)
-						rdb.put_ms(w, expire)
-					}
-					if lru || lfu {
-						e := persist_slot_entry(&db, t, i)
-						if lru {
-							rdb.put_u8(w, rdb.OPCODE_IDLE)
-							rdb.put_len(w, u64(max(entry_idle_seconds(&e), 0)))
-						} else {
-							rdb.put_u8(w, rdb.OPCODE_FREQ)
-							rdb.put_u8(w, u8(clamp(entry_tally(&e), 0, 255)))
-						}
-					}
-					v := persist_slot_value(&db, kp, &t.slots[i].val)
-					if !persist_write_value(w, key_bytes(kp, &db.slab), v, true) {
-						return false
-					}
-					processed += 1
-					persist_child_progress(processed)
-				}
-			}
+		if !persist_write_table(w, &db, lru, lfu, &processed, false) {
+			return false
 		}
 	}
 	rdb.put_trailer(w)
@@ -438,10 +478,6 @@ persist_child_progress :: proc(processed: i64) {
 
 @(private = "file")
 persist_save_internal :: proc(filename: string) -> bool {
-	if access_persistence_off() {
-		plog(LOG_WARNING, "RDB save refused: ", LABEL_PERSISTENCE_ON)
-		return false
-	}
 	tbuf: [64]u8
 	temp := persist_temp_name(linux.getpid(), tbuf[:])
 	tcbuf: [80]u8
@@ -452,7 +488,12 @@ persist_save_internal :: proc(filename: string) -> bool {
 	defer {
 		if !pst.in_child { intrinsics.atomic_store_explicit(&persist_signal_saving, 0, .Release) }
 	}
-	fd, err := linux.open(ctemp, {.WRONLY, .CREAT, .TRUNC, .CLOEXEC}, {.IRUSR, .IWUSR, .IRGRP, .IROTH})
+	_, private := access_save_mode()
+	fmode: linux.Mode = {.IRUSR, .IWUSR} if private else {.IRUSR, .IWUSR, .IRGRP, .IROTH}
+	fd, err := linux.open(ctemp, {.WRONLY, .CREAT, .TRUNC, .CLOEXEC}, fmode)
+	if err == .NONE && private {
+		linux.fchmod(fd, {.IRUSR, .IWUSR})
+	}
 	if err != .NONE {
 		cwd: [PERSIST_PATH_MAX]u8
 		plog(LOG_WARNING, "Failed opening the temp RDB file ", temp, " (in server root dir ", persist_cwd(cwd[:]), ") for saving: ", errno_text(err))
@@ -460,11 +501,18 @@ persist_save_internal :: proc(filename: string) -> bool {
 	}
 	w: rdb.Writer
 	rdb.writer_init_file(&w, fd, pst.compression, pst.checksum)
+	sw: Seal_File_Writer
+	if seal_on {
+		seal_writer_attach(&w, &sw, fd, .Snapshot, seal_salt())
+	}
 	if cfg.rdb_save_incremental_fsync {
 		w.sync_every = 4 << 20
 	}
 	good := persist_write_rdb(&w, false)
 	good = rdb.writer_flush(&w) && good
+	if seal_on {
+		good = seal_writer_close(&w, &sw) && good
+	}
 	write_errno := w.errno
 	rdb.writer_destroy(&w)
 	if good {
@@ -475,7 +523,11 @@ persist_save_internal :: proc(filename: string) -> bool {
 	}
 	linux.close(fd)
 	if !good {
-		plog(LOG_WARNING, "Write error saving DB on disk: ", errno_text(write_errno))
+		if access_save_refused != "" {
+			plog(LOG_WARNING, "Refusing to save: ", access_save_refused)
+		} else {
+			plog(LOG_WARNING, "Write error saving DB on disk: ", errno_text(write_errno))
+		}
 		linux.unlink(ctemp)
 		return false
 	}
@@ -501,12 +553,16 @@ persist_rdb_save :: proc() -> bool {
 		plog(LOG_WARNING, "Background save already in progress")
 		return false
 	}
+	access_prepare_save()
 	good := persist_save_internal(persist_filename())
 	pst.stat_rdb_saves += 1
 	if good {
 		pst.dirty = 0
 		pst.lastsave = persist_unix_now()
 		pst.lastbgsave_err = false
+		access_snapshot_saved(access_forget_at_fork)
+	} else {
+		access_snapshot_failed()
 	}
 	persist_update_gate()
 	return good
@@ -514,13 +570,10 @@ persist_rdb_save :: proc() -> bool {
 
 persist_bgsave :: proc() -> bool {
 	keyspace_fence()
-	if access_persistence_off() {
-		plog(LOG_WARNING, "Background save refused: ", LABEL_PERSISTENCE_ON)
-		return false
-	}
 	if pst.child_pid > 0 {
 		return false
 	}
+	access_prepare_save()
 	pst.dirty_at_fork = pst.dirty
 	pst.bgsave_attempt_at = persist_unix_now()
 	persist_progress_prepare()
@@ -601,10 +654,13 @@ persist_rdb_child_finished :: proc(result: Persist_Child_Result, signal: int = 0
 		pst.dirty = max(pst.dirty - pst.dirty_at_fork, 0)
 		pst.lastsave = now
 		pst.lastbgsave_err = false
+		access_snapshot_saved(access_forget_at_fork)
 	case .Failed:
 		plog(LOG_WARNING, "Background saving error")
 		pst.lastbgsave_err = true
+		access_snapshot_failed()
 	case .Killed:
+		access_snapshot_failed()
 		digits: [24]u8
 		width := format_i64(&digits[0], i64(signal))
 		plog(LOG_WARNING, "Background saving terminated by signal ", string(digits[:width]))
@@ -746,8 +802,8 @@ persist_load_object :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> (v: Loa
 			rdb.corrupt(r, "holds module data with an unreadable module id")
 			return
 		}
-		if id == VSET_RDB_MODULE_ID {
-			if vs := vset_rdb_load(r); vs != nil {
+		if vset_rdb_module(id) {
+			if vs := vset_rdb_load(r, id); vs != nil {
 				v.type = .Vectorset
 				v.obj = vs
 			}
@@ -1038,6 +1094,14 @@ Access_Hint :: struct {
 	value: i64,
 }
 
+@(private = "file")
+persist_load_settled :: proc(e: ^Entry, expire: i64, hint: Access_Hint) {
+	if expire != -1 {
+		entry_set_expire(e, expire)
+	}
+	persist_apply_access_hint(e, hint)
+}
+
 persist_apply_access_hint :: proc(e: ^Entry, hint: Access_Hint) {
 	counting := persist_policy_lfu()
 	switch hint.kind {
@@ -1055,6 +1119,62 @@ persist_apply_access_hint :: proc(e: ^Entry, hint: Access_Hint) {
 
 @(private = "file")
 persist_skip_expired: bool
+
+@(private = "file")
+persist_seed_found: bool
+
+@(private = "file")
+persist_seed_value: u64
+
+@(private = "file")
+persist_seed_written: bool
+
+VSET_SEED_AUX :: "eski-vset-seed"
+
+persist_seed_parse :: proc "contextless" (text: []u8) -> (seed: u64, good: bool) {
+	if len(text) == 0 || len(text) > 20 || text[0] == '0' {
+		return 0, false
+	}
+	for ch in text {
+		if ch < '0' || ch > '9' {
+			return 0, false
+		}
+		d := u64(ch - '0')
+		if seed > (max(u64) - d) / 10 {
+			return 0, false
+		}
+		seed = seed * 10 + d
+	}
+	return seed, true
+}
+
+persist_seed_digits :: proc "contextless" (out: ^[20]u8, seed: u64) -> []u8 {
+	n := 20
+	v := seed
+	for {
+		n -= 1
+		out[n] = u8('0' + v % 10)
+		v /= 10
+		if v == 0 {
+			break
+		}
+	}
+	return out[n:]
+}
+
+@(private = "file")
+persist_write_seed :: proc(w: ^rdb.Writer) {
+	persist_seed_written = true
+	seed, held := vset_seed_get()
+	if !held || seed == 0 {
+		return
+	}
+	digits: [20]u8
+	rdb.put_aux(w, VSET_SEED_AUX, persist_seed_digits(&digits, seed))
+}
+
+@(private = "file")
+persist_past_aux: bool
 
 @(private = "file")
 persist_load_version :: proc(magic: []u8) -> int {
@@ -1087,6 +1207,10 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 		plog(LOG_WARNING, "Can't handle RDB format version ", string(tmp[:n]))
 		return .Failed
 	}
+	access_load_begin()
+	persist_past_aux = false
+	persist_seed_found = false
+	persist_seed_value = 0
 	if !preserve_libraries {
 		lua_library_flush(false)
 	}
@@ -1103,6 +1227,12 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 		t := rdb.get_type(r)
 		if t < 0 {
 			persist_load_failed(r)
+		}
+		if labels_on && !access_ld.active && t != rdb.OPCODE_AUX && t != rdb.OPCODE_MODULE_AUX {
+			return persist_refuse(LABEL_STARTUP_FILE)
+		}
+		if t != rdb.OPCODE_AUX && t != rdb.OPCODE_MODULE_AUX {
+			persist_past_aux = true
 		}
 		switch t {
 		case rdb.OPCODE_EXPIRETIME:
@@ -1147,6 +1277,11 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 				plog(LOG_WARNING, "FATAL: Data file was created with a server configured to handle more than ", string(tmp[:n]), " databases. Exiting")
 				linux.exit_group(1)
 			}
+			if access_ld.active {
+				if msg := access_load_select(int(id)); msg != "" {
+					persist_fail_with(r, msg)
+				}
+			}
 			db = &dbs[id]
 			continue
 		case rdb.OPCODE_RESIZEDB:
@@ -1173,12 +1308,35 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 			if !vgood {
 				persist_load_failed(r)
 			}
+			if string(k) == VSET_SEED_AUX {
+				seed, valid := persist_seed_parse(v)
+				if !valid || persist_seed_found {
+					persist_fail_with(r, "the file has an invalid vector set seed field")
+				}
+				persist_seed_found = true
+				persist_seed_value = seed
+				continue
+			}
 			persist_handle_aux(k, v)
 			continue
 		case rdb.OPCODE_MODULE_AUX:
 			id := rdb.get_len(r)
 			if !rdb.ok(r) {
 				persist_load_failed(r)
+			}
+			if id == ACCESS_MODULE_ID {
+				msg, refusal := access_load_module(r)
+				if refusal {
+					return persist_refuse(msg)
+				}
+				if !rdb.ok(r) {
+					persist_load_failed(r)
+				}
+				if msg != "" {
+					persist_fail_with(r, msg)
+				}
+				persist_past_aux = true
+				continue
 			}
 			name: [9]u8
 			persist_fail_with(r, "the file carries auxiliary data of unknown module type '", rdb.module_name_by_id(id, &name), "'")
@@ -1196,10 +1354,16 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 			old := lua_library_find(library.name)
 			if old != nil && !merge {
 				lua_library_free(library)
+				if access_ld.active {
+					persist_fail_with(r, "the file holds one function library twice")
+				}
 				return .Failed
 			}
 			if lua_library_collision(library, old) != nil {
 				lua_library_free(library)
+				if access_ld.active {
+					persist_fail_with(r, "the file holds function libraries that collide")
+				}
 				return .Failed
 			}
 			if old != nil {
@@ -1214,44 +1378,89 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 			if !kgood {
 				persist_load_failed(r)
 			}
-			v := persist_load_object(r, t, deep)
-			if r.status == .Empty_Key {
-				r.status = .Ok
-				persist_log_empty_key(key)
-				pst.last_load_empty += 1
-				expire, hint = -1, {}
-				continue
-			}
-			if !rdb.ok(r) {
-				persist_value_failed(r, key, t)
-			}
-			keys_seen += 1
-			if persist_skip_expired && expire != -1 && expire < now_ms {
-				persist_free_loaded(v)
-				pst.last_load_expired += 1
-				expire, hint = -1, {}
-				continue
-			}
-			due := expire if expire != -1 else 0
-			e, created := db_upsert_timed_in(db, key, due)
-			if !created {
-				if !merge {
-					l: Log_Line
-					persist_fail_begin(&l, r)
-					ll_str(&l, "duplicated key ")
-					persist_ll_key(&l, key)
-					ll_str(&l, " in database ")
-					ll_int(&l, i64(db.id))
-					persist_fail_end(&l)
+			if access_ld.active {
+				if !access_load_in_part() {
+					persist_fail_key(r, "the file holds key ", key, " outside any partition")
 				}
-				db_remove_in(db, key)
-				e, _ = db_upsert_timed_in(db, key, due)
 			}
-			persist_attach(e, key, v)
-			if expire != -1 {
-				entry_set_expire(e, expire)
+			if access_ld.active && t == rdb.TYPE_MODULE_2 {
+				keys_seen += 1
+				if persist_skip_expired && expire != -1 && expire < now_ms {
+					aof_load_expired(db.id, key)
+					if _, read := access_load_vset(r, key, false); !read {
+						persist_value_failed(r, key, t)
+					}
+					if access_load_dead(key) {
+						persist_fail_duplicate(r, key, db.id)
+					}
+					pst.last_load_expired += 1
+					expire, hint = -1, {}
+					continue
+				}
+				s, read := access_load_vset(r, key, true)
+				if !read {
+					persist_value_failed(r, key, t)
+				}
+				part, msg, duplicate := access_load_target(key)
+				if duplicate {
+					persist_fail_duplicate(r, key, db.id)
+				}
+				if msg != "" {
+					persist_fail_with(r, msg)
+				}
+				e, created := access_load_presence(part, key, expire if expire != -1 else 0, s)
+				if !created {
+					persist_fail_duplicate(r, key, part.id)
+				}
+				persist_load_settled(e, expire, hint)
+			} else {
+				v := persist_load_object(r, t, deep)
+				if r.status == .Empty_Key {
+					r.status = .Ok
+					persist_log_empty_key(key)
+					pst.last_load_empty += 1
+					expire, hint = -1, {}
+					continue
+				}
+				if !rdb.ok(r) {
+					persist_value_failed(r, key, t)
+				}
+				keys_seen += 1
+				if persist_skip_expired && expire != -1 && expire < now_ms {
+					aof_load_expired(db.id, key)
+					persist_free_loaded(v)
+					if access_ld.active && access_load_dead(key) {
+						persist_fail_duplicate(r, key, db.id)
+					}
+					pst.last_load_expired += 1
+					expire, hint = -1, {}
+					continue
+				}
+				due := expire if expire != -1 else 0
+				target := db
+				if access_ld.active {
+					part, msg, duplicate := access_load_target(key)
+					if duplicate {
+						persist_free_loaded(v)
+						persist_fail_duplicate(r, key, db.id)
+					}
+					if msg != "" {
+						persist_free_loaded(v)
+						persist_fail_with(r, msg)
+					}
+					target = part
+				}
+				e, created := db_upsert_timed_in(target, key, due)
+				if !created {
+					if !merge {
+						persist_fail_duplicate(r, key, target.id)
+					}
+					db_remove_in(target, key)
+					e, _ = db_upsert_timed_in(target, key, due)
+				}
+				persist_attach(e, key, v)
+				persist_load_settled(e, expire, hint)
 			}
-			persist_apply_access_hint(e, hint)
 			pst.last_load_loaded += 1
 			expire, hint = -1, {}
 			if cfg.key_load_delay != 0 {
@@ -1289,7 +1498,66 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 			}
 		}
 	}
+	if access_ld.active {
+		if persist_seed_found {
+			persist_fail_with(r, "the file has a vector set seed field outside its labelled header")
+		}
+		if !access_load_vsets_finish(r) {
+			persist_fail_with(r, "the file ", rdb.reader_reason(r))
+		}
+		persist_seed_value, persist_seed_found = access_load_seed()
+		if msg := access_load_finish(); msg != "" {
+			persist_fail_with(r, msg)
+		}
+	}
+	if !merge {
+		if persist_seed_found {
+			vset_seed_put(persist_seed_value)
+		} else {
+			vset_seed_clear()
+		}
+	}
 	return .Ok
+}
+
+@(private = "file")
+persist_fail_key :: proc "contextless" (r: ^rdb.Reader, head: string, key: []u8, tail: string) -> ! {
+	l: Log_Line
+	persist_fail_begin(&l, r)
+	ll_str(&l, head)
+	persist_ll_key(&l, key)
+	ll_str(&l, tail)
+	persist_fail_end(&l)
+}
+
+@(private = "file")
+persist_fail_duplicate :: proc "contextless" (r: ^rdb.Reader, key: []u8, dbi: int) -> ! {
+	l: Log_Line
+	persist_fail_begin(&l, r)
+	ll_str(&l, "duplicated key ")
+	persist_ll_key(&l, key)
+	ll_str(&l, " in database ")
+	ll_int(&l, i64(dbi))
+	persist_fail_end(&l)
+}
+
+persist_refuse_name: string
+
+@(private = "file")
+persist_refuse :: proc(msg: string) -> Load_Result {
+	name := persist_refuse_name if persist_refuse_name != "" else persist_filename()
+	cwd: [PERSIST_PATH_MAX]u8
+	if access_ld.startup {
+		plog(LOG_WARNING, "Refusing to start: the data file ", name, " in ", persist_cwd(cwd[:]), " ", msg)
+		linux.exit_group(1)
+	}
+	plog(LOG_WARNING, "Refusing to load the data file ", name, ": it ", msg)
+	if persist_past_aux {
+		plog(LOG_WARNING, "Part of the data file was already loaded when it was refused, so the server stops")
+		linux.exit_group(1)
+	}
+	access_load_free()
+	return .Failed
 }
 
 @(private = "file")
@@ -1308,18 +1576,6 @@ persist_ll_hex16 :: proc "contextless" (l: ^Log_Line, v: u64) {
 	ll_str(l, string(tmp[:]))
 }
 
-persist_refuse_unlabelled_file :: proc() {
-	name := persist_filename()
-	pbuf: [PERSIST_PATH_MAX]u8
-	st: linux.Stat
-	if linux.stat(persist_cstr(name, pbuf[:]), &st) == .ENOENT {
-		return
-	}
-	cwd: [PERSIST_PATH_MAX]u8
-	plog(LOG_WARNING, "Refusing to start: the data file ", name, " in ", persist_cwd(cwd[:]), " ", LABEL_STARTUP_FILE)
-	linux.exit_group(1)
-}
-
 persist_rdb_load :: proc(merge: bool, at_startup: bool, preserve_libraries: bool = false) -> Load_Result {
 	keyspace_fence()
 	name := persist_filename()
@@ -1327,13 +1583,6 @@ persist_rdb_load :: proc(merge: bool, at_startup: bool, preserve_libraries: bool
 	fd, err := linux.open(persist_cstr(name, pbuf[:]), {.CLOEXEC})
 	if err == .ENOENT {
 		return .Not_Exist
-	}
-	if labels_on {
-		if err == .NONE {
-			linux.close(fd)
-		}
-		plog(LOG_WARNING, "Refusing to load ", name, ": a server with a label scheme or owner mode never loads data that carries no labels or owners")
-		return .Failed
 	}
 	if err != .NONE {
 		plog(LOG_WARNING, "Fatal error loading the DB, check server logs. Exiting.")
@@ -1354,14 +1603,28 @@ persist_rdb_load :: proc(merge: bool, at_startup: bool, preserve_libraries: bool
 	persist_update_gate()
 	r: rdb.Reader
 	rdb.reader_init_file(&r, fd, pst.checksum)
+	sr: Seal_File_Reader
+	if !seal_snapshot_attach(&r, &sr, fd, name) {
+		rdb.reader_destroy(&r)
+		pst.loading = false
+		pst.serve_while_loading = false
+		persist_update_gate()
+		return .Failed
+	}
 	r.progress = persist_loading_progress
 	r.tick_every = cfg.loading_events_interval_bytes if cfg.loading_events_interval_bytes > 0 else PERSIST_LOADING_EVENTS_BYTES
 	r.next_tick = r.tick_every
 	start := now_ns()
 	persist_skip_expired = true
+	access_load_startup = at_startup
 	result := persist_load_stream(&r, merge, preserve_libraries)
+	if result == .Ok && !seal_snapshot_done(&r, &sr) {
+		result = .Failed
+	}
+	access_load_startup = false
 	persist_skip_expired = false
 	pst.loading_loaded = rdb.reader_offset(&r)
+	seal_reader_release(&r, &sr)
 	rdb.reader_destroy(&r)
 	pst.loading = false
 	pst.serve_while_loading = false
@@ -1402,6 +1665,7 @@ persist_finish_shutdown :: proc(flags: Shutdown_Flags) -> bool {
 		mem_registry_changed()
 	}
 	remove_pid_file()
+	seal_wipe_keys()
 	plog(LOG_WARNING, "Eski is now ready to exit, bye bye...")
 	runtime_operations_shutdown()
 	diagnostics_shutdown()
@@ -1424,8 +1688,32 @@ persist_prepare_shutdown :: proc(flags_in: Shutdown_Flags) -> bool {
 		plog(LOG_WARNING, "There is a child saving an .rdb. Killing it!")
 		persist_kill_child()
 	}
+	if aof_forgotten := !pst.loading && access_forget_aof_uncovered(); aof_forgotten {
+		if .Nosave in flags {
+			plog(LOG_WARNING, "Exiting without a rewrite although OWNERS FORGET ran after the last append-only rewrite: the append-only files still hold the data it removed")
+		} else {
+			plog(LOG_NOTICE, "OWNERS FORGET ran after the last append-only rewrite, so the append-only file is rewritten before exiting.")
+			if aof_rewrite_sync() {
+				aof_drain_jobs()
+			} else {
+				if .Force in flags {
+					plog(LOG_WARNING, "Error trying to rewrite the append-only file. Exit anyway.")
+				} else {
+					plog(LOG_WARNING, "Error trying to rewrite the append-only file, can't exit.")
+					return false
+				}
+			}
+		}
+	}
 	aof_shutdown()
-	if .Nosave not_in flags && (.Save in flags || len(pst.save_params) > 0) {
+	forgotten := !pst.loading && access_forget_uncovered()
+	if forgotten && .Nosave in flags {
+		plog(LOG_WARNING, "Exiting without a save although OWNERS FORGET ran after the last snapshot: the data file still holds the data it removed")
+	}
+	if .Nosave not_in flags && (.Save in flags || len(pst.save_params) > 0 || forgotten) {
+		if forgotten && .Save not_in flags && len(pst.save_params) == 0 {
+			plog(LOG_NOTICE, "OWNERS FORGET ran after the last snapshot, so a snapshot is saved before exiting.")
+		}
 		plog(LOG_NOTICE, "Saving the final RDB snapshot before exiting.")
 		if !persist_rdb_save() {
 			if .Force in flags {
@@ -1517,6 +1805,8 @@ persist_cron :: proc() {
 		persist_bgsave()
 	case:
 		persist_auto_save(persist_unix_now())
+		access_forget_cron()
+		access_forget_aof_cron()
 	}
 }
 
@@ -1525,14 +1815,13 @@ persist_startup :: proc() {
 	persist_install_signals()
 	pst.lastsave = persist_unix_now()
 	persist_update_gate()
-	if labels_on {
-		persist_refuse_unlabelled_file()
-	}
+	access_startup_cleanup()
 	if !aof.started && !aof_startup() {
 		plog(LOG_WARNING, "Fatal error loading the DB, check server logs. Exiting.")
 		linux.exit_group(1)
 	}
 	if aof.wanted || aof.state != .Disabled {
+		seal_startup_done()
 		return
 	}
 	switch persist_rdb_load(false, true) {
@@ -1541,12 +1830,16 @@ persist_startup :: proc() {
 		plog(LOG_WARNING, "Fatal error loading the DB, check server logs. Exiting.")
 		linux.exit_group(1)
 	}
+	seal_startup_done()
 }
 
 persist_flushed :: proc(all: bool, removed: i64) {
 	pst.dirty += removed
 	pst.dirty_explicit = true
-	if !all {
+	if !all || !access_flush_everything_ran() {
+		return
+	}
+	if labels_on && aof.loading {
 		return
 	}
 	if pst.child_pid > 0 && !pst.child_aof {
@@ -1564,6 +1857,8 @@ cmd_save :: proc(c: ^Conn, argv: [][]u8) {
 	}
 	if persist_rdb_save() {
 		reply_ok(c)
+	} else if access_save_refused != "" {
+		reply_error_parts(c, "ERR ", access_save_refused)
 	} else {
 		reply_error(c, "ERR")
 	}
@@ -1600,6 +1895,10 @@ cmd_bgsave :: proc(c: ^Conn, argv: [][]u8) {
 }
 
 cmd_lastsave :: proc(c: ^Conn, argv: [][]u8) {
+	if labels_on && !access.top {
+		reply_int(c, srv.start_ms / 1000)
+		return
+	}
 	reply_int(c, pst.lastsave)
 }
 
@@ -1673,7 +1972,7 @@ persist_info :: proc(b: ^[dynamic]u8) {
 	info_line_int(b, "rdb_changes_since_last_save", pst.dirty)
 	info_line_int(b, "rdb_bgsave_in_progress", 1 if child else 0)
 	info_line_int(b, "rdb_last_save_time", pst.lastsave)
-	info_line_str(b, "rdb_last_bgsave_status", "err" if pst.lastbgsave_err else "ok")
+	info_line_str(b, "rdb_last_bgsave_status", "err" if pst.lastbgsave_err && persist_info_open() else "ok")
 	info_line_int(b, "rdb_last_bgsave_time_sec", pst.save_time_last)
 	current: i64 = -1
 	if child && pst.save_time_start >= 0 {
@@ -1684,9 +1983,50 @@ persist_info :: proc(b: ^[dynamic]u8) {
 	info_line_int(b, "rdb_last_cow_size", pst.stat_rdb_cow)
 	info_line_int(b, "rdb_last_load_keys_expired", pst.last_load_expired)
 	info_line_int(b, "rdb_last_load_keys_loaded", pst.last_load_loaded)
+	mark := len(b)
 	aof_info(b)
+	if !persist_info_open() {
+		persist_info_fixed(b, mark)
+	}
+	if owners_on && access.top {
+		access_info_forget(b)
+	}
 	if pst.loading {
 		persist_info_loading(b)
+	}
+}
+
+@(private = "file")
+persist_info_open :: #force_inline proc "contextless" () -> bool {
+	return !labels_on || access.top
+}
+
+@(private = "file")
+persist_info_fixed :: proc(b: ^[dynamic]u8, mark: int) {
+	tail := make([]u8, len(b) - mark, context.temp_allocator)
+	copy(tail, b[mark:])
+	resize(b, mark)
+	start := 0
+	for start < len(tail) {
+		stop := start
+		for stop < len(tail) && tail[stop] != '\n' {
+			stop += 1
+		}
+		line := tail[start:min(stop + 1, len(tail))]
+		start = stop + 1
+		colon := -1
+		for ch, i in line {
+			if ch == ':' {
+				colon = i
+				break
+			}
+		}
+		name := string(line[:colon]) if colon > 0 else ""
+		if len(name) > len("_status") && name[len(name) - len("_status"):] == "_status" {
+			info_line_str(b, name, "ok")
+			continue
+		}
+		sb_bytes(b, line)
 	}
 }
 
@@ -1726,6 +2066,8 @@ Digest_Tag :: enum u8 {
 	Stream,
 	Key,
 	Vectorset,
+	Scope,
+	Quota,
 }
 
 @(private = "file")
@@ -2011,6 +2353,197 @@ persist_dataset_digest :: proc(final: ^[20]u8) {
 }
 
 @(private = "file")
+digest_scope_rank :: proc(cp: ^Label_Copies, label: lb.Id) -> u64 {
+	if cp == nil {
+		return 0
+	}
+	mine: u64 = 0
+	for x in cp.copies {
+		if x.label == label {
+			mine = x.seq
+		}
+	}
+	rank: u64 = 0
+	for x in cp.copies {
+		if x.seq < mine {
+			rank += 1
+		}
+	}
+	return rank
+}
+
+@(private = "file")
+digest_scoped_db :: proc(total: ^Digest, db: ^Db, owner: string, owned: bool, copies: ^map[string]^Label_Copies) {
+	if db_size_of(db) == 0 {
+		return
+	}
+	marking := make([dynamic]u8, context.temp_allocator)
+	access_format(&marking, db.label)
+	for &t in db.t[:persist_table_count(db)] {
+		if !persist_table_ok(&t) {
+			continue
+		}
+		for g in 0 ..< t.groups {
+			occupied := group_full(group_load(t.ctrl, g))
+			base := int(g) * GROUP_SLOTS
+			for occupied != 0 {
+				slot := base + int(intrinsics.count_trailing_zeros(occupied))
+				occupied &= occupied - 1
+				name := key_bytes(&t.slots[slot].key, &db.slab)
+				h: blake2b.Context
+				digest_begin(&h, .Scope)
+				digest_word(&h, u64(db.id))
+				digest_text(&h, name)
+				value := persist_slot_value(db, &t.slots[slot].key, &t.slots[slot].val)
+				contents := digest_vset_partition(db, cast(vt.Vset)value.obj) if value.type == .Vectorset && value.obj != nil else digest_of_value(value)
+				blake2b.update(&h, contents[:])
+				digest_word(&h, u64(slot_deadline(db, &t, slot)))
+				digest_text(&h, marking[:])
+				digest_word(&h, 1 if owned else 0)
+				digest_text(&h, transmute([]u8)owner)
+				cp: ^Label_Copies
+				if copies != nil && len(copies^) > 0 {
+					cp = copies[string(name)]
+				}
+				digest_word(&h, digest_scope_rank(cp, db.label))
+				digest_accumulate(total, digest_close(&h))
+			}
+		}
+	}
+}
+
+@(private = "file")
+digest_sink_write :: proc(ctx: rawptr, data: []u8) {
+	blake2b.update((^blake2b.Context)(ctx), data)
+}
+
+@(private = "file")
+digest_vset_scopes: map[vt.Vset]Digest
+
+@(private = "file")
+digest_vset_ids: [dynamic]lb.Id
+
+@(private = "file")
+digest_vset_marking: [dynamic]u8
+
+@(private = "file")
+digest_vset_release :: proc() {
+	delete(digest_vset_scopes)
+	delete(digest_vset_ids)
+	delete(digest_vset_marking)
+	digest_vset_scopes = nil
+	digest_vset_ids = nil
+	digest_vset_marking = nil
+}
+
+@(private = "file")
+digest_vset_scope :: proc(total: ^Digest, label: lb.Id, owner: string, owned: bool) {
+	clear(&digest_vset_marking)
+	access_format(&digest_vset_marking, label)
+	h: blake2b.Context
+	digest_begin(&h, .Scope)
+	digest_text(&h, digest_vset_marking[:])
+	digest_word(&h, 1 if owned else 0)
+	digest_text(&h, transmute([]u8)owner)
+	digest_accumulate(total, digest_close(&h))
+}
+
+@(private = "file")
+digest_vset_scope_list :: proc(s: vt.Vset) -> Digest {
+	if scopes, done := digest_vset_scopes[s]; done {
+		return scopes
+	}
+	scopes: Digest
+	clear(&digest_vset_ids)
+	vt.labels_present(s, &digest_vset_ids)
+	for id in digest_vset_ids {
+		digest_vset_scope(&scopes, id, "", false)
+	}
+	if s.lab != nil && s.lab.owners != nil {
+		idx := s.lab.owners
+		for i in 0 ..< idx.slot_cap {
+			o := idx.slots[i].owner
+			if o == vt.SHARED {
+				continue
+			}
+			text, _ := owner_text(ow.Owner(o))
+			clear(&digest_vset_ids)
+			vt.owner_labels(s, o, &digest_vset_ids)
+			for id in digest_vset_ids {
+				digest_vset_scope(&scopes, id, text, true)
+			}
+		}
+	}
+	digest_vset_scopes[s] = scopes
+	return scopes
+}
+
+@(private = "file")
+digest_vset_partition :: proc(db: ^Db, s: vt.Vset) -> Digest {
+	scopes := digest_vset_scope_list(s)
+	h: blake2b.Context
+	digest_begin(&h, .Vectorset)
+	blake2b.update(&h, scopes[:])
+	scope := vt.Scope{label = db.label, owner = access_vset_scope(db)}
+	if plan, planned := vt.scoped_plan(s, scope, 0); planned {
+		digest_word(&h, u64(plan.size))
+		vt.scoped_write(s, scope, &plan, vt.Sink{ctx = &h, write = digest_sink_write})
+	}
+	return digest_close(&h)
+}
+
+@(private = "file")
+digest_quota :: proc(total: ^Digest, name: []u8, owned: bool, bytes: i64) {
+	h: blake2b.Context
+	digest_begin(&h, .Quota)
+	digest_word(&h, 1 if owned else 0)
+	digest_text(&h, name)
+	digest_word(&h, u64(bytes))
+	digest_accumulate(total, digest_close(&h))
+}
+
+persist_scoped_digest :: proc(final: ^[20]u8) {
+	defer digest_vset_release()
+	total: Digest
+	for i in 0 ..< len(label_dbs) {
+		ld := &label_dbs[i]
+		for p in ld.by_id {
+			if p != nil {
+				digest_scoped_db(&total, p, "", false, &ld.copies)
+			}
+		}
+	}
+	for e in owner_table.entries {
+		if e == nil {
+			continue
+		}
+		parts := make([dynamic]^Owner_Part, context.temp_allocator)
+		owner_parts_of(e, &parts)
+		for q in parts {
+			d := owner_db(q)
+			digest_owner_db = d
+			digest_scoped_db(&total, d, e.text, true, q.space.copies)
+		}
+		if e.keyspace.quota_set {
+			digest_quota(&total, transmute([]u8)e.text, true, e.keyspace.quota)
+		}
+	}
+	digest_owner_db = nil
+	for id, bytes in label_quotas {
+		marking := make([dynamic]u8, context.temp_allocator)
+		access_format(&marking, id)
+		digest_quota(&total, marking[:], false, i64(bytes))
+	}
+	if access_forget_seq > 0 {
+		h: blake2b.Context
+		digest_begin(&h, .Quota)
+		digest_word(&h, access_forget_seq)
+		digest_accumulate(&total, digest_close(&h))
+	}
+	final^ = total
+}
+
+@(private = "file")
 persist_debug_reload :: proc(c: ^Conn, argv: [][]u8) {
 	merge, noflush, nosave := false, false, false
 	for arg in argv[2:] {
@@ -2026,6 +2559,10 @@ persist_debug_reload :: proc(c: ^Conn, argv: [][]u8) {
 			return
 		}
 	}
+	if labels_on && (merge || noflush) {
+		reply_error(c, ACCESS_RELOAD_OPTIONS)
+		return
+	}
 	if !nosave {
 		if pst.child_pid > 0 && !pst.child_aof {
 			persist_kill_child()
@@ -2034,9 +2571,19 @@ persist_debug_reload :: proc(c: ^Conn, argv: [][]u8) {
 			reply_error(c, "ERR")
 			return
 		}
+	} else {
+		if msg := access_file_probe(persist_filename()); msg != "" {
+			plog(LOG_WARNING, "Refusing to load the data file ", persist_filename(), ": it ", msg)
+			reply_error(c, "ERR Error trying to load the RDB dump, check server logs.")
+			return
+		}
 	}
 	if !noflush {
-		db_flush_all()
+		if labels_on {
+			access_flush_everything()
+		} else {
+			db_flush_all()
+		}
 	}
 	if persist_rdb_load(merge, false, noflush) != .Ok {
 		reply_error(c, "ERR Error trying to load the RDB dump, check server logs.")
@@ -2071,9 +2618,15 @@ persist_debug :: proc(c: ^Conn, argv: [][]u8) -> bool {
 		return false
 	}
 	sub := argv[1]
+	if labels_on && pst.loading {
+		reply_error(c, ERR_LOADING)
+		return true
+	}
 	switch {
-	case labels_on && (eq_nocase(sub, "reload") || eq_nocase(sub, "loadaof")):
-		reply_error(c, access_persistence_text())
+	case labels_on && eq_nocase(sub, "digest-scopes") && len(argv) == 2:
+		d: [20]u8
+		persist_scoped_digest(&d)
+		reply_digest(c, &d)
 	case eq_nocase(sub, "reload"):
 		persist_debug_reload(c, argv)
 	case eq_nocase(sub, "digest") && len(argv) == 2:

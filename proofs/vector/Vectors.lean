@@ -22,6 +22,7 @@ import Vectors.OwnerPartition
 import Vectors.OwnerPlain
 import Vectors.OwnerFootprint
 import Vectors.OwnerSim
+import Vectors.Persist
 
 #print axioms Vectors.hadamardSign_mul
 #print axioms Vectors.rowDot_self
@@ -428,3 +429,42 @@ import Vectors.OwnerSim
 #print axioms Vectors.single_owner_view
 #print axioms Vectors.single_owner_find
 #print axioms Vectors.single_owner_range
+#print axioms Vectors.takeN_append
+#print axioms Vectors.takePairs_append
+#print axioms Vectors.takeLists_append
+#print axioms Vectors.takeSlot_encode
+#print axioms Vectors.takeSlots_append
+#print axioms Vectors.parse_encode
+#print axioms Vectors.wf_shape
+#print axioms Vectors.wf_clause
+#print axioms Vectors.payload_decode_encode
+#print axioms Vectors.decode_wf
+#print axioms Vectors.decode_encode_decode
+#print axioms Vectors.decode_rejects_failure
+#print axioms Vectors.wf_free
+#print axioms Vectors.wf_elements
+#print axioms Vectors.wf_sequences
+#print axioms Vectors.wf_link_target
+#print axioms Vectors.wf_list_nodup
+#print axioms Vectors.wf_symmetric
+#print axioms Vectors.wf_entry
+#print axioms Vectors.wf_twins
+#print axioms Vectors.wf_twin_prev_distinct
+#print axioms Vectors.slotAt_canon
+#print axioms Vectors.listAt_occupied
+#print axioms Vectors.unlink_leaves_no_reference
+#print axioms Vectors.example_base
+#print axioms Vectors.necessary_shape
+#print axioms Vectors.necessary_counter_bound
+#print axioms Vectors.necessary_free
+#print axioms Vectors.necessary_slot
+#print axioms Vectors.necessary_seq
+#print axioms Vectors.necessary_level
+#print axioms Vectors.necessary_degree
+#print axioms Vectors.necessary_link
+#print axioms Vectors.necessary_sym
+#print axioms Vectors.necessary_entry
+#print axioms Vectors.necessary_twin
+#print axioms Vectors.rank_key_unique
+#print axioms Vectors.rank_restore
+#print axioms Vectors.stream_moves_only_by_draw

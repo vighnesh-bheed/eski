@@ -15,6 +15,7 @@ Distance_Cache :: struct {
 	used:      int,
 	hits:      int,
 	misses:    int,
+	fixed:     bool,
 	allocator: runtime.Allocator,
 }
 
@@ -31,6 +32,7 @@ cache_destroy :: proc(c: ^Distance_Cache) {
 	c.values = nil
 	c.count = 0
 	c.used = 0
+	c.fixed = false
 }
 
 cache_clear :: proc "contextless" (c: ^Distance_Cache) {
@@ -46,18 +48,40 @@ cache_slot :: #force_inline proc "contextless" (c: ^Distance_Cache, key: u32) ->
 	return int((key * 0x9E3779B1) & mask)
 }
 
-cache_reserve :: proc(c: ^Distance_Cache, entries: int) -> bool {
+cache_capacity :: proc "contextless" (entries: int) -> int {
 	capacity := 64
 	for capacity < 2 * entries && capacity < 1 << 20 {
 		capacity *= 2
 	}
+	return capacity
+}
+
+cache_reserve :: proc(c: ^Distance_Cache, entries: int) -> bool {
+	if c.fixed {
+		return len(c.keys) > 0
+	}
+	capacity := cache_capacity(entries)
 	if capacity <= len(c.keys) {
 		return true
 	}
 	return cache_resize(c, capacity)
 }
 
+cache_fix :: proc(c: ^Distance_Cache, entries: int) -> bool {
+	if c.fixed || len(c.keys) != 0 {
+		return false
+	}
+	if !cache_resize(c, cache_capacity(entries)) {
+		return false
+	}
+	c.fixed = true
+	return true
+}
+
 cache_grow :: proc(c: ^Distance_Cache) -> bool {
+	if c.fixed {
+		return false
+	}
 	return cache_resize(c, max(64, 2 * len(c.keys)))
 }
 
@@ -293,6 +317,7 @@ cas_record :: proc(p: ^Partition, plan: ^Cas_Plan, stored: []f32, ef: int, sc: ^
 }
 
 cas_commit :: proc(s: Vset, plan: ^Cas_Plan, scratch: ^Scratch = nil) -> (added: bool, f: Failure) {
+	write_fence(s)
 	if !plan.ready {
 		return false, failure(.Invalid_Parameter)
 	}
@@ -350,6 +375,7 @@ cas_prepare_at :: proc(s: Vset, a: ^Access, req: ^Add_Request, plan: ^Cas_Plan, 
 }
 
 cas_commit_at :: proc(s: Vset, a: ^Access, plan: ^Cas_Plan, scratch: ^Scratch = nil) -> (ch: Change, f: Failure) {
+	write_fence(s)
 	if !plan.ready || !access_valid(a) {
 		return ch, failure(.Invalid_Parameter)
 	}

@@ -54,6 +54,7 @@ def swapRemove (l : List SElem) (n : List Nat) : List SElem :=
 
 def simOps (flat shrink : Nat) : PartOps (List Nat) SVal SPart where
   create := fun seed => { mode := .flat, uid := 0, rng := seed, order := [] }
+  seed := 1
   insert := fun p n v =>
     let uid := p.uid + 1
     { p with uid := uid, order := p.order ++ [⟨n, v.mask, v.attr, uid⟩],

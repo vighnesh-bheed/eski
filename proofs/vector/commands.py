@@ -170,8 +170,6 @@ class Model:
     def insert(self, key, o, lab, name, mask, attr):
         created = lab not in o.parts
         if created:
-            k = self.skey(lab)
-            self.streams[k] = (self.streams[k] + GOLDEN) & M64
             o.parts[lab] = {'order': [], 'elems': {}, 'uid': 0}
             self.presence_add(key, lab, o)
         p = o.parts[lab]
@@ -774,12 +772,12 @@ def model_mutants():
 
     original_insert = Model.insert
 
-    def no_stream(self, key, o, lab, name, mask, attr):
-        before = self.streams[lab]
+    def stream_on_create(self, key, o, lab, name, mask, attr):
         created = lab not in o.parts
         original_insert(self, key, o, lab, name, mask, attr)
         if created:
-            self.streams[lab] = before
+            k = self.skey(lab)
+            self.streams[k] = (self.streams[k] + GOLDEN) & M64
 
     original_vinfo = Model.c_vinfo
 
@@ -803,7 +801,7 @@ def model_mutants():
         return array([bulk(n) for _, n in scored][:len(names)])
 
     return {'lookup_ignores_own': ('lookup', ignores_own), 'lookup_ignores_visibility': ('lookup', sees_all),
-            'element_ties_newest': (('Obj', 'resolve'), newest), 'creation_keeps_stream': ('insert', no_stream),
+            'element_ties_newest': (('Obj', 'resolve'), newest), 'creation_draws_stream': ('insert', stream_on_create),
             'vinfo_shows_uid': ('c_vinfo', uid_shown), 'vsim_ties_reversed': ('c_vsim', ties_reversed)}
 
 
@@ -881,6 +879,7 @@ class OModel(Model):
     def __init__(self, seed):
         super().__init__(seed)
         self.streams = Streams(label_mix(seed & M64))
+        self.forgets = 0
 
     def new_obj(self, dim):
         return OObj(dim)
@@ -935,7 +934,9 @@ class OModel(Model):
             cs[:] = [c for c in cs if c['label'][1] != owner]
         for x in [x for x in self.streams if x[1] == owner]:
             del self.streams[x]
-        return re.compile(re.escape(f'E|*6^$4^keys^:{keys}^$8^elements^:{elements}^$5^bytes^:') + r'\d+\^')
+        self.forgets += 1
+        return re.compile(re.escape(f'E|*8^$4^keys^:{keys}^$8^elements^:{elements}^$5^bytes^:') + r'\d+\^' +
+                          re.escape(f'$8^sequence^:{self.forgets}^'))
 
 
 def owner_command_args(cmd, args):

@@ -54,7 +54,7 @@ Vset_Charge :: struct {
 
 Vset_Snap :: struct {
 	charges: []Vset_Charge,
-	global:  int,
+	mem:     int,
 	owner:   ow.Owner,
 	shared:  bool,
 }
@@ -75,6 +75,7 @@ label_charges_before: [dynamic]Vset_Charge
 label_charges_after: [dynamic]Vset_Charge
 label_ids: [dynamic]lb.Id
 label_cmd_writes: bool
+label_own_names: [dynamic][]u8
 
 keyspace_labels_enable :: proc() {
 	if label_dbs != nil || len(dbs) == 0 {
@@ -288,6 +289,9 @@ label_vt_access :: proc() -> vt.Access {
 }
 
 keyspace_label_enter :: proc(c: ^Conn, cmd: ^Command, argv: [][]u8) -> string {
+	if aof.feed {
+		aof_skips_reset()
+	}
 	if owner_user() && access.owner_entry != nil {
 		owner_stream_load(access.owner_entry, access.id)
 	} else {
@@ -417,7 +421,19 @@ label_creates_only :: proc(cmd: ^Command, argv: [][]u8, pos: int) -> bool {
 	return false
 }
 
+label_own_named :: proc(key: []u8) -> bool {
+	for name in label_own_names {
+		if bytes_eq(name, key) {
+			return true
+		}
+	}
+	return false
+}
+
 label_write_conflict :: proc(own: ^Db, key: []u8) -> (lb.Id, ow.Owner, bool) {
+	if len(label_own_names) > 0 && label_own_named(key) {
+		return lb.ID_NONE, ow.SHARED, false
+	}
 	l := lookup_make(key)
 	if label_live_in(own, &l) {
 		return lb.ID_NONE, ow.SHARED, false
@@ -501,8 +517,11 @@ label_locate_other :: proc(dbi: int, key: []u8, l: ^Lookup, reader: lb.Id, vis: 
 				q := label_part(dbi, cp.copies[best].label)
 				if q != nil {
 					tt, ii := db_locate_slot(q, l)
-					if ii >= 0 && label_slot_live(q, tt, ii) {
-						return q, tt, ii
+					if ii >= 0 {
+						if label_slot_live(q, tt, ii) {
+							return q, tt, ii
+						}
+						aof_note_skipped(q, tt, ii)
 					}
 				}
 				floor = cp.copies[best]
@@ -520,6 +539,7 @@ label_locate_other :: proc(dbi: int, key: []u8, l: ^Lookup, reader: lb.Id, vis: 
 			if label_slot_live(q, tt, ii) {
 				return q, tt, ii
 			}
+			aof_note_skipped(q, tt, ii)
 			return nil, nil, -1
 		}
 	}
@@ -527,7 +547,7 @@ label_locate_other :: proc(dbi: int, key: []u8, l: ^Lookup, reader: lb.Id, vis: 
 }
 
 label_find_miss :: proc(db: ^Db, key: []u8, l: ^Lookup) -> ^Entry {
-	if !label_active || db != db_cur {
+	if !label_active || db != db_cur || (len(label_own_names) > 0 && label_own_named(key)) {
 		return nil
 	}
 	saved := store_no_touch
@@ -575,8 +595,11 @@ label_resolve :: proc(dbi: int, key: []u8, reader: lb.Id, vis: ^lb.Visibility, o
 	own, e := label_scope_part(dbi, reader, o)
 	if own != nil && db_size_of(own) > 0 {
 		tt, ii := db_locate_slot(own, &l)
-		if ii >= 0 && label_slot_live(own, tt, ii) {
-			return own, tt, ii
+		if ii >= 0 {
+			if label_slot_live(own, tt, ii) {
+				return own, tt, ii
+			}
+			aof_note_skipped(own, tt, ii)
 		}
 	}
 	if owners_on && ow.is_user(o) {
@@ -699,6 +722,20 @@ label_note_erased :: proc "contextless" (db: ^Db, key: []u8) {
 	}
 }
 
+label_copies_find :: proc(db: ^Db, key: []u8) -> ^Label_Copies {
+	if label_dbs == nil || db == nil || db.role & LABEL_ROLE_SENTINEL != 0 {
+		return nil
+	}
+	if db.role & DB_ROLE_OWNER != 0 {
+		s := owner_part_of(db).space
+		if s == nil || s.copies == nil {
+			return nil
+		}
+		return s.copies[string(key)] or_else nil
+	}
+	return label_dbs[db.id].copies[string(key)] or_else nil
+}
+
 label_copies_free :: proc(cp: ^Label_Copies) {
 	delete(cp.copies)
 	delete(cp.name)
@@ -758,7 +795,7 @@ label_flush_prepare :: proc(db: ^Db) {
 				kp := &t.slots[i].key
 				vp := &t.slots[i].val
 				if kp.small.tag.val_form == FORM_OBJECT && vp.slab.info.type == .Vectorset {
-					label_vset_detach(db, vp)
+					label_vset_flush_one(db, vp)
 				} else if owned && kp.small.tag.val_form == FORM_OBJECT {
 					owner_object_unbind(vp)
 				}
@@ -779,43 +816,17 @@ label_vset_charges :: proc(s: vt.Vset, out: ^[dynamic]Vset_Charge, o: ow.Owner, 
 	if shared {
 		clear(&label_ids)
 		vt.labels_present(s, &label_ids)
-		if len(label_ids) > 0 {
-			anchor := label_ids[0]
-			for id in label_ids[1:] {
-				if label_less(id, anchor) {
-					anchor = id
-				}
-			}
-			bytes_shared := vt.shared_memory(s)
-			for id in label_ids {
-				bytes := vt.label_memory(s, id)
-				if id == anchor {
-					bytes += bytes_shared
-				}
-				append(out, Vset_Charge{id, ow.SHARED, bytes})
-			}
+		for id in label_ids {
+			append(out, Vset_Charge{id, ow.SHARED, vt.label_charge(s, id)})
 		}
 	}
 	if ow.is_user(o) {
 		clear(&label_ids)
 		vt.owner_labels(s, vt.Owner(o), &label_ids)
 		for id in label_ids {
-			append(out, Vset_Charge{id, o, vt.scope_memory(s, id, vt.Owner(o))})
+			append(out, Vset_Charge{id, o, vt.scope_charge(s, id, vt.Owner(o))})
 		}
 	}
-}
-
-label_vset_global :: proc(s: vt.Vset) -> int {
-	if !owners_on || s == nil {
-		return 0
-	}
-	n := vt.index_bytes(s)
-	clear(&label_ids)
-	vt.labels_present(s, &label_ids)
-	if len(label_ids) == 0 {
-		n += vt.shared_memory(s)
-	}
-	return n
 }
 
 label_vset_part :: proc(dbi: int, id: lb.Id, o: ow.Owner) -> ^Db {
@@ -831,6 +842,7 @@ label_vset_part :: proc(dbi: int, id: lb.Id, o: ow.Owner) -> ^Db {
 
 label_vset_settle :: proc(dbi: int, before: Vset_Snap, s: vt.Vset) {
 	label_vset_charges(s, &label_charges_after, before.owner, before.shared)
+	applied := 0
 	for b in before.charges {
 		after := 0
 		for a in label_charges_after {
@@ -842,6 +854,7 @@ label_vset_settle :: proc(dbi: int, before: Vset_Snap, s: vt.Vset) {
 		if after != b.bytes {
 			if p := label_vset_part(dbi, b.label, b.owner); p != nil {
 				object_account(p, after - b.bytes)
+				applied += after - b.bytes
 			}
 		}
 	}
@@ -856,12 +869,11 @@ label_vset_settle :: proc(dbi: int, before: Vset_Snap, s: vt.Vset) {
 		if !seen {
 			if p := label_vset_part(dbi, a.label, a.owner); p != nil {
 				object_account(p, a.bytes)
+				applied += a.bytes
 			}
 		}
 	}
-	if owners_on {
-		db_used_memory += label_vset_global(s) - before.global
-	}
+	db_used_memory += vt.memory_usage(s) - before.mem - applied
 }
 
 label_vset_take :: proc(s: vt.Vset) -> Vset_Snap {
@@ -873,7 +885,7 @@ label_vset_snapshot :: proc(s: vt.Vset, o: ow.Owner) -> Vset_Snap {
 	label_vset_charges(s, &label_charges_before, o, shared)
 	out := make([]Vset_Charge, len(label_charges_before), context.temp_allocator)
 	copy(out, label_charges_before[:])
-	return Vset_Snap{charges = out, global = label_vset_global(s), owner = o, shared = shared}
+	return Vset_Snap{charges = out, mem = vt.memory_usage(s), owner = o, shared = shared}
 }
 
 label_vset_none :: proc() -> Vset_Snap {
@@ -899,27 +911,27 @@ label_vset_release :: proc "contextless" (db: ^Db, obj: rawptr) {
 	label_vset_settle(db.id, before, s)
 }
 
+label_vset_alone :: proc(db: ^Db, s: vt.Vset) -> bool {
+	o := db.owner if db.role & DB_ROLE_OWNER != 0 else ow.SHARED
+	if ow.is_user(o) {
+		return vt.card(s) == vt.scope_card(s, db.label, vt.Owner(o))
+	}
+	clear(&label_ids)
+	vt.labels_present(s, &label_ids)
+	for id in label_ids {
+		if id != db.label {
+			return false
+		}
+	}
+	return !owners_on || vt.owner_count(s) == 0
+}
+
 label_vset_detach :: proc(db: ^Db, vp: ^Val_Handle) {
 	s := vt.Vset(rawptr(vp.ref.addr))
-	o := db.owner if db.role & DB_ROLE_OWNER != 0 else ow.SHARED
-	others := false
-	if ow.is_user(o) {
-		others = vt.card(s) != vt.scope_card(s, db.label, vt.Owner(o))
-	} else {
-		clear(&label_ids)
-		vt.labels_present(s, &label_ids)
-		for id in label_ids {
-			if id != db.label {
-				others = true
-			}
-		}
-		if owners_on && vt.owner_count(s) > 0 {
-			others = true
-		}
-	}
-	if !others {
+	if label_vset_alone(db, s) {
 		return
 	}
+	o := db.owner if db.role & DB_ROLE_OWNER != 0 else ow.SHARED
 	before := label_vset_snapshot(s, o)
 	fresh: vt.Vset
 	err: vt.Error
@@ -932,12 +944,9 @@ label_vset_detach :: proc(db: ^Db, vp: ^Val_Handle) {
 		return
 	}
 	label_vset_settle(db.id, before, s)
-	if ow.is_user(o) {
-		object_account(db, vt.scope_memory(fresh, db.label, vt.Owner(o)))
-		db_used_memory += label_vset_global(fresh)
-	} else {
-		object_account(db, vt.memory_usage(fresh))
-	}
+	charge := vt.charges_total(fresh)
+	object_account(db, charge)
+	db_used_memory += vt.memory_usage(fresh) - charge
 	vp.ref.addr = uintptr(rawptr(fresh))
 }
 
@@ -951,6 +960,14 @@ label_vset_detach_key :: proc(db: ^Db, key: []u8) {
 	vp := &t.slots[i].val
 	if kp.small.tag.val_form == FORM_OBJECT && vp.slab.info.type == .Vectorset {
 		label_vset_detach(db, vp)
+	}
+}
+
+label_vset_flush_one :: proc(db: ^Db, vp: ^Val_Handle) {
+	label_vset_detach(db, vp)
+	s := vt.Vset(rawptr(vp.ref.addr))
+	if label_vset_alone(db, s) {
+		db.heap_bytes += vt.memory_usage(s) - vt.charges_total(s)
 	}
 }
 

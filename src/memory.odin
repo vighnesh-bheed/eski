@@ -7,6 +7,8 @@ import ow "owner"
 import ht "hashtype"
 import st "settype"
 import zt "zsettype"
+import lt "listtype"
+import sm "streamtype"
 
 foreign import libc_mem "system:c"
 
@@ -562,7 +564,30 @@ memory_usage :: proc(c: ^Conn, argv: [][]u8) {
 		reply_null(c)
 		return
 	}
-	reply_int(c, i64(len(argv[2]) + entry_memory(e) + ENTRY_OVERHEAD))
+	size := entry_memory_seen(e) if labels_on && (!access.top || owner_user()) else entry_memory(e)
+	reply_int(c, i64(len(argv[2]) + size + ENTRY_OVERHEAD))
+}
+
+entry_memory_seen :: proc(e: ^Entry) -> int {
+	if h := entry_object(e, .Hash); h != nil {
+		return ht.content_memory(cast(ht.Hash)h)
+	}
+	if s := entry_object(e, .Set); s != nil {
+		return st.content_memory(cast(st.Set)s)
+	}
+	if l := entry_object(e, .List); l != nil {
+		return lt.content_memory(cast(lt.List)l)
+	}
+	if z := entry_object(e, .Zset); z != nil {
+		return zt.content_memory(cast(zt.Zset)z)
+	}
+	if x := entry_object(e, .Stream); x != nil {
+		return sm.content_memory(cast(sm.Stream)x)
+	}
+	if v := entry_object(e, .Vectorset); v != nil {
+		return vset_view_memory(v)
+	}
+	return int(e.cap)
 }
 
 entry_memory :: proc(e: ^Entry) -> int {

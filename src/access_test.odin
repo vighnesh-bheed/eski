@@ -297,22 +297,94 @@ access_persistence_and_top_rules_are_central :: proc(t: ^testing.T) {
 	debug := lookup_command(transmute([]u8)string("debug"))
 	get := lookup_command(transmute([]u8)string("get"))
 	shutdown := lookup_command(transmute([]u8)string("shutdown"))
-	testing.expect(t, access_persistence_refuses(save, words("SAVE")))
-	testing.expect(t, access_persistence_refuses(debug, words("DEBUG", "RELOAD")))
+	rewrite := lookup_command(transmute([]u8)string("bgrewriteaof"))
+	config := lookup_command(transmute([]u8)string("config"))
+	testing.expect(t, !access_persistence_refuses(save, words("SAVE")))
+	testing.expect(t, !access_persistence_refuses(debug, words("DEBUG", "RELOAD")))
+	testing.expect(t, !access_persistence_refuses(debug, words("DEBUG", "LOADAOF")))
+	testing.expect(t, !access_persistence_refuses(rewrite, words("BGREWRITEAOF")))
 	testing.expect(t, !access_persistence_refuses(debug, words("DEBUG", "SLEEP", "0")))
-	testing.expect(t, access_persistence_refuses(shutdown, words("SHUTDOWN", "SAVE")))
-	testing.expect(t, !access_persistence_refuses(shutdown, words("SHUTDOWN", "NOSAVE")))
+	testing.expect(t, !access_persistence_refuses(shutdown, words("SHUTDOWN", "SAVE")))
 	testing.expect(t, !access_persistence_refuses(get, words("GET", "k")))
 	access.top = false
 	testing.expect_value(t, access_command_refusal(debug, words("DEBUG", "SLEEP", "0")), ERR_LABEL_TOP)
 	testing.expect_value(t, access_command_refusal(get, words("GET", "k")), "")
+	testing.expect_value(t, access_command_refusal(save, words("SAVE")), ERR_LABEL_TOP)
+	testing.expect_value(t, access_command_refusal(shutdown, words("SHUTDOWN", "NOSAVE")), ERR_LABEL_TOP)
+	testing.expect_value(t, access_command_refusal(config, words("CONFIG", "SET", "maxmemory", "0", "DBFILENAME", "x.rdb")), ERR_LABEL_TOP)
+	testing.expect_value(t, access_command_refusal(config, words("CONFIG", "SET", "maxmemory", "0")), ERR_LABEL_TOP)
+	testing.expect_value(t, access_command_refusal(rewrite, words("BGREWRITEAOF")), ERR_LABEL_TOP)
 	access.top = true
 	testing.expect_value(t, access_command_refusal(debug, words("DEBUG", "SLEEP", "0")), "")
-	testing.expect_value(t, access_command_refusal(save, words("SAVE")), ERR_LABEL_PERSISTENCE)
-	testing.expect(t, access_persistence_off())
+	testing.expect_value(t, access_command_refusal(save, words("SAVE")), "")
+	testing.expect_value(t, access_command_refusal(rewrite, words("BGREWRITEAOF")), "")
+	migrate := lookup_command(transmute([]u8)string("migrate"))
+	testing.expect_value(t, access_command_refusal(migrate, words("MIGRATE", "127.0.0.1", "1", "k", "0", "10")), ERR_LABEL_MIGRATE)
+	testing.expect(t, access_persistence_refuses(migrate, words("MIGRATE", "127.0.0.1", "1", "k", "0", "10")))
 	labels_on = false
-	testing.expect(t, !access_persistence_refuses(save, words("SAVE")))
+	testing.expect(t, !access_persistence_refuses(migrate, words("MIGRATE", "127.0.0.1", "1", "k", "0", "10")))
 	labels_on = true
+}
+
+@(test)
+access_configuration_writes_need_the_top_for_every_setting :: proc(t: ^testing.T) {
+	context.allocator = runtime.heap_allocator()
+	f: Access_Fixture
+	fixture_open(t, &f)
+	defer fixture_close(&f)
+	config := lookup_command(transmute([]u8)string("config"))
+	forms := [][][]u8 {
+		words("CONFIG", "SET", "maxmemory", "0"),
+		words("config", "set", "maxmemory", "0"),
+		words("Config", "Set", "maxmemory", "0"),
+		words("CONFIG", "SET", "no-such-setting-at-all", "1"),
+		words("CONFIG", "SET", "hz", "10", "maxmemory", "0", "save", ""),
+		words("CONFIG", "SET", "label-levels", "U,C,S,TOP SECRET,NEW"),
+		words("CONFIG", "SET", "encryption-key-file", "/x"),
+		words("CONFIG", "SET", "no-appendfsync-on-rewrite", "yes"),
+		words("CONFIG", "SET", "sanitize-dump-payload", "no"),
+		words("CONFIG", "SET", "loading-process-events-interval-bytes", "1024"),
+		words("CONFIG", "SET"),
+		words("CONFIG", "SET", "maxmemory"),
+		words("CONFIG", "SET", "maxmemory", "0", "hz"),
+		words("CONFIG", "REWRITE"),
+		words("config", "rewrite"),
+		words("CONFIG", "REWRITE", "extra"),
+		words("CONFIG", "RESETSTAT"),
+	}
+	open_forms := [][][]u8 {
+		words("CONFIG", "GET", "maxmemory"),
+		words("CONFIG", "GET", "*"),
+		words("CONFIG", "GET", "no-such-setting-at-all"),
+		words("CONFIG", "GET"),
+		words("CONFIG", "HELP"),
+		words("CONFIG", "NOSUCH"),
+		words("CONFIG"),
+	}
+	access.top = false
+	access.label_top = false
+	for form in forms {
+		testing.expect_value(t, access_top_only(config, form), true)
+		testing.expect_value(t, access_command_refusal(config, form), ERR_LABEL_TOP)
+	}
+	for form in open_forms {
+		testing.expect_value(t, access_top_only(config, form), false)
+		testing.expect_value(t, access_command_refusal(config, form), "")
+	}
+	access.label_top = true
+	for form in forms {
+		testing.expect_value(t, access_command_refusal(config, form), ERR_OWNER_OPERATOR)
+	}
+	for form in open_forms {
+		testing.expect_value(t, access_command_refusal(config, form), "")
+	}
+	access.top = true
+	for form in forms {
+		testing.expect_value(t, access_command_refusal(config, form), "")
+	}
+	for form in open_forms {
+		testing.expect_value(t, access_command_refusal(config, form), "")
+	}
 }
 
 @(test)

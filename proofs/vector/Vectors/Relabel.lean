@@ -19,10 +19,7 @@ def rawAdd (ops : PartOps N V P) (mops : MoveOps N V P) (s : LState L N P) (t : 
     LState L N P :=
   match s.parts t with
   | some q => setIndex (setPart s t (some (mops.insertRaw q n v))) n (s.index n ++ [t])
-  | none =>
-    let st := ops.advance (s.stream t)
-    setIndex (setPart (setStream s t st) t (some (mops.insertRaw (ops.create (ops.output st)) n v))) n
-      (s.index n ++ [t])
+  | none => setIndex (setPart s t (some (mops.insertRaw (ops.create ops.seed) n v))) n (s.index n ++ [t])
 
 def relabelState (ops : PartOps N V P) (mops : MoveOps N V P) (sees : L → L → Bool) (src t : L) (n : N)
     (s : LState L N P) : LState L N P :=
@@ -48,32 +45,29 @@ theorem erase_append_of_mem (a b : L) (ls : List L) (ha : a ∈ ls) : (ls ++ [b]
 def rawBase (ops : PartOps N V P) (s : LState L N P) (t : L) : P :=
   match s.parts t with
   | some q => q
-  | none => ops.create (ops.output (ops.advance (s.stream t)))
+  | none => ops.create ops.seed
 
-def rawStream (ops : PartOps N V P) (s : LState L N P) (t : L) : Nat :=
-  match s.parts t with
-  | some _ => s.stream t
-  | none => ops.advance (s.stream t)
+def rawStream (_ops : PartOps N V P) (s : LState L N P) (t : L) : Nat := s.stream t
 
 theorem rawAdd_parts (ops : PartOps N V P) (mops : MoveOps N V P) (s : LState L N P) (t : L) (n : N) (v : V)
     (l : L) : (rawAdd ops mops s t n v).parts l =
       if l = t then some (mops.insertRaw (rawBase ops s t) n v) else s.parts l := by
   unfold rawAdd rawBase
-  cases s.parts t <;> simp [setIndex, setPart, setStream]
+  cases s.parts t <;> simp [setIndex, setPart]
 
 theorem rawAdd_index (ops : PartOps N V P) (mops : MoveOps N V P) (s : LState L N P) (t : L) (n : N) (v : V)
     (m : N) : (rawAdd ops mops s t n v).index m = if m = n then s.index n ++ [t] else s.index m := by
   unfold rawAdd
-  cases s.parts t <;> simp [setIndex, setPart, setStream]
+  cases s.parts t <;> simp [setIndex, setPart]
 
 theorem rawAdd_stream (ops : PartOps N V P) (mops : MoveOps N V P) (s : LState L N P) (t : L) (n : N) (v : V)
     (l : L) : (rawAdd ops mops s t n v).stream l = if l = t then rawStream ops s t else s.stream l := by
   by_cases hl : l = t
   · subst hl
     unfold rawAdd rawStream
-    cases s.parts l <;> simp [setIndex, setPart, setStream]
+    cases s.parts l <;> simp [setIndex, setPart]
   · unfold rawAdd
-    cases s.parts t <;> simp [setIndex, setPart, setStream, hl]
+    cases s.parts t <;> simp [setIndex, setPart, hl]
 
 theorem remStep_parts (ops : PartOps N V P) (sees : L → L → Bool) (src : L) (n : N) (s : LState L N P) (p : P)
     (hs : src ∈ s.index n) (hp : s.parts src = some p) (l : L) :
@@ -112,9 +106,9 @@ theorem relabel_as_remove_then_write (ops : PartOps N V P) (mops : MoveOps N V P
     rw [remStep_parts ops sees src n s p hs hp]; simp [hts]
   have hBs := remStep_stream ops sees src n s p hs hp
   have hbase : rawBase ops (wstep ops sees ⟨src, .rem n⟩ s) t = rawBase ops s t := by
-    unfold rawBase; rw [hBt, hBs]
+    unfold rawBase; rw [hBt]
   have hrs : rawStream ops (wstep ops sees ⟨src, .rem n⟩ s) t = rawStream ops s t := by
-    unfold rawStream; rw [hBt, hBs]
+    unfold rawStream; rw [hBs]
   have hAp : ∀ l, (rawAdd ops mops s t n v).parts l = if l = t then some (mops.insertRaw (rawBase ops s t) n v) else s.parts l :=
     fun l => rawAdd_parts ops mops s t n v l
   have hAix : ∀ m, (rawAdd ops mops s t n v).index m = if m = n then s.index n ++ [t] else s.index m :=

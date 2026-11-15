@@ -3,17 +3,18 @@ package main
 import "core:sys/linux"
 import lb "label"
 
-LABEL_SCHEME_PERSISTENCE :: "a label scheme needs persistence off: set save \"\", appendonly no and no save in shutdown-on-sigterm or shutdown-on-sigint first"
-LABEL_PERSISTENCE_ON :: "persistence stays off while a label scheme is configured"
 LABEL_SCHEME_MEMCACHED :: "a label scheme needs the memcached endpoint off, because its requests carry no label"
 OWNERS_RESERVED_LEVEL :: "owner mode needs a label scheme without a level named OWNER or SHARED"
 OWNERS_LEVEL_RESERVED :: "OWNER and SHARED are reserved and cannot name a level while owner mode is on"
 OWNERS_STAY_ON :: "owner mode cannot be turned off"
 LABEL_SCHEME_KEYS :: "a label scheme needs a server without keys, because existing keys carry no label"
 OWNERS_KEYS :: "owner mode needs a server without keys, because existing keys carry no owner"
-OWNERS_PERSISTENCE :: "owner mode needs persistence off: set save \"\", appendonly no and no save in shutdown-on-sigterm or shutdown-on-sigint first"
-OWNERS_PERSISTENCE_ON :: "persistence stays off while owner mode is on"
 OWNERS_MEMCACHED :: "owner mode needs the memcached endpoint off, because its requests carry no owner"
+LABEL_SCHEME_SNAPSHOT :: "the empty snapshot for the new label scheme or owner mode could not be written; check the server log"
+LABEL_SCHEME_RESAVE :: "the snapshot with the changed label scheme could not be written; check the server log"
+LABEL_SCHEME_LOG :: "the append-only file with the new label scheme or owner mode could not be written; check the server log"
+LABEL_SCHEME_LOGGED :: "a logged label scheme change cannot turn a label scheme or owner mode on"
+LABEL_AOF_BASE :: "the append-only base of a server with a label scheme or owner mode is always a snapshot"
 LABEL_STARTUP_FILE :: "holds data that carries no labels or owners, and a server with a label scheme or owner mode never loads it. Start once without the label scheme and owner mode to move the data out, or move the file away, then start again."
 
 Label_Name_Kind :: enum u8 {
@@ -81,8 +82,12 @@ owners_setting_rewrite :: proc(rs: ^Rewrite_State, cf: ^Config) {
 
 @(private = "file")
 owners_reserved :: proc() -> bool {
-	for n in label_scheme.levels {
-		name := transmute([]u8)lb.config_name(&label_scheme, n)
+	return label_scheme_reserved(&label_scheme)
+}
+
+label_scheme_reserved :: proc(c: ^lb.Config) -> bool {
+	for n in c.levels {
+		name := transmute([]u8)lb.config_name(c, n)
 		if eq_nocase(name, "owner") || eq_nocase(name, "shared") {
 			return true
 		}
@@ -195,8 +200,18 @@ label_config_error_text :: proc(e: lb.Config_Error) -> string {
 }
 
 @(private = "file")
-label_persistence_on :: proc() -> bool {
-	return len(pst.save_params) > 0 || aof.wanted || (cfg.shutdown_on_sigterm | cfg.shutdown_on_sigint) & SHUTDOWN_SAVE != 0
+label_aof_on :: proc() -> bool {
+	return aof.wanted
+}
+
+@(private = "file")
+label_aof_running :: proc() -> bool {
+	return aof.started && aof.state != .Disabled
+}
+
+@(private = "file")
+label_snapshots_on :: proc() -> bool {
+	return len(pst.save_params) > 0 || (cfg.shutdown_on_sigterm | cfg.shutdown_on_sigint) & SHUTDOWN_SAVE != 0
 }
 
 @(private = "file")
@@ -324,9 +339,6 @@ label_trusts_rewrite :: proc(rs: ^Rewrite_State, cf: ^Config) {
 label_scheme_apply :: proc() -> string {
 	labelled := lb.config_labelled(&label_scheme)
 	guarded := labelled || owners_wanted
-	if label_scheme_runtime && guarded && label_persistence_on() {
-		return LABEL_SCHEME_PERSISTENCE if labelled else OWNERS_PERSISTENCE
-	}
 	if label_scheme_runtime && guarded && mc_port != 0 {
 		return LABEL_SCHEME_MEMCACHED if labelled else OWNERS_MEMCACHED
 	}
@@ -338,6 +350,24 @@ label_scheme_apply :: proc() -> string {
 	}
 	if label_scheme_runtime && owners_wanted && owners_reserved() {
 		return OWNERS_LEVEL_RESERVED if owners_on else OWNERS_RESERVED_LEVEL
+	}
+	wanted := Access_Mode{labelled, owners_wanted} if guarded else Access_Mode{}
+	if aof.loading && wanted != access_server_mode() {
+		return LABEL_SCHEME_LOGGED
+	}
+	if !aof.loading {
+		if label_scheme_runtime && guarded && wanted != access_server_mode() && label_snapshots_on() && !access_save_empty(wanted) {
+			return LABEL_SCHEME_SNAPSHOT
+		}
+		if label_scheme_runtime && guarded && wanted != access_server_mode() && label_aof_running() && !aof_rewrite_for_mode(wanted) {
+			return LABEL_SCHEME_LOG
+		}
+		if label_scheme_runtime && guarded && labels_on && wanted == access_server_mode() && (label_snapshots_on() || access_snapshot_used) && !access_save_scheme() {
+			return LABEL_SCHEME_RESAVE
+		}
+		if label_scheme_runtime && guarded && labels_on && wanted == access_server_mode() && label_aof_running() && !aof_rewrite_sync() {
+			return LABEL_SCHEME_LOG
+		}
 	}
 	was := labels_on
 	was_owners := owners_on
@@ -382,10 +412,118 @@ label_keys_held :: proc() -> bool {
 }
 
 label_persistence_refusal :: proc(enabling: bool) -> string {
-	if enabling && label_scheme_runtime && labels_on {
-		return LABEL_PERSISTENCE_ON if label_scheme_labelled else OWNERS_PERSISTENCE_ON
+	if enabling && label_scheme_runtime && labels_on && !aof.preamble {
+		return LABEL_AOF_BASE
 	}
 	return ""
+}
+
+label_preamble_apply :: proc() -> string {
+	if labels_on && !aof.preamble {
+		return LABEL_AOF_BASE
+	}
+	return ""
+}
+
+label_scheme_merge :: proc(file: ^lb.Config, adopt: bool) -> (msg: string, adopted: bool) {
+	words := [Label_Name_Kind]string {
+		.Level       = "level",
+		.Compartment = "compartment",
+		.Trust       = "trust level",
+	}
+	lists: [Label_Name_Kind][dynamic]string
+	grows := false
+	for k in Label_Name_Kind {
+		lists[k] = make([dynamic]string, context.temp_allocator)
+		mine := label_kind_names(&label_scheme, k)
+		theirs := label_kind_names(file, k)
+		for i in 0 ..< min(len(mine), len(theirs)) {
+			a := lb.config_name(file, theirs[i])
+			b := lb.config_name(&label_scheme, mine[i])
+			if a != b {
+				text := make([dynamic]u8, context.temp_allocator)
+				sb_str(&text, "names ")
+				sb_str(&text, words[k])
+				sb_byte(&text, ' ')
+				sb_int(&text, i64(i + 1))
+				sb_byte(&text, ' ')
+				sb_str(&text, a)
+				sb_str(&text, " and the configured scheme names it ")
+				sb_str(&text, b)
+				sb_str(&text, "; configure the file's names, or start without the file")
+				return string(text[:]), false
+			}
+		}
+		for n in mine {
+			append(&lists[k], lb.config_name(&label_scheme, n))
+		}
+		if len(theirs) > len(mine) {
+			grows = true
+			for n in theirs[len(mine):] {
+				append(&lists[k], lb.config_name(file, n))
+			}
+		}
+	}
+	if !grows {
+		return "", false
+	}
+	views: [Label_Name_Kind][]string
+	for k in Label_Name_Kind {
+		views[k] = lists[k][:]
+	}
+	fresh: lb.Config
+	if e := label_build(views, &fresh); e != "" {
+		return concat_temp("has a label scheme this server cannot adopt: ", e), false
+	}
+	if owners_on && label_scheme_reserved(&fresh) {
+		lb.config_destroy(&fresh)
+		return "names a level OWNER or SHARED in its label scheme, which owner mode reserves", false
+	}
+	if !adopt {
+		lb.config_destroy(&fresh)
+		return "", false
+	}
+	before := make([dynamic]u8, context.temp_allocator)
+	after := make([dynamic]u8, context.temp_allocator)
+	for k in Label_Name_Kind {
+		if k != .Level {
+			sb_str(&before, "; ")
+			sb_str(&after, "; ")
+		}
+		label_get_kind(k, &before)
+		for n, i in views[k] {
+			if i > 0 {
+				sb_byte(&after, ',')
+			}
+			sb_str(&after, n)
+		}
+	}
+	kinds := [Label_Name_Kind]string {
+		.Level       = "levels",
+		.Compartment = "compartments",
+		.Trust       = "trust-levels",
+	}
+	for k in Label_Name_Kind {
+		if len(views[k]) == len(label_kind_names(&label_scheme, k)) {
+			continue
+		}
+		was := make([dynamic]u8, context.temp_allocator)
+		now := make([dynamic]u8, context.temp_allocator)
+		label_get_kind(k, &was)
+		for n, i in views[k] {
+			if i > 0 {
+				sb_byte(&now, ',')
+			}
+			sb_str(&now, n)
+		}
+		label_audit(nil, "scheme-adopt", "kind", kinds[k], "before", string(was[:]), "after", string(now[:]))
+	}
+	lb.config_destroy(&label_scheme)
+	label_scheme = fresh
+	label_scheme_labelled = lb.config_labelled(&label_scheme)
+	access_scheme_changed()
+	plog(LOG_WARNING, "The data file extends the configured label scheme, which now reads ", string(after[:]), " instead of ", string(before[:]), "; run CONFIG REWRITE to keep it")
+	return "", true
 }
 
 label_scheme_checkpoint :: proc() {
@@ -407,6 +545,9 @@ label_scheme_committed :: proc(c: ^Conn) {
 		return
 	}
 	label_checkpoint_taken = false
+	if aof.loading {
+		return
+	}
 	if owners_on && !owners_checkpoint {
 		label_audit(c, "owners-on")
 	}
@@ -456,8 +597,8 @@ label_scheme_startup :: proc() {
 	owners_on = owners_wanted
 	label_scheme_labelled = labelled
 	access_scheme_changed()
-	if labels_on && label_persistence_on() {
-		config_fatal(0, "", LABEL_SCHEME_PERSISTENCE if labelled else OWNERS_PERSISTENCE)
+	if labels_on && label_aof_on() && !aof.preamble {
+		config_fatal(0, "", LABEL_AOF_BASE)
 	}
 	if labels_on && mc_port != 0 {
 		config_fatal(0, "", LABEL_SCHEME_MEMCACHED if labelled else OWNERS_MEMCACHED)

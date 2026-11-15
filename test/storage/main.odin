@@ -1730,7 +1730,7 @@ compute_active_accounting :: proc() {
 		ts := linux.Time_Spec{time_nsec = 100_000}
 		linux.nanosleep(&ts, nil)
 	}
-	check(intrinsics.atomic_load_explicit(&task.job.state, .Acquire) == .Completed && task.table[cells - 1] == u32(len(a)), "actual worker completes the expected LCS while its job stays unpolled")
+	check(intrinsics.atomic_load_explicit(&task.job.state, .Acquire) == .Completed && (cast(^Lcs_Task)task).table[cells - 1] == u32(len(a)), "actual worker completes the expected LCS while its job stays unpolled")
 	check(compute_pending == 1 && cp.pending(&compute_pool) == 1 && compute_reserved > 0 && compute_tasks[task.slot] == task, "completed unpolled job retains real reservation and task ownership")
 	check(mem_used() == before_used + compute_reserved && mem_overhead().overhead == before_overhead + compute_reserved, "manual memory accounting includes an outstanding job reservation exactly once")
 	allocated, _, libc_allocated := storage_test_memory_sample()

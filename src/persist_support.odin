@@ -390,6 +390,12 @@ persist_pace_cow :: proc "contextless" (p: ^Persist_Progress, processed: i64) {
 
 persist_total_keys :: proc "contextless" () -> i64 {
 	n: i64 = 0
+	if labels_on {
+		for d in db_parts {
+			n += i64(db_size_of(d))
+		}
+		return n + i64(owner_keys_total)
+	}
 	for &d in dbs {
 		n += i64(db_size_of(&d))
 	}
@@ -440,6 +446,9 @@ persist_serve_events :: proc() {
 	n, werr := linux.epoll_wait(srv.epfd, &events[0], MAX_EVENTS, 0)
 	if werr != .NONE {
 		return
+	}
+	if n > 0 && access_ld.active {
+		access_ld.served = true
 	}
 	update_clock()
 	for i in 0 ..< int(n) {

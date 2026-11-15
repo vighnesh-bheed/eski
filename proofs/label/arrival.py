@@ -5,8 +5,14 @@ HEX = set(b'0123456789abcdefABCDEF')
 KNOWN = {b'get', b'set', b'ping', b'echo', b'select', b'auth', b'hello', b'quit', b'reset', b'client', b'label', b'context',
          b'multi', b'exec', b'discard', b'watch', b'unwatch', b'subscribe', b'psubscribe', b'ssubscribe', b'save', b'bgsave',
          b'bgrewriteaof', b'dump', b'restore', b'migrate', b'debug', b'monitor', b'swapdb', b'latency', b'memory', b'slowlog', b'config', b'shutdown', b'eval', b'publish',
-         b'script', b'function'}
-PERSISTENCE = {b'save', b'bgsave', b'bgrewriteaof', b'dump', b'restore', b'migrate'}
+         b'script', b'function', b'lastsave'}
+PERSISTENCE = {b'bgrewriteaof', b'migrate'}
+OLD_PERSISTENCE = {b'save', b'bgsave', b'bgrewriteaof', b'dump', b'restore', b'migrate'}
+PERSISTENCE_NAMES = {b'save', b'appendonly', b'appendfsync', b'dir', b'dbfilename', b'appenddirname', b'appendfilename',
+                     b'stop-writes-on-bgsave-error', b'rdbcompression', b'rdbchecksum', b'key-load-delay',
+                     b'owners-forget-snapshot-delay'}
+PERSISTENCE_PREFIXES = (b'aof-', b'auto-aof-', b'rdb-', b'shutdown-')
+SNAPSHOT_TOP = {b'save', b'bgsave', b'shutdown'}
 INVALID = 'ERR invalid label'
 CONTEXT = 'ERR invalid context'
 TOKEN = 'ERR invalid label token'
@@ -18,7 +24,9 @@ TRANSACTION = "ERR the command's label differs from the transaction's label"
 NESTED = 'ERR LABEL AS cannot wrap LABEL AS or LABEL SESSION'
 MISMATCH = "ERR the label differs from the context's label"
 TOP = 'ERR this command needs a label that dominates the whole label scheme'
-PERSIST = 'ERR persistence is off while a label scheme is configured'
+AOF = 'ERR the append-only file is off while a label scheme is configured; SAVE and BGSAVE write labelled snapshots'
+MIGRATE_OFF = 'ERR MIGRATE is off while a label scheme is configured; move keys with DUMP and RESTORE'
+OLD_PERSIST = 'ERR persistence is off while a label scheme is configured'
 SYNTAX = 'ERR syntax error'
 CAP = 'ERR this login already holds the maximum number of contexts'
 WATCH_IN_MULTI = 'ERR WATCH inside MULTI is not allowed'
@@ -26,14 +34,22 @@ EXEC_WATCH = 'EXECABORT Transaction discarded because of: ' + TRANSACTION[len('E
 OWNER_TRANSACTION = "ERR the command's owner differs from the transaction's owner"
 EXEC_WATCH_OWNER = 'EXECABORT Transaction discarded because of: ' + OWNER_TRANSACTION[len('ERR '):]
 OPERATOR = 'ERR this command needs a login with the owner-operator right'
-OWNER_PERSIST = 'ERR persistence is off while owner mode is on'
+OWNER_AOF = 'ERR the append-only file is off while owner mode is on; SAVE and BGSAVE write owner snapshots'
+OWNER_MIGRATE = 'ERR MIGRATE is off while owner mode is on; move keys with DUMP and RESTORE'
+OLD_OWNER_PERSIST = 'ERR persistence is off while owner mode is on'
+OWNER_TEXTS = {AOF: OWNER_AOF, MIGRATE_OFF: OWNER_MIGRATE, OLD_PERSIST: OLD_OWNER_PERSIST}
 REFUSALS = {PER_COMMAND: 'refused_per_command', TOKEN_ONLY: 'refused_token_only', TRANSACTION: 'refused_transaction',
-            NESTED: 'refused_nested', MISMATCH: 'refused_mismatch', TOP: 'refused_top', PERSIST: 'refused_persist',
+            NESTED: 'refused_nested', MISMATCH: 'refused_mismatch', TOP: 'refused_top', AOF: 'refused_persist',
+            MIGRATE_OFF: 'refused_migrate',
             SESSION_NEEDED: 'refused_session_needed', INVALID: 'refused_invalid', CONTEXT: 'refused_context',
             TOKEN: 'refused_token'}
 
 
-MUTANTS = ('pin_before_acl', 'kill_by_dominance', 'pin_at_admission', 'multi_naming_ignored', 'token_counts_as_named')
+MUTANTS = ('pin_before_acl', 'kill_by_dominance', 'pin_at_admission', 'multi_naming_ignored', 'token_counts_as_named',
+           'persistence_old_set', 'top_only_old_set', 'persistence_single_text', 'migrate_text_as_aof',
+           'owner_migrate_unmapped', 'top_before_persistence', 'shutdown_abort_open', 'config_set_any_position',
+           'config_set_first_name', 'config_get_counts', 'prefix_without_dash', 'lastsave_saved_below_top',
+           'lastsave_label_top')
 ACL_POOL = [b'subscribe', b'psubscribe', b'ssubscribe', b'client|tracking', b'get', b'swapdb', b'monitor', b'bgrewriteaof']
 
 
@@ -365,18 +381,72 @@ class Arrival:
             if self.subscribing(args) and not c['explicit'] and not c['multi']:
                 self.note(event + '_push')
             return msg
-        if n in PERSISTENCE or (n == b'debug' and (self.arg_is(args, 1, b'reload') or self.arg_is(args, 1, b'loadaof'))) \
-                or (n == b'shutdown' and any(self.word(a, b'save') for a in args[1:])):
-            return PERSIST
-        top_only = n in (b'monitor', b'swapdb', b'debug', b'latency') or \
+        top = self.top(label)
+        if self.mutant == 'top_before_persistence' and self.top_only(args) and not top:
+            return TOP
+        if self.persist_refused(args):
+            if top:
+                self.note('refused_persist_at_top')
+            return self.persist_text(args)
+        if self.top_only(args) and not top:
+            if n in SNAPSHOT_TOP:
+                self.note('refused_top_snapshot')
+            if n == b'config' and self.config_persistence(args):
+                self.note('refused_top_config')
+            return TOP
+        if not top and n in (b'dump', b'restore', b'lastsave'):
+            self.note('open_below_top')
+        if not top and n == b'config' and self.arg_is(args, 1, b'set'):
+            self.note('config_set_open')
+        return None
+
+    def persistence_name(self, a):
+        b = self.lit(a)
+        if b is None:
+            return False
+        b = b.lower()
+        prefixes = tuple(p[:-1] for p in PERSISTENCE_PREFIXES) if self.mutant == 'prefix_without_dash' else PERSISTENCE_PREFIXES
+        return b in PERSISTENCE_NAMES or any(b.startswith(p) for p in prefixes)
+
+    def config_persistence(self, args):
+        if not (self.arg_is(args, 1, b'set') or (self.mutant == 'config_get_counts' and self.arg_is(args, 1, b'get'))):
+            return False
+        if self.mutant == 'config_set_any_position':
+            names = args[2:]
+        elif self.mutant == 'config_set_first_name':
+            names = args[2:3]
+        else:
+            names = args[2::2]
+        return any(self.persistence_name(a) for a in names)
+
+    def persist_refused(self, args):
+        n = self.name(args)
+        if self.mutant == 'persistence_old_set':
+            return n in OLD_PERSISTENCE or \
+                (n == b'debug' and (self.arg_is(args, 1, b'reload') or self.arg_is(args, 1, b'loadaof'))) or \
+                (n == b'shutdown' and any(self.word(a, b'save') for a in args[1:]))
+        return n in PERSISTENCE or (n == b'debug' and self.arg_is(args, 1, b'loadaof'))
+
+    def persist_text(self, args):
+        if self.mutant == 'persistence_single_text':
+            return OLD_PERSIST
+        if self.is_cmd(args, b'migrate') and self.mutant != 'migrate_text_as_aof':
+            return MIGRATE_OFF
+        return AOF
+
+    def top_only(self, args):
+        n = self.name(args)
+        old = n in (b'monitor', b'swapdb', b'debug', b'latency') or \
             (n == b'client' and (self.arg_is(args, 1, b'pause') or self.arg_is(args, 1, b'unpause'))) or \
             (n == b'memory' and any(self.arg_is(args, 1, w) for w in (b'stats', b'doctor', b'malloc-stats', b'purge'))) or \
             (n == b'slowlog' and self.arg_is(args, 1, b'reset')) or (n == b'config' and self.arg_is(args, 1, b'resetstat')) or \
             (n == b'function' and any(self.arg_is(args, 1, w) for w in (b'load', b'delete', b'flush', b'restore'))) or \
             (n == b'script' and self.arg_is(args, 1, b'flush'))
-        if top_only and not self.top(label):
-            return TOP
-        return None
+        if self.mutant == 'top_only_old_set':
+            return old
+        if self.mutant == 'shutdown_abort_open' and n == b'shutdown' and any(self.word(a, b'abort') for a in args[1:]):
+            return old
+        return old or n in SNAPSHOT_TOP or (n == b'config' and self.config_persistence(args))
 
     def arrive(self, c, args, run=True):
         login = c['login']
@@ -547,7 +617,16 @@ class Arrival:
             return self.session_cmd(c, inner)
         if self.is_cmd(inner, b'context'):
             return self.context_cmd(c, label, inner)
+        if self.is_cmd(inner, b'lastsave'):
+            return self.lastsave(self.top(label))
         return '-'
+
+    def lastsave(self, top):
+        if top or self.mutant == 'lastsave_saved_below_top':
+            self.note('lastsave_saved')
+            return 'lastsave:saved'
+        self.note('lastsave_start')
+        return 'lastsave:start'
 
     def veto(self, cid, args):
         c = self.conns[cid]
@@ -671,15 +750,9 @@ class Owners(Arrival):
         return self.housekeeping(args)
 
     def owner_top(self, args):
-        n = self.name(args)
-        if n == b'owners':
+        if self.is_cmd(args, b'owners'):
             return not self.arg_is(args, 1, b'help')
-        return n in (b'monitor', b'swapdb', b'debug', b'latency') or \
-            (n == b'client' and (self.arg_is(args, 1, b'pause') or self.arg_is(args, 1, b'unpause'))) or \
-            (n == b'memory' and any(self.arg_is(args, 1, w) for w in (b'stats', b'doctor', b'malloc-stats', b'purge'))) or \
-            (n == b'slowlog' and self.arg_is(args, 1, b'reset')) or (n == b'config' and self.arg_is(args, 1, b'resetstat')) or \
-            (n == b'function' and any(self.arg_is(args, 1, w) for w in (b'load', b'delete', b'flush', b'restore'))) or \
-            (n == b'script' and self.arg_is(args, 1, b'flush'))
+        return self.top_only(args)
 
     def pick_at(self, args, i):
         if i + 2 < len(args) and self.word(args[i], b'owner'):
@@ -748,9 +821,12 @@ class Owners(Arrival):
     def owner_refuse(self, c, oc, slot, msg):
         if msg in OWNER_REFUSALS:
             self.note(OWNER_REFUSALS[msg])
-        if msg == PERSIST and not (len(self.cfg.levels) > 1 or self.cfg.comps or len(self.cfg.trusts) > 1):
+        if msg in OWNER_TEXTS and not (len(self.cfg.levels) > 1 or self.cfg.comps or len(self.cfg.trusts) > 1):
             self.note('refused_owner_persist')
-            msg = OWNER_PERSIST
+            if msg == MIGRATE_OFF:
+                self.note('refused_owner_migrate')
+            if not (self.mutant == 'owner_migrate_unmapped' and msg == MIGRATE_OFF):
+                msg = OWNER_TEXTS[msg]
         out = self.refuse(c, slot, msg)
         if out.startswith('no:EXECABORT'):
             oc['wany'] = oc['wmixed'] = oc['wlmixed'] = False
@@ -1018,6 +1094,11 @@ class Owners(Arrival):
             marking = cfg.format(x['label'][:2] + (0,))
             trust = cfg.trusts[x['label'][2]] if x['label'][2] < len(cfg.trusts) else b''
             return f"info:{self.h['hexs'](marking)}:{self.h['hexs'](trust)}:{owner_text(self.cowners.get(x['handle'], 's'))}"
+        if self.is_cmd(inner, b'lastsave'):
+            operator = self.rule_of(c['login'])['op']
+            if self.top(label) and not operator:
+                self.note('owner_lastsave_not_operator')
+            return self.lastsave(self.top(label) and (operator or self.mutant == 'lastsave_label_top'))
         return self.handle(c, label, inner)
 
     def veto_o(self, cid, args):
@@ -1094,7 +1175,7 @@ OWNER_NOTES = ('form_owner_only', 'form_marking_owner', 'owner_named', 'owner_co
                'owner_kill_same', 'owner_kill_operator', 'owner_kill_operator_refused', 'owner_kill_refused_shared',
                'owner_kill_refused_user', 'owner_kill_refused_label', 'owner_noperm', 'owner_noperm_push',
                'vetoed_owner_unpinned', 'refused_operator', 'exec_owner_watch_text', 'refused_owner_persist', 'tx_named',
-               'token_unnamed')
+               'token_unnamed', 'refused_owner_migrate', 'owner_lastsave_not_operator')
 
 
 def corpus(helpers, seed, sessions=64, steps=160, watch_sessions=32, episodes=30, owner_sessions=48, owner_steps=150,
@@ -1844,9 +1925,140 @@ def corpus(helpers, seed, sessions=64, steps=160, watch_sessions=32, episodes=30
             else:
                 owner_request(cid, args)
 
+    owner_last = m
+    grid_models = []
+
+    def grid_user(login, clear, trust, kind=None, oid=None, shared=False, op=False):
+        texts = []
+        if clear == '*':
+            texts.append(b'clearance:*')
+        elif clear != '-':
+            texts.append(b'clearance:' + m.cfg.format(clear + (0,)))
+        if trust == '*':
+            texts.append(b'trust:*')
+        elif trust != '-':
+            texts.append(b'trust:' + m.cfg.trusts[trust])
+        m.users[login] = {'clear': clear, 'trust': trust, 'pc': False, 'rt': False, 'keys': []}
+        m.cache = {}
+        clear_text = clear if clear in ('*', '-') else helpers['label_text'](clear + (0,))
+        ceil = helpers['label_text'](m.ceiling(login))
+        if kind is None:
+            emit(f'AU {login.hex()} {clear_text} {trust} 0 0 - {names_text(texts)}', f'AU|{ceil}|0|0|0')
+            return
+        if kind == '*':
+            texts.append(b'owners:*')
+        elif kind == 'f':
+            texts.append(b'owner:' + oid)
+        if shared:
+            texts.append(b'owner-shared')
+        if op:
+            texts.append(b'owner-operator')
+        m.orules[login] = {'kind': kind, 'id': oid, 'shared': shared, 'op': op}
+        emit(f"OU {login.hex()} {clear_text} {trust} 0 0 - {names_text(texts)} {kind} {oid.hex() if oid else '-'} "
+             f'{int(shared)} {int(op)}', f'OU|{ceil}|0|0|0|{kind}|{int(shared)}|{int(op)}')
+
+    def grid_conn(cid, login, owners):
+        m.conns[cid] = {'login': login, 'explicit': False, 'session': (0, frozenset(), 0), 'multi': False,
+                        'dirty': False, 'bound': (0, frozenset(), 0), 'bprefixed': False, 'cas': False,
+                        'watched': [], 'wlabels': []}
+        if owners:
+            m.oconns[cid] = {'pinned': False, 'pin': 's', 'owner': 's', 'wany': False, 'wmixed': False,
+                             'wlabel': (0, frozenset(), 0), 'wowner': 's', 'wlmixed': False, 'named': False}
+            emit(f'OC {cid} {login.hex()}', f'OC|{cid}')
+        else:
+            emit(f'AC {cid} {login.hex()}', f'AC|{cid}')
+
+    def grid_request(cid, args):
+        if isinstance(m, Owners):
+            emit(f'OR {cid} ' + ' '.join(map(arg_text, args)), m.request_o(cid, args))
+        else:
+            emit(f'AR {cid} ' + ' '.join(map(arg_text, args)), m.request('AR', cid, args))
+
+    grid_names = [b'save', b'APPENDONLY', b'appendfsync', b'Dir', b'dbfilename', b'appenddirname', b'appendfilename',
+                  b'stop-writes-on-bgsave-error', b'RDBCOMPRESSION', b'rdbchecksum', b'key-load-delay',
+                  b'owners-forget-snapshot-delay', b'aof-use-rdb-preamble', b'AUTO-AOF-REWRITE-PERCENTAGE',
+                  b'rdb-key-save-delay', b'Rdb-Del-Sync-Files', b'shutdown-timeout', b'shutdown-on-sigterm', b'aof-',
+                  b'maxmemory', b'rdbx', b'aof', b'saves', b'xsave', b'appendonlyx', b'shutdown', b'auto-aof', b'dirs',
+                  b'no-appendfsync-on-rewrite', b'sanitize-dump-payload', b'notify-keyspace-events']
+    grid_commands = [[x(b'SAVE')], [x(b'save')], [x(b'BGSAVE')], [x(b'BGSAVE'), x(b'SCHEDULE')], [x(b'SHUTDOWN')],
+                     [x(b'SHUTDOWN'), x(b'NOSAVE')], [x(b'SHUTDOWN'), x(b'SAVE')], [x(b'shutdown'), x(b'abort')],
+                     [x(b'SHUTDOWN'), x(b'NOW'), x(b'FORCE')], [x(b'SHUTDOWN'), x(b'NOSAVE'), x(b'NOW'), x(b'FORCE'), x(b'ABORT')],
+                     [x(b'BGREWRITEAOF')], [x(b'MIGRATE'), x(b'host'), x(b'1'), x(b'k'), x(b'0'), x(b'5')],
+                     [x(b'migrate'), x(b'host'), x(b'1'), x(b'k'), x(b'0'), x(b'5'), x(b'KEYS'), x(b'k')],
+                     [x(b'DEBUG'), x(b'LOADAOF')], [x(b'debug'), x(b'loadaof')], [x(b'DEBUG'), x(b'RELOAD')],
+                     [x(b'DEBUG'), x(b'RELOAD'), x(b'NOSAVE')], [x(b'DEBUG'), x(b'SLEEP'), x(b'0')], [x(b'DUMP'), x(b'k')],
+                     [x(b'RESTORE'), x(b'k'), x(b'0'), x(b'v')], [x(b'restore'), x(b'k'), x(b'0'), x(b'v'), x(b'REPLACE')],
+                     [x(b'LASTSAVE')], [x(b'lastsave')], [x(b'MONITOR')], [x(b'CONFIG'), x(b'RESETSTAT')],
+                     [x(b'CONFIG'), x(b'GET'), x(b'save')], [x(b'CONFIG'), x(b'GET'), x(b'dir')], [x(b'CONFIG'), x(b'REWRITE')],
+                     [x(b'CONFIG'), x(b'SET'), x(b'maxmemory'), x(b'save')], [x(b'CONFIG'), x(b'SET'), x(b'save')],
+                     [x(b'CONFIG'), x(b'SET'), x(b'maxmemory'), x(b'0'), x(b'save'), x(b'v')],
+                     [x(b'config'), x(b'set'), x(b'maxmemory'), x(b'0'), x(b'hz'), x(b'10'), x(b'dir'), x(b'v')],
+                     [x(b'CONFIG'), x(b'SET'), x(b'maxmemory'), x(b'0'), x(b'hz'), x(b'10')],
+                     [x(b'CONFIG'), x(b'SET'), x(b'hz'), x(b'aof-x'), x(b'maxmemory'), x(b'rdb-y')]]
+    grid_commands += [[x(b'CONFIG'), x(b'SET'), x(name), x(b'v')] for name in grid_names]
+    for mode in ('labels', 'owners', 'both'):
+        m = Arrival(helpers, mutant) if mode == 'labels' else Owners(helpers, mutant)
+        grid_models.append(m)
+        owners = mode != 'labels'
+        cfg = helpers['Config']()
+        levels = [b'U'] if mode == 'owners' else [b'U', b'C', b'S']
+        comps = [] if mode == 'owners' else [b'A']
+        trusts = [] if mode == 'owners' else [b'WEB', b'VETTED']
+        for kind, names in (('CL', levels), ('CC', comps), ('CT', trusts)):
+            for n in names:
+                assert cfg.add(kind, n) == 'ok'
+        m.reset(cfg, b'node', 4, 3)
+        head = 'OX' if owners else 'AX'
+        emit(f'{head} {names_text(levels)} {names_text(comps)} {names_text(trusts)} {hexs(b"node")} 4 3',
+             f'{head}|{len(levels)}|{len(comps)}|{len(trusts)}')
+        low = (0, frozenset()) if mode == 'owners' else (1, frozenset())
+        if owners:
+            grid_user(b'ops', '*', '*', '-', None, False, True)
+            grid_user(b'batch', '*', '*', '-', None, False, False)
+            grid_user(b'app', low, '-', '*', None, True, False)
+            grid_user(b'reader', '*', '*', '*', None, True, True)
+            people = [b'ops', b'batch', b'app', b'reader']
+        else:
+            grid_user(b'ops', '*', '*')
+            grid_user(b'app', low, '-')
+            people = [b'ops', b'ops', b'app']
+        for cid, login in enumerate(people):
+            grid_conn(cid, login, owners)
+        top_mark = m.cfg.format((len(levels) - 1, frozenset(range(len(comps))), 0))
+        low_mark = m.cfg.format(low + (0,))
+        if not owners:
+            grid_request(1, [x(b'LABEL'), x(b'SESSION'), x(low_mark)])
+        lowered = [[x(b'LABEL'), x(b'AS'), x(low_mark)]]
+        if mode != 'owners':
+            lowered += [[x(b'LABEL'), x(b'AS'), x(b'S')], [x(b'LABEL'), x(b'AS'), x(top_mark), x(b'TRUST'), x(b'VETTED')]]
+        for cmd in grid_commands:
+            if owners:
+                forms = [(0, []), (0, [x(b'LABEL'), x(b'AS'), x(top_mark), x(b'SHARED')]), (0, [x(b'LABEL'), x(b'AS'), x(b'SHARED')]),
+                         (1, []), (1, [x(b'LABEL'), x(b'AS'), x(top_mark)]), (2, []),
+                         (2, [x(b'LABEL'), x(b'AS'), x(low_mark), x(b'OWNER'), x(b'u1')]), (3, []),
+                         (3, [x(b'LABEL'), x(b'AS'), x(top_mark), x(b'OWNER'), x(b'u1')]), (3, [x(b'LABEL'), x(b'AS'), x(b'SHARED')])]
+                if mode == 'both':
+                    forms += [(0, lowered[0] + [x(b'SHARED')]), (0, lowered[2])]
+            else:
+                forms = [(0, []), (1, []), (2, []), (0, [x(b'LABEL'), x(b'AS'), x(top_mark)]), (2, lowered[0])]
+                forms += [(0, pre) for pre in lowered]
+            for cid, pre in forms:
+                grid_request(cid, pre + cmd)
+            for cid, pre in ((0, []), (1, []), (0, lowered[0])):
+                grid_request(cid, pre + [x(b'MULTI')])
+                grid_request(cid, cmd)
+                grid_request(cid, [x(b'EXEC')])
+            grid_request(0, [x(b'LABEL'), x(b'AS'), x(top_mark)] + ([x(b'SHARED')] if owners else []) + [x(b'MULTI')])
+            grid_request(0, [x(b'LABEL'), x(b'AS'), x(top_mark)] + ([x(b'SHARED')] if owners else []) + cmd)
+            grid_request(0, [x(b'EXEC')])
+
     notes = dict(label_model.notes)
+    for gm in grid_models[:1]:
+        for key, count in gm.notes.items():
+            notes[key] = notes.get(key, 0) + count
     for key in OWNER_NOTES:
-        count = owner_model.notes.get(key, 0) + owner_veto_model.notes.get(key, 0) + m.notes.get(key, 0)
+        count = owner_model.notes.get(key, 0) + owner_veto_model.notes.get(key, 0) + owner_last.notes.get(key, 0) + \
+            sum(gm.notes.get(key, 0) for gm in grid_models[1:])
         if count:
             notes[key] = count
     for key, at in owner_marks.items():

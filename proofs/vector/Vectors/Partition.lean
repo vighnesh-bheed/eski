@@ -4,6 +4,7 @@ namespace Vectors
 
 structure PartOps (N V P : Type) where
   create : Nat → P
+  seed : Nat
   insert : P → N → V → P
   update : P → N → V → P
   setAttr : P → N → V → P
@@ -58,8 +59,7 @@ def wstep (ops : PartOps N V P) (sees : L → L → Bool) (c : Cmd L N V) (s : L
       match s.parts w with
       | some p => setIndex (setPart s w (some (ops.insert p n v))) n (ls ++ [w])
       | none =>
-        let st := ops.advance (s.stream w)
-        setIndex (setPart (setStream s w st) w (some (ops.insert (ops.create (ops.output st)) n v))) n (ls ++ [w])
+        setIndex (setPart s w (some (ops.insert (ops.create ops.seed) n v))) n (ls ++ [w])
   | .set n v =>
     if w ∈ s.index n then
       match s.parts w with
@@ -149,7 +149,7 @@ theorem step_local (ops : PartOps N V P) (sees : L → L → Bool) (gt : L → L
       · split <;> simp [setPart, hlw]
       · split
         · rfl
-        · split <;> simp [setPart, setIndex, setStream, hlw]
+        · split <;> simp [setPart, setIndex, hlw]
     | set n v => simp only; split <;> (try split) <;> simp [setPart, hlw]
     | rem n => simp only; split <;> (try split) <;> simp [setPart, setIndex, hlw]
     | drop => simp [hlw]
@@ -165,7 +165,7 @@ theorem step_local (ops : PartOps N V P) (sees : L → L → Bool) (gt : L → L
       · split
         · rfl
         · split <;>
-          · simp only [setIndex, setPart, setStream]
+          · simp only [setIndex, setPart]
             by_cases hm : n = m
             · subst hm; simp [List.filter_append, hwf]
             · simp [hm]
@@ -192,7 +192,7 @@ theorem step_local (ops : PartOps N V P) (sees : L → L → Bool) (gt : L → L
       · split <;> simp [setPart]
       · split
         · rfl
-        · split <;> simp [setPart, setIndex, setStream, hlw]
+        · split <;> simp [setPart, setIndex]
     | set n v => simp only; split <;> (try split) <;> simp [setPart]
     | rem n => simp only; split <;> (try split) <;> simp [setPart, setIndex]
     | drop => rfl
@@ -300,9 +300,8 @@ theorem step_consistent (ops : PartOps N V P) (sees : L → L → Bool) (hs : Se
         · apply restrict_setIndex
           · exact restrict_setPart r _ _ w _ hidem
           · rw [hix]; exact hfl _
-        · rw [hsw]
-          apply restrict_setIndex
-          · exact restrict_setPart r _ _ w _ (restrict_setStream r _ _ w _ hidem)
+        · apply restrict_setIndex
+          · exact restrict_setPart r _ _ w _ hidem
           · rw [hix]; exact hfl _
   | set n v =>
     simp only

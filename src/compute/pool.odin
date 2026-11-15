@@ -31,6 +31,7 @@ Job :: struct {
 Pool :: struct {
 	mutex:       sync.Mutex,
 	ready:       sync.Cond,
+	finished:    sync.Cond,
 	threads:     [MAX_WORKERS]^thread.Thread,
 	worker_enter: proc(),
 	worker_leave: proc(),
@@ -96,6 +97,7 @@ worker_main :: proc(t: ^thread.Thread) {
 		p.completed[(p.done_head + p.done_len) % CAPACITY] = job
 		p.done_len += 1
 		intrinsics.atomic_store_explicit(&job.state, .Completed, .Release)
+		sync.cond_broadcast(&p.finished)
 		sync.mutex_unlock(&p.mutex)
 		notify_completion(p.fd)
 	}
@@ -178,6 +180,66 @@ cancel :: proc "contextless" (job: ^Job) {
 	}
 }
 
+withdraw :: proc "contextless" (p: ^Pool, job: ^Job) -> bool {
+	if p == nil || job == nil {
+		return false
+	}
+	sync.mutex_lock(&p.mutex)
+	if intrinsics.atomic_load_explicit(&job.state, .Acquire) != .Queued {
+		sync.mutex_unlock(&p.mutex)
+		return false
+	}
+	at := -1
+	for i in 0 ..< p.queue_len {
+		if p.queued[(p.queue_head + i) % CAPACITY] == job {
+			at = i
+			break
+		}
+	}
+	if at < 0 {
+		sync.mutex_unlock(&p.mutex)
+		return false
+	}
+	for i in at ..< p.queue_len - 1 {
+		p.queued[(p.queue_head + i) % CAPACITY] = p.queued[(p.queue_head + i + 1) % CAPACITY]
+	}
+	p.queued[(p.queue_head + p.queue_len - 1) % CAPACITY] = nil
+	p.queue_len -= 1
+	intrinsics.atomic_store_explicit(&job.cancel_flag, 1, .Release)
+	job.elapsed_ns = 0
+	p.completed[(p.done_head + p.done_len) % CAPACITY] = job
+	p.done_len += 1
+	intrinsics.atomic_store_explicit(&job.state, .Completed, .Release)
+	sync.cond_broadcast(&p.finished)
+	fd := p.fd
+	sync.mutex_unlock(&p.mutex)
+	notify_completion(fd)
+	return true
+}
+
+wait_done :: proc "contextless" (p: ^Pool, job: ^Job) {
+	if p == nil || job == nil {
+		return
+	}
+	sync.mutex_lock(&p.mutex)
+	for {
+		state := intrinsics.atomic_load_explicit(&job.state, .Acquire)
+		if state != .Queued && state != .Running && state != .Admitted {
+			break
+		}
+		if state == .Queued && p.nthreads == 0 {
+			break
+		}
+		sync.cond_wait(&p.finished, &p.mutex)
+	}
+	sync.mutex_unlock(&p.mutex)
+}
+
+reading :: #force_inline proc "contextless" (job: ^Job) -> bool {
+	state := intrinsics.atomic_load_explicit(&job.state, .Acquire)
+	return state == .Queued || state == .Running || state == .Admitted
+}
+
 cancelled :: proc "contextless" (job: ^Job) -> bool {
 	return job != nil && intrinsics.atomic_load_explicit(&job.cancel_flag, .Acquire) != 0
 }
@@ -215,6 +277,13 @@ drain_notifications :: proc "contextless" (p: ^Pool) {
 		if err != .NONE {
 			return
 		}
+	}
+}
+
+notify :: proc "contextless" (p: ^Pool) {
+	fd := completion_fd(p)
+	if fd >= 0 {
+		notify_completion(fd)
 	}
 }
 

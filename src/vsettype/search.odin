@@ -248,6 +248,31 @@ search :: proc(s: Vset, req: ^Search_Request, scratch: ^Scratch, out: ^[dynamic]
 	if f.err != .None {
 		return f
 	}
+	return search_query(s, q, req, sc, out)
+}
+
+search_prepare :: proc(s: Vset, req: ^Search_Request, sc: ^Scratch) -> (q: vmath.Query, f: Failure) {
+	if q, f = build_query(s, req, sc); f.err != .None {
+		return {}, f
+	}
+	if f = filter_check(req, sc); f.err != .None {
+		return {}, f
+	}
+	return q, {}
+}
+
+filter_check :: proc(req: ^Search_Request, sc: ^Scratch) -> Failure {
+	if !req.use_filter {
+		return {}
+	}
+	filter: Filter
+	f := filter_compile(&filter, req.filter, sc)
+	filter_destroy(&filter, sc)
+	return f
+}
+
+search_query :: proc(s: Vset, q: vmath.Query, req: ^Search_Request, sc: ^Scratch, out: ^[dynamic]Hit) -> Failure {
+	f: Failure
 	filter: Filter
 	defer filter_destroy(&filter, sc)
 	actx := Accept_Context{part = &s.core, filter = &filter}

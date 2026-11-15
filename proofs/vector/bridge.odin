@@ -1323,6 +1323,208 @@ z_step :: proc(z: ^Z_State, fields: []string, b: ^strings.Builder) {
 	free_all(context.temp_allocator)
 }
 
+Ks_Writer :: struct {
+	out: [dynamic]u8,
+}
+
+ks_var :: proc(w: ^Ks_Writer, v: u64) {
+	x := v
+	for x >= 0x80 {
+		append(&w.out, u8(x) | 0x80)
+		x >>= 7
+	}
+	append(&w.out, u8(x))
+}
+
+ks_id :: proc(w: ^Ks_Writer, v: int, width: int) {
+	for i in 0 ..< width {
+		append(&w.out, u8(u64(v) >> (8 * uint(i))))
+	}
+}
+
+ks_f32 :: proc(w: ^Ks_Writer, v: f32) {
+	ks_id(w, int(transmute(u32)v), 4)
+}
+
+ks_width :: proc(high: int) -> int {
+	if high <= 65_535 {
+		return 2
+	}
+	if high <= 16_777_215 {
+		return 3
+	}
+	return 4
+}
+
+ks_class :: proc(err: vt.Decode_Error) -> string {
+	#partial switch err {
+	case .Bad_Free_List:
+		return "free"
+	case .Bad_Slot:
+		return "slot"
+	case .Bad_Sequence:
+		return "seq"
+	case .Bad_Graph:
+		return "graph"
+	case .Bad_Link:
+		return "link"
+	case .Asymmetric_Link:
+		return "sym"
+	case .Bad_Entry:
+		return "entry"
+	case .Bad_Twin:
+		return "twin"
+	}
+	return "shape"
+}
+
+ks_row :: proc(b: ^strings.Builder, fields: []string) {
+	t := make([dynamic]int, 0, len(fields))
+	defer delete(t)
+	for f, i in fields {
+		append(&t, int(word(f)) if i != 2 else 0)
+	}
+	uid := word(fields[2])
+	at := 0
+	next :: proc(t: []int, at: ^int) -> int {
+		v := t[at^]
+		at^ += 1
+		return v
+	}
+	m := next(t[:], &at)
+	high := next(t[:], &at)
+	next(t[:], &at)
+	entry := next(t[:], &at)
+	top := next(t[:], &at)
+	table := next(t[:], &at) == 1
+	nfree := next(t[:], &at)
+	free := t[at:][:nfree]
+	at += nfree
+	nelem := next(t[:], &at)
+	elems := t[at:][:2 * nelem]
+	at += 2 * nelem
+	levels := make([]int, high)
+	defer delete(levels)
+	starts := make([]int, high)
+	defer delete(starts)
+	upper := 0
+	twins := 0
+	for i in 0 ..< high {
+		starts[i] = at
+		lv := next(t[:], &at)
+		levels[i] = lv
+		if lv == 253 {
+			at += 1
+			twins += 1
+		} else if lv <= 30 {
+			upper += lv
+			for _ in 0 ..= lv {
+				n := next(t[:], &at)
+				at += n
+			}
+		}
+	}
+	assert(at == len(t))
+	width := ks_width(high)
+	w: Ks_Writer
+	defer delete(w.out)
+	append(&w.out, 'E', 'V', 'S', 2, 0x04 if table else 0, 0)
+	ks_var(&w, 2)
+	ks_var(&w, 0)
+	ks_var(&w, u64(m))
+	ks_var(&w, u64(nelem))
+	ks_var(&w, uid)
+	ks_id(&w, 7, 4)
+	ks_id(&w, 0, 4)
+	append(&w.out, 0)
+	ks_var(&w, u64(high))
+	ks_var(&w, u64(high))
+	ks_var(&w, u64(high))
+	ks_var(&w, u64(upper))
+	ks_id(&w, entry, width)
+	append(&w.out, u8(top))
+	ks_var(&w, u64(twins))
+	for f in free {
+		ks_id(&w, f, width)
+	}
+	for k in 0 ..< nelem {
+		ks_id(&w, elems[2 * k], width)
+		ks_var(&w, u64(elems[2 * k + 1]))
+		name := fmt.tprintf("e%d", k)
+		ks_var(&w, u64(len(name)))
+		append(&w.out, ..transmute([]u8)name)
+		append(&w.out, 1, 2)
+		ks_f32(&w, 1)
+		ks_f32(&w, 0.01)
+		ks_var(&w, 0)
+	}
+	for i in 0 ..< high {
+		at = starts[i]
+		lv := next(t[:], &at)
+		append(&w.out, u8(lv))
+		if lv == 253 {
+			ks_id(&w, next(t[:], &at), width)
+		} else if lv <= 30 {
+			for _ in 0 ..= lv {
+				n := next(t[:], &at)
+				ks_var(&w, u64(n))
+				for _ in 0 ..< n {
+					ks_id(&w, next(t[:], &at), width)
+				}
+			}
+		}
+	}
+	ks_var(&w, 0)
+	s, err := vt.deserialize(w.out[:])
+	if err != .None {
+		fmt.sbprintf(b, "KS|0|%s", ks_class(err))
+		return
+	}
+	defer vt.destroy(s)
+	g := &s.core.graph
+	out := make([dynamic]int, 0, len(t))
+	defer delete(out)
+	chain := make([dynamic]int)
+	defer delete(chain)
+	for x := s.arena.free; x != vm.NIL_SLOT; x = vm.free_next(s.arena.norms[x]) {
+		append(&chain, int(x))
+	}
+	append(&out, g.m, int(s.arena.high), 0, int(g.entry), g.max_level, 1 if g.twin_link != nil else 0, len(chain))
+	append(&out, ..chain[:])
+	append(&out, s.count)
+	for k in 0 ..< s.count {
+		slot := s.order[k]
+		append(&out, int(slot), int(s.elements[slot].seq))
+	}
+	for i in 0 ..< g.slots {
+		slot := u32(i)
+		lv := int(g.levels[slot])
+		append(&out, lv)
+		if lv == 253 {
+			append(&out, int(hn.twin_prev(g, slot)))
+		} else if lv <= 30 {
+			for layer in 0 ..= lv {
+				l := hn.list_get(g, slot, layer)
+				append(&out, l.count)
+				for k in 0 ..< l.count {
+					append(&out, int(hn.list_id(g, l, k)))
+				}
+			}
+		}
+	}
+	strings.write_string(b, "KS|1|")
+	for v, i in out {
+		if i > 0 {
+			strings.write_byte(b, ',')
+		}
+		if i == 2 {
+			fmt.sbprintf(b, "%d", g.node_uid)
+		} else {
+			fmt.sbprintf(b, "%d", v)
+		}
+	}
+}
+
 main :: proc() {
 	assert(len(os.args) == 2)
 	input, err := os.read_entire_file(os.args[1], context.allocator)
@@ -1603,6 +1805,8 @@ main :: proc() {
 		case "LW":
 			w := hn.link_width(nat(fields[1]))
 			fmt.sbprintf(&b, "LW|%d|%d", w, hn.width_none(w))
+		case "KS":
+			ks_row(&b, fields[1:])
 		case "LN":
 			stored, ok := vm.live_norm(transmute(f32)u32(word(fields[1])))
 			fmt.sbprintf(&b, "LN|%x|%d", transmute(u32)stored, bit(ok))

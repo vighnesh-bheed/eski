@@ -8,8 +8,7 @@ import "../vmath"
 NAME_MULTI :: u64(1) << 63
 PART_NONE :: max(u32)
 PART_FIXED_BYTES :: size_of(Part_Block)
-VIEW_BASE_BYTES :: size_of(Vset_Object) + size_of(Labelled)
-NAME_INDEX_BYTES :: 24
+NAME_INDEX_BYTES :: 40
 SHARED_PART_LIMIT :: u32(lbl.LABEL_LIMIT)
 
 Access :: struct {
@@ -18,8 +17,13 @@ Access :: struct {
 	visibility: ^lbl.Visibility,
 	table:      ^lbl.Table,
 	stream:     ^u64,
+	key:        []u8,
 	top:        bool,
 }
+
+Seed_Hook :: #type proc(a: ^Access) -> u64
+
+seed_hook: Seed_Hook
 
 Ref :: struct {
 	slot: u32,
@@ -38,6 +42,7 @@ Copies :: struct {
 Part_Block :: struct {
 	using part: Partition,
 	charge:     Charge,
+	tally:      Tally,
 }
 
 Name_Set :: struct {
@@ -137,12 +142,17 @@ access_stream :: proc(a: ^Access) -> ^u64 {
 	return label_stream(a.label)
 }
 
+scope_seed :: #force_inline proc "contextless" (l: lbl.Id, o: Owner) -> u64 {
+	return mix64(stream_seed(l) ~ (u64(o) * GOLDEN_GAMMA)) | 1
+}
+
 draw_seed :: proc(a: ^Access) -> u64 {
-	st := access_stream(a)
-	if st == nil {
-		return stream_seed(a.label)
+	if seed_hook != nil {
+		if v := seed_hook(a); v != 0 {
+			return v
+		}
 	}
-	return stream_next(st) | 1
+	return scope_seed(a.label, a.owner)
 }
 
 copies_entries :: #force_inline proc "contextless" (c: ^Copies) -> [^]Ref {
@@ -434,6 +444,7 @@ convert :: proc(s: Vset) -> Error {
 	blk.label = lbl.BOTTOM_ID
 	blk.owner = SHARED
 	blk.mode = .Pinned
+	tally_refresh(&blk.head)
 	s.core = {}
 	part_init(&s.core, q, s.dim, m, 1, allocator_of(s))
 	lab := s.lab
@@ -904,6 +915,7 @@ top_visible_label :: proc "contextless" (s: Vset, a: ^Access) -> (l: lbl.Id, ok:
 }
 
 remove_label :: proc(s: Vset, l: lbl.Id) -> (removed: int, ch: Change) {
+	write_fence(s)
 	if s == nil {
 		ch.emptied = true
 		return
@@ -953,6 +965,7 @@ part_remove_all :: proc(s: Vset, p: ^Part_Head) -> int {
 }
 
 make_labelled :: proc(s: Vset) -> Error {
+	write_fence(s)
 	if s == nil {
 		return .Invalid_Parameter
 	}
@@ -1039,6 +1052,7 @@ split_target :: proc(s: Vset) -> (out: Vset, err: Error) {
 }
 
 split_label :: proc(s: Vset, l: lbl.Id) -> (out: Vset, ch: Change, err: Error) {
+	write_fence(s)
 	if s == nil || s.lab == nil {
 		return nil, ch, .Invalid_Parameter
 	}
@@ -1062,6 +1076,8 @@ split_label :: proc(s: Vset, l: lbl.Id) -> (out: Vset, ch: Change, err: Error) {
 }
 
 absorb :: proc(dst: Vset, src: Vset) -> Error {
+	write_fence(dst)
+	write_fence(src)
 	if dst == nil || src == nil || dst == src || !params_match(dst, src) {
 		return .Invalid_Parameter
 	}

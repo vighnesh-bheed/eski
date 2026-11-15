@@ -134,6 +134,8 @@ sort_get_args: [dynamic]int
 @(private = "file")
 sort_slices: [dynamic][]u8
 
+sort_stepped_expired: bool
+
 sort_add_element :: proc(elem: []u8) {
 	append(&sort_rows, Sort_Row{elem_off = len(sort_data), elem_len = len(elem), key_len = SORT_ABSENT, seq = len(sort_rows)})
 	append(&sort_data, ..elem)
@@ -270,6 +272,7 @@ sort_gather :: proc(src: ^Entry, kind: Obj_Type, req: ^Sort_Request) -> Sort_Win
 @(private = "file")
 sort_command :: proc(c: ^Conn, argv: [][]u8, writable: bool) {
 	pst.dirty_explicit = true
+	sort_stepped_expired = false
 	req, parsed := sort_read_options(c, argv, writable)
 	if !parsed {
 		return
@@ -865,6 +868,9 @@ sort_reply :: proc(c: ^Conn) {
 @(private = "file")
 sort_store :: proc(c: ^Conn, key: []u8) {
 	if len(sort_values) == 0 {
+		if sort_stepped_expired {
+			aof_sort_effect(c, key, nil)
+		}
 		if found, _ := db_remove(key); found {
 			signal_key(key)
 			notify(.Generic, "del", key)
@@ -879,6 +885,9 @@ sort_store :: proc(c: ^Conn, key: []u8) {
 		} else {
 			append(&sort_slices, sort_value_bytes(v))
 		}
+	}
+	if sort_stepped_expired {
+		aof_sort_effect(c, key, sort_slices[:])
 	}
 	list_sort_store(key, sort_slices[:])
 	signal_key(key)

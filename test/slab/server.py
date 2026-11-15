@@ -20,7 +20,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="eski-slab-server-") as temporary:
         work = Path(temporary)
         with (work / "server.log").open("wb") as log:
-            process = subprocess.Popen([str(binary), "--port", str(args.port), "--dir", str(work), "--save", "", "--appendonly", "no", "--enable-debug-command", "yes"], cwd=work, stdout=log, stderr=log)
+            process = subprocess.Popen([str(binary), "--port", str(args.port), "--bind", "127.0.0.1", "--dir", str(work), "--save", "", "--appendonly", "no", "--enable-debug-command", "yes"], cwd=work, stdout=log, stderr=log)
             client = storage_server.ready(args.port, process)
             try:
                 client.check("DEBUG", "SET-ACTIVE-EXPIRE", 0)

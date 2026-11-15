@@ -2,15 +2,19 @@ package main
 
 import "base:intrinsics"
 import "base:runtime"
+import "core:slice"
 import "core:strconv"
 import "core:sync"
 import "core:sys/linux"
 import "core:thread"
 import ht "hashtype"
 import ks "keyspace"
+import lb "label"
 import lt "listtype"
+import ow "owner"
 import "rdb"
 import rx "rax"
+import "seal"
 import st "settype"
 import sm "streamtype"
 import zt "zsettype"
@@ -33,6 +37,8 @@ ERR_AOF_REWRITE_RUNNING :: "ERR Background append only file rewriting already in
 
 ERR_AOF_LOAD :: "ERR Error trying to load the AOF files, check server logs."
 
+ERR_AOF_LOAD_WRITE_PENDING :: "ERR the append-only file has a failed write that is not resolved yet, so DEBUG LOADAOF is refused; check the server log"
+
 ERR_AOF_CHILD_BGSAVE :: "ERR Another child process is active (AOF?): can't BGSAVE right now. Use BGSAVE SCHEDULE in order to schedule a BGSAVE whenever possible."
 
 Aof_Status :: enum u8 {
@@ -54,9 +60,13 @@ Aof_File_Kind :: enum u8 {
 }
 
 Aof_File :: struct {
-	name: [dynamic]u8,
-	seq:  i64,
-	kind: Aof_File_Kind,
+	name:     [dynamic]u8,
+	seq:      i64,
+	kind:     Aof_File_Kind,
+	sealed:   bool,
+	has_size: bool,
+	salt:     [seal.SALT_SIZE]u8,
+	size:     i64,
 }
 
 Aof_Manifest :: struct {
@@ -125,6 +135,7 @@ Aof :: struct {
 	rewrite_last:        i64,
 	rewrite_preamble:    bool,
 	rewrite_state:       Aof_Status,
+	forget_at_start:     u64,
 	stat_rewrites:       i64,
 	failures:            i64,
 	last_rewrite_err:    bool,
@@ -282,13 +293,21 @@ aof_now_ms :: proc "contextless" () -> i64 {
 	return i64(ts.time_sec) * 1000 + i64(ts.time_nsec) / 1_000_000
 }
 
-@(private = "file")
+aof_private :: #force_inline proc "contextless" () -> bool {
+	return labels_on || access_save_forced
+}
+
 aof_mode_file :: proc "contextless" () -> linux.Mode {
+	if aof_private() {
+		return {.IRUSR, .IWUSR}
+	}
 	return {.IRUSR, .IWUSR, .IRGRP, .IROTH}
 }
 
-@(private = "file")
 aof_mode_dir :: proc "contextless" () -> linux.Mode {
+	if aof_private() {
+		return {.IRUSR, .IWUSR, .IXUSR}
+	}
 	return {.IRUSR, .IWUSR, .IXUSR, .IRGRP, .IXGRP, .IROTH, .IXOTH}
 }
 
@@ -432,6 +451,63 @@ aof_make_dir :: proc() -> bool {
 	return true
 }
 
+@(private = "file")
+aof_tighten_fd :: proc(fd: linux.Fd, mode: linux.Mode) {
+	sb: linux.Stat
+	if linux.fstat(fd, &sb) != .NONE {
+		return
+	}
+	loose := linux.Mode{.IXOTH, .IWOTH, .IROTH, .IXGRP, .IWGRP, .IRGRP}
+	if sb.mode & loose != {} {
+		linux.fchmod(fd, mode)
+	}
+}
+
+aof_private_modes :: proc() {
+	if !aof_private() {
+		return
+	}
+	buf: [PERSIST_PATH_MAX]u8
+	dfd, err := linux.open(persist_cstr(aof.dirname, buf[:]), {.DIRECTORY, .NOFOLLOW, .CLOEXEC})
+	if err != .NONE {
+		return
+	}
+	defer linux.close(dfd)
+	aof_tighten_fd(dfd, aof_mode_dir())
+	mname: [dynamic]u8
+	defer delete(mname)
+	aof_manifest_name(&mname)
+	names := make([dynamic]string, context.temp_allocator)
+	chunk: [4096]u8
+	for {
+		n, derr := linux.getdents(dfd, chunk[:])
+		if derr != .NONE || n <= 0 {
+			break
+		}
+		offset := 0
+		for d in linux.dirent_iterate_buf(chunk[:n], &offset) {
+			name := linux.dirent_name(d)
+			temporary := len(name) > len("temp-") && name[:5] == "temp-"
+			if name == string(mname[:]) || name == aof.filename || temporary || aof_is_log_file_name(name) {
+				copied := make([]u8, len(name), context.temp_allocator)
+				copy(copied, name)
+				append(&names, string(copied))
+			}
+		}
+	}
+	for name in names {
+		fd, ferr := linux.open(aof_cpath(name, buf[:]), {.NOFOLLOW, .NONBLOCK, .CLOEXEC})
+		if ferr != .NONE {
+			continue
+		}
+		sb: linux.Stat
+		if linux.fstat(fd, &sb) == .NONE && linux.S_ISREG(sb.mode) {
+			aof_tighten_fd(fd, aof_mode_file())
+		}
+		linux.close(fd)
+	}
+}
+
 aof_fsync_dir :: proc() {
 	buf: [PERSIST_PATH_MAX]u8
 	fd, err := linux.open(persist_cstr(aof.dirname, buf[:]), {.DIRECTORY, .CLOEXEC})
@@ -464,8 +540,12 @@ aof_write_all :: proc "contextless" (fd: linux.Fd, data: []u8) -> (written: int,
 
 aof_file_clone :: proc(f: Aof_File) -> Aof_File {
 	out := Aof_File {
-		seq  = f.seq,
-		kind = f.kind,
+		seq      = f.seq,
+		kind     = f.kind,
+		sealed   = f.sealed,
+		has_size = f.has_size,
+		salt     = f.salt,
+		size     = f.size,
 	}
 	append(&out.name, ..f.name[:])
 	return out
@@ -569,6 +649,14 @@ aof_manifest_line :: proc(b: ^[dynamic]u8, f: ^Aof_File) {
 		append(b, 'h')
 	case .Incr:
 		append(b, 'i')
+	}
+	if f.sealed {
+		append(b, " salt ")
+		seal_hex(b, f.salt[:])
+	}
+	if f.has_size {
+		append(b, " size ")
+		aof_put_decimal(b, f.size)
 	}
 	append(b, '\n')
 }
@@ -716,6 +804,9 @@ aof_manifest_parse :: proc(text: []u8, m: ^Aof_Manifest) -> (ok: bool, reason: s
 		have_name, have_seq, have_type := false, false, false
 		seq: i64 = 0
 		kind := Aof_File_Kind.Base
+		sealed, has_size := false, false
+		salt: [seal.SALT_SIZE]u8
+		size: i64 = 0
 		at := 0
 		for {
 			found, good := aof_manifest_token(line, &at, &tok)
@@ -730,6 +821,8 @@ aof_manifest_parse :: proc(text: []u8, m: ^Aof_Manifest) -> (ok: bool, reason: s
 			is_file := key == "file"
 			is_seq := key == "seq"
 			is_type := key == "type"
+			is_salt := seal_on && key == "salt"
+			is_size := seal_on && key == "size"
 			found, good = aof_manifest_token(line, &at, &tok)
 			if !found || !good {
 				aof_manifest_free(m)
@@ -765,6 +858,20 @@ aof_manifest_parse :: proc(text: []u8, m: ^Aof_Manifest) -> (ok: bool, reason: s
 					return false, "Unknown AOF file type"
 				}
 				have_type = true
+			case is_salt:
+				if !seal_unhex(tok[:], salt[:]) {
+					aof_manifest_free(m)
+					return false, "Invalid AOF file salt"
+				}
+				sealed = true
+			case is_size:
+				v, vok := parse_i64(tok[:])
+				if !vok || v < 0 {
+					aof_manifest_free(m)
+					return false, "Invalid AOF file size"
+				}
+				size = v
+				has_size = true
 			}
 		}
 		if !have_name || !have_seq || !have_type || len(name) == 0 {
@@ -778,8 +885,12 @@ aof_manifest_parse :: proc(text: []u8, m: ^Aof_Manifest) -> (ok: bool, reason: s
 			}
 		}
 		f := Aof_File {
-			seq  = seq,
-			kind = kind,
+			seq      = seq,
+			kind     = kind,
+			sealed   = sealed,
+			has_size = has_size,
+			salt     = salt,
+			size     = size,
 		}
 		append(&f.name, ..name[:])
 		switch kind {
@@ -865,6 +976,9 @@ aof_manifest_load_from_disk :: proc(m: ^Aof_Manifest) -> (exists: bool, ok: bool
 		plog(LOG_WARNING, "Fail to open AOF manifest ", string(mname[:]), ": ", errno_text(err))
 		return true, false
 	}
+	if !seal_manifest_open(&data, string(mname[:])) {
+		return true, false
+	}
 	good, reason := aof_manifest_parse(data[:], m)
 	if !good {
 		plog(LOG_WARNING, reason)
@@ -887,7 +1001,18 @@ aof_write_file_atomic :: proc(name: string, data: []u8) -> bool {
 		plog(LOG_WARNING, "Can't open the AOF manifest file ", string(tname[:]), ": ", errno_text(err))
 		return false
 	}
-	_, werr := aof_write_all(fd, data)
+	werr: linux.Errno
+	if seal_on {
+		sealed: [dynamic]u8
+		defer delete(sealed)
+		if !seal_manifest_seal(data, &sealed) {
+			werr = .EFBIG
+		} else {
+			_, werr = aof_write_all(fd, sealed[:])
+		}
+	} else {
+		_, werr = aof_write_all(fd, data)
+	}
 	if werr == .NONE {
 		werr = linux.fsync(fd)
 	}
@@ -986,6 +1111,10 @@ aof_bio_before_fork :: proc() {
 		ts := linux.Time_Spec{time_nsec = 100_000}
 		linux.nanosleep(&ts, nil)
 	}
+}
+
+aof_drain_jobs :: proc() {
+	aof_bio_before_fork()
 }
 
 aof_bio_after_fork :: proc() {
@@ -1181,8 +1310,267 @@ aof_stage_argv :: proc(dbid: int, argv: [][]u8) {
 	aof_put_argv(&aof.stage, argv)
 }
 
+AOF_MARKER :: "ESKI-ACCESS"
+
+AOF_MARKER_VERSION :: "1"
+
+AOF_SEED_RECORD :: "ESKI-VSET-SEED"
+
+AOF_MARKER_LOWER :: "eski-access"
+
+AOF_SEED_LOWER :: "eski-vset-seed"
+
+Aof_Word :: enum u8 {
+	None,
+	Shared,
+	User,
+}
+
+Aof_Head :: struct {
+	label: lb.Id,
+	word:  Aof_Word,
+	owner: ow.Owner,
+}
+
+@(private = "file")
+Aof_Skip :: struct {
+	dbi:  int,
+	head: Aof_Head,
+	from: int,
+	to:   int,
+}
+
+@(private = "file")
+aof_skips: [dynamic]Aof_Skip
+
+@(private = "file")
+aof_skip_keys: [dynamic]u8
+
+@(private = "file")
+aof_cmd_operator: bool
+
+@(private = "file")
+aof_dels: [dynamic]Aof_Skip
+
+@(private = "file")
+aof_del_keys: [dynamic]u8
+
+aof_head_command :: proc() -> Aof_Head {
+	h := Aof_Head{label = access.id}
+	if !owners_on {
+		return h
+	}
+	switch {
+	case owner_user():
+		h.word = .User
+		h.owner = access.owner
+	case access.top && !access.owner_named:
+		h.word = .None
+	case:
+		h.word = .Shared
+	}
+	return h
+}
+
+aof_head_part :: proc(db: ^Db) -> Aof_Head {
+	h := Aof_Head{label = db.label}
+	if !owners_on {
+		return h
+	}
+	if db.role & DB_ROLE_OWNER != 0 {
+		h.word = .User
+		h.owner = db.owner
+	} else {
+		h.word = .Shared
+	}
+	return h
+}
+
+aof_head_words :: proc "contextless" (h: Aof_Head) -> int {
+	switch h.word {
+	case .User:
+		return 5
+	case .Shared:
+		return 4
+	case .None:
+	}
+	return 3
+}
+
+aof_put_head :: proc(b: ^[dynamic]u8, h: Aof_Head) {
+	l, known := lb.table_label(&label_table, h.label)
+	text, ok := lb.format(&label_scheme, l, context.temp_allocator)
+	if !known || !ok {
+		store_fatal("a log record names a label the scheme cannot write")
+	}
+	append(b, "$5\r\nLABEL\r\n$2\r\nAS\r\n")
+	aof_put_str(b, text)
+	switch h.word {
+	case .User:
+		owner, found := owner_text(h.owner)
+		if !found {
+			store_fatal("a log record names an owner that is not interned")
+		}
+		append(b, "$5\r\nOWNER\r\n")
+		aof_put_str(b, owner)
+	case .Shared:
+		append(b, "$6\r\nSHARED\r\n")
+	case .None:
+	}
+}
+
+aof_note_skipped :: proc(p: ^Db, t: ^Table, i: int) {
+	if !aof.feed || !labels_on || p == nil || t == nil || i < 0 || p.role & LABEL_ROLE_SENTINEL != 0 {
+		return
+	}
+	key := key_bytes(&t.slots[i].key, &p.slab)
+	head := aof_head_part(p)
+	for s in aof_skips {
+		if s.dbi == p.id && s.head == head && bytes_eq(aof_skip_keys[s.from:s.to], key) {
+			return
+		}
+	}
+	from := len(aof_skip_keys)
+	append(&aof_skip_keys, ..key)
+	append(&aof_skips, Aof_Skip{p.id, head, from, len(aof_skip_keys)})
+}
+
+aof_skips_reset :: proc() {
+	clear(&aof_skips)
+	clear(&aof_skip_keys)
+	if cap(aof_skip_keys) > 1 << 16 {
+		delete(aof_skip_keys)
+		aof_skip_keys = nil
+	}
+}
+
+@(private = "file")
+aof_dels_reset :: proc() {
+	clear(&aof_dels)
+	clear(&aof_del_keys)
+	if cap(aof_del_keys) > 1 << 16 {
+		delete(aof_del_keys)
+		aof_del_keys = nil
+	}
+}
+
+@(private = "file")
+aof_emit_del_noted :: proc(db: ^Db, key: []u8) {
+	aof_emit_del(db, key)
+	if !aof.in_cmd && !aof.in_tx {
+		return
+	}
+	from := len(aof_del_keys)
+	append(&aof_del_keys, ..key)
+	append(&aof_dels, Aof_Skip{db.id, aof_head_part(db), from, len(aof_del_keys)})
+}
+
+aof_key_expired :: proc(db: ^Db, key: []u8) {
+	if !aof.feed || db == nil || (labels_on && db.role & LABEL_ROLE_SENTINEL != 0) {
+		return
+	}
+	if aof.in_cmd || aof.in_tx {
+		head := aof_head_part(db)
+		for &s in aof_dels {
+			if s.dbi == db.id && s.head == head && bytes_eq(aof_del_keys[s.from:s.to], key) {
+				s.dbi = -1
+				return
+			}
+		}
+	}
+	aof_emit_del(db, key)
+}
+
+aof_load_expired :: proc(dbi: int, key: []u8) {
+	if !aof.feed {
+		return
+	}
+	h: Aof_Head
+	if labels_on {
+		ld := &access_ld
+		if !ld.active || ld.part_label >= u64(len(ld.labels)) {
+			return
+		}
+		h.label = ld.labels[ld.part_label]
+		if owners_on {
+			switch {
+			case ld.part_owner == 0:
+				h.word = .Shared
+			case ld.part_owner < u64(len(ld.owners)) && ld.owners[ld.part_owner] != nil:
+				h.word = .User
+				h.owner = ld.owners[ld.part_owner].number
+			case:
+				return
+			}
+		}
+		b := aof_sink_plain(ld.db, 2 + aof_head_words(h))
+		aof_put_head(b, h)
+		append(b, "$3\r\nDEL\r\n")
+		aof_put_arg(b, key)
+		return
+	}
+	b := aof_sink_plain(dbi, 2)
+	append(b, "$3\r\nDEL\r\n")
+	aof_put_arg(b, key)
+}
+
+@(private = "file")
+aof_skips_flush :: proc() {
+	if len(aof_skips) == 0 {
+		return
+	}
+	for s in aof_skips {
+		b := aof_sink_plain(s.dbi, 2 + aof_head_words(s.head))
+		aof_put_head(b, s.head)
+		append(b, "$3\r\nDEL\r\n")
+		aof_put_arg(b, aof_skip_keys[s.from:s.to])
+	}
+	aof_skips_reset()
+}
+
+@(private = "file")
+aof_operator_command :: proc(cmd: ^Command, argv: [][]u8) -> bool {
+	h := cmd.handler
+	switch {
+	case h == cmd_function, h == cmd_swapdb, h == cmd_owners, h == cmd_config:
+		return true
+	case h == cmd_label:
+		return len(argv) >= 2 && eq_nocase(argv[1], "quota")
+	}
+	return false
+}
+
 @(private = "file")
 aof_sink :: proc(dbid: int, nargs: int) -> ^[dynamic]u8 {
+	if labels_on {
+		return aof_sink_labelled(dbid, nargs, nil)
+	}
+	return aof_sink_plain(dbid, nargs)
+}
+
+@(private = "file")
+aof_sink_part :: proc(db: ^Db, nargs: int) -> ^[dynamic]u8 {
+	if labels_on {
+		return aof_sink_labelled(db.id, nargs, db)
+	}
+	return aof_sink_plain(db.id, nargs)
+}
+
+@(private = "file")
+@(cold)
+aof_sink_labelled :: #force_no_inline proc(dbid: int, nargs: int, part: ^Db) -> ^[dynamic]u8 {
+	aof_skips_flush()
+	if part == nil && aof_cmd_operator {
+		return aof_sink_plain(dbid, nargs)
+	}
+	head := aof_head_part(part) if part != nil else aof_head_command()
+	b := aof_sink_plain(dbid, nargs + aof_head_words(head))
+	aof_put_head(b, head)
+	return b
+}
+
+@(private = "file")
+aof_sink_plain :: proc(dbid: int, nargs: int) -> ^[dynamic]u8 {
 	if aof.in_cmd || aof.in_tx {
 		aof_stage_begin(dbid, nargs)
 		return &aof.stage
@@ -1210,6 +1598,7 @@ aof_feed_argv_direct :: proc(dbid: int, argv: [][]u8) {
 
 aof_stage_commit :: proc(wrap: bool) {
 	defer {
+		aof_dels_reset()
 		clear(&aof.stage)
 		aof.stage_count = 0
 		if cap(aof.stage) > 1 << 20 {
@@ -1237,6 +1626,9 @@ aof_stage_commit :: proc(wrap: bool) {
 @(private = "file")
 aof_db_of :: proc(c: ^Conn) -> ^Db {
 	if c != nil && c.db != nil {
+		if labels_on && db_cur != nil && db_cur.id == c.db.id {
+			return db_cur
+		}
 		return c.db
 	}
 	return cur_db()
@@ -1327,7 +1719,7 @@ aof_hash_field_expired :: proc(h: ht.Hash, field: []u8) {
 	registry := hash_key_ref_registry(ref)
 	if registry == nil || registry.owner == nil || !aof.feed { return }
 	db := cast(^Db)registry.owner
-	b := aof_sink(db.id, 3)
+	b := aof_sink_part(db, 3)
 	aof_put_str(b, "HDEL")
 	aof_put_arg(b, hash_key_ref_bytes(ref))
 	aof_put_arg(b, field)
@@ -1337,7 +1729,7 @@ aof_propagate_del :: proc(db: ^Db, key: []u8, lazy: bool) {
 	if !aof.feed || db == nil {
 		return
 	}
-	b := aof_sink(db.id, 2)
+	b := aof_sink_part(db, 2)
 	aof_put_str(b, "UNLINK" if lazy else "DEL")
 	aof_put_arg(b, key)
 }
@@ -1412,9 +1804,118 @@ aof_log_write_error :: proc(err: linux.Errno) {
 	plog(LOG_WARNING, "Error writing to the AOF file: ", errno_text(err))
 }
 
+@(private = "file")
+aof_seal_streams: [2]seal.Sealer
+
+@(private = "file")
+aof_seal_at: int
+
+@(private = "file")
+aof_seal_pending: [dynamic]u8
+
+@(private = "file")
+aof_seal_covered: int
+
+@(private = "file")
+aof_seal_base_salt: [seal.SALT_SIZE]u8
+
+@(private = "file")
+aof_seal_cur :: proc "contextless" () -> ^seal.Sealer {
+	return &aof_seal_streams[aof_seal_at]
+}
+
+@(private = "file")
+aof_seal_next :: proc "contextless" () -> ^seal.Sealer {
+	return &aof_seal_streams[1 - aof_seal_at]
+}
+
+@(private = "file")
+aof_seal_drop_pending :: proc() {
+	clear(&aof_seal_pending)
+	aof_seal_covered = 0
+}
+
+aof_seal_prepare :: proc(fd: linux.Fd, name: string) -> bool {
+	next := aof_seal_next()
+	seal.sealer_init(next, &seal_keys.current, .Incremental, seal_salt())
+	if _, err := aof_write_all(fd, next.header[:]); err != .NONE {
+		plog(LOG_WARNING, "Can't write the encryption header of the append-only file ", name, ": ", errno_text(err))
+		seal.sealer_destroy(next)
+		return false
+	}
+	return true
+}
+
+@(private = "file")
+aof_seal_switch :: proc() -> bool {
+	seal.sealer_destroy(aof_seal_cur())
+	aof_seal_drop_pending()
+	if !aof_seal_next().ready {
+		return false
+	}
+	aof_seal_at = 1 - aof_seal_at
+	return true
+}
+
+aof_seal_close :: proc() {
+	seal.sealer_destroy(aof_seal_cur())
+	delete(aof_seal_pending)
+	aof_seal_pending = nil
+	aof_seal_covered = 0
+}
+
+@(private = "file")
+aof_note_sealed_failure :: proc(written: int, err: linux.Errno) {
+	if written > 0 && linux.ftruncate(aof.fd, aof_incr_bytes) != .NONE {
+		aof_account_written(written)
+		remove_range(&aof_seal_pending, 0, written)
+	}
+	aof_err_from_fsync = false
+	aof.write_errno = err
+	aof_log_write_error(err)
+	switch {
+	case aof.fsync == .Always:
+		plog(LOG_WARNING, "Can't recover from AOF write error when the AOF fsync policy is 'always'. Exiting...")
+		linux.exit_group(1)
+	case !aof.write_err:
+		aof.write_err = true
+		persist_update_gate()
+	}
+}
+
+@(private = "file")
+aof_write_sealed :: #force_no_inline proc() -> bool {
+	if pst.in_child {
+		return false
+	}
+	if aof_seal_covered < len(aof.buf) {
+		if !seal.seal_batch(aof_seal_cur(), aof.buf[aof_seal_covered:], &aof_seal_pending) {
+			aof_note_sealed_failure(0, .EINVAL)
+			return false
+		}
+		aof_seal_covered = len(aof.buf)
+	}
+	started := latency_start()
+	written, err := aof_write_all(aof.fd, aof_seal_pending[:])
+	latency_end("aof-write", started)
+	if err != .NONE {
+		aof_note_sealed_failure(written, err)
+		return false
+	}
+	aof_account_written(written)
+	aof_seal_drop_pending()
+	clear(&aof.buf)
+	aof_shrink_buf()
+	aof_clear_write_error()
+	return true
+}
+
 aof_write_buffer :: proc() -> bool {
 	if len(aof.buf) == 0 || aof.fd < 0 {
 		return true
+	}
+	if seal_on {
+		return aof_write_sealed()
 	}
 	started := latency_start()
 	written, err := aof_write_all(aof.fd, aof.buf[:])
@@ -2016,7 +2517,7 @@ aof_kind_of :: proc(cmd: ^Command) -> Aof_Kind {
 
 @(private = "file")
 aof_emit_del :: proc(db: ^Db, key: []u8) {
-	b := aof_sink(db.id, 2)
+	b := aof_sink_part(db, 2)
 	aof_put_str(b, "DEL")
 	aof_put_arg(b, key)
 }
@@ -2026,9 +2527,6 @@ aof_snap_cmd: ^Command
 
 @(private = "file")
 aof_tx_conn: ^Conn
-
-@(private = "file")
-aof_expired_before: i64
 
 @(private = "file")
 aof_precheck_keys :: proc(c: ^Conn, cmd: ^Command, argv: [][]u8) {
@@ -2059,25 +2557,9 @@ aof_precheck_keys :: proc(c: ^Conn, cmd: ^Command, argv: [][]u8) {
 		}
 		exists, expired := db_key_state(db, key)
 		if exists && expired {
-			aof_emit_del(db, key)
+			aof_emit_del_noted(db, key)
 		}
 	}
-}
-
-@(private = "file")
-aof_precheck_field :: proc(c: ^Conn, argv: [][]u8) {
-	if len(argv) < 3 {
-		return
-	}
-	db := aof_db_of(c)
-	if db == nil {
-		return
-	}
-	exists, _, v := aof_key_state(db, argv[1])
-	if !exists || v.obj == nil || v.type != .Hash {
-		return
-	}
-	_, _ = ht.get(cast(ht.Hash)v.obj, argv[2], hash_now())
 }
 
 Aof_Xrg :: struct {
@@ -2243,6 +2725,7 @@ aof_is_queueing :: proc(c: ^Conn, kind: Aof_Kind) -> bool {
 aof_cmd_prepare :: proc(c: ^Conn, cmd: ^Command, argv: [][]u8) {
 	aof_snap = {}
 	aof_snap_cmd = nil
+	aof_cmd_operator = false
 	if cmd == nil || len(argv) == 0 {
 		return
 	}
@@ -2251,19 +2734,17 @@ aof_cmd_prepare :: proc(c: ^Conn, cmd: ^Command, argv: [][]u8) {
 		return
 	}
 	aof_snap_cmd = cmd
+	if labels_on {
+		aof_cmd_operator = aof_operator_command(cmd, argv)
+	}
 	aof_precheck_keys(c, cmd, argv)
 	#partial switch kind {
-	case .Hincrby, .Hsetnx:
-		aof_precheck_field(c, argv)
 	case .Xreadgroup:
 		aof_xrg_snapshot(c, argv)
 	case .Xclaim:
 		aof_claim_snapshot(c, argv, true)
 	case .Xautoclaim:
 		aof_claim_snapshot(c, argv, false)
-	case .Scan, .Randomkey:
-		aof_expired_before = srv.stat_expired
-		aof_snap.valid = true
 	}
 }
 
@@ -3248,28 +3729,70 @@ aof_any_code_one :: proc(reply: []u8) -> bool {
 }
 
 @(private = "file")
-aof_scan_expired :: proc(c: ^Conn) {
-	if !aof_snap.valid || aof_snap_cmd == nil || srv.stat_expired <= aof_expired_before {
+aof_tr_hpersist :: proc(c: ^Conn, argv: [][]u8, reply: []u8) {
+	db := aof_db_of(c)
+	nf: i64 = -1
+	if len(argv) >= 4 && eq_nocase(argv[2], "fields") {
+		nf, _ = parse_i64(argv[3])
+	}
+	p := Aof_Rp {
+		b = reply,
+	}
+	n, null, ok := aof_rp_agg(&p)
+	if !ok || null || nf <= 0 || i64(n) != nf || 4 + n != len(argv) {
+		if aof_any_code_one(reply) {
+			aof_write_argv(db.id, argv)
+		}
+		return
+	}
+	clear(&aof_flags_scratch)
+	defer clear(&aof_flags_scratch)
+	set := 0
+	for _ in 0 ..< n {
+		code, cok := aof_rp_int(&p)
+		if !cok {
+			aof_write_argv(db.id, argv)
+			return
+		}
+		append(&aof_flags_scratch, code)
+		if code == 1 {
+			set += 1
+		}
+	}
+	if set == n {
+		aof_write_argv(db.id, argv)
+	} else if set > 0 {
+		b := aof_sink(db.id, 4 + set)
+		aof_put_str(b, "HPERSIST")
+		aof_put_arg(b, argv[1])
+		aof_put_str(b, "FIELDS")
+		aof_put_int(b, i64(set))
+		for f, k in argv[4:] {
+			if aof_flags_scratch[k] == 1 {
+				aof_put_arg(b, f)
+			}
+		}
+	}
+}
+
+aof_sort_effect :: proc(c: ^Conn, key: []u8, values: [][]u8) {
+	if !aof.feed {
 		return
 	}
 	db := aof_db_of(c)
 	if db == nil {
 		return
 	}
-	start := 0
-	for end in scan_expired_ends {
-		if end < start || end > len(scan_expired) {
-			break
-		}
-		key := scan_expired[start:end]
-		start = end
-		if len(key) == 0 {
-			continue
-		}
-		exists, expired := db_key_state(db, key)
-		if !exists || expired {
-			aof_emit_del(db, key)
-		}
+	aof_explicit = true
+	b := aof_sink(db.id, 2)
+	aof_put_str(b, "DEL")
+	aof_put_arg(b, key)
+	for at := 0; at < len(values); at += AOF_ITEMS_PER_EMITTED_COMMAND {
+		batch := values[at:min(at + AOF_ITEMS_PER_EMITTED_COMMAND, len(values))]
+		b = aof_sink(db.id, 2 + len(batch))
+		aof_put_str(b, "RPUSH")
+		aof_put_arg(b, key)
+		aof_put_argv(b, batch)
 	}
 }
 
@@ -3347,9 +3870,7 @@ aof_translate :: proc(c: ^Conn, cmd: ^Command, argv: [][]u8, reply: []u8) {
 	case .Hpexpireat:
 		aof_tr_hexpire(c, "hpexpireat", argv, reply)
 	case .Hpersist:
-		if aof_any_code_one(reply) {
-			aof_write_argv(db.id, argv)
-		}
+		aof_tr_hpersist(c, argv, reply)
 	case .Sort:
 		if aof_has_token(argv, 2, "store") {
 			aof_write_argv(db.id, argv)
@@ -3410,6 +3931,10 @@ aof_after_command :: proc(c: ^Conn, cmd: ^Command, flags: Persist_Cmd_Flags, arg
 	aof_explicit = false
 	aof_snap = {}
 	aof_snap_cmd = nil
+	aof_cmd_operator = false
+	if labels_on {
+		aof_skips_reset()
+	}
 }
 
 @(private = "file")
@@ -3423,7 +3948,6 @@ aof_after_inner :: proc(c: ^Conn, cmd: ^Command, kind: Aof_Kind, flags: Persist_
 	}
 	reply := aof_reply_view(c, pending)
 	if kind == .Scan || kind == .Randomkey {
-		aof_scan_expired(c)
 		return
 	}
 	if .Write not_in flags || aof_explicit || aof_reply_failed(reply) {
@@ -3588,13 +4112,13 @@ aof_format_score :: proc(dst: ^[64]u8, v: f64) -> []u8 {
 }
 
 @(private = "file")
-aof_rewrite_hash :: proc(w: ^rdb.Writer, key: []u8, h: ht.Hash, now: u64) {
-	live := ht.length_live(h, now)
-	if live <= 0 {
+aof_rewrite_hash :: proc(w: ^rdb.Writer, key: []u8, h: ht.Hash) {
+	stored := ht.length(h)
+	if stored <= 0 {
 		return
 	}
 	has_ttl := false
-	probe := ht.iterator_live(h, now)
+	probe := ht.iterator(h)
 	for ht.next(&probe) {
 		e := ht.current_expire(&probe)
 		if e != 0 && e != ht.DEADLINE_UNSET {
@@ -3603,9 +4127,9 @@ aof_rewrite_hash :: proc(w: ^rdb.Writer, key: []u8, h: ht.Hash, now: u64) {
 		}
 	}
 	fbuf, vbuf: [24]u8
-	it := ht.iterator_live(h, now)
+	it := ht.iterator(h)
 	if !has_ttl {
-		remaining := live
+		remaining := stored
 		for remaining > 0 {
 			batch := min(remaining, AOF_ITEMS_PER_EMITTED_COMMAND)
 			aof_w_header(w, 2 + 2 * batch)
@@ -3644,11 +4168,89 @@ aof_rewrite_hash :: proc(w: ^rdb.Writer, key: []u8, h: ht.Hash, now: u64) {
 	}
 }
 
+@(private = "file")
+aof_stream_ghosts :: proc(s: sm.Stream, out: ^[dynamic]sm.ID) {
+	if s.groups == nil {
+		return
+	}
+	gi: rx.Iterator
+	rx.start(&gi, s.groups)
+	rx.seek(&gi, "^")
+	for rx.next(&gi) {
+		cg := (^sm.Group)(gi.data)
+		if cg.pending == nil {
+			continue
+		}
+		pi: rx.Iterator
+		rx.start(&pi, cg.pending)
+		rx.seek(&pi, "^")
+		for rx.next(&pi) {
+			nack := (^sm.Delivery)(pi.data)
+			if nack == nil || nack.owner == nil {
+				continue
+			}
+			id := sm.decode_id(rx.key(&pi))
+			lo, hi := id, id
+			probe: sm.Cursor
+			sm.cursor_open(&probe, s, &lo, &hi, false)
+			_, _, found := sm.cursor_next(&probe)
+			sm.cursor_close(&probe)
+			if !found {
+				append(out, id)
+			}
+		}
+		rx.stop(&pi)
+	}
+	rx.stop(&gi)
+	slice.sort_by(out[:], proc(a, b: sm.ID) -> bool {
+		return sm.compare_id(a, b) < 0
+	})
+	kept := 0
+	for id in out {
+		if kept > 0 && sm.compare_id(id, out[kept - 1]) == 0 {
+			continue
+		}
+		out[kept] = id
+		kept += 1
+	}
+	resize(out, kept)
+}
+
+@(private = "file")
+aof_stream_ghost_add :: proc(w: ^rdb.Writer, key: []u8, id: sm.ID) {
+	aof_w_header(w, 5)
+	aof_w_str(w, "XADD")
+	aof_w_arg(w, key)
+	aof_w_id(w, id)
+	aof_w_str(w, "x")
+	aof_w_str(w, "y")
+}
+
+@(private = "file")
+aof_stream_setid :: proc(w: ^rdb.Writer, key: []u8, s: sm.Stream) {
+	aof_w_header(w, 7)
+	aof_w_str(w, "XSETID")
+	aof_w_arg(w, key)
+	aof_w_id(w, s.top)
+	aof_w_str(w, "ENTRIESADDED")
+	aof_w_int(w, i64(s.added))
+	aof_w_str(w, "MAXDELETEDID")
+	aof_w_id(w, s.tomb)
+}
+
 aof_rewrite_stream :: proc(w: ^rdb.Writer, key: []u8, s: sm.Stream) {
+	ghosts: [dynamic]sm.ID
+	defer delete(ghosts)
+	aof_stream_ghosts(s, &ghosts)
+	next_ghost := 0
 	if s.live > 0 {
 		si: sm.Cursor
 		sm.cursor_open(&si, s, nil, nil, false)
 		for id, numfields in sm.cursor_next(&si) {
+			for next_ghost < len(ghosts) && sm.compare_id(ghosts[next_ghost], id) < 0 {
+				aof_stream_ghost_add(w, key, ghosts[next_ghost])
+				next_ghost += 1
+			}
 			aof_w_header(w, 3 + 2 * int(numfields))
 			aof_w_str(w, "XADD")
 			aof_w_arg(w, key)
@@ -3660,7 +4262,7 @@ aof_rewrite_stream :: proc(w: ^rdb.Writer, key: []u8, s: sm.Stream) {
 			}
 		}
 		sm.cursor_close(&si)
-	} else {
+	} else if len(ghosts) == 0 {
 		first := s.top
 		if first.ms == 0 && first.seq == 0 {
 			first.seq = 1
@@ -3674,14 +4276,11 @@ aof_rewrite_stream :: proc(w: ^rdb.Writer, key: []u8, s: sm.Stream) {
 		aof_w_str(w, "x")
 		aof_w_str(w, "y")
 	}
-	aof_w_header(w, 7)
-	aof_w_str(w, "XSETID")
-	aof_w_arg(w, key)
-	aof_w_id(w, s.top)
-	aof_w_str(w, "ENTRIESADDED")
-	aof_w_int(w, i64(s.added))
-	aof_w_str(w, "MAXDELETEDID")
-	aof_w_id(w, s.tomb)
+	for next_ghost < len(ghosts) {
+		aof_stream_ghost_add(w, key, ghosts[next_ghost])
+		next_ghost += 1
+	}
+	aof_stream_setid(w, key, s)
 	if s.groups == nil {
 		return
 	}
@@ -3744,6 +4343,19 @@ aof_rewrite_stream :: proc(w: ^rdb.Writer, key: []u8, s: sm.Stream) {
 		}
 	}
 	rx.stop(&gi)
+	for done := 0; done < len(ghosts); {
+		batch := min(len(ghosts) - done, AOF_ITEMS_PER_EMITTED_COMMAND)
+		aof_w_header(w, 2 + batch)
+		aof_w_str(w, "XDEL")
+		aof_w_arg(w, key)
+		for id in ghosts[done:done + batch] {
+			aof_w_id(w, id)
+		}
+		done += batch
+	}
+	if len(ghosts) > 0 {
+		aof_stream_setid(w, key, s)
+	}
 }
 
 aof_rewrite_value :: proc(w: ^rdb.Writer, key: []u8, v: Slot_Value) {
@@ -3818,7 +4430,7 @@ aof_rewrite_value :: proc(w: ^rdb.Writer, key: []u8, v: Slot_Value) {
 			remaining -= batch
 		}
 	case .Hash:
-		aof_rewrite_hash(w, key, cast(ht.Hash)v.obj, u64(max(aof_now_ms(), 0)))
+		aof_rewrite_hash(w, key, cast(ht.Hash)v.obj)
 	case .Stream:
 		aof_rewrite_stream(w, key, cast(sm.Stream)v.obj)
 	case .Vectorset:
@@ -3915,11 +4527,18 @@ aof_write_base_to :: proc(path: cstring, preamble: bool) -> bool {
 	} else {
 		rdb.writer_init_file(&w, fd, false, false)
 	}
+	sw: seal.File_Writer
+	if seal_on {
+		seal_writer_attach(&w, &sw, fd, .Base, aof_seal_base_salt)
+	}
 	if aof.incremental_fsync {
 		w.sync_every = AOF_AUTOSYNC_BYTES
 	}
 	good := persist_write_rdb(&w, true) if preamble else aof_rewrite_commands(&w)
 	good = rdb.writer_flush(&w) && good
+	if seal_on {
+		good = seal_writer_close(&w, &sw) && good
+	}
 	werr := w.errno
 	rdb.writer_destroy(&w)
 	if good {
@@ -3930,7 +4549,11 @@ aof_write_base_to :: proc(path: cstring, preamble: bool) -> bool {
 	}
 	linux.close(fd)
 	if !good {
-		plog(LOG_WARNING, "Write error writing append only file on disk: ", errno_text(werr))
+		if access_save_refused != "" {
+			plog(LOG_WARNING, "Refusing to write the append only base: ", access_save_refused)
+		} else {
+			plog(LOG_WARNING, "Write error writing append only file on disk: ", errno_text(werr))
+		}
 		linux.unlink(path)
 	}
 	return good
@@ -3951,11 +4574,19 @@ aof_switch_fd :: proc(fd: linux.Fd) {
 	aof.selected_db = -1
 	aof.last_ts = 0
 	aof_incr_bytes = 0
+	fresh := false
 	if fd >= 0 {
 		sb: linux.Stat
 		if linux.fstat(fd, &sb) == .NONE {
 			aof_incr_bytes = i64(sb.size)
+			fresh = sb.size == 0
 		}
+	}
+	if seal_on {
+		fresh = aof_seal_switch() && fd >= 0
+	}
+	if fresh {
+		aof_open_records()
 	}
 	if old >= 0 && old != fd {
 		if aof.fsync != .No {
@@ -3963,6 +4594,50 @@ aof_switch_fd :: proc(fd: linux.Fd) {
 		}
 		aof_bio_close(old)
 	}
+}
+
+aof_marker_into :: proc(b: ^[dynamic]u8) {
+	mode, _ := access_save_mode()
+	append(b, "*4\r\n")
+	aof_put_str(b, AOF_MARKER)
+	aof_put_str(b, AOF_MARKER_VERSION)
+	aof_put_str(b, "1" if mode.labelled else "0")
+	aof_put_str(b, "1" if mode.owners else "0")
+}
+
+aof_seed_into :: proc(b: ^[dynamic]u8, seed: u64) {
+	digits: [24]u8
+	n := len(digits)
+	v := seed
+	for {
+		n -= 1
+		digits[n] = '0' + u8(v % 10)
+		v /= 10
+		if v == 0 {
+			break
+		}
+	}
+	append(b, "*2\r\n")
+	aof_put_str(b, AOF_SEED_RECORD)
+	aof_put_arg(b, digits[n:])
+}
+
+@(private = "file")
+aof_open_records :: proc() {
+	if labels_on || access_save_forced {
+		aof_marker_into(&aof.buf)
+	}
+	if seed, held := vset_seed_get(); held {
+		aof_seed_into(&aof.buf, seed)
+	}
+}
+
+aof_seed_drawn :: proc(seed: u64) {
+	if !aof.feed || aof.fd < 0 || pst.loading || pst.in_child {
+		return
+	}
+	aof_emit_timestamp()
+	aof_seed_into(&aof.buf, seed)
 }
 
 @(private = "file")
@@ -3973,6 +4648,9 @@ aof_close_fd :: proc() {
 	aof_bio_close(aof.fd)
 	aof.fd = -1
 	aof_incr_bytes = 0
+	if seal_on {
+		aof_seal_close()
+	}
 }
 
 aof_open_new_incr_for_rewrite :: proc() -> bool {
@@ -3980,9 +4658,17 @@ aof_open_new_incr_for_rewrite :: proc() -> bool {
 	defer delete(name)
 	if aof.state == .Awaiting_Base {
 		aof_temp_incr_name(&name)
+		if seal_on {
+			buf: [PERSIST_PATH_MAX]u8
+			linux.unlink(aof_cpath(string(name[:]), buf[:]))
+		}
 		fd, err := aof_open_incr(string(name[:]), true)
 		if err != .NONE {
 			plog(LOG_WARNING, "Can't open the append-only file ", string(name[:]), ": ", errno_text(err))
+			return false
+		}
+		if seal_on && !aof_seal_prepare(fd, string(name[:])) {
+			linux.close(fd)
 			return false
 		}
 		clear(&aof.buf)
@@ -4004,9 +4690,25 @@ aof_open_new_incr_for_rewrite :: proc() -> bool {
 		plog(LOG_WARNING, "Can't open the append-only file ", string(name[:]), ": ", errno_text(err))
 		return false
 	}
+	if seal_on && !aof_seal_prepare(fd, string(name[:])) {
+		linux.close(fd)
+		buf: [PERSIST_PATH_MAX]u8
+		linux.unlink(aof_cpath(string(name[:]), buf[:]))
+		return false
+	}
 	f := Aof_File {
 		seq  = seq,
 		kind = .Incr,
+	}
+	sized := -1
+	if seal_on {
+		f.sealed = true
+		f.salt = aof_seal_next().salt
+		if n := len(aof.manifest.incr); n > 0 && !aof.manifest.incr[n - 1].has_size {
+			sized = n - 1
+			aof.manifest.incr[sized].has_size = true
+			aof.manifest.incr[sized].size = aof_incr_bytes
+		}
 	}
 	append(&f.name, ..name[:])
 	append(&aof.manifest.incr, f)
@@ -4016,6 +4718,13 @@ aof_open_new_incr_for_rewrite :: proc() -> bool {
 		last := pop(&aof.manifest.incr)
 		aof_file_free(&last)
 		aof.manifest.incr_seq = prev_seq
+		if sized >= 0 {
+			aof.manifest.incr[sized].has_size = false
+			aof.manifest.incr[sized].size = 0
+		}
+		if seal_on {
+			seal.sealer_destroy(aof_seal_next())
+		}
 		linux.close(fd)
 		buf: [PERSIST_PATH_MAX]u8
 		linux.unlink(aof_cpath(string(name[:]), buf[:]))
@@ -4024,6 +4733,174 @@ aof_open_new_incr_for_rewrite :: proc() -> bool {
 	aof_switch_fd(fd)
 	aof_rewrite_incr_seq = seq
 	return true
+}
+
+aof_scheme_changed :: proc(c: ^Conn, name: string, value: string) {
+	if !aof.feed || !labels_on || aof.loading {
+		return
+	}
+	aof_cmd_operator = true
+	aof_emit(c, aof_bytes("CONFIG"), aof_bytes("SET"), aof_bytes(name), aof_bytes(value))
+}
+
+@(private = "file")
+aof_manifest_found: bool
+
+@(private = "file")
+aof_listed :: proc(m: ^Aof_Manifest, name: string) -> bool {
+	if m.has_base && string(m.base.name[:]) == name {
+		return true
+	}
+	for f in m.incr {
+		if string(f.name[:]) == name {
+			return true
+		}
+	}
+	for f in m.history {
+		if string(f.name[:]) == name {
+			return true
+		}
+	}
+	return false
+}
+
+aof_is_log_file_name :: proc(name: string) -> bool {
+	prefix := aof.filename
+	if len(name) <= len(prefix) + 1 || name[:len(prefix)] != prefix || name[len(prefix)] != '.' {
+		return false
+	}
+	rest := name[len(prefix) + 1:]
+	digits := 0
+	for digits < len(rest) && rest[digits] >= '0' && rest[digits] <= '9' {
+		digits += 1
+	}
+	if digits == 0 || digits > 18 || digits >= len(rest) || rest[digits] != '.' {
+		return false
+	}
+	tail := rest[digits + 1:]
+	return tail == "base.rdb" || tail == "base.aof" || tail == "incr.aof"
+}
+
+@(private = "file")
+aof_cleanup_stale :: proc() {
+	if !(labels_on || seal_on) || !aof_manifest_found || !aof_dir_exists() {
+		return
+	}
+	buf: [PERSIST_PATH_MAX]u8
+	dfd, err := linux.open(persist_cstr(aof.dirname, buf[:]), {.DIRECTORY, .CLOEXEC})
+	if err != .NONE {
+		return
+	}
+	defer linux.close(dfd)
+	mname: [dynamic]u8
+	defer delete(mname)
+	aof_manifest_name(&mname)
+	stale := make([dynamic]string, context.temp_allocator)
+	chunk: [4096]u8
+	for {
+		n, derr := linux.getdents(dfd, chunk[:])
+		if derr != .NONE || n <= 0 {
+			break
+		}
+		offset := 0
+		for d in linux.dirent_iterate_buf(chunk[:n], &offset) {
+			name := linux.dirent_name(d)
+			if name == "." || name == ".." || name == string(mname[:]) || aof_listed(&aof.manifest, name) {
+				continue
+			}
+			temporary := len(name) > len("temp-") && name[:5] == "temp-"
+			if temporary || aof_is_log_file_name(name) {
+				copied := make([]u8, len(name), context.temp_allocator)
+				copy(copied, name)
+				append(&stale, string(copied))
+			}
+		}
+	}
+	for name in stale {
+		if linux.unlink(aof_cpath(name, buf[:])) == .NONE {
+			plog(LOG_NOTICE, "Removed the stale append-only file ", name)
+		}
+	}
+}
+
+aof_rewrite_sync :: proc() -> bool {
+	keyspace_fence()
+	if pst.loading || aof.loading || aof.state == .Disabled || !aof.started {
+		return false
+	}
+	if aof_in_exec() {
+		plog(LOG_WARNING, "AOF rewrite refused: a transaction is running, so the records it has already staged would be written after a base that holds them")
+		return false
+	}
+	if labels_on && !aof.preamble {
+		plog(LOG_WARNING, "AOF rewrite refused: ", LABEL_AOF_BASE)
+		return false
+	}
+	if aof_rewriting() {
+		aof_kill_child()
+	}
+	if !aof_make_dir() {
+		aof.last_rewrite_err = true
+		return false
+	}
+	seeding := aof.state == .Awaiting_Base
+	if seeding && !aof_open_new_incr_for_rewrite() {
+		aof.last_rewrite_err = true
+		return false
+	}
+	if !seeding {
+		aof_flush(true)
+		if len(aof.buf) > 0 {
+			plog(LOG_WARNING, "Can't start the AOF rewrite while the AOF buffer can't be written: ", errno_text(aof.write_errno))
+			aof.last_rewrite_err = true
+			return false
+		}
+	}
+	aof.rewrite_preamble = aof.preamble
+	aof.rewrite_state = aof.state
+	aof.forget_at_start = access_forget_seq
+	if labels_on || access_save_forced {
+		access_prepare_save()
+	}
+	pid := linux.getpid()
+	tbuf: [64]u8
+	tmp := aof_temp_base_name(tbuf[:], pid, true)
+	cbuf: [80]u8
+	if seal_on {
+		aof_seal_base_salt = seal_salt()
+	}
+	if !aof_write_base_to(persist_cstr(tmp, cbuf[:]), aof.rewrite_preamble) {
+		aof_rewrite_failed()
+		aof_feed_refresh()
+		persist_update_gate()
+		return false
+	}
+	aof.stat_rewrites += 1
+	if !(aof_install_rewrite(pid) if seeding else aof_install_sync(pid)) {
+		aof_remove_temp_base(pid)
+		aof_rewrite_failed()
+		aof_feed_refresh()
+		persist_update_gate()
+		return false
+	}
+	aof.failures = 0
+	aof.last_rewrite_err = false
+	aof_retry_at = 0
+	aof_retry_reported = false
+	aof_private_modes()
+	access_aof_rewritten(aof.forget_at_start)
+	aof_forget_confirm()
+	plog(LOG_NOTICE, "Synchronous AOF rewrite finished successfully")
+	aof_feed_refresh()
+	persist_update_gate()
+	return true
+}
+
+aof_rewrite_for_mode :: proc(mode: Access_Mode) -> bool {
+	access_save_forced = true
+	access_save_forced_mode = mode
+	defer access_save_forced = false
+	return aof_rewrite_sync()
 }
 
 aof_remove_temp_base :: proc(pid: linux.Pid) {
@@ -4050,8 +4927,8 @@ aof_in_exec :: proc() -> bool {
 
 aof_rewrite_background :: proc() -> bool {
 	keyspace_fence()
-	if access_persistence_off() {
-		plog(LOG_WARNING, "AOF rewrite refused: ", LABEL_PERSISTENCE_ON)
+	if labels_on && !aof.preamble {
+		plog(LOG_WARNING, "AOF rewrite refused: ", LABEL_AOF_BASE)
 		return false
 	}
 	if pst.child_pid > 0 || pst.loading || aof.loading {
@@ -4067,7 +4944,14 @@ aof_rewrite_background :: proc() -> bool {
 	}
 	aof.rewrite_preamble = aof.preamble
 	aof.rewrite_state = aof.state
+	aof.forget_at_start = access_forget_seq
+	if labels_on {
+		access_prepare_save()
+	}
 	persist_progress_prepare()
+	if seal_on {
+		aof_seal_base_salt = seal_salt()
+	}
 	keyspace_before_fork()
 	compute_before_fork()
 	pid, ferr := runtime_fork()
@@ -4106,7 +4990,7 @@ aof_rewrite_background :: proc() -> bool {
 }
 
 aof_delete_history :: proc() {
-	if aof.disable_auto_gc || len(aof.manifest.history) == 0 {
+	if (aof.disable_auto_gc && !seal_force_gc && !access_forget_aof_unconfirmed()) || len(aof.manifest.history) == 0 {
 		return
 	}
 	names: [dynamic]Aof_File
@@ -4130,6 +5014,68 @@ aof_delete_history :: proc() {
 	for f in names {
 		plog(LOG_NOTICE, "Removing the history file ", string(f.name[:]), " in the background")
 		aof_bio_unlink(string(f.name[:]))
+		if owners_on {
+			awaited: [dynamic]u8
+			append(&awaited, ..f.name[:])
+			append(&aof_awaited, awaited)
+		}
+	}
+}
+
+aof_awaited: [dynamic][dynamic]u8
+
+aof_forget_confirm :: proc() {
+	if len(aof_awaited) > 0 {
+		idle := intrinsics.atomic_load_explicit(&aof_bio_jobs_pending, .Acquire) == 0
+		kept := 0
+		for &name in aof_awaited {
+			if aof_file_exists(string(name[:])) {
+				if idle {
+					buf: [PERSIST_PATH_MAX]u8
+					linux.unlink(aof_cpath(string(name[:]), buf[:]))
+				}
+				aof_awaited[kept] = name
+				kept += 1
+				continue
+			}
+			delete(name)
+		}
+		resize(&aof_awaited, kept)
+	}
+	if access_forget_in_aof <= access_forget_aof_confirmed || len(aof.manifest.history) > 0 || len(aof_awaited) > 0 {
+		return
+	}
+	access_forget_aof_confirmed = access_forget_in_aof
+}
+
+aof_log_files_present :: proc() -> bool {
+	buf: [PERSIST_PATH_MAX]u8
+	sb: linux.Stat
+	if linux.stat(persist_cstr(aof.filename, buf[:]), &sb) == .NONE && linux.S_ISREG(sb.mode) {
+		return true
+	}
+	dfd, err := linux.open(persist_cstr(aof.dirname, buf[:]), {.DIRECTORY, .CLOEXEC})
+	if err != .NONE {
+		return false
+	}
+	defer linux.close(dfd)
+	mname: [dynamic]u8
+	defer delete(mname)
+	aof_manifest_name(&mname)
+	chunk: [4096]u8
+	for {
+		n, derr := linux.getdents(dfd, chunk[:])
+		if derr != .NONE || n <= 0 {
+			return false
+		}
+		offset := 0
+		for d in linux.dirent_iterate_buf(chunk[:n], &offset) {
+			name := linux.dirent_name(d)
+			temporary := len(name) > len("temp-") && name[:5] == "temp-"
+			if name == string(mname[:]) || name == aof.filename || temporary || aof_is_log_file_name(name) {
+				return true
+			}
+		}
 	}
 }
 
@@ -4208,6 +5154,10 @@ aof_adopt_seed_incr :: proc(m: ^Aof_Manifest, incr_name: ^[dynamic]u8) -> bool {
 		seq  = seq,
 		kind = .Incr,
 	}
+	if seal_on {
+		fresh.sealed = true
+		fresh.salt = aof_seal_cur().salt
+	}
 	append(&fresh.name, ..incr_name[:])
 	append(&m.incr, fresh)
 	m.incr_seq = seq
@@ -4259,6 +5209,10 @@ aof_install_rewrite :: proc(pid: linux.Pid) -> bool {
 		seq  = seq,
 		kind = .Base,
 	}
+	if seal_on {
+		next.base.sealed = true
+		next.base.salt = aof_seal_base_salt
+	}
 	append(&next.base.name, ..base_name[:])
 	next.has_base = true
 	next.base_seq = seq
@@ -4288,8 +5242,101 @@ aof_install_rewrite :: proc(pid: linux.Pid) -> bool {
 }
 
 @(private = "file")
+aof_install_sync :: proc(pid: linux.Pid) -> bool {
+	seq := aof.manifest.incr_seq + 1
+	incr_name: [dynamic]u8
+	defer delete(incr_name)
+	aof_name(&incr_name, seq, "incr.aof")
+	ibuf: [PERSIST_PATH_MAX]u8
+	incr_path := aof_cpath(string(incr_name[:]), ibuf[:])
+	nbuf: [64]u8
+	temp := aof_temp_base_name(nbuf[:], pid, true)
+	tbuf: [80]u8
+	temp_path := persist_cstr(temp, tbuf[:])
+	linux.unlink(incr_path)
+	fd, err := aof_open_incr(string(incr_name[:]), true)
+	if err != .NONE {
+		plog(LOG_WARNING, "Can't open the append-only file ", string(incr_name[:]), ": ", errno_text(err))
+		linux.unlink(temp_path)
+		return false
+	}
+	if seal_on && !aof_seal_prepare(fd, string(incr_name[:])) {
+		linux.close(fd)
+		linux.unlink(incr_path)
+		linux.unlink(temp_path)
+		return false
+	}
+	abandon :: proc(fd: linux.Fd, incr_path: cstring) {
+		if seal_on {
+			seal.sealer_destroy(aof_seal_next())
+		}
+		linux.close(fd)
+		linux.unlink(incr_path)
+	}
+	next := aof_manifest_dup(&aof.manifest)
+	base_seq := next.base_seq + 1
+	base_name: [dynamic]u8
+	defer delete(base_name)
+	aof_name(&base_name, base_seq, "base.rdb" if aof.rewrite_preamble else "base.aof")
+	bbuf: [PERSIST_PATH_MAX]u8
+	base_path := aof_cpath(string(base_name[:]), bbuf[:])
+	if !aof_rename_temp("base", temp, temp_path, string(base_name[:]), base_path) {
+		aof_manifest_free(&next)
+		linux.unlink(temp_path)
+		abandon(fd, incr_path)
+		return false
+	}
+	if next.has_base {
+		aof_retire(&next, next.base)
+	}
+	next.base = Aof_File {
+		seq  = base_seq,
+		kind = .Base,
+	}
+	if seal_on {
+		next.base.sealed = true
+		next.base.salt = aof_seal_base_salt
+		if n := len(next.incr); n > 0 && !next.incr[n - 1].has_size {
+			next.incr[n - 1].has_size = true
+			next.incr[n - 1].size = aof_incr_bytes
+		}
+	}
+	append(&next.base.name, ..base_name[:])
+	next.has_base = true
+	next.base_seq = base_seq
+	aof_retire_incr_below(&next, max(i64))
+	fresh := Aof_File {
+		seq  = seq,
+		kind = .Incr,
+	}
+	if seal_on {
+		fresh.sealed = true
+		fresh.salt = aof_seal_next().salt
+	}
+	append(&fresh.name, ..incr_name[:])
+	append(&next.incr, fresh)
+	next.incr_seq = seq
+	if !aof_persist_manifest(&next) {
+		aof_manifest_free(&next)
+		linux.unlink(base_path)
+		abandon(fd, incr_path)
+		return false
+	}
+	aof_manifest_set(next)
+	aof_switch_fd(fd)
+	aof_rewrite_incr_seq = seq
+	aof_recompute_sizes()
+	aof_flush(true)
+	aof_delete_history()
+	return true
+}
+
+@(private = "file")
 aof_abandon_seed :: proc() {
 	clear(&aof.buf)
+	if seal_on {
+		aof_seal_drop_pending()
+	}
 	aof_close_fd()
 	aof_remove_temp_incr()
 }
@@ -4310,6 +5357,7 @@ aof_arm_retry_limit :: proc() {
 aof_rewrite_failed :: proc() {
 	aof.failures += 1
 	aof.last_rewrite_err = true
+	access_aof_failed()
 	if aof.state == .Awaiting_Base {
 		aof.rewrite_scheduled = true
 		aof_abandon_seed()
@@ -4334,6 +5382,8 @@ aof_rewrite_succeeded :: proc(pid: linux.Pid) {
 	aof.last_rewrite_err = false
 	aof_retry_at = 0
 	aof_retry_reported = false
+	access_aof_rewritten(aof.forget_at_start)
+	aof_forget_confirm()
 	plog(LOG_NOTICE, "Background AOF rewrite finished successfully")
 }
 
@@ -4344,8 +5394,11 @@ aof_rewrite_abandoned :: proc(pid: linux.Pid, killed_by_us: bool) {
 	}
 	if !killed_by_us {
 		aof_rewrite_failed()
-	} else if aof.state == .Awaiting_Base {
-		aof.rewrite_scheduled = true
+	} else {
+		access_aof_failed()
+		if aof.state == .Awaiting_Base {
+			aof.rewrite_scheduled = true
+		}
 	}
 }
 
@@ -4405,13 +5458,14 @@ aof_terminate_child :: proc(pid: linux.Pid) {
 	aof_remove_temp_base(pid)
 	aof_forget_child()
 	aof.rewrite_start = -1
+	access_aof_failed()
 	aof_feed_refresh()
 }
 
 aof_start :: proc() -> bool {
 	keyspace_fence()
-	if access_persistence_off() {
-		plog(LOG_WARNING, "AOF start refused: ", LABEL_PERSISTENCE_ON)
+	if labels_on && !aof.preamble {
+		plog(LOG_WARNING, "AOF start refused: ", LABEL_AOF_BASE)
 		return false
 	}
 	if !aof.started {
@@ -4424,6 +5478,7 @@ aof_start :: proc() -> bool {
 	if !aof_make_dir() {
 		return false
 	}
+	aof_private_modes()
 	aof.state = .Awaiting_Base
 	aof.last_fsync_ms = aof_now_ms()
 	if (pst.child_pid > 0 && !pst.child_aof) || aof_in_exec() || pst.loading {
@@ -4472,6 +5527,9 @@ aof_stop :: proc() {
 		aof_remove_temp_incr()
 	}
 	clear(&aof.buf)
+	if seal_on {
+		aof_seal_drop_pending()
+	}
 	clear(&aof.stage)
 	aof.stage_count = 0
 	aof.state = .Disabled
@@ -4494,6 +5552,12 @@ aof_create_on_start :: proc() -> bool {
 	tmp := aof_temp_base_name(tbuf[:], linux.getpid(), false)
 	cbuf: [80]u8
 	src := persist_cstr(tmp, cbuf[:])
+	if labels_on {
+		access_prepare_save()
+	}
+	if seal_on {
+		aof_seal_base_salt = seal_salt()
+	}
 	if !aof_write_base_to(src, aof.preamble) {
 		return false
 	}
@@ -4512,9 +5576,14 @@ aof_create_on_start :: proc() -> bool {
 		seq  = seq,
 		kind = .Base,
 	}
+	if seal_on {
+		aof.manifest.base.sealed = true
+		aof.manifest.base.salt = aof_seal_base_salt
+	}
 	append(&aof.manifest.base.name, ..name[:])
 	aof.manifest.has_base = true
 	aof.manifest.base_seq = seq
+	access_aof_rewritten(access_forget_at_fork if labels_on else access_forget_seq)
 	plog(LOG_NOTICE, "Creating AOF base file ", string(name[:]), " on server start")
 	return true
 }
@@ -4530,7 +5599,12 @@ aof_open_incr_on_start :: proc() -> bool {
 	}
 	fd: linux.Fd
 	err: linux.Errno
-	if n := len(aof.manifest.incr); n > 0 {
+	if n := len(aof.manifest.incr); seal_on && n > 0 && !aof.manifest.incr[n - 1].has_size {
+		closing := &aof.manifest.incr[n - 1]
+		closing.has_size = true
+		closing.size = aof_file_size(string(closing.name[:]))
+	}
+	if n := len(aof.manifest.incr); n > 0 && !seal_on {
 		last := string(aof.manifest.incr[n - 1].name[:])
 		fd, err = aof_open_incr(last, false)
 		if err != .NONE {
@@ -4548,9 +5622,17 @@ aof_open_incr_on_start :: proc() -> bool {
 			plog(LOG_WARNING, "Can't open the append-only file ", string(name[:]), ": ", errno_text(err))
 			return false
 		}
+		if seal_on && !aof_seal_prepare(fd, string(name[:])) {
+			linux.close(fd)
+			return false
+		}
 		f := Aof_File {
 			seq  = seq,
 			kind = .Incr,
+		}
+		if seal_on {
+			f.sealed = true
+			f.salt = aof_seal_next().salt
 		}
 		append(&f.name, ..name[:])
 		append(&aof.manifest.incr, f)
@@ -4604,6 +5686,7 @@ aof_upgrade_old_style :: proc() -> (did: bool, ok: bool) {
 	}
 	aof_fsync_dir()
 	aof_manifest_set(m)
+	aof_private_modes()
 	plog(LOG_NOTICE, "Successfully migrated an old-style AOF into the AOF directory")
 	return true, true
 }
@@ -4611,7 +5694,10 @@ aof_upgrade_old_style :: proc() -> (did: bool, ok: bool) {
 aof_startup :: proc() -> bool {
 	aof.started = true
 	m: Aof_Manifest
+	seal_quiet = !aof.wanted
 	exists, ok := aof_manifest_load_from_disk(&m)
+	seal_quiet = false
+	aof_manifest_found = exists && ok
 	if !aof.wanted {
 		if exists && ok {
 			aof_manifest_set(m)
@@ -4639,6 +5725,7 @@ aof_startup :: proc() -> bool {
 					return false
 				}
 				aof_fsync_dir()
+				aof_private_modes()
 				plog(LOG_NOTICE, "Completed interrupted old-style AOF migration into the AOF directory")
 			}
 		}
@@ -4650,6 +5737,7 @@ aof_startup :: proc() -> bool {
 		}
 	}
 	aof.state = .Enabled
+	aof_cleanup_stale()
 	if aof.manifest.has_base || len(aof.manifest.incr) > 0 {
 		t0 := now_ns()
 		#partial switch aof_load_all(true) {
@@ -4667,7 +5755,12 @@ aof_startup :: proc() -> bool {
 	if !aof_open_incr_on_start() {
 		return false
 	}
+	aof_private_modes()
 	aof_delete_history()
+	if seal_on {
+		aof_drain_jobs()
+	}
+	aof_forget_confirm()
 	aof_feed_refresh()
 	persist_update_gate()
 	return true
@@ -4693,6 +5786,7 @@ aof_cron :: proc() {
 	}
 	aof_bio_collect()
 	aof_delete_history()
+	aof_forget_confirm()
 	if aof.state == .Awaiting_Base && !aof_rewriting() && !aof.rewrite_scheduled {
 		aof.rewrite_scheduled = true
 	}
@@ -4746,6 +5840,7 @@ Aof_Reader :: struct {
 	split: [dynamic][]u8,
 	keep:  int,
 	err:   linux.Errno,
+	seal:  ^seal.File_Reader,
 }
 
 Aof_Parse :: enum u8 {
@@ -4789,7 +5884,10 @@ aof_r_fill :: proc(r: ^Aof_Reader, need: int) -> bool {
 		want := max(AOF_READ_CHUNK, need - (old - r.pos))
 		non_zero_resize(&r.buf, old + want)
 		got := 0
-		for {
+		if r.seal != nil {
+			got = aof_r_fill_sealed(r, old, want)
+		}
+		for r.seal == nil {
 			n, err := linux.read(r.fd, r.buf[old:old + want])
 			if err == .EINTR {
 				continue
@@ -4807,6 +5905,15 @@ aof_r_fill :: proc(r: ^Aof_Reader, need: int) -> bool {
 		resize(&r.buf, old + got)
 	}
 	return true
+}
+
+@(private = "file")
+aof_r_fill_sealed :: #force_no_inline proc(r: ^Aof_Reader, old: int, want: int) -> int {
+	got := seal.read(r.seal, r.buf[old:old + want])
+	if got == 0 {
+		r.eof = true
+	}
+	return got
 }
 
 aof_r_offset :: #force_inline proc(r: ^Aof_Reader) -> i64 {
@@ -4914,6 +6021,17 @@ aof_fake_conn :: proc() -> ^Conn {
 }
 
 @(private = "file")
+aof_rec_offset: i64
+
+@(private = "file")
+aof_reject :: proc(name: string, reason: string) -> bool {
+	tmp: [24]u8
+	n := format_i64(&tmp[0], aof_rec_offset)
+	plog(LOG_WARNING, "Bad file format reading the append only file ", name, ": ", reason, " (the record at byte offset ", string(tmp[:n]), ")")
+	return false
+}
+
+@(private = "file")
 aof_exec_one :: proc(c: ^Conn, argv: [][]u8, name: string) -> bool {
 	if eq_nocase(argv[0], "select") {
 		if len(argv) != 2 {
@@ -4928,6 +6046,21 @@ aof_exec_one :: proc(c: ^Conn, argv: [][]u8, name: string) -> bool {
 		c.db = &dbs[id]
 		return true
 	}
+	if eq_nocase(argv[0], AOF_SEED_LOWER) {
+		return aof_replay_seed(argv, name)
+	}
+	if eq_nocase(argv[0], AOF_MARKER_LOWER) {
+		if !labels_on {
+			return aof_reject(name, AOF_REJECT_LABELLED_FILE)
+		}
+		return aof_reject(name, "the access marker is not the first record of the file")
+	}
+	if labels_on {
+		return aof_replay_labelled(c, argv, name)
+	}
+	if len(argv) >= 2 && eq_nocase(argv[0], "label") && eq_nocase(argv[1], "as") {
+		return aof_reject(name, AOF_REJECT_LABELLED_FILE)
+	}
 	cmd := lookup_command(argv[0])
 	if cmd == nil || cmd.handler == nil {
 		plog(LOG_WARNING, "Unknown command '", string(argv[0]), "' reading the append only file ", name)
@@ -4938,6 +6071,13 @@ aof_exec_one :: proc(c: ^Conn, argv: [][]u8, name: string) -> bool {
 		return false
 	}
 	db_cur = c.db
+	return aof_run_handler(c, cmd, argv, name)
+}
+
+AOF_REJECT_LABELLED_FILE :: "the file was written by a server with a label scheme or owner mode, and this server has neither"
+
+@(private = "file")
+aof_run_handler :: proc(c: ^Conn, cmd: ^Command, argv: [][]u8, name: string) -> bool {
 	c.wlen = 0
 	c.wpos = 0
 	cmd.handler(c, argv)
@@ -4945,6 +6085,11 @@ aof_exec_one :: proc(c: ^Conn, argv: [][]u8, name: string) -> bool {
 		last := c.wlen
 		if last >= 2 && c.wbuf[last - 2] == '\r' && c.wbuf[last - 1] == '\n' { last -= 2 }
 		plog(LOG_WARNING, "Error executing '", cmd.name, "' while reading AOF ", name, ": ", string(c.wbuf[1:last]))
+		if labels_on {
+			c.wlen = 0
+			c.wpos = 0
+			return aof_reject(name, "a record failed at replay, so the file and the data disagree about a scope")
+		}
 		if cfg.propagation_error_behavior == 1 {
 			plog(LOG_WARNING, "Fatal AOF command execution error: propagation-error-behavior is panic")
 			panic("AOF command execution failed with propagation-error-behavior panic")
@@ -4957,6 +6102,320 @@ aof_exec_one :: proc(c: ^Conn, argv: [][]u8, name: string) -> bool {
 		persist_debug_delay(cfg.key_load_delay)
 	}
 	return true
+}
+
+aof_parse_seed :: proc(text: []u8) -> (v: u64, ok: bool) {
+	if len(text) == 0 || len(text) > 20 || text[0] == '0' {
+		return 0, false
+	}
+	for b in text {
+		if b < '0' || b > '9' {
+			return 0, false
+		}
+		d := u64(b - '0')
+		if v > (max(u64) - d) / 10 {
+			return 0, false
+		}
+		v = v * 10 + d
+	}
+	return v, true
+}
+
+@(private = "file")
+aof_replay_seed :: proc(argv: [][]u8, name: string) -> bool {
+	if len(argv) != 2 {
+		return aof_reject(name, "a vector set seed record has the wrong number of arguments")
+	}
+	v, ok := aof_parse_seed(argv[1])
+	if !ok {
+		return aof_reject(name, "a vector set seed record does not hold a seed")
+	}
+	if held, have := vset_seed_get(); have && held != v {
+		return aof_reject(name, "a vector set seed record disagrees with the seed the dataset already holds")
+	}
+	vset_seed_put(v)
+	return true
+}
+
+Aof_Scope_Text :: struct {
+	marking: []u8,
+	word:    Aof_Word,
+	owner:   []u8,
+}
+
+aof_loader_only :: proc(name: []u8) -> bool {
+	return eq_nocase(name, "select") || eq_nocase(name, "multi") || eq_nocase(name, "exec") || eq_nocase(name, "discard") || eq_nocase(name, AOF_MARKER_LOWER) || eq_nocase(name, AOF_SEED_LOWER)
+}
+
+aof_scheme_setting :: proc(name: []u8) -> bool {
+	return eq_nocase(name, "label-levels") || eq_nocase(name, "label-compartments") || eq_nocase(name, "label-trust-levels")
+}
+
+aof_operator_record :: proc(argv: [][]u8) -> bool {
+	n := len(argv)
+	if n == 0 {
+		return false
+	}
+	head := argv[0]
+	switch {
+	case eq_nocase(head, "function"):
+		return n >= 2 && (eq_nocase(argv[1], "load") || eq_nocase(argv[1], "delete") || eq_nocase(argv[1], "flush") || eq_nocase(argv[1], "restore"))
+	case eq_nocase(head, "swapdb"):
+		return n == 3
+	case eq_nocase(head, "owners"):
+		return owners_on && ((n == 3 && eq_nocase(argv[1], "forget")) || (n == 5 && eq_nocase(argv[1], "quota") && eq_nocase(argv[3], "limit")))
+	case eq_nocase(head, "label"):
+		return (n == 5 || n == 7) && eq_nocase(argv[1], "quota") && eq_nocase(argv[n - 2], "limit")
+	case eq_nocase(head, "config"):
+		return n == 4 && eq_nocase(argv[1], "set") && aof_scheme_setting(argv[2])
+	}
+	return false
+}
+
+@(private = "file")
+aof_operator_name :: proc(argv: [][]u8) -> bool {
+	head := argv[0]
+	switch {
+	case eq_nocase(head, "function"), eq_nocase(head, "swapdb"), eq_nocase(head, "owners"), eq_nocase(head, "config"):
+		return true
+	case eq_nocase(head, "label"):
+		return len(argv) >= 2 && eq_nocase(argv[1], "quota")
+	}
+	return false
+}
+
+aof_parse_scope :: proc(argv: [][]u8) -> (scope: Aof_Scope_Text, inner: [][]u8, reason: string) {
+	if len(argv) < 4 {
+		return {}, nil, "a scoped record names no command"
+	}
+	scope.marking = argv[2]
+	i := 3
+	switch {
+	case eq_nocase(argv[i], "owner"):
+		if !owners_on {
+			return {}, nil, "a record names an owner, and owner mode is off on this server"
+		}
+		if i + 1 >= len(argv) || !ow.text_valid(argv[i + 1]) {
+			return {}, nil, "a record names a malformed owner id"
+		}
+		scope.word = .User
+		scope.owner = argv[i + 1]
+		i += 2
+	case eq_nocase(argv[i], "shared"):
+		if !owners_on {
+			return {}, nil, "a record names shared data, and owner mode is off on this server"
+		}
+		scope.word = .Shared
+		i += 1
+	}
+	if i >= len(argv) {
+		return {}, nil, "a scoped record names no command"
+	}
+	inner = argv[i:]
+	switch {
+	case eq_nocase(inner[0], "label") && len(inner) >= 2 && (eq_nocase(inner[1], "as") || eq_nocase(inner[1], "session")):
+		return {}, nil, "a scope prefix wraps another scope prefix"
+	case aof_loader_only(inner[0]):
+		return {}, nil, "a scope prefix wraps a record that only the loader reads"
+	case aof_operator_name(inner):
+		return {}, nil, "a scope prefix wraps an operator record"
+	}
+	cmd := lookup_command(inner[0])
+	if cmd == nil || cmd.handler == nil {
+		return {}, nil, "a scoped record names an unknown command"
+	}
+	if lua_is_eval(cmd) || cmd.handler == cmd_migrate {
+		return {}, nil, "a scoped record names a command the log never holds"
+	}
+	declassify := cmd.handler == cmd_label && len(inner) >= 2 && eq_nocase(inner[1], "declassify")
+	if .Write not_in persist_cmd_flags(cmd) && cmd.handler != cmd_pfcount && !declassify {
+		return {}, nil, "a scoped record names a command that changes no data"
+	}
+	return scope, inner, ""
+}
+
+aof_maintenance_form :: proc(inner: [][]u8) -> bool {
+	switch {
+	case len(inner) == 2 && (eq_nocase(inner[0], "del") || eq_nocase(inner[0], "unlink")):
+		return true
+	case len(inner) == 3 && eq_nocase(inner[0], "hdel"):
+		return true
+	}
+	return false
+}
+
+@(private = "file")
+aof_replay_labelled :: proc(c: ^Conn, argv: [][]u8, name: string) -> bool {
+	if len(argv) >= 2 && eq_nocase(argv[0], "label") && eq_nocase(argv[1], "as") {
+		return aof_replay_scoped(c, argv, name)
+	}
+	if !aof_operator_record(argv) {
+		return aof_reject(name, "a record carries no scope and is not an operator record")
+	}
+	cmd := lookup_command(argv[0])
+	if cmd == nil || cmd.handler == nil || (cmd.arity > 0 && len(argv) != cmd.arity) || (cmd.arity < 0 && len(argv) < -cmd.arity) {
+		return aof_reject(name, "an operator record names an unknown command or has the wrong number of arguments")
+	}
+	if !access_resume_enter(access_resume_operator()) {
+		return aof_reject(name, "the operator scope cannot be set")
+	}
+	defer access_resume_leave()
+	db_cur = c.db
+	return aof_run_handler(c, cmd, argv, name)
+}
+
+@(private = "file")
+aof_replay_scoped :: proc(c: ^Conn, argv: [][]u8, name: string) -> bool {
+	scope, inner, reason := aof_parse_scope(argv)
+	if reason != "" {
+		return aof_reject(name, reason)
+	}
+	l, failure := lb.parse(&label_scheme, string(scope.marking))
+	if failure.error != .None {
+		return aof_reject(name, "a record's marking does not parse in the label scheme")
+	}
+	owner := ow.SHARED
+	if scope.word == .User {
+		e, err := owner_intern(scope.owner)
+		if err != .None || e == nil {
+			return aof_reject(name, "a record names an owner the server cannot hold")
+		}
+		owner = e.number
+	}
+	cmd := lookup_command(inner[0])
+	if (cmd.arity > 0 && len(inner) != cmd.arity) || (cmd.arity < 0 && len(inner) < -cmd.arity) {
+		return aof_reject(name, "a scoped record has the wrong number of arguments")
+	}
+	resume := Access_Resume{label = l, owner = owner, owner_named = scope.word != .None, operator = scope.word == .None || !owners_on}
+	if !access_resume_enter(resume) {
+		return aof_reject(name, "a record's scope cannot be set")
+	}
+	defer access_resume_leave()
+	defer clear(&label_own_names)
+	spec := cmd_spec_lookup(cmd, inner)
+	writes := label_command_writes(cmd, spec)
+	maintenance := aof_maintenance_form(inner)
+	look := lookup_make(inner[1]) if len(inner) > 1 else Lookup{}
+	saved_from := len(aof_gone_copies)
+	if maintenance {
+		own, _ := access_resume_partition(c.db, false)
+		if !label_live_in(own, &look) {
+			return true
+		}
+		if aof_replay_in_group {
+			if cp := label_copies_find(own, inner[1]); cp != nil {
+				append(&aof_gone_copies, ..cp.copies[:])
+			}
+		}
+	} else if writes && spec != nil {
+		access_resume_partition(c.db, false)
+		aof_spare_names(c.db.id, spec, inner)
+		if label_write_check(cmd, spec, inner) != "" {
+			return aof_reject(name, "a record writes a name that another scope holds, which the running server refuses")
+		}
+	}
+	if _, refusal := access_resume_partition(c.db, writes); refusal != "" {
+		return aof_reject(name, "a record needs a partition beyond label-partitions-max or owner-partitions-max")
+	}
+	if !aof_run_handler(c, cmd, inner, name) {
+		return false
+	}
+	if !aof_replay_in_group {
+		return true
+	}
+	if maintenance {
+		if label_live_in(db_cur, &look) {
+			resize(&aof_gone_copies, saved_from)
+			return true
+		}
+		from := len(aof_gone_keys)
+		append(&aof_gone_keys, ..inner[1])
+		append(&aof_gone, Aof_Gone{c.db.id, access.id, access.owner, from, len(aof_gone_keys), saved_from, len(aof_gone_copies), false})
+	} else if len(aof_gone) > 0 {
+		aof_gone_restore(c.db.id)
+	}
+	return true
+}
+
+@(private = "file")
+aof_gone_restore :: proc(dbi: int) {
+	for &g in aof_gone {
+		if g.restored || g.dbi != dbi || g.label != access.id || g.owner != access.owner {
+			continue
+		}
+		key := aof_gone_keys[g.from:g.to]
+		look := lookup_make(key)
+		if !label_live_in(db_cur, &look) {
+			continue
+		}
+		g.restored = true
+		cp := label_copies_find(db_cur, key)
+		if cp == nil {
+			continue
+		}
+		for &x in cp.copies {
+			for y in aof_gone_copies[g.copies_from:g.copies_to] {
+				if x.label == y.label {
+					x.seq = y.seq
+					break
+				}
+			}
+		}
+	}
+}
+
+@(private = "file")
+Aof_Gone :: struct {
+	dbi:         int,
+	label:       lb.Id,
+	owner:       ow.Owner,
+	from:        int,
+	to:          int,
+	copies_from: int,
+	copies_to:   int,
+	restored:    bool,
+}
+
+@(private = "file")
+aof_replay_in_group: bool
+
+@(private = "file")
+aof_gone: [dynamic]Aof_Gone
+
+@(private = "file")
+aof_gone_keys: [dynamic]u8
+
+@(private = "file")
+aof_gone_refs: [dynamic]Key_Ref
+
+@(private = "file")
+aof_gone_copies: [dynamic]Label_Copy
+
+@(private = "file")
+aof_gone_reset :: proc() {
+	aof_replay_in_group = false
+	clear(&aof_gone)
+	clear(&aof_gone_keys)
+	clear(&aof_gone_copies)
+}
+
+@(private = "file")
+aof_spare_names :: proc(dbi: int, spec: ^Cmd_Spec, argv: [][]u8) {
+	if len(aof_gone) == 0 || .Module in spec.flags {
+		return
+	}
+	find_keys(spec, argv, &aof_gone_refs)
+	for ref in aof_gone_refs {
+		if ref.pos <= 0 || ref.pos >= len(argv) || (ref.flags != {} && ref.flags & LABEL_WRITE_FLAGS == {}) {
+			continue
+		}
+		for g in aof_gone {
+			if g.dbi == dbi && g.label == access.id && g.owner == access.owner && bytes_eq(aof_gone_keys[g.from:g.to], argv[ref.pos]) {
+				append(&label_own_names, argv[ref.pos])
+				break
+			}
+		}
+	}
 }
 
 aof_exec :: proc(c: ^Conn, cmd: ^Command, argv: [][]u8) {
@@ -4988,6 +6447,9 @@ aof_q_push :: proc(argv: [][]u8) {
 
 @(private = "file")
 aof_q_run :: proc(c: ^Conn, name: string) -> bool {
+	aof_gone_reset()
+	aof_replay_in_group = true
+	defer aof_gone_reset()
 	off, li := 0, 0
 	for n in aof_q_argc {
 		clear(&aof_q_argv)
@@ -5002,6 +6464,67 @@ aof_q_run :: proc(c: ^Conn, name: string) -> bool {
 		}
 	}
 	clear(&aof_q_argv)
+	return true
+}
+
+@(private = "file")
+aof_group_set: bool
+
+@(private = "file")
+aof_group_word: Aof_Word
+
+@(private = "file")
+aof_group_marking: [dynamic]u8
+
+@(private = "file")
+aof_group_owner: [dynamic]u8
+
+@(private = "file")
+aof_group_reset :: proc() {
+	aof_group_set = false
+	aof_group_word = .None
+	clear(&aof_group_marking)
+	clear(&aof_group_owner)
+}
+
+@(private = "file")
+aof_group_admit :: proc(argv: [][]u8, name: string) -> bool {
+	if !(len(argv) >= 2 && eq_nocase(argv[0], "label") && eq_nocase(argv[1], "as")) {
+		return true
+	}
+	scope, inner, reason := aof_parse_scope(argv)
+	if reason != "" {
+		return aof_reject(name, reason)
+	}
+	if aof_maintenance_form(inner) {
+		return true
+	}
+	if !aof_group_set {
+		aof_group_set = true
+		aof_group_word = scope.word
+		append(&aof_group_marking, ..scope.marking)
+		append(&aof_group_owner, ..scope.owner)
+		return true
+	}
+	if aof_group_word != scope.word || !bytes_eq(aof_group_marking[:], scope.marking) || !bytes_eq(aof_group_owner[:], scope.owner) {
+		return aof_reject(name, "a transaction's records name two scopes")
+	}
+	return true
+}
+
+@(private = "file")
+aof_marker_check :: proc(argv: [][]u8, name: string) -> bool {
+	if !eq_nocase(argv[0], AOF_MARKER_LOWER) {
+		return aof_reject(name, "the file does not start with the access marker that a server with a label scheme or owner mode writes")
+	}
+	if len(argv) != 4 || !bytes_eq(argv[1], transmute([]u8)string(AOF_MARKER_VERSION)) {
+		return aof_reject(name, "the access marker has a form or version this server does not read")
+	}
+	labelled := "1" if label_scheme_labelled else "0"
+	owners := "1" if owners_on else "0"
+	if !bytes_eq(argv[2], transmute([]u8)labelled) || !bytes_eq(argv[3], transmute([]u8)owners) {
+		return aof_reject(name, "the access marker names another mode than this server's; start the server with the label scheme and owner mode the file was written with")
+	}
 	return true
 }
 
@@ -5047,6 +6570,9 @@ aof_load_commands :: proc(r: ^Aof_Reader, name: string, is_last: bool, done_befo
 	count: i64 = 0
 	for {
 		res := aof_r_command(r, &aof_load_argv)
+		if r.seal != nil && (res == .Eof || res == .Truncated) {
+			return aof_seal_end(r, name, is_last, res == .Truncated || inside_transaction)
+		}
 		switch res {
 		case .Eof:
 			if inside_transaction {
@@ -5070,6 +6596,20 @@ aof_load_commands :: proc(r: ^Aof_Reader, name: string, is_last: bool, done_befo
 		case .Ok:
 		}
 		argv := aof_load_argv[:]
+		aof_rec_offset = valid
+		if labels_on {
+			if count == 0 {
+				if !aof_marker_check(argv, name) {
+					return .Aborted
+				}
+				valid = aof_r_offset(r)
+				count += 1
+				continue
+			}
+			if inside_transaction && !aof_loader_only(argv[0]) && !aof_group_admit(argv, name) {
+				return .Aborted
+			}
+		}
 		switch {
 		case eq_nocase(argv[0], "multi"):
 			if !inside_transaction {
@@ -5077,9 +6617,13 @@ aof_load_commands :: proc(r: ^Aof_Reader, name: string, is_last: bool, done_befo
 			}
 			inside_transaction = true
 			aof_q_reset()
+			aof_group_reset()
 		case eq_nocase(argv[0], "exec"):
-			if inside_transaction && !aof_q_run(c, name) {
-				return .Aborted
+			if inside_transaction {
+				aof_rec_offset = before_multi
+				if !aof_q_run(c, name) {
+					return .Aborted
+				}
 			}
 			inside_transaction = false
 			aof_q_reset()
@@ -5109,6 +6653,133 @@ aof_load_commands :: proc(r: ^Aof_Reader, name: string, is_last: bool, done_befo
 }
 
 @(private = "file")
+aof_seal_end :: proc(r: ^Aof_Reader, name: string, is_last: bool, inside: bool) -> Aof_Load_Outcome {
+	#partial switch r.seal.state {
+	case .End:
+		if inside {
+			plog(LOG_WARNING, "Bad file format reading the append only file ", name, ": its decrypted content ends inside a record or a transaction")
+			return .Aborted
+		}
+		return .Loaded
+	case .Torn:
+		if inside {
+			plog(LOG_WARNING, "Bad file format reading the append only file ", name, ": its decrypted content ends inside a record or a transaction before the incomplete segment")
+			return .Aborted
+		}
+		if r.seal.mode != .Live {
+			return .Aborted
+		}
+		plog(LOG_WARNING, "The last write batch of the encrypted append only file ", name, " is incomplete")
+		return aof_load_truncated(name, r.seal.cut, is_last)
+	}
+	return .Aborted
+}
+
+@(private = "file")
+aof_seal_open :: proc(fd: linux.Fd, f: ^Aof_File, size: i64, is_last: bool, sr: ^seal.File_Reader) -> Seal_Open {
+	name := string(f.name[:])
+	want: bit_set[seal.Kind] = {.Base} if f.kind == .Base else {.Incremental}
+	outcome, header, h, key, use := seal_classify(fd, "append-only file", name, want)
+	switch outcome {
+	case .Plain:
+		if seal_on {
+			if f.sealed {
+				seal_refuse_file("append-only file", name, "the manifest lists it as encrypted, but it is not")
+				return .Refused
+			}
+			seal_rewrap_aof = true
+		}
+		return .Plain
+	case .Refused:
+		return .Refused
+	case .Torn_Header:
+		seal_refuse_file("append-only file", name, SEAL_TEXT_HEADER)
+		return .Refused
+	case .Sealed:
+	}
+	if use == .Previous {
+		seal_rewrap_aof = true
+	}
+	if !f.sealed {
+		seal_refuse_file("append-only file", name, "the manifest lists no salt for this encrypted file")
+		return .Refused
+	}
+	if f.salt != h.salt {
+		seal_refuse_file("append-only file", name, "it is not the file the manifest lists, because its salt differs")
+		return .Refused
+	}
+	mode := seal.Mode.Closed
+	if f.kind != .Base {
+		switch {
+		case f.has_size:
+			if f.size != size {
+				l: Log_Line
+				ll_begin(&l, LOG_WARNING)
+				ll_str(&l, "Refusing to load the append-only file ")
+				ll_str(&l, name)
+				ll_str(&l, ": it is ")
+				ll_int(&l, size)
+				ll_str(&l, " bytes long and the manifest records ")
+				ll_int(&l, f.size)
+				ll_end(&l)
+				return .Refused
+			}
+			mode = .Bounded
+		case is_last:
+			mode = .Live
+		case:
+			seal_refuse_file("append-only file", name, "the manifest records no length for this encrypted file, which is not the newest")
+			return .Refused
+		}
+	}
+	seal_reading_name = name
+	seal.reader_init(sr, fd, size, key, header, h.kind, mode)
+	sr.on_fail = seal_reader_failed
+	return .Sealed
+}
+
+@(private = "file")
+aof_load_sealed :: proc(r: ^Aof_Reader, sr: ^seal.File_Reader, f: ^Aof_File, is_last: bool, done_before: i64) -> Aof_Load_Outcome {
+	name := string(f.name[:])
+	defer seal.reader_destroy(sr)
+	r.seal = sr
+	defer r.seal = nil
+	head := seal.peek(sr, 5)
+	if sr.state != .Open && sr.state != .End {
+		return .Aborted
+	}
+	if len(head) == 5 && string(head) == "REDIS" {
+		if f.kind != .Base {
+			plog(LOG_WARNING, "Bad file format reading the append only file ", name, ": make a backup of your AOF file, then repair it by hand. Eski has no AOF repair tool.")
+			return .Aborted
+		}
+		plog(LOG_NOTICE, "Reading RDB base file on AOF loading...")
+		rr: rdb.Reader
+		rdb.reader_init_file(&rr, r.fd, pst.checksum)
+		rr.seal = sr
+		rr.progress = persist_loading_progress
+		rr.tick_every = cfg.loading_events_interval_bytes if cfg.loading_events_interval_bytes > 0 else AOF_LOAD_EVENTS_BYTES
+		rr.next_tick = rr.tick_every
+		where_: [dynamic]u8
+		defer delete(where_)
+		aof_path(&where_, name)
+		persist_refuse_name = string(where_[:])
+		res := persist_load_stream(&rr, false)
+		persist_refuse_name = ""
+		done := res == .Ok && seal_snapshot_done(&rr, sr)
+		rr.seal = nil
+		rdb.reader_destroy(&rr)
+		if !done {
+			plog(LOG_WARNING, "Error reading the RDB base file ", name, ", AOF loading aborted")
+			return .Aborted
+		}
+		persist_log_load_done()
+		return .Loaded
+	}
+	return aof_load_commands(r, name, is_last, done_before)
+}
+
+@(private = "file")
 aof_load_one :: proc(f: ^Aof_File, is_last: bool, done_before: i64) -> Aof_Load_Outcome {
 	name := string(f.name[:])
 	buf: [PERSIST_PATH_MAX]u8
@@ -5135,6 +6806,14 @@ aof_load_one :: proc(f: ^Aof_File, is_last: bool, done_before: i64) -> Aof_Load_
 		fd = fd,
 	}
 	defer aof_reader_free(&r)
+	sr: seal.File_Reader
+	switch aof_seal_open(fd, f, size, is_last, &sr) {
+	case .Refused, .Torn_Header:
+		return .Aborted
+	case .Sealed:
+		return aof_load_sealed(&r, &sr, f, is_last, done_before)
+	case .Plain:
+	}
 	magic: [5]u8
 	got, _ := linux.pread(fd, magic[:], 0)
 	if got == 5 && string(magic[:]) == "REDIS" {
@@ -5148,7 +6827,12 @@ aof_load_one :: proc(f: ^Aof_File, is_last: bool, done_before: i64) -> Aof_Load_
 		rr.progress = persist_loading_progress
 		rr.tick_every = cfg.loading_events_interval_bytes if cfg.loading_events_interval_bytes > 0 else AOF_LOAD_EVENTS_BYTES
 		rr.next_tick = rr.tick_every
+		where_: [dynamic]u8
+		defer delete(where_)
+		aof_path(&where_, name)
+		persist_refuse_name = string(where_[:])
 		res := persist_load_stream(&rr, false)
+		persist_refuse_name = ""
 		rest := rdb.reader_offset(&rr)
 		rdb.reader_destroy(&rr)
 		if res != .Ok {
@@ -5291,6 +6975,11 @@ aof_debug_loadaof :: proc(c: ^Conn) {
 	if aof.state == .Enabled {
 		aof_flush(true)
 	}
+	if aof.state != .Disabled && (aof.write_err || (aof.state == .Enabled && len(aof.buf) > 0)) {
+		plog(LOG_WARNING, "DEBUG LOADAOF refused: a write or sync of the append-only file failed and is not resolved yet, and loading would cut back the file the server still writes")
+		reply_error(c, ERR_AOF_LOAD_WRITE_PENDING)
+		return
+	}
 	if aof.state == .Disabled {
 		m: Aof_Manifest
 		exists, ok := aof_manifest_load_from_disk(&m)
@@ -5305,8 +6994,32 @@ aof_debug_loadaof :: proc(c: ^Conn) {
 			aof_manifest_free(&m)
 		}
 	}
-	db_flush_all()
+	if labels_on && aof.manifest.has_base {
+		path: [dynamic]u8
+		defer delete(path)
+		aof_path(&path, string(aof.manifest.base.name[:]))
+		if msg := access_file_probe(string(path[:])); msg != "" {
+			plog(LOG_WARNING, "Refusing to load the append-only base ", string(aof.manifest.base.name[:]), ": it ", msg)
+			reply_error(c, ERR_AOF_LOAD)
+			return
+		}
+	}
+	seq := access_forget_seq
+	if labels_on {
+		access_flush_everything()
+		access_forget_seq = 0
+	} else {
+		db_flush_all()
+	}
 	res := aof_load_all(false)
+	if labels_on {
+		if access_forget_seq < seq {
+			access_forget_seq = seq
+		}
+		if res != .Loaded && res != .Blank && res != .Truncated_Tail {
+			access_flush_everything()
+		}
+	}
 	if aof.fd >= 0 {
 		aof_recompute_sizes()
 		aof.fsynced_size = aof.current_size

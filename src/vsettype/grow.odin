@@ -28,6 +28,7 @@ part_maybe_graduate :: proc(s: Vset, p: ^Part_Head, sc: ^Scratch) {
 			owner_graduate(s, p, sc)
 		} else {
 			part_graduate(s, (^Partition)(p), sc)
+			tally_levels_refresh(p)
 		}
 	}
 }
@@ -38,6 +39,7 @@ part_maybe_flatten :: proc(s: Vset, p: ^Part_Head) {
 			owner_flatten(s, p)
 		} else {
 			part_flatten(s, (^Partition)(p))
+			tally_levels_refresh(p)
 		}
 	}
 }

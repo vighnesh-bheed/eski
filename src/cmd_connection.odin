@@ -869,12 +869,23 @@ pause_should_hold :: proc(c: ^Conn, args: [][]u8) -> bool {
 			if !tx_may_replicate(c) {
 				return false
 			}
-		} else if !is_write_command(cmd.name, argv) {
+		} else if !pause_holds_command(cmd, argv) {
 			return false
 		}
 	}
 	c.last_cmd = full
 	return true
+}
+
+pause_holds_command :: proc(cmd: ^Command, argv: [][]u8) -> bool {
+	switch cmd.name {
+	case "eval", "evalsha", "fcall", "pfcount", "publish", "spublish":
+		return true
+	case "owners":
+		return false
+	}
+	spec := cmd_spec_lookup(cmd, argv)
+	return spec != nil && .Write in spec.flags
 }
 
 is_write_command :: proc(name: string, argv: [][]u8) -> bool {

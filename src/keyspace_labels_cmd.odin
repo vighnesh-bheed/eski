@@ -140,7 +140,7 @@ label_cmd_declassify :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	if target.has {
-		label_declassify_element(c, key, target)
+		label_declassify_element(c, argv, key, target)
 		return
 	}
 	l := lookup_make(key)
@@ -189,7 +189,10 @@ label_cmd_declassify :: proc(c: ^Conn, argv: [][]u8) {
 	signal_key_in(key, made)
 	notify_in(.Generic, "relabel_from", key, own)
 	notify_in(.Generic, "relabel_to", key, made)
-	label_audit_declassify(c, key, nil, from, target.id)
+	if !aof.loading {
+		label_audit_declassify(c, key, nil, from, target.id)
+	}
+	aof_emit_explicit(c, argv, true)
 	reply_ok(c)
 }
 
@@ -273,7 +276,7 @@ label_declassify_seen :: proc(s: vt.Vset, obj: rawptr, dbi: int, key: []u8, targ
 	return "", {}
 }
 
-label_declassify_element :: proc(c: ^Conn, key: []u8, target: Label_Target) {
+label_declassify_element :: proc(c: ^Conn, argv: [][]u8, key: []u8, target: Label_Target) {
 	e := db_find_notouch(key)
 	if e == nil {
 		reply_error(c, ERR_LABEL_NO_KEY)
@@ -304,6 +307,7 @@ label_declassify_element :: proc(c: ^Conn, key: []u8, target: Label_Target) {
 		return
 	}
 	a := label_vt_access()
+	a.key = key
 	to := a
 	to.label = target.id
 	word := label_target_access(target.id, a.visibility).stream^
@@ -335,7 +339,10 @@ label_declassify_element :: proc(c: ^Conn, key: []u8, target: Label_Target) {
 	signal_key_in(key, made)
 	notify_in(.Generic, "relabel_from", key, own)
 	notify_in(.Generic, "relabel_to", key, made)
-	label_audit_declassify(c, key, target.element, access.id, target.id)
+	if !aof.loading {
+		label_audit_declassify(c, key, target.element, access.id, target.id)
+	}
+	aof_emit_explicit(c, argv, true)
 	reply_ok(c)
 }
 
@@ -505,7 +512,19 @@ label_cmd_quota :: proc(c: ^Conn, argv: [][]u8) {
 		} else {
 			label_quotas[id] = int(limit)
 		}
-		label_audit(c, "label-quota", "label", string(marking), "limit", string(argv[len(argv) - 1]))
+		if !aof.loading {
+			label_audit(c, "label-quota", "label", string(marking), "limit", string(argv[len(argv) - 1]))
+		}
+		digits: [24]u8
+		n := format_i64(&digits[0], limit)
+		record := [7][]u8{argv[0], argv[1], marking, aof_bytes("TRUST"), trust, aof_bytes("LIMIT"), digits[:n]}
+		if has_trust {
+			aof_emit_explicit(c, record[:], true)
+		} else {
+			record[3] = record[5]
+			record[4] = record[6]
+			aof_emit_explicit(c, record[:5], true)
+		}
 		reply_ok(c)
 		return
 	}

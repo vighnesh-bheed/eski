@@ -44,6 +44,43 @@ def read_commands(directory):
     return result
 
 
+def server_ms(client):
+    seconds, micros = client.call('TIME')
+    return int(seconds) * 1000 + int(micros) // 1000
+
+
+def after_deadline(client, deadline):
+    wait_for(lambda: server_ms(client) > deadline, label='the server clock to pass the field deadline')
+
+
+def dump_and_restore(c, key):
+    payload = c.call('DUMP', key)
+    return c.call('RESTORE', 'x-restored', 0, payload)
+
+
+OVER_EXPIRED_FIELD = (
+    ('hset', lambda c, k: c.call('HSET', k, 'f1', 'n', 'f4', 'x')),
+    ('hmset', lambda c, k: c.call('HMSET', k, 'f1', 'n')),
+    ('hsetnx', lambda c, k: c.call('HSETNX', k, 'f1', 'n')),
+    ('hincrby', lambda c, k: c.call('HINCRBY', k, 'f1', 5)),
+    ('hincrbyfloat', lambda c, k: c.call('HINCRBYFLOAT', k, 'f1', '1.5')),
+    ('hdel', lambda c, k: c.call('HDEL', k, 'f1', 'f2')),
+    ('hexpire', lambda c, k: c.call('HEXPIRE', k, 900, 'FIELDS', 2, 'f1', 'f2')),
+    ('hexpire-nx', lambda c, k: c.call('HEXPIRE', k, 900, 'NX', 'FIELDS', 3, 'f1', 'f2', 'f3')),
+    ('hexpire-xx', lambda c, k: c.call('HEXPIRE', k, 900, 'XX', 'FIELDS', 3, 'f1', 'f2', 'f3')),
+    ('hexpire-gt', lambda c, k: c.call('HPEXPIRE', k, 999999, 'GT', 'FIELDS', 3, 'f1', 'f2', 'f3')),
+    ('hexpire-lt', lambda c, k: c.call('HPEXPIRE', k, 1000, 'LT', 'FIELDS', 3, 'f1', 'f2', 'f3')),
+    ('hexpireat-past', lambda c, k: c.call('HPEXPIREAT', k, 1, 'FIELDS', 3, 'f1', 'f2', 'f3')),
+    ('hpersist', lambda c, k: c.call('HPERSIST', k, 'FIELDS', 3, 'f1', 'f2', 'f3')),
+    ('hrandfield', lambda c, k: (c.call('HRANDFIELD', k, -5), c.call('HSET', k, 'f9', 9))),
+    ('rename', lambda c, k: c.call('RENAME', k, 'x-renamed')),
+    ('copy', lambda c, k: c.call('COPY', k, 'x-copied')),
+    ('move', lambda c, k: c.call('MOVE', k, 1)),
+    ('dump', dump_and_restore),
+    ('hget', lambda c, k: (c.call('HGET', k, 'f1'), c.call('HSET', k, 'f1', 'again'))),
+)
+
+
 class HashExpiryAof(unittest.TestCase):
     def setUp(self):
         self.server = Server(BINARY, workers=0, arguments=('--keyspace-threads', str(KEYSPACE_THREADS), '--appendonly', 'yes',
@@ -155,6 +192,63 @@ class HashExpiryAof(unittest.TestCase):
         self.assertEqual(self.client.call('HGETALL', 'suppressed'), [b'keep', b'stable'])
         self.assertEqual(self.client.call('HGET', 'disconnected', 'n'), b'3')
         self.assertGreater(self.client.call('HPTTL', 'disconnected', 'FIELDS', 1, 'n')[0], 50000)
+
+    def hashes(self, stored):
+        out = []
+        for db in (0, 1):
+            self.client.call('SELECT', db)
+            for key in sorted(self.client.call('KEYS', 'x-*')):
+                row = [db, key]
+                if stored:
+                    row.append(self.client.call('HLEN', key))
+                flat = self.client.call('HGETALL', key)
+                pairs = sorted(zip(flat[0::2], flat[1::2]))
+                row.append(pairs)
+                if pairs:
+                    row.append(self.client.call('HPEXPIRETIME', key, 'FIELDS', len(pairs), *[f for f, _ in pairs]))
+                out.append(row)
+        self.client.call('SELECT', 0)
+        return out
+
+    def test_commands_over_an_expired_field_replay_to_the_running_state(self):
+        c = self.client
+        c.call('DEBUG', 'SET-ACTIVE-EXPIRE', 0)
+        deadline = server_ms(c) + 1000
+        for name, unused in OVER_EXPIRED_FIELD:
+            key = 'x-' + name
+            c.call('HSET', key, 'f1', 10, 'f2', 20, 'f3', 30)
+            self.assertEqual(c.call('HPEXPIREAT', key, deadline, 'FIELDS', 1, 'f1'), [1])
+            c.call('HPEXPIRE', key, 900000, 'FIELDS', 1, 'f2')
+        after_deadline(c, deadline)
+        for name, run in OVER_EXPIRED_FIELD:
+            run(c, 'x-' + name)
+        running = self.hashes(True)
+        self.assertEqual(c.call('DEBUG', 'LOADAOF'), 'OK')
+        self.assertEqual(self.hashes(True), running)
+        visible = self.hashes(False)
+        self.restart()
+        self.assertEqual(self.hashes(False), visible)
+
+    def test_hpersist_is_logged_with_the_fields_it_persisted(self):
+        c = self.client
+        c.call('DEBUG', 'SET-ACTIVE-EXPIRE', 0)
+        deadline = server_ms(c) + 200
+        c.call('HSET', 'persisted', 'f1', 1, 'f2', 2, 'f3', 3)
+        self.assertEqual(c.call('HPEXPIREAT', 'persisted', deadline, 'FIELDS', 1, 'f1'), [1])
+        c.call('HPEXPIRE', 'persisted', 900000, 'FIELDS', 1, 'f2')
+        after_deadline(c, deadline)
+        self.assertEqual(c.call('HPERSIST', 'persisted', 'FIELDS', 3, 'f1', 'f2', 'f3'), [-2, 1, -1])
+        c.call('HPEXPIRE', 'persisted', 900000, 'FIELDS', 1, 'f3')
+        self.assertEqual(c.call('HPERSIST', 'persisted', 'FIELDS', 1, 'f3'), [1])
+        self.assertEqual(c.call('HPERSIST', 'persisted', 'FIELDS', 2, 'f1', 'f3'), [-2, -1])
+        self.assertEqual([command for command in self.commands() if command[0].upper() == b'HPERSIST'],
+                         [[b'HPERSIST', b'persisted', b'FIELDS', b'1', b'f2'], [b'HPERSIST', b'persisted', b'FIELDS', b'1', b'f3']])
+        self.assertEqual(c.call('DEBUG', 'LOADAOF'), 'OK')
+        self.assertEqual(c.call('HLEN', 'persisted'), 3)
+        self.assertEqual(sorted(c.call('HGETALL', 'persisted')), [b'2', b'3', b'f2', b'f3'])
+        self.restart()
+        self.assertEqual(sorted(self.client.call('HGETALL', 'persisted')), [b'2', b'3', b'f2', b'f3'])
+        self.assertEqual(self.client.call('HPEXPIRETIME', 'persisted', 'FIELDS', 2, 'f2', 'f3'), [-1, -1])
 
     def test_float_increment_keeps_future_field_deadline_across_replay(self):
         for threshold in (512, 0):

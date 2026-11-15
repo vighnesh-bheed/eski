@@ -111,6 +111,9 @@ signal_key_hooked :: #force_no_inline proc(key: []u8, db: ^Db, attributed: bool)
 }
 
 key_expired_event :: proc(key: []u8, db: ^Db) {
+	if aof.feed {
+		aof_key_expired(db, key)
+	}
 	signal_key_expired(key, db)
 	notify_in(.Expired, "expired", key, db)
 }

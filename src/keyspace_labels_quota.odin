@@ -32,11 +32,10 @@ label_quota_check :: proc(cmd: ^Command, spec: ^Cmd_Spec) -> string {
 	if !ok {
 		return ""
 	}
-	used := label_used(access.id)
-	if used <= quota {
+	if label_used(access.id) <= quota {
 		return ""
 	}
-	evict_in_label(int(access.id), used - quota)
+	evict_in_label(access.id, quota)
 	if label_used(access.id) > quota {
 		return ERR_LABEL_QUOTA_OOM
 	}

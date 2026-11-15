@@ -100,7 +100,8 @@ for runner in "${runners[@]}"; do
 			check compare --result "$out/compare.json"
 			;;
 		smoke)
-			ESKI_LABELLED_MODE="$mode" ESKI_LABELLED_DIR="$out/server-dir" ESKI_SMOKE_BINARY="$wrapper" ESKI_SMOKE_KEYSPACE_THREADS="$threads" ESKI_SMOKE_FULL_DIR="$out/smoke-full" bash test/smoke.sh >"$out/smoke.log" 2>&1
+			login_rules="$(ESKI_LABELLED_MODE="$mode" ESKI_LABELLED_PRINT_LOGIN=1 bash "$wrapper")"
+			ESKI_LABELLED_MODE="$mode" ESKI_LABELLED_DIR="$out/server-dir" ESKI_SMOKE_BINARY="$wrapper" ESKI_SMOKE_KEYSPACE_THREADS="$threads" ESKI_SMOKE_FULL_DIR="$out/smoke-full" ESKI_SMOKE_LOGIN_RULES="$login_rules" bash test/smoke.sh >"$out/smoke.log" 2>&1
 			check smoke --result "$out/smoke.log"
 			;;
 	esac

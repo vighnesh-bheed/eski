@@ -16,7 +16,7 @@ ERR_LABEL_WATCH_EXEC :: "EXECABORT Transaction discarded because of: the command
 ERR_LABEL_NESTED :: "ERR LABEL AS cannot wrap LABEL AS or LABEL SESSION"
 ERR_LABEL_CONTEXT_MISMATCH :: "ERR the label differs from the context's label"
 ERR_LABEL_TOP :: "ERR this command needs a label that dominates the whole label scheme"
-ERR_LABEL_PERSISTENCE :: "ERR persistence is off while a label scheme is configured"
+ERR_LABEL_MIGRATE :: "ERR MIGRATE is off while a label scheme is configured; move keys with DUMP and RESTORE"
 ERR_LABEL_SCRIPT :: "ERR this command needs a label that dominates the running script's label"
 ERR_OWNER_INVALID :: "ERR invalid owner"
 ERR_OWNERS_OFF :: "ERR owners are not enabled on this server"
@@ -26,7 +26,7 @@ ERR_OWNER_BOUND :: "ERR this connection is bound to another owner"
 ERR_OWNER_TRANSACTION :: "ERR the command's owner differs from the transaction's owner"
 ERR_OWNER_WATCH_EXEC :: "EXECABORT Transaction discarded because of: the command's owner differs from the transaction's owner"
 ERR_OWNER_OPERATOR :: "ERR this command needs a login with the owner-operator right"
-ERR_OWNER_PERSISTENCE :: "ERR persistence is off while owner mode is on"
+ERR_OWNER_MIGRATE :: "ERR MIGRATE is off while owner mode is on; move keys with DUMP and RESTORE"
 
 Access :: struct {
 	label:       lb.Label,
@@ -635,7 +635,9 @@ access_top_only :: proc(cmd: ^Command, argv: [][]u8) -> bool {
 	case h == cmd_slowlog:
 		return access_word(argv, 1, "reset")
 	case h == cmd_config:
-		return access_word(argv, 1, "resetstat")
+		return access_word(argv, 1, "set") || access_word(argv, 1, "rewrite") || access_word(argv, 1, "resetstat")
+	case h == cmd_save, h == cmd_bgsave, h == cmd_shutdown, h == cmd_bgrewriteaof:
+		return true
 	case h == cmd_owners:
 		return owners_on && !access_word(argv, 1, "help")
 	case h == cmd_function:
@@ -650,28 +652,14 @@ access_persistence_refuses :: proc(cmd: ^Command, argv: [][]u8) -> bool {
 	if !labels_on {
 		return false
 	}
-	h := cmd.handler
-	switch {
-	case h == cmd_save, h == cmd_bgsave, h == cmd_bgrewriteaof, h == cmd_dump, h == cmd_restore, h == cmd_migrate:
-		return true
-	case h == cmd_debug:
-		return access_word(argv, 1, "reload") || access_word(argv, 1, "loadaof")
-	case h == cmd_shutdown:
-		for a in argv[1:] {
-			if eq_nocase(a, "save") {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-access_persistence_off :: #force_inline proc "contextless" () -> bool {
-	return labels_on
+	return cmd.handler == cmd_migrate
 }
 
 access_persistence_text :: proc "contextless" () -> string {
-	return ERR_OWNER_PERSISTENCE if owners_on && !label_scheme_labelled else ERR_LABEL_PERSISTENCE
+	if owners_on && !label_scheme_labelled {
+		return ERR_OWNER_MIGRATE
+	}
+	return ERR_LABEL_MIGRATE
 }
 
 access_top_refusal :: proc "contextless" () -> string {

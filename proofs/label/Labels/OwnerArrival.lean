@@ -244,12 +244,18 @@ def afterRefusal (OD : ODyn) (id : Nat) (oc : OConn) (m : String) : ODyn :=
 
 def topLabelOf (E : AEnv) (l : TLabel) : Bool := domT l (ttop E.cfg.base.levels.length E.cfg.base.comps.length)
 
-def errOwnerPersistence : String := "ERR persistence is off while owner mode is on"
+def errOwnerAof : String :=
+  "ERR the append-only file is off while owner mode is on; SAVE and BGSAVE write owner snapshots"
+def errOwnerMigrate : String := "ERR MIGRATE is off while owner mode is on; move keys with DUMP and RESTORE"
 
 def schemeLabelled (E : AEnv) : Bool :=
   decide (1 < E.cfg.base.levels.length) || !E.cfg.base.comps.isEmpty || decide (1 < E.cfg.trusts.length)
 
-def ownerMsg (E : AEnv) (m : String) : String := if m == errPersistence && !schemeLabelled E then errOwnerPersistence else m
+def ownerMsg (E : AEnv) (m : String) : String :=
+  if schemeLabelled E then m
+  else if m == errAof then errOwnerAof
+  else if m == errMigrate then errOwnerMigrate
+  else m
 
 def pinIn (D : ADyn) (id : Nat) (c : AConn) (inner : List Arg) (l : TLabel) : ADyn :=
   setConn D id (pinConn ((connOf D id).getD c) inner l)
@@ -363,6 +369,7 @@ def handleO (E : AEnv) (OE : OEnv) (D : ADyn) (OD : ODyn) (id : Nat) (l : TLabel
     else if isCmd inner "context" && argIs inner 1 "create" then contextCreateO E D OD c (orulesOf OE c.login) l o (inner.drop 2)
     else if isCmd inner "context" && (argIs inner 1 "info" || argIs inner 1 "drop") then
       ((contextUseO E D OD c inner).1, (contextUseO E D OD c inner).2, OD)
+    else if isCmd inner "lastsave" then (.base (.lastsave !(topLabelOf E l && (orulesOf OE c.login).operator)), D, OD)
     else (.base (handleCmd E D id l inner).1, (handleCmd E D id l inner).2, OD)
 
 def requestO (E : AEnv) (OE : OEnv) (D : ADyn) (OD : ODyn) (id : Nat) (args : List Arg) : ArrivalO × ReplyO × ADyn × ODyn :=
@@ -1268,5 +1275,105 @@ theorem arriveO_pins_push {E : AEnv} {OE : OEnv} {D D' : ADyn} {OD OD' : ODyn} {
           exact connOf_setConn hc1 _
         · simp [pinConn, hmm, hm, hs, he, hx]
         · simp [pinConn, hmm, hm, hs, he, hx]
+
+theorem ownerTop_exists {args : List Arg} (h : ownerTop args = true) : cmdExists args = true := by
+  unfold ownerTop at h
+  unfold cmdExists
+  cases ht : topOnly args
+  · simp only [ht, Bool.false_or, Bool.and_eq_true] at h
+    simp [h.1]
+  · simp [topOnly_known ht]
+
+theorem ownerTop_snapshot {args : List Arg}
+    (h : isCmd args "save" = true ∨ isCmd args "bgsave" = true ∨ isCmd args "shutdown" = true ∨
+      (isCmd args "config" = true ∧ configPersistence args = true)) : ownerTop args = true := by
+  rcases h with h | h | h | ⟨h, hs⟩
+  · simp [ownerTop, (snapshot_commands_top (Or.inl h)).1]
+  · simp [ownerTop, (snapshot_commands_top (Or.inr (Or.inl h))).1]
+  · simp [ownerTop, (snapshot_commands_top (Or.inr (Or.inr h))).1]
+  · simp [ownerTop, (config_persistence_top h hs).1]
+
+theorem ownerPhase_top {r : ORules} {oc : OConn} {inMulti : Bool} {inner : List Arg} {topLabel : Bool} {pick : Pick}
+    {ctx : Option Owner} {tok : Option TokOwner} {o : Owner} {oc' : OConn}
+    (h : ownerPhase r oc inMulti inner topLabel pick ctx tok = .ok (o, oc')) (ht : ownerTop inner = true) :
+    topLabel = true ∧ r.operator = true := by
+  unfold ownerPhase at h
+  split at h
+  · simp at h
+  · rename_i hn
+    simp only [ht, Bool.true_and, Bool.not_eq_true'] at hn
+    cases topLabel <;> cases hop : r.operator <;> simp_all
+
+theorem ownerPhase_top_text {r : ORules} {oc : OConn} {inMulti : Bool} {inner : List Arg} {topLabel : Bool} {pick : Pick}
+    {ctx : Option Owner} {tok : Option TokOwner} (ht : ownerTop inner = true) (hn : (topLabel && r.operator) = false) :
+    ownerPhase r oc inMulti inner topLabel pick ctx tok = .error (if topLabel then errOperator else errTop) := by
+  simp [ownerPhase, ht, hn]
+
+theorem ownerMsg_unlabelled (E : AEnv) (h : schemeLabelled E = false) :
+    ownerMsg E errAof = errOwnerAof ∧ ownerMsg E errMigrate = errOwnerMigrate := by
+  have hne : (errMigrate == errAof) = false := by decide
+  simp [ownerMsg, h, hne]
+
+theorem ownerMsg_labelled (E : AEnv) (h : schemeLabelled E = true) (m : String) : ownerMsg E m = m := by
+  simp [ownerMsg, h]
+
+theorem ownerMsg_other (E : AEnv) {m : String} (h1 : m ≠ errAof) (h2 : m ≠ errMigrate) : ownerMsg E m = m := by
+  simp [ownerMsg, h1, h2]
+
+theorem labelStepO_gate {E : AEnv} {OE : OEnv} {D : ADyn} {id : Nat} {c : AConn} {args inner : List Arg} {l : TLabel}
+    {ctx : Option ACtx} (h : (labelStepO E OE D id c args).arrival = .ok l inner ctx) :
+    ∃ c' p, gate E c' inner l p = none := by
+  unfold labelStepO at h
+  split at h
+  · split at h
+    · exact (refuse_fst_ne h).elim
+    · split at h
+      · exact (refuse_fst_ne h).elim
+      · split at h
+        · exact ⟨_, _, core_fst_gate h⟩
+        · split at h
+          · exact (refuse_fst_ne h).elim
+          · exact ⟨_, _, core_fst_gate h⟩
+  · split at h
+    · exact (refuse_fst_ne h).elim
+    · exact ⟨_, _, core_fst_gate h⟩
+
+theorem arriveO_rules {E : AEnv} {OE : OEnv} {D D' : ADyn} {OD OD' : ODyn} {id : Nat} {args inner : List Arg}
+    {l : TLabel} {o : Owner} {ctx : Option ACtx} {c : AConn} (hc : connOf D id = some c)
+    (h : arriveO E OE D OD id args = (.ok l o inner ctx, D', OD')) :
+    persistenceRefused inner = false ∧
+      (ownerTop inner = true → topLabelOf E l = true ∧ (orulesOf OE c.login).operator = true) := by
+  unfold arriveO at h
+  rw [hc] at h
+  simp only at h
+  split at h
+  · simp at h
+  · rename_i l1 inner1 ctx1 D1 pick tok hls
+    have hk : (labelStepO E OE D id c args).arrival = .ok l1 inner1 ctx1 := by rw [hls]
+    obtain ⟨c', p, hg⟩ := labelStepO_gate hk
+    have hr := gate_none_rules hg
+    split at h
+    · rename_i hx
+      simp only [Prod.mk.injEq, ArrivalO.ok.injEq] at h
+      obtain ⟨⟨rfl, -, rfl, -⟩, -, -⟩ := h
+      refine ⟨hr.1, fun ht => ?_⟩
+      have := ownerTop_exists ht
+      simp [this] at hx
+    · split at h
+      · simp at h
+      · rename_i o1 oc1 hph
+        simp only [Prod.mk.injEq, ArrivalO.ok.injEq] at h
+        obtain ⟨⟨rfl, rfl, rfl, rfl⟩, -, -⟩ := h
+        exact ⟨hr.1, fun ht => ownerPhase_top hph ht⟩
+
+theorem handleO_lastsave {E : AEnv} {OE : OEnv} {D : ADyn} {OD : ODyn} {id : Nat} {l : TLabel} {o : Owner}
+    {inner : List Arg} {c : AConn} (hc : connOf D id = some c) (h : isCmd inner "lastsave" = true) :
+    (handleO E OE D OD id l o inner).1 =
+      if c.inMulti then .base .queued else .base (.lastsave !(topLabelOf E l && (orulesOf OE c.login).operator)) := by
+  cases hm : c.inMulti <;>
+    simp [handleO, hc, hm, h, immediate, isCmd_ne h (v := "multi") (by decide), isCmd_ne h (v := "exec") (by decide),
+      isCmd_ne h (v := "discard") (by decide), isCmd_ne h (v := "watch") (by decide),
+      isCmd_ne h (v := "unwatch") (by decide), isCmd_ne h (v := "context") (by decide),
+      isCmd_ne h (v := "quit") (by decide), isCmd_ne h (v := "reset") (by decide)]
 
 end Labels

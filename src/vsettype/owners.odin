@@ -17,6 +17,7 @@ Compact_Block :: struct {
 	charge:     Charge,
 	uid:        u64,
 	seed:       u64,
+	tally:      Tally,
 }
 
 Owner_Slot :: struct {
@@ -319,6 +320,77 @@ owner_id_give :: proc "contextless" (idx: ^Owner_Index, id: u32) {
 	idx.free_len += 1
 }
 
+owner_part_renumber :: proc(s: Vset, idx: ^Owner_Index, p: ^Part_Head, local: u32) {
+	old := p.id
+	fresh := OWNER_PART_BASE + local
+	idx.parts[local] = p
+	idx.parts[old - OWNER_PART_BASE] = nil
+	p.id = fresh
+	scope := owner_scope(s, p.owner)
+	if scope == nil {
+		return
+	}
+	for i in 0 ..< p.count {
+		slot := p.order[i]
+		name := part_element_name(p, slot)
+		v, found := rax.find(scope.names, name)
+		if !found {
+			continue
+		}
+		x := u64(uintptr(v))
+		if x & NAME_MULTI == 0 {
+			if v == name_inline(Ref{slot = slot, part = old}) {
+				rax.insert(scope.names, name, name_inline(Ref{slot = slot, part = fresh}))
+			}
+			continue
+		}
+		c := (^Copies)(uintptr(x &~ NAME_MULTI))
+		for &r in copies_entries(c)[:c.count] {
+			if r.part == old && r.slot == slot {
+				r.part = fresh
+			}
+		}
+	}
+}
+
+owners_trim :: proc(s: Vset) {
+	if s == nil || s.lab == nil || s.lab.owners == nil {
+		return
+	}
+	idx := s.lab.owners
+	live := idx.part_high - idx.free_len
+	if idx.part_cap <= max(SET_TABLE_MIN, 2 * live) {
+		return
+	}
+	if idx.part_high > live {
+		hole: u32 = 0
+		for high := idx.part_high; high > live; high -= 1 {
+			p := idx.parts[high - 1]
+			if p == nil {
+				continue
+			}
+			for idx.parts[hole] != nil {
+				hole += 1
+			}
+			owner_part_renumber(s, idx, p, hole)
+		}
+		idx.part_high = live
+		idx.free_len = 0
+		s.version += 1
+	}
+	target := max(u32(SET_TABLE_MIN), live)
+	if q := charge_resize(&idx.index, idx.parts, int(idx.part_cap) * size_of(^Part_Head), int(target) * size_of(^Part_Head), 8, false); q != nil {
+		idx.parts = ([^]^Part_Head)(q)
+		idx.part_cap = target
+	}
+	if idx.free_cap > target {
+		if q := charge_resize(&idx.index, idx.free, int(idx.free_cap) * size_of(u32), int(target) * size_of(u32), 8, false); q != nil {
+			idx.free = ([^]u32)(q)
+			idx.free_cap = target
+		}
+	}
+}
+
 owner_part_create :: proc(s: Vset, scope: ^Owner_Scope, l: lbl.Id, seed: u64) -> (p: ^Part_Head, err: Error) {
 	idx := s.lab.owners
 	if !scope_reserve(scope, u32(scope.part_len) + 1) {
@@ -360,6 +432,7 @@ owner_part_retire :: proc(s: Vset, p: ^Part_Head) {
 	if scope.part_len == 0 {
 		owner_scope_drop(s, scope)
 	}
+	owners_trim(s)
 }
 
 owner_part_for_write :: proc(s: Vset, a: ^Access) -> (p: ^Part_Head, created: bool, err: Error) {
@@ -440,6 +513,8 @@ owner_graduate :: proc(s: Vset, p: ^Part_Head, sc: ^Scratch) -> Error {
 		block_free(&idx.ledger, blk)
 		return .Out_Of_Memory
 	}
+	blk.tally = Tally{content = compact.tally.content}
+	tally_levels_refresh(&blk.head)
 	scope_replace(s, p, &blk.head)
 	block_free(&idx.ledger, compact)
 	return .None
@@ -462,6 +537,7 @@ owner_flatten :: proc(s: Vset, p: ^Part_Head) {
 	compact.arena.allocator = charge_allocator(&compact.charge)
 	compact.uid = uid
 	compact.seed = seed
+	compact.tally = Tally{content = full.tally.content}
 	scope_replace(s, p, &compact.head)
 	block_free(&idx.ledger, full)
 }
@@ -551,6 +627,7 @@ owner_count :: proc "contextless" (s: Vset) -> int {
 }
 
 remove_scope :: proc(s: Vset, l: lbl.Id, o: Owner) -> (removed: int, ch: Change) {
+	write_fence(s)
 	if o == SHARED {
 		return remove_label(s, l)
 	}
@@ -571,6 +648,7 @@ remove_scope :: proc(s: Vset, l: lbl.Id, o: Owner) -> (removed: int, ch: Change)
 }
 
 remove_owner :: proc(s: Vset, o: Owner, labels: ^[dynamic]lbl.Id = nil) -> (removed: int, ch: Change) {
+	write_fence(s)
 	if s == nil {
 		ch.emptied = true
 		return
@@ -594,6 +672,7 @@ remove_owner :: proc(s: Vset, o: Owner, labels: ^[dynamic]lbl.Id = nil) -> (remo
 	scope.part_len = 0
 	s.lab.total -= removed
 	owner_scope_drop(s, scope)
+	owners_trim(s)
 	s.version += 1
 	ch.found = removed > 0
 	ch.label_gone = removed > 0
@@ -641,6 +720,7 @@ owner_part_move :: proc(src: Vset, dst: Vset, p: ^Part_Head, dscope: ^Owner_Scop
 }
 
 split_scope :: proc(s: Vset, l: lbl.Id, o: Owner) -> (out: Vset, ch: Change, err: Error) {
+	write_fence(s)
 	if o == SHARED {
 		return split_label(s, l)
 	}
@@ -668,6 +748,7 @@ split_scope :: proc(s: Vset, l: lbl.Id, o: Owner) -> (out: Vset, ch: Change, err
 		destroy(out)
 		return nil, ch, err
 	}
+	owners_trim(s)
 	out.version = 0
 	ch.found = true
 	ch.label_gone = true
@@ -692,6 +773,8 @@ owners_clash :: proc "contextless" (dst: Vset, src: Vset) -> bool {
 }
 
 owners_absorb :: proc(dst: Vset, src: Vset) -> Error {
+	write_fence(dst)
+	write_fence(src)
 	didx, err := owners_attach(dst)
 	if err != .None {
 		return err

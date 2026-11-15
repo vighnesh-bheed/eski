@@ -13,12 +13,12 @@
   "src/hnsw/scratch.odin": "7cb92f3818cd25f378636abe1f4d5568730c8f0106e3a6e9a160e474da93602c",
   "src/hnsw/heap.odin": "c6e30aeceb58b6e4d6beb54c6c8595f7e26114ef5905bd3e144470f53e87259d",
   "src/vfilter/evaluate.odin": "7b98d9309022dde6000e7b1f6bc9015cd4d570a358ae0e59d3ec45ae55541b85",
-  "src/access.odin": "ab6bd192940f4bfe60e41ab01f24415f366e337ee1f3c0bc4a1a65084fead6d1",
+  "src/access.odin": "76395d1c09e288f209e2a0a91bf6bad26c5afc63f622ae0f1e1a6f07dc8c42eb",
   "src/cmd_label.odin": "eaac7d102289cbdaef297433d13fa026cdcfaee8ea0d7b4d4075bdb7be47b74a",
   "src/multi.odin": "e2bb0080cfe2d2db7ad0a0a7bba4cc65d4db7618b95ceabd1cf6156da6e1705a",
   "src/keyspace_labels.odin": "2b47119d93b4f75931da64392274594835234fba857b2502917c781899abdca0",
   "src/keyspace_labels_scan.odin": "9b4858371e2bf6dcb1f86656c1a5e16296eba5b39ae10423bd9745386358b779",
-  "src/keyspace_labels_cmd.odin": "61ac133955bb9c4a2bf1bd1b7b51475a75e758937661a26f12f986ef6d993d74",
+  "src/keyspace_labels_cmd.odin": "0f6a2d772ec4552feb5a5d78648058b7ddc4f279e353e632d6dd36f9998a7855",
   "src/store.odin": "0803b20e9867200be6e16d6821b25682231e0160504225b77843d6cb1612309f",
   "src/cmd_generic.odin": "37807b89c15f9ea984c4ad256061907470cf0b9c1bd6a765eef8e27a2d4483ec",
   "src/cmd_copy.odin": "fb4e44ba0e0a2fae7f750c711e9d12c28ca5e36e0d5abb69ae825d3def43a377",
@@ -30,6 +30,8 @@
   "src/keyspace_owners_scan.odin": "7d5911aa98a3777e372d9a10007511abbdb0b75d5341cbda2bdb7cda70b2edfa",
   "src/keyspace_owners_forget.odin": "948bdf4bf42c6750c25813d3339bf30e6548b88cdfffb628740ab21a8ec0788a",
   "src/keyspace_owners_quota.odin": "3c3d08d12846d5334d7ed95f842acea08830c0ed122cdb95e996afc8e50fbe34",
-  "src/owner_commands.odin": "9fe54073b842490b9498f89e647d51a3336142fb3a5ede1b1fa9c21522fd62d8",
-  "src/cmd_server.odin": "2372ba2aaac83eae543736440a20c0f229be5b93dfc5c780386c82adff4ceb3e"
+  "src/owner_commands.odin": "141d337fe8da822b6125dbe9c5c5dc1e020cd6cbbdd487184cf6a0d68c003dac",
+  "src/cmd_server.odin": "2372ba2aaac83eae543736440a20c0f229be5b93dfc5c780386c82adff4ceb3e",
+  "src/cmd_persist.odin": "b2205167b6e3cdb3e729ac76cbac9b3defb0597a0e0d523f5bfb41881f5714c9",
+  "src/persist_access.odin": "e799ca6c49b92eaf76e8fe39306b136e4095297a8b6f8dfb2e53ec52a1b6a7cd"
 }

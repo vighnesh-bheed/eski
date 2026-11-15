@@ -26,7 +26,7 @@ INVALID = 'ERR invalid label'
 CONTEXT_ERROR = 'ERR invalid context'
 TOKEN_ERROR = 'ERR invalid label token'
 TOP_ERROR = 'ERR this command needs a label that dominates the whole label scheme'
-PERSIST_ERROR = 'ERR persistence is off while a label scheme is configured'
+MIGRATE_ERROR = 'ERR MIGRATE is off while a label scheme is configured; move keys with DUMP and RESTORE'
 LABELS_OFF = 'ERR labels are not configured on this server'
 KEYS_REFUSED = "ERR CONFIG SET failed (possibly related to argument 'label-levels') - a label scheme needs a server without keys, because existing keys carry no label"
 STARTUP_REFUSED = 'holds data that carries no labels or owners, and a server with a label scheme or owner mode never loads it'
@@ -162,17 +162,21 @@ class LabelsOff(unittest.TestCase):
             text = error_of(self.client, 'ACL', 'SETUSER', 'x', rule)
             self.assertEqual(text, "ERR Error in ACL SETUSER modifier '%s': Labels are not configured on this server" % rule)
 
-    def test_scheme_needs_persistence_off(self):
+    def test_a_scheme_can_be_turned_on_while_the_append_only_file_is_on(self):
+        self.client.call('CONFIG', 'SET', 'appendonly', 'yes')
+        self.assertEqual(info(self.client, 'persistence')['aof_enabled'], '1')
+        self.assertEqual(self.client.call('CONFIG', 'SET', 'label-levels', 'U,S'), 'OK')
+        self.assertEqual(self.client.call('CONFIG', 'GET', 'label-levels'), [b'label-levels', b'U,S'])
+        self.assertEqual(error_of(self.client, 'CONFIG', 'SET', 'aof-use-rdb-preamble', 'no'), TOP_ERROR)
+
+    def test_a_scheme_is_turned_on_with_save_points_and_the_log_off_afterwards(self):
         self.client.call('CONFIG', 'SET', 'save', '900 1')
-        text = error_of(self.client, 'CONFIG', 'SET', 'label-levels', 'U,S')
-        self.assertIn('a label scheme needs persistence off', text)
-        self.assertEqual(self.client.call('CONFIG', 'GET', 'label-levels'), [b'label-levels', b'UNCLASSIFIED'])
-        self.client.call('CONFIG', 'SET', 'save', '')
         self.assertEqual(self.client.call('CONFIG', 'SET', 'label-levels', 'U,S'), 'OK')
         self.assertTrue(as_map(self.client.call('LABEL', 'WHOAMI'))[b'label'] == b'U')
-        self.assertIn('persistence stays off', error_of(self.client, 'CONFIG', 'SET', 'appendonly', 'yes'))
-        self.assertIn('persistence stays off', error_of(self.client, 'CONFIG', 'SET', 'save', '60 10'))
-        self.assertEqual(error_of(self.client, 'SAVE'), PERSIST_ERROR)
+        self.assertEqual(error_of(self.client, 'CONFIG', 'SET', 'appendonly', 'yes'), TOP_ERROR)
+        self.assertEqual(error_of(self.client, 'CONFIG', 'SET', 'save', '60 10'), TOP_ERROR)
+        self.assertEqual(error_of(self.client, 'SAVE'), TOP_ERROR)
+        self.assertEqual(error_of(self.client, 'BGREWRITEAOF'), TOP_ERROR)
 
     def test_a_read_only_evalsha_passes_a_write_pause(self):
         c, other = self.client, self.server.client()
@@ -205,6 +209,21 @@ class LabelsOff(unittest.TestCase):
         self.assertEqual(c.call('LABEL', 'AS', 'S', 'SET', 'k', 'v'), 'OK')
         self.assertEqual(c.call('CONFIG', 'SET', 'label-levels', 'U,S,T', 'label-compartments', 'A'), 'OK')
         self.assertEqual(c.call('LABEL', 'AS', 'S', 'GET', 'k'), b'v')
+
+    def test_configuration_writes_are_open_with_labels_off(self):
+        c = self.client
+        self.assertEqual(c.call('CONFIG', 'SET', 'maxmemory', 0, 'hz', 10), 'OK')
+        self.assertEqual(c.call('CONFIG', 'SET', 'no-appendfsync-on-rewrite', 'yes'), 'OK')
+        self.assertEqual(c.call('MULTI'), 'OK')
+        self.assertEqual(c.call('CONFIG', 'SET', 'hz', 20), 'QUEUED')
+        self.assertEqual(c.call('EXEC'), ['OK'])
+        self.assertEqual(c.call('CONFIG', 'GET', 'hz'), [b'hz', b'20'])
+        self.assertEqual(error_of(c, 'CONFIG', 'SET', 'no-such-setting-at-all', 1),
+                         "ERR Unknown option or number of arguments for CONFIG SET - 'no-such-setting-at-all'")
+        self.assertEqual(error_of(c, 'CONFIG', 'SET', 'encryption-key-file', '/x'),
+                         "ERR CONFIG SET failed (possibly related to argument 'encryption-key-file') - can't set immutable config")
+        self.assertEqual(c.call('CONFIG', 'RESETSTAT'), 'OK')
+        self.assertEqual(error_of(c, 'CONFIG', 'REWRITE'), 'ERR The server is running without a config file')
 
 
 class Labelled(unittest.TestCase):
@@ -253,8 +272,8 @@ class Labelled(unittest.TestCase):
         self.assertEqual(c.call('CONFIG', 'GET', 'label-levels'), [b'label-levels', b'U,CONFIDENTIAL,S,TOP SECRET'])
         self.assertEqual(self.whoami(self.connect('app'))[b'trust-clearance'], b'VETTED')
         self.assertEqual(self.whoami(self.connect('low'))[b'clearance'], b'CONFIDENTIAL')
-        self.assertIn('persistence stays off', error_of(c, 'CONFIG', 'SET', 'appendonly', 'yes'))
-        self.assertIn('persistence stays off', error_of(c, 'CONFIG', 'SET', 'save', '900 1'))
+        self.assertIn('always a snapshot', error_of(c, 'CONFIG', 'SET', 'aof-use-rdb-preamble', 'no'))
+        self.assertEqual(c.call('CONFIG', 'SET', 'save', '900 1'), 'OK')
         self.assertEqual(c.call('CONFIG', 'SET', 'save', ''), 'OK')
         self.assertIn('never removed', error_of(c, 'CONFIG', 'SET', 'label-compartments', 'A,B,X,Y', 'label-levels', 'U'))
         self.assertEqual(c.call('CONFIG', 'GET', 'label-compartments'), [b'label-compartments', b'A,B,X'])
@@ -446,7 +465,7 @@ class Labelled(unittest.TestCase):
         app.call('LABEL', 'WHOAMI')
         self.assertEqual(as_map(app.call('LABEL', 'AS', 'C', 'EXEC')[0])[b'label'], b'C')
         app.call('LABEL', 'AS', 'U', 'MULTI')
-        self.assertEqual(error_of(app, 'SAVE'), PERSIST_ERROR)
+        self.assertEqual(error_of(app, 'SAVE'), TOP_ERROR)
         self.assertEqual(error_of(app, 'DEBUG', 'SLEEP', 0), TOP_ERROR)
         self.assertTrue(error_of(app, 'EXEC').startswith('EXECABORT'))
 
@@ -485,7 +504,7 @@ class Labelled(unittest.TestCase):
                      "return redis.call('CONTEXT', 'CREATE')"):
             self.assertIn('This command is not allowed from script', error_of(app, 'EVAL', body, 0))
         app.call('LABEL', 'AS', 'S//A', 'SET', 'k', 'v')
-        self.assertIn('persistence is off', error_of(app, 'EVAL', "return redis.call('DUMP', 'k')", 0))
+        self.assertTrue(app.call('EVAL', "return redis.call('DUMP', 'k')", 0).startswith(b'\x00'))
         self.assertIn('dominates the whole label scheme', error_of(app, 'EVAL', "return redis.call('SWAPDB', 0, 1)", 0))
         self.assertEqual(self.admin.call('EVAL', "return redis.call('SWAPDB', 0, 1)", 0), 'OK')
         self.assertEqual(as_map(app.call('LABEL', 'AS', 'U', 'EVAL_RO', script, 0))[b'label'], b'U')
@@ -728,6 +747,82 @@ class Labelled(unittest.TestCase):
         self.assertEqual(info(low, 'server')['redis_version'], info(self.admin, 'server')['redis_version'])
         self.assertTrue(isinstance(self.admin.call('ACL', 'LOG'), list))
 
+    def test_configuration_writes_need_the_top_for_every_setting(self):
+        app, low, peer = self.connect('app'), self.connect('low'), self.connect('peer')
+        names = ('maxmemory', 'hz', 'slowlog-max-len', 'save', 'appendonly', 'label-levels', 'label-compartments', 'owners', 'no-appendfsync-on-rewrite',
+                 'sanitize-dump-payload', 'loading-process-events-interval-bytes', 'encryption-key-file', 'label-audit-file', 'requirepass', 'port')
+        before = {name: self.admin.call('CONFIG', 'GET', name) for name in names}
+        forms = [('CONFIG', 'SET', 'maxmemory', 1), ('config', 'set', 'maxmemory', 1), ('Config', 'Set', 'maxmemory', 1),
+                 ('CONFIG', 'SET', 'no-such-setting-at-all', 1), ('CONFIG', 'SET', 'hz', 10, 'maxmemory', 1),
+                 ('CONFIG', 'SET', 'slowlog-max-len', 5), ('CONFIG', 'SET', 'save', '60 1'), ('CONFIG', 'SET', 'appendonly', 'yes'),
+                 ('CONFIG', 'SET', 'label-levels', 'U,C,S,TOP SECRET,NEW'), ('CONFIG', 'SET', 'label-compartments', 'A,B,X'),
+                 ('CONFIG', 'SET', 'owners', 'yes'), ('CONFIG', 'SET', 'no-appendfsync-on-rewrite', 'yes'),
+                 ('CONFIG', 'SET', 'sanitize-dump-payload', 'no'), ('CONFIG', 'SET', 'loading-process-events-interval-bytes', 1024),
+                 ('CONFIG', 'SET', 'encryption-key-file', '/x'), ('CONFIG', 'SET', 'label-audit-file', '/x'), ('CONFIG', 'SET', 'port', 1),
+                 ('CONFIG', 'SET', 'requirepass', 'secret'), ('CONFIG', 'SET', 'maxmemory', 1, 'maxmemory', 2),
+                 ('CONFIG', 'SET'), ('CONFIG', 'SET', 'maxmemory'), ('CONFIG', 'SET', 'maxmemory', 1, 'hz'),
+                 ('CONFIG', 'REWRITE'), ('config', 'rewrite'), ('CONFIG', 'REWRITE', 'extra'), ('CONFIG', 'RESETSTAT')]
+        for client in (app, low, peer):
+            for form in forms:
+                self.assertEqual(error_of(client, *form), TOP_ERROR)
+                self.assertEqual(error_of(client, 'LABEL', 'AS', 'C', *form), TOP_ERROR)
+        self.assertEqual({name: self.admin.call('CONFIG', 'GET', name) for name in names}, before)
+        for client in (app, low, peer):
+            self.assertEqual(client.call('CONFIG', 'GET', 'maxmemory'), [b'maxmemory', b'0'])
+            self.assertEqual(client.call('CONFIG', 'GET', 'maxmemory', 'hz'), [b'maxmemory', b'0', b'hz', before['hz'][1]])
+            self.assertEqual(len(client.call('CONFIG', 'GET', '*')) % 2, 0)
+            self.assertEqual(client.call('CONFIG', 'GET', 'no-such-setting-at-all'), [])
+            self.assertTrue(client.call('CONFIG', 'HELP'))
+            self.assertTrue(error_of(client, 'CONFIG', 'NOSUCH').startswith("ERR unknown subcommand 'NOSUCH'"))
+        self.assertEqual(error_of(app, 'LABEL', 'AS', 'S//A', 'CONFIG', 'SET', 'maxmemory', 1), TOP_ERROR)
+        self.admin.call('ACL', 'SETUSER', 'nopower', 'on', 'nopass', '+@all', '-config', '~*', '&*', 'clearance:C')
+        self.assertEqual(error_of(self.connect('nopower'), 'CONFIG', 'SET', 'maxmemory', 1),
+                         "NOPERM User nopower has no permissions to run the 'config|set' command")
+        self.assertEqual(self.admin.call('CONFIG', 'SET', 'maxmemory', 0, 'hz', before['hz'][1]), 'OK')
+        self.assertEqual(self.admin.call('CONFIG', 'SET', 'no-appendfsync-on-rewrite', 'yes'), 'OK')
+        self.assertEqual(self.admin.call('CONFIG', 'SET', 'no-appendfsync-on-rewrite', 'no'), 'OK')
+        self.assertEqual(self.admin.call('CONFIG', 'SET', 'sanitize-dump-payload', 'clients'), 'OK')
+        self.assertEqual(self.admin.call('CONFIG', 'SET', 'loading-process-events-interval-bytes', 1048576), 'OK')
+        self.assertEqual(self.admin.call('CONFIG', 'SET', 'label-compartments', 'A,B,X'), 'OK')
+        self.assertEqual(error_of(self.admin, 'CONFIG', 'SET', 'encryption-key-file', '/x'),
+                         "ERR CONFIG SET failed (possibly related to argument 'encryption-key-file') - can't set immutable config")
+        self.assertEqual(error_of(self.admin, 'CONFIG', 'SET', 'no-such-setting-at-all', 1),
+                         "ERR Unknown option or number of arguments for CONFIG SET - 'no-such-setting-at-all'")
+
+    def test_configuration_writes_in_transactions_scripts_and_functions_need_the_top(self):
+        app, admin = self.connect('app'), self.admin
+        self.assertEqual(app.call('MULTI'), 'OK')
+        self.assertEqual(error_of(app, 'CONFIG', 'SET', 'maxmemory', 1), TOP_ERROR)
+        self.assertTrue(error_of(app, 'EXEC').startswith('EXECABORT'))
+        self.assertEqual(app.call('MULTI'), 'OK')
+        self.assertEqual(error_of(app, 'CONFIG', 'REWRITE'), TOP_ERROR)
+        self.assertEqual(app.call('DISCARD'), 'OK')
+        self.assertEqual(app.call('LABEL', 'AS', 'C', 'MULTI'), 'OK')
+        self.assertEqual(error_of(app, 'CONFIG', 'SET', 'maxmemory', 1), TOP_ERROR)
+        self.assertTrue(error_of(app, 'EXEC').startswith('EXECABORT'))
+        self.assertEqual(admin.call('MULTI'), 'OK')
+        self.assertEqual(admin.call('CONFIG', 'SET', 'slowlog-max-len', 77), 'QUEUED')
+        self.assertEqual(admin.call('EXEC'), ['OK'])
+        self.assertEqual(admin.call('CONFIG', 'GET', 'slowlog-max-len'), [b'slowlog-max-len', b'77'])
+        self.assertEqual(admin.call('CONFIG', 'SET', 'slowlog-max-len', 128), 'OK')
+        body = "return redis.call('CONFIG', 'SET', 'slowlog-max-len', '55')"
+        self.assertIn('This command is not allowed from script', error_of(app, 'EVAL', body, 0))
+        self.assertEqual(admin.call('DEBUG', 'SET-DISABLE-DENY-SCRIPTS', 1), 'OK')
+        self.addCleanup(admin.call, 'DEBUG', 'SET-DISABLE-DENY-SCRIPTS', 0)
+        library = "#!lua name=cfg\nredis.register_function('setlen', function() return redis.call('CONFIG', 'SET', 'slowlog-max-len', '55') end)\n" \
+                  "redis.register_function('rewrite', function() return redis.call('CONFIG', 'REWRITE') end)"
+        self.assertEqual(admin.call('FUNCTION', 'LOAD', library), b'cfg')
+        sha = app.call('SCRIPT', 'LOAD', body)
+        for command in (('EVAL', body, 0), ('EVALSHA', sha, 0), ('FCALL', 'setlen', 0), ('FCALL', 'rewrite', 0),
+                        ('EVAL', "return redis.pcall('CONFIG', 'SET', 'slowlog-max-len', '55')", 0)):
+            self.assertIn('dominates the whole label scheme', error_of(app, *command))
+        for command in (('EVAL', body, 0), ('FCALL', 'setlen', 0), ('FCALL', 'rewrite', 0)):
+            self.assertIn('dominates the whole label scheme', error_of(app, 'LABEL', 'AS', 'C', *command))
+        self.assertEqual(admin.call('CONFIG', 'GET', 'slowlog-max-len'), [b'slowlog-max-len', b'128'])
+        self.assertEqual(admin.call('FCALL', 'setlen', 0), 'OK')
+        self.assertEqual(admin.call('CONFIG', 'GET', 'slowlog-max-len'), [b'slowlog-max-len', b'55'])
+        self.assertEqual(admin.call('CONFIG', 'SET', 'slowlog-max-len', 128), 'OK')
+
     def test_monitor_and_slowlog_carry_labels(self):
         monitor = Client(self.server.port)
         self.addCleanup(monitor.close)
@@ -759,16 +854,18 @@ class Labelled(unittest.TestCase):
         self.assertGreater(self.admin.call('SLOWLOG', 'LEN'), len(public))
         self.assertEqual(len(app.call('LABEL', 'AS', 'U', 'SLOWLOG', 'GET', 1)), 1)
 
-    def test_persistence_is_refused_in_one_place(self):
+    def test_the_append_only_file_and_migrate_are_refused_in_one_place(self):
         c = self.admin
         c.call('SET', 'k', 'v')
-        for command in (('SAVE',), ('BGSAVE',), ('BGSAVE', 'SCHEDULE'), ('BGREWRITEAOF',), ('DUMP', 'k'),
-                        ('RESTORE', 'x', 0, 'payload'), ('MIGRATE', '127.0.0.1', 1, 'k', 0, 10), ('DEBUG', 'RELOAD'),
-                        ('DEBUG', 'LOADAOF'), ('SHUTDOWN', 'SAVE')):
-            self.assertEqual(error_of(c, *command), PERSIST_ERROR)
+        for command in (('MIGRATE', '127.0.0.1', 1, 'k', 0, 10),):
+            self.assertEqual(error_of(c, *command), MIGRATE_ERROR)
         self.assertEqual(c.call('PING'), 'PONG')
         self.assertEqual(info(c, 'persistence')['rdb_bgsave_in_progress'], '0')
         self.assertFalse(list(Path(self.server.directory).glob('*.rdb')))
+        self.assertEqual(error_of(c, 'RESTORE', 'x', 0, 'payload'), 'ERR DUMP payload version or checksum are wrong')
+        self.assertEqual(c.call('RESTORE', 'x', 0, c.call('DUMP', 'k')), 'OK')
+        self.assertEqual(c.call('SAVE'), 'OK')
+        self.assertTrue(list(Path(self.server.directory).glob('*.rdb')))
 
     def test_acl_changes_evict_connections_beyond_the_new_clearance(self):
         app = self.connect('app')
@@ -853,14 +950,15 @@ class Labelled(unittest.TestCase):
         self.assertEqual(error_of(agent, 'CONTEXT', 'CREATE'), "NOPERM User all-but-dangerous has no permissions to run the 'context|create' command")
         self.assertEqual(len(self.connect('explicit').call('CONTEXT', 'CREATE')), 32)
 
-    def test_shutdown_options_cannot_save(self):
+    def test_shutdown_options_may_save_and_shutdown_needs_top(self):
         for option in ('shutdown-on-sigterm', 'shutdown-on-sigint'):
-            self.assertIn('persistence stays off', error_of(self.admin, 'CONFIG', 'SET', option, 'save'))
-            self.assertIn('persistence stays off', error_of(self.admin, 'CONFIG', 'SET', option, 'save now'))
+            self.assertEqual(self.admin.call('CONFIG', 'SET', option, 'save'), 'OK')
+            self.assertEqual(self.admin.call('CONFIG', 'SET', option, 'save now'), 'OK')
             self.assertEqual(self.admin.call('CONFIG', 'SET', option, 'nosave now'), 'OK')
             self.assertEqual(self.admin.call('CONFIG', 'SET', option, 'default'), 'OK')
-        self.assertEqual(error_of(self.admin, 'SHUTDOWN', 'SAVE'), PERSIST_ERROR)
-        self.assertEqual(error_of(self.admin, 'SHUTDOWN', 'NOW', 'SAVE'), PERSIST_ERROR)
+        app = self.connect('app')
+        for command in (('SHUTDOWN',), ('SHUTDOWN', 'SAVE'), ('SHUTDOWN', 'NOW', 'NOSAVE'), ('CONFIG', 'SET', 'shutdown-on-sigterm', 'save')):
+            self.assertEqual(error_of(app, *command), TOP_ERROR)
 
     def test_label_state_counts_in_client_memory(self):
         def tot_mem(port):
@@ -1127,16 +1225,12 @@ class Startup(unittest.TestCase):
         command = [str(BINARY)] + list(arguments) + ['--bind', '127.0.0.1', '--port', str(port), '--dir', directory.name]
         return subprocess.run(command, capture_output=True, timeout=20, text=True), directory.name, port
 
-    def test_default_save_points_refuse_a_scheme(self):
-        result, _, _ = self.run_server('--label-levels', 'U,S')
+    def test_the_append_only_file_refuses_a_scheme(self):
+        result, _, _ = self.run_server('--label-levels', 'U,S', '--appendonly', 'yes', '--aof-use-rdb-preamble', 'no')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('a label scheme needs persistence off', result.stdout + result.stderr)
-        result, _, _ = self.run_server('--label-levels', 'U,S', '--save', '', '--appendonly', 'yes')
+        self.assertIn('the append-only base of a server with a label scheme or owner mode is always a snapshot', result.stdout + result.stderr)
+        result, _, _ = self.run_server('--label-levels', 'U,S', '--save', '', '--appendonly', 'yes', '--aof-use-rdb-preamble', 'no')
         self.assertNotEqual(result.returncode, 0)
-        for option in ('--shutdown-on-sigterm', '--shutdown-on-sigint'):
-            result, _, _ = self.run_server('--label-levels', 'U,S', '--save', '', option, 'save')
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn('no save in shutdown-on-sigterm or shutdown-on-sigint', result.stdout + result.stderr)
         result, _, _ = self.run_server('--label-levels', 'U,CONTEXT', '--save', '')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('reserved', result.stdout + result.stderr)
@@ -1160,6 +1254,7 @@ class Startup(unittest.TestCase):
         try:
             wait_for(lambda: self.ping(port), timeout=15, label='server started')
             client = Client(port)
+            client.call('ACL', 'SETUSER', 'default', 'clearance:*')
             client.call('CONFIG', 'SET', 'label-trust-levels', 'WEB,VETTED')
             self.assertEqual(client.call('CONFIG', 'REWRITE'), 'OK')
             client.close()
@@ -1205,12 +1300,15 @@ class Startup(unittest.TestCase):
             self.addCleanup(client.close)
             self.assertEqual(client.call('DBSIZE'), 0)
             client.call('ACL', 'SETUSER', 'default', 'clearance:*')
-            for command in (('DEBUG', 'RELOAD'), ('DEBUG', 'RELOAD', 'NOSAVE'), ('DEBUG', 'RELOAD', 'MERGE', 'NOSAVE'), ('DEBUG', 'LOADAOF')):
-                self.assertEqual(error_of(client, *command), PERSIST_ERROR)
+            self.assertEqual(client.call('DEBUG', 'RELOAD'), 'OK')
+            self.assertEqual(client.call('DEBUG', 'RELOAD', 'NOSAVE'), 'OK')
+            self.assertEqual(error_of(client, 'DEBUG', 'RELOAD', 'MERGE', 'NOSAVE'), 'ERR DEBUG RELOAD MERGE and NOFLUSH are not available with a label scheme or owner mode')
+            self.assertEqual(error_of(client, 'DEBUG', 'LOADAOF'), 'ERR Error trying to load the AOF files, check server logs.')
+            client.call('SET', 'own', 'value')
             client.call('CONFIG', 'SET', 'dbfilename', 'old.rdb')
-            self.assertEqual(error_of(client, 'DEBUG', 'RELOAD', 'NOSAVE'), PERSIST_ERROR)
-            self.assertIn('persistence stays off', error_of(client, 'CONFIG', 'SET', 'appendonly', 'yes'))
-            self.assertEqual(client.call('DBSIZE'), 0)
+            self.assertEqual(error_of(client, 'DEBUG', 'RELOAD', 'NOSAVE'), 'ERR Error trying to load the RDB dump, check server logs.')
+            self.assertIn('always a snapshot', error_of(client, 'CONFIG', 'SET', 'aof-use-rdb-preamble', 'no'))
+            self.assertEqual(client.call('DBSIZE'), 1)
         finally:
             os.killpg(server.pid, signal.SIGTERM)
             server.wait(timeout=10)
@@ -1228,8 +1326,10 @@ class Startup(unittest.TestCase):
                 wait_for(lambda: self.ping(port), timeout=15, label='server started')
                 client = Client(port)
                 client.call('SET', 'k', 'v')
-                self.assertEqual(error_of(client, 'SHUTDOWN', 'SAVE'), PERSIST_ERROR)
+                self.assertEqual(error_of(client, 'SHUTDOWN', 'SAVE'), TOP_ERROR)
+                self.assertEqual(error_of(client, 'SHUTDOWN'), TOP_ERROR)
                 if how == 'shutdown':
+                    client.call('ACL', 'SETUSER', 'default', 'clearance:*')
                     client.send('SHUTDOWN')
                     try:
                         client.reply()
@@ -1255,6 +1355,66 @@ class Startup(unittest.TestCase):
             return False
 
 
+class WritePause(unittest.TestCase):
+    def start(self, *arguments):
+        server = Server(BINARY, workers=2, arguments=('--keyspace-threads', str(KEYSPACE_THREADS)) + arguments)
+        self.addCleanup(server.close)
+        server.start()
+        admin = server.client()
+        self.addCleanup(admin.close)
+        return server, admin
+
+    def held(self, server, admin, sends, free):
+        clients = []
+        for command in sends:
+            client = server.client()
+            self.addCleanup(client.close)
+            clients.append(client)
+        before = admin.call('DEBUG', 'DIGEST')
+        self.assertEqual(admin.call('CLIENT', 'PAUSE', 10000, 'WRITE'), 'OK')
+        for client, command in zip(clients, sends):
+            client.send(*command)
+        for command, reply in free:
+            self.assertEqual(admin.call(*command), reply, command)
+        for client, command in zip(clients, sends):
+            self.assertFalse(client.available(0.3), command)
+        self.assertEqual(admin.call('DEBUG', 'DIGEST'), before)
+        self.assertEqual(admin.call('CLIENT', 'UNPAUSE'), 'OK')
+        return [client.reply() for client in clients]
+
+    def test_a_write_pause_holds_the_vector_writes_as_the_reference_does(self):
+        server, admin = self.start()
+        for i in range(4):
+            self.assertEqual(admin.call('VADD', 'v', 'VALUES', 2, i, 1, 'e%d' % i), 1)
+        replies = self.held(server, admin, (('VADD', 'v', 'VALUES', 2, 9, 9, 'new'), ('VREM', 'v', 'e1'), ('VSETATTR', 'v', 'e2', '{"a":1}'), ('PUBLISH', 'ch', 'm'), ('PFCOUNT', 'hll')),
+                            ((('VCARD', 'v'), 4), (('VISMEMBER', 'v', 'e1'), 1), (('SCRIPT', 'FLUSH'), 'OK'), (('VGETATTR', 'v', 'e2'), None)))
+        self.assertEqual(replies, [1, 1, 1, 0, 0])
+        self.assertEqual(admin.call('VCARD', 'v'), 4)
+
+    def test_a_write_pause_holds_a_prefixed_vector_write_and_a_relabel(self):
+        server, admin = self.start(*SCHEME)
+        admin.call('ACL', 'SETUSER', 'default', 'clearance:*')
+        for i in range(4):
+            self.assertEqual(admin.call('LABEL', 'AS', 'S', 'VADD', 'v', 'VALUES', 2, i, 1, 'e%d' % i), 1)
+        self.assertEqual(admin.call('LABEL', 'AS', 'S', 'SET', 'k', 'x'), 'OK')
+        replies = self.held(server, admin, (('LABEL', 'AS', 'S', 'VADD', 'v', 'VALUES', 2, 9, 9, 'new'), ('LABEL', 'AS', 'S', 'VREM', 'v', 'e1'),
+                                            ('LABEL', 'AS', 'S', 'LABEL', 'DECLASSIFY', 'k', 'C')),
+                            ((('LABEL', 'AS', 'S', 'VCARD', 'v'), 4), (('LABEL', 'AS', 'C', 'GET', 'k'), None)))
+        self.assertEqual(replies, [1, 1, 'OK'])
+        self.assertEqual(admin.call('LABEL', 'AS', 'C', 'GET', 'k'), b'x')
+
+    def test_the_keyspace_worker_lines_read_zero_below_the_top(self):
+        server, admin = self.start(*SCHEME, '--keyspace-threads', '2')
+        admin.call('ACL', 'SETUSER', 'default', 'clearance:*')
+        for i in range(50):
+            admin.call('LABEL', 'AS', 'S', 'SET', 'k%d' % i, 'v')
+        text = admin.call('LABEL', 'AS', 'U', 'INFO', 'server').decode()
+        lines = dict(line.split(':', 1) for line in text.splitlines() if line.startswith('keyspace_'))
+        self.assertEqual(lines.pop('keyspace_threads_configured'), '2')
+        self.assertEqual(lines.pop('keyspace_threads_active'), '2')
+        self.assertEqual(set(lines.values()), {'0'}, lines)
+
+
 def main():
     global BINARY, KEYSPACE_THREADS
     parser = argparse.ArgumentParser(description='Label scheme, subjects, contexts, tokens and server-wide channels.')
@@ -1268,7 +1428,7 @@ def main():
     if args.timeout <= 0 or not BINARY.is_file():
         parser.error('existing binary and positive timeout required')
     suite = unittest.TestSuite()
-    for case in (LabelsOff, Labelled, Startup):
+    for case in (LabelsOff, Labelled, Startup, WritePause):
         for name in unittest.defaultTestLoader.getTestCaseNames(case):
             if fnmatch.fnmatchcase(name, args.case):
                 suite.addTest(case(name))

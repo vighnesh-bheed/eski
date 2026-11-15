@@ -154,6 +154,10 @@ run_script "test/compatibility/owners_compact.py" "owners-compact-coordinator" -
 run_script "test/compatibility/owners_compact.py" "owners-compact-workers" --server "$server_binary" --keyspace-threads 2
 run_script "test/compatibility/labels_keyspace.py" "labels-keyspace-coordinator" --server "$server_binary" --keyspace-threads 0
 run_script "test/compatibility/labels_keyspace.py" "labels-keyspace-workers" --server "$server_binary" --keyspace-threads 2
+run_script "test/compatibility/labels_persistence.py" "labels-persistence-coordinator" --server "$server_binary" --keyspace-threads 0
+run_script "test/compatibility/labels_persistence.py" "labels-persistence-workers" --server "$server_binary" --keyspace-threads 2
+run_script "test/compatibility/owners_persistence.py" "owners-persistence-coordinator" --server "$server_binary" --keyspace-threads 0
+run_script "test/compatibility/owners_persistence.py" "owners-persistence-workers" --server "$server_binary" --keyspace-threads 2
 
 if [ "$ran" -eq 0 ]; then
 	echo "no test packages found yet"

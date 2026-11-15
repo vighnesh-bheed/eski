@@ -13,7 +13,7 @@ import unittest
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'test/threading'))
-from support import Client, Push, Server, ServerError, info
+from support import Client, Push, Server, ServerError, info, wait_for
 
 BINARY = ROOT / 'bin/eski'
 KEYSPACE_THREADS = 0
@@ -32,8 +32,6 @@ SESSION_NEEDED = 'ERR this command needs a session label set with LABEL SESSION'
 PER_COMMAND = 'ERR this login must send every command through LABEL AS'
 TOKEN_ERROR = 'ERR invalid label token'
 CONTEXT_ERROR = 'ERR invalid context'
-PERSIST_ERROR = 'ERR persistence is off while a label scheme is configured'
-OWNER_PERSIST_ERROR = 'ERR persistence is off while owner mode is on'
 OPERATOR_ERROR = 'ERR this command needs a login with the owner-operator right'
 OWNER_TRANSACTION = "ERR the command's owner differs from the transaction's owner"
 OWNER_WATCH_REFUSED = "EXECABORT Transaction discarded because of: the command's owner differs from the transaction's owner"
@@ -207,19 +205,26 @@ class OwnersOff(unittest.TestCase):
 
 
 class LabelsOff(OwnersOff):
-    def test_turning_owners_on_needs_persistence_off(self):
+    def test_owner_mode_can_be_turned_on_while_the_append_only_file_is_on(self):
+        c = self.client
+        c.call('CONFIG', 'SET', 'appendonly', 'yes')
+        self.assertEqual(c.call('CONFIG', 'SET', 'owners', 'yes'), 'OK')
+        self.assertEqual(c.call('CONFIG', 'GET', 'owners'), [b'owners', b'yes'])
+
+    def test_owner_mode_is_turned_on_with_save_points_and_the_log_off_afterwards(self):
         c = self.client
         c.call('CONFIG', 'SET', 'save', '900 1')
-        self.assertIn('needs persistence off', error_of(c, 'CONFIG', 'SET', 'owners', 'yes'))
-        self.assertEqual(c.call('CONFIG', 'GET', 'owners'), [b'owners', b'no'])
-        c.call('CONFIG', 'SET', 'save', '')
         self.assertEqual(c.call('CONFIG', 'SET', 'owners', 'yes'), 'OK')
         self.assertEqual(as_map(c.call('LABEL', 'WHOAMI'))[b'owners'], b'none')
-        self.assertEqual(error_of(c, 'CONFIG', 'SET', 'owners', 'no'),
+        self.assertEqual(error_of(c, 'CONFIG', 'SET', 'owners', 'no'), OPERATOR_ERROR)
+        c.call('ACL', 'SETUSER', 'op', 'on', 'nopass', '+@all', '~*', '&*', 'owner-operator')
+        operator = self.server.client()
+        operator.call('AUTH', 'op', 'x')
+        self.assertEqual(error_of(operator, 'CONFIG', 'SET', 'owners', 'no'),
                          "ERR CONFIG SET failed (possibly related to argument 'owners') - owner mode cannot be turned off")
-        self.assertEqual(error_of(c, 'CONFIG', 'SET', 'save', '60 10'),
-                         "ERR CONFIG SET failed (possibly related to argument 'save') - persistence stays off while owner mode is on")
-        self.assertEqual(error_of(c, 'SAVE'), OWNER_PERSIST_ERROR)
+        self.assertEqual(error_of(c, 'CONFIG', 'SET', 'appendonly', 'yes'), OPERATOR_ERROR)
+        self.assertEqual(error_of(c, 'SAVE'), OPERATOR_ERROR)
+        self.assertEqual(error_of(c, 'BGREWRITEAOF'), OPERATOR_ERROR)
         self.assertEqual(c.call('CONFIG', 'GET', 'owners'), [b'owners', b'yes'])
 
 
@@ -254,9 +259,13 @@ class LabelOnly(OwnersOff):
                          "ERR CONFIG SET failed (possibly related to argument 'owners') - owner mode needs a label scheme without a level named OWNER or SHARED")
         self.assertEqual(c.call('CONFIG', 'SET', 'label-levels', 'U,C,S,TOP'), 'OK')
         self.assertEqual(c.call('CONFIG', 'SET', 'owners', 'yes'), 'OK')
-        self.assertEqual(error_of(c, 'CONFIG', 'SET', 'label-levels', 'U,C,S,TOP,OWNER'),
+        c.call('ACL', 'SETUSER', 'op', 'on', 'nopass', '+@all', '~*', '&*', 'clearance:*', 'owner-operator')
+        operator = self.server.client()
+        operator.call('AUTH', 'op', 'x')
+        self.assertEqual(error_of(c, 'CONFIG', 'SET', 'label-levels', 'U,C,S,TOP,OWNER'), OPERATOR_ERROR)
+        self.assertEqual(error_of(operator, 'CONFIG', 'SET', 'label-levels', 'U,C,S,TOP,OWNER'),
                          "ERR CONFIG SET failed (possibly related to argument 'label-levels') - OWNER and SHARED are reserved and cannot name a level while owner mode is on")
-        self.assertEqual(error_of(c, 'CONFIG', 'SET', 'label-levels', 'U,C,S,owner'),
+        self.assertEqual(error_of(operator, 'CONFIG', 'SET', 'label-levels', 'U,C,S,owner'),
                          "ERR CONFIG SET failed (possibly related to argument 'label-levels') - OWNER and SHARED are reserved and cannot name a level while owner mode is on")
         self.assertEqual(c.call('CONFIG', 'GET', 'label-levels'), [b'label-levels', b'U,C,S,TOP'])
         who = as_map(sub.call('LABEL', 'WHOAMI'))
@@ -792,7 +801,7 @@ class Owners(OwnerMode):
         time.sleep(0.2)
         entry = as_map(self.admin.call('OWNERS', 'INFO', 'u7'))[b'bytes']
         self.assertGreater(entry, 0)
-        self.assertEqual(as_map(self.admin.call('OWNERS', 'FORGET', 'u7')), {b'keys': 0, b'elements': 0, b'bytes': entry})
+        self.assertEqual(as_map(self.admin.call('OWNERS', 'FORGET', 'u7')), {b'keys': 0, b'elements': 0, b'bytes': entry, b'sequence': 1})
         for client in (pinned, bound, watching, blocked):
             self.assertTrue(closed(client))
         self.assertFalse(closed(other_pin))
@@ -807,7 +816,7 @@ class Owners(OwnerMode):
         self.assertEqual((record['details']['connections'], record['details']['contexts']), ('4', '1'))
         self.assertGreaterEqual(int(record['details']['slowlog']), 1)
         self.assertEqual(record['details']['tokens'], '1')
-        self.assertEqual(as_map(self.admin.call('OWNERS', 'FORGET', 'never-seen')), {b'keys': 0, b'elements': 0, b'bytes': 0})
+        self.assertEqual(as_map(self.admin.call('OWNERS', 'FORGET', 'never-seen')), {b'keys': 0, b'elements': 0, b'bytes': 0, b'sequence': 2})
         self.assertEqual(error_of(self.admin, 'OWNERS', 'FORGET', 'a b'), INVALID_OWNER)
 
     def test_owner_quota_info_and_list(self):
@@ -892,23 +901,42 @@ class Owners(OwnerMode):
 
     def test_forget_cancels_a_pending_job_of_the_owner(self):
         admin, login = self.compute_server()
-        app, job = login(), login()
+        app = login()
         first = bytes(97 + (i * 7) % 5 for i in range(3000))
         second = bytes(97 + (i * 11) % 5 for i in range(3000))
-        for owner in ('u7', 'u8'):
+        app.call('LABEL', 'AS', 'OWNER', 'u8', 'SET', 'k1', first)
+        app.call('LABEL', 'AS', 'OWNER', 'u8', 'SET', 'k2', second)
+
+        def counters():
+            stats = info(admin, 'everything')
+            return tuple(int(stats['compute_jobs_' + name]) for name in ('pending', 'submitted', 'cancelled', 'completed'))
+
+        caught = None
+        for attempt in range(200):
+            owner = 'u7-%d' % attempt
             app.call('LABEL', 'AS', 'OWNER', owner, 'SET', 'k1', first)
             app.call('LABEL', 'AS', 'OWNER', owner, 'SET', 'k2', second)
-        admin.call('SLOWLOG', 'RESET')
-        stats = info(admin, 'everything')
-        cancelled, completed = int(stats['compute_jobs_cancelled']), int(stats['compute_jobs_completed'])
-        job.send('LABEL', 'AS', 'OWNER', 'u7', 'LCS', 'k1', 'k2', 'LEN')
-        self.assertEqual(int(info(admin, 'everything')['compute_jobs_pending']), 1)
-        self.assertEqual(as_map(admin.call('OWNERS', 'FORGET', 'u7'))[b'keys'], 2)
-        job.socket.settimeout(5)
+            admin.call('SLOWLOG', 'RESET')
+            admin.call('CONFIG', 'RESETSTAT')
+            wait_for(lambda: counters()[0] == 0, timeout=60, label='earlier jobs to be collected')
+            _, submitted, cancelled, completed = counters()
+            job = login()
+            job.send('LABEL', 'AS', 'OWNER', owner, 'LCS', 'k1', 'k2', 'LEN')
+            wait_for(lambda: counters()[1] > submitted, timeout=60, label='the job to reach the server')
+            stats, forgotten = admin.pipeline([('INFO', 'everything'), ('OWNERS', 'FORGET', owner)])
+            self.assertEqual(as_map(forgotten)[b'keys'], 2)
+            fields = dict(line.split(':', 1) for line in stats.decode().splitlines() if ':' in line)
+            if int(fields['compute_jobs_pending']) == 1:
+                caught = (job, cancelled, completed)
+                break
+            job.close()
+        self.assertIsNotNone(caught, 'no job was still pending when its owner was forgotten')
+        job, cancelled, completed = caught
+        job.socket.settimeout(60)
         with self.assertRaises((EOFError, OSError)):
             job.reply()
-        stats = info(admin, 'everything')
-        self.assertEqual((int(stats['compute_jobs_cancelled']), int(stats['compute_jobs_completed'])), (cancelled + 1, completed))
+        wait_for(lambda: counters()[0] == 0, timeout=60, label='the cancelled job to be collected')
+        self.assertEqual(counters()[2:], (cancelled + 1, completed))
         self.assertFalse([e for e in admin.call('SLOWLOG', 'GET', 100000) if e[3][:1] == [b'LCS']])
         self.assertNotIn('cmdstat_lcs', admin.call('INFO', 'commandstats').decode())
         reader = login()
@@ -1024,6 +1052,65 @@ class Owners(OwnerMode):
         self.assertGreaterEqual(grown[1], len(body))
         self.assertLess(abs(grown[1] - grown[0]), len(body) // 2)
 
+    def test_configuration_writes_need_the_operator_at_top(self):
+        top, app, fixed, shared, plain, op = (self.connect(name) for name in ('top', 'app', 'fixed', 'shared', 'plain', 'op'))
+        names = ('maxmemory', 'hz', 'slowlog-max-len', 'owners', 'owner-quota-default', 'owner-partitions-max', 'no-appendfsync-on-rewrite',
+                 'sanitize-dump-payload', 'loading-process-events-interval-bytes', 'owners-forget-aof-delay')
+        before = {name: self.admin.call('CONFIG', 'GET', name) for name in names}
+        forms = [('CONFIG', 'SET', 'maxmemory', 1), ('config', 'set', 'maxmemory', 1), ('CONFIG', 'SET', 'no-such-setting-at-all', 1),
+                 ('CONFIG', 'SET', 'hz', 10, 'maxmemory', 1), ('CONFIG', 'SET', 'owner-quota-default', 5), ('CONFIG', 'SET', 'owner-partitions-max', 3),
+                 ('CONFIG', 'SET', 'owners-forget-aof-delay', 5), ('CONFIG', 'SET', 'no-appendfsync-on-rewrite', 'yes'),
+                 ('CONFIG', 'SET', 'sanitize-dump-payload', 'no'), ('CONFIG', 'SET', 'loading-process-events-interval-bytes', 1024),
+                 ('CONFIG', 'SET', 'encryption-key-file', '/x'), ('CONFIG', 'SET', 'save', '60 1'), ('CONFIG', 'SET'), ('CONFIG', 'SET', 'maxmemory'),
+                 ('CONFIG', 'REWRITE'), ('CONFIG', 'RESETSTAT')]
+        for client, prefix, text in ((top, ('LABEL', 'AS', 'OWNER', 'u1'), OPERATOR_ERROR), (top, ('LABEL', 'AS', 'S//A', 'OWNER', 'u1'), TOP_ERROR),
+                                     (app, ('LABEL', 'AS', 'OWNER', 'u1'), TOP_ERROR), (fixed, (), TOP_ERROR), (fixed, ('LABEL', 'AS', 'C'), TOP_ERROR),
+                                     (shared, ('LABEL', 'AS', 'SHARED'), TOP_ERROR), (plain, (), TOP_ERROR)):
+            for form in forms:
+                self.assertEqual(error_of(client, *prefix, *form), text)
+        self.assertEqual({name: self.admin.call('CONFIG', 'GET', name) for name in names}, before)
+        for client, prefix in ((top, ('LABEL', 'AS', 'OWNER', 'u1')), (app, ('LABEL', 'AS', 'OWNER', 'u1')), (fixed, ()), (plain, ())):
+            self.assertEqual(client.call(*prefix, 'CONFIG', 'GET', 'maxmemory'), [b'maxmemory', b'0'])
+            self.assertEqual(client.call(*prefix, 'CONFIG', 'GET', 'no-such-setting-at-all'), [])
+            self.assertTrue(client.call(*prefix, 'CONFIG', 'HELP'))
+        self.assertEqual(op.call('LABEL', 'AS', 'OWNER', 'u1', 'CONFIG', 'SET', 'slowlog-max-len', 77), 'OK')
+        self.assertEqual(self.admin.call('CONFIG', 'GET', 'slowlog-max-len'), [b'slowlog-max-len', b'77'])
+        self.assertEqual(op.call('LABEL', 'AS', 'OWNER', 'u1', 'CONFIG', 'SET', 'no-appendfsync-on-rewrite', 'yes', 'hz', 10), 'OK')
+        self.assertEqual(op.call('LABEL', 'AS', 'OWNER', 'u1', 'CONFIG', 'SET', 'no-appendfsync-on-rewrite', 'no'), 'OK')
+        self.assertEqual(op.call('LABEL', 'AS', 'OWNER', 'u1', 'CONFIG', 'SET', 'sanitize-dump-payload', 'clients'), 'OK')
+        self.assertEqual(self.admin.call('CONFIG', 'SET', 'slowlog-max-len', 128), 'OK')
+        self.assertEqual(error_of(self.admin, 'CONFIG', 'SET', 'no-such-setting-at-all', 1),
+                         "ERR Unknown option or number of arguments for CONFIG SET - 'no-such-setting-at-all'")
+        self.assertEqual(error_of(self.admin, 'CONFIG', 'REWRITE'), 'ERR The server is running without a config file')
+
+    def test_configuration_writes_in_transactions_scripts_and_functions_need_the_operator_at_top(self):
+        top, app, op, admin = self.connect('top'), self.connect('app'), self.connect('op'), self.admin
+        u1 = ('LABEL', 'AS', 'OWNER', 'u1')
+        self.assertEqual(top.call(*u1, 'MULTI'), 'OK')
+        self.assertEqual(error_of(top, 'CONFIG', 'SET', 'maxmemory', 1), OPERATOR_ERROR)
+        self.assertTrue(error_of(top, 'EXEC').startswith('EXECABORT'))
+        self.assertEqual(app.call(*u1, 'MULTI'), 'OK')
+        self.assertEqual(error_of(app, 'CONFIG', 'REWRITE'), TOP_ERROR)
+        self.assertEqual(app.call('DISCARD'), 'OK')
+        self.assertEqual(op.call(*u1, 'MULTI'), 'OK')
+        self.assertEqual(op.call('CONFIG', 'SET', 'slowlog-max-len', 77), 'QUEUED')
+        self.assertEqual(op.call('EXEC'), ['OK'])
+        self.assertEqual(admin.call('CONFIG', 'GET', 'slowlog-max-len'), [b'slowlog-max-len', b'77'])
+        self.assertEqual(admin.call('CONFIG', 'SET', 'slowlog-max-len', 128), 'OK')
+        body = "return redis.call('CONFIG', 'SET', 'slowlog-max-len', '55')"
+        self.assertIn('This command is not allowed from script', error_of(top, *u1, 'EVAL', body, 0))
+        self.assertEqual(admin.call('DEBUG', 'SET-DISABLE-DENY-SCRIPTS', 1), 'OK')
+        self.addCleanup(admin.call, 'DEBUG', 'SET-DISABLE-DENY-SCRIPTS', 0)
+        library = "#!lua name=cfg\nredis.register_function('setlen', function() return redis.call('CONFIG', 'SET', 'slowlog-max-len', '55') end)"
+        self.assertEqual(admin.call('FUNCTION', 'LOAD', library), b'cfg')
+        for client, text in ((top, 'owner-operator right'), (app, 'dominates the whole label scheme')):
+            for command in (('EVAL', body, 0), ('FCALL', 'setlen', 0), ('EVAL', "return redis.pcall('CONFIG', 'REWRITE')", 0)):
+                self.assertIn(text, error_of(client, *u1, *command))
+        self.assertEqual(admin.call('CONFIG', 'GET', 'slowlog-max-len'), [b'slowlog-max-len', b'128'])
+        self.assertEqual(op.call(*u1, 'FCALL', 'setlen', 0), 'OK')
+        self.assertEqual(admin.call('CONFIG', 'GET', 'slowlog-max-len'), [b'slowlog-max-len', b'55'])
+        self.assertEqual(admin.call('CONFIG', 'SET', 'slowlog-max-len', 128), 'OK')
+
     def test_function_changes_need_the_operator_at_top(self):
         library = "#!lua name=lib\nredis.register_function('f', function() return 'one' end)"
         top, app, fixed, op = self.connect('top'), self.connect('app'), self.connect('fixed'), self.connect('op')
@@ -1121,9 +1208,11 @@ class OwnersWithoutLabels(OwnerMode):
         who = self.whoami(user)
         self.assertEqual((who[b'label'], who[b'owner'], who[b'top']), (b'UNCLASSIFIED', b'u1', 0))
         self.assertEqual(error_of(user, 'DEBUG', 'SLEEP', 0), OPERATOR_ERROR)
-        self.assertEqual(error_of(user, 'SAVE'), OWNER_PERSIST_ERROR)
-        self.assertEqual(error_of(self.admin, 'CONFIG', 'SET', 'save', '60 1'),
-                         "ERR CONFIG SET failed (possibly related to argument 'save') - persistence stays off while owner mode is on")
+        self.assertEqual(error_of(user, 'SAVE'), OPERATOR_ERROR)
+        self.assertEqual(error_of(user, 'CONFIG', 'SET', 'save', '60 1'), OPERATOR_ERROR)
+        self.assertEqual(self.admin.call('CONFIG', 'SET', 'save', '60 1'), 'OK')
+        self.assertEqual(error_of(self.admin, 'CONFIG', 'SET', 'aof-use-rdb-preamble', 'no'),
+                         "ERR CONFIG SET failed (possibly related to argument 'aof-use-rdb-preamble') - the append-only base of a server with a label scheme or owner mode is always a snapshot")
         self.assertEqual(self.admin.call('DEBUG', 'SLEEP', 0), 'OK')
         self.assertEqual(self.whoami(self.admin)[b'top'], 1)
         self.assertEqual(user.call('SET', 'k', 'v'), 'OK')
@@ -1174,10 +1263,43 @@ class Startup(unittest.TestCase):
             self.assertIn('Refusing to start: the data file dump.rdb in ', text)
             self.assertIn('a server with a label scheme or owner mode never loads it', text)
 
-    def test_owner_mode_refuses_persistence_memcached_and_reserved_levels(self):
-        self.assertIn('needs persistence off', self.refused('--save', '900 1'))
+    def test_owner_mode_refuses_the_append_only_file_memcached_and_reserved_levels(self):
+        self.assertIn('the append-only base of a server with a label scheme or owner mode is always a snapshot', self.refused('--save', '900 1', '--appendonly', 'yes', '--aof-use-rdb-preamble', 'no'))
         self.assertIn('memcached endpoint off', self.refused('--save', '', '--memcached-port', '11421'))
         self.assertIn('without a level named OWNER or SHARED', self.refused('--save', '', '--label-levels', 'U,SHARED'))
+
+
+class OwnerWritePause(unittest.TestCase):
+    def test_a_write_pause_holds_a_users_vector_writes_and_lets_a_forget_run(self):
+        server = Server(BINARY, workers=0, arguments=('--keyspace-threads', str(KEYSPACE_THREADS), '--owners', 'yes', '--memcached-port', '0') + SCHEME)
+        self.addCleanup(server.close)
+        server.start()
+        admin = server.client()
+        self.addCleanup(admin.close)
+        admin.call('ACL', 'SETUSER', 'default', 'on', 'nopass', '~*', '&*', '+@all', 'clearance:*', 'trust:*', 'owners:*', 'owner-shared', 'owner-operator')
+        top = ('LABEL', 'AS', 'S//A/B', 'SHARED')
+        self.assertEqual(admin.call('LABEL', 'AS', 'C', 'SHARED', 'VADD', 'v', 'VALUES', 2, 0, 1, 'shared'), 1)
+        for i in range(3):
+            self.assertEqual(admin.call('LABEL', 'AS', 'C', 'OWNER', 'u1', 'VADD', 'v', 'VALUES', 2, i, 1, 'e%d' % i), 1)
+        self.assertEqual(admin.call('LABEL', 'AS', 'C', 'OWNER', 'u2', 'SET', 'k', 'x'), 'OK')
+        sends = (('LABEL', 'AS', 'C', 'OWNER', 'u1', 'VADD', 'v', 'VALUES', 2, 9, 9, 'new'), ('LABEL', 'AS', 'C', 'OWNER', 'u1', 'VSETATTR', 'v', 'e0', '{"a":1}'))
+        clients = []
+        for _ in sends:
+            client = server.client()
+            self.addCleanup(client.close)
+            clients.append(client)
+        before = admin.call(*top, 'DEBUG', 'DIGEST')
+        self.assertEqual(admin.call(*top, 'CLIENT', 'PAUSE', 10000, 'WRITE'), 'OK')
+        for client, command in zip(clients, sends):
+            client.send(*command)
+        for client, command in zip(clients, sends):
+            self.assertFalse(client.available(0.3), command)
+        self.assertEqual(admin.call(*top, 'DEBUG', 'DIGEST'), before)
+        forgot = admin.call(*top, 'OWNERS', 'FORGET', 'u2')
+        self.assertEqual(as_map(forgot)[b'keys'], 1)
+        self.assertIsNone(admin.call('LABEL', 'AS', 'C', 'OWNER', 'u2', 'GET', 'k'))
+        self.assertEqual(admin.call(*top, 'CLIENT', 'UNPAUSE'), 'OK')
+        self.assertEqual([client.reply() for client in clients], [1, 1])
 
 
 if __name__ == '__main__':

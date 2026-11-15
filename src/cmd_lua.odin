@@ -113,6 +113,43 @@ lua_outer_readonly :: proc(cmd: ^Command, argv: [][]u8) -> bool {
 	return false
 }
 
+lua_outer_denyoom :: proc(cmd: ^Command, argv: [][]u8) -> bool {
+	if cmd == nil || len(argv) < 2 {
+		return false
+	}
+	flags: u32
+	if cmd.handler == cmd_fcall || cmd.handler == cmd_fcall_ro {
+		library, _, info := lua_function_find(argv[1])
+		if library == nil {
+			return false
+		}
+		flags = info.flags
+	} else {
+		body: []u8
+		if cmd.handler == cmd_eval || cmd.handler == cmd_eval_ro {
+			body = argv[1]
+		} else if (cmd.handler == cmd_evalsha || cmd.handler == cmd_evalsha_ro) && !labels_on {
+			digest, good := lua_digest_parse(argv[1])
+			if !good {
+				return false
+			}
+			entry := lua_cache_lookup(digest)
+			if entry == nil {
+				return false
+			}
+			body = entry.body
+		} else {
+			return false
+		}
+		_, declared, flagged, err := lua_source_plan(body)
+		if err != "" || !flagged {
+			return false
+		}
+		flags = declared
+	}
+	return flags & (LUA_FLAG_NO_WRITES | LUA_FLAG_ALLOW_OOM) == 0
+}
+
 lua_outer_persistence_write :: proc(cmd: ^Command, argv: [][]u8) -> bool {
 	if cmd == nil || len(argv) < 2 || lua_outer_readonly(cmd, argv) {
 		return false
@@ -398,7 +435,7 @@ lua_inner :: proc(run: ^Lua_Invocation, argv: [][]u8) {
 			return
 		}
 	}
-	if .Denyoom in spec.flags && !run.wrote && !run.allow_oom && maxmemory_bytes > 0 && u64(max(0, mem_used()-mem_not_counted())) > maxmemory_bytes {
+	if .Denyoom in spec.flags && !run.wrote && !run.allow_oom && maxmemory_bytes > 0 && memory_arrival_over {
 		lua_inner_reject(run, ERR_OOM)
 		stat_reject(hot, argv)
 		return
@@ -433,9 +470,10 @@ lua_inner :: proc(run: ^Lua_Invocation, argv: [][]u8) {
 	stat_cur = &hot.stats
 	pst.dirty_explicit = false
 	start := mono_now()
+	settled := compute_settle_ticks
 	cmd.handler(client, argv)
 	run.db = client.db
-	stat_call_slow(client, cmd, hot, argv, mono_now()-start)
+	stat_call_slow(client, cmd, hot, argv, compute_own_ticks(start, settled))
 	if client.blocked != .None || client.compute != nil || client.keyspace_inflight > 0 {
 		store_fatal("Lua inner dispatcher deferred execution invariant")
 	}
@@ -660,7 +698,7 @@ lua_invoke :: proc(client: ^Conn, argv: [][]u8, numkeys: int, text: []u8, readon
 	debug_child := false
 	loading := aof.loading && client.fd < 0
 	allow_oom := loading || readonly || flags & LUA_FLAG_ALLOW_OOM != 0
-	if flagged && !allow_oom && maxmemory_bytes > 0 && u64(max(0, mem_used()-mem_not_counted())) > maxmemory_bytes {
+	if flagged && !allow_oom && maxmemory_bytes > 0 && memory_arrival_over {
 		reply_error(client, ERR_OOM)
 		return
 	}

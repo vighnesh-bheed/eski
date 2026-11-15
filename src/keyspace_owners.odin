@@ -176,11 +176,22 @@ Owner_Sampler :: struct {
 }
 
 Owner_Touch :: struct {
-	p:     ^Owner_Part,
-	keys:  int,
-	bytes: int,
-	exp:   int,
-	tabs:  int,
+	p:         ^Owner_Part,
+	keys:      int,
+	bytes:     int,
+	exp:       int,
+	tabs:      int,
+	made:      bool,
+	ever_new:  bool,
+	more_new:  bool,
+	space_new: bool,
+}
+
+Owner_Made :: struct {
+	p:         ^Owner_Part,
+	ever_new:  bool,
+	more_new:  bool,
+	space_new: bool,
 }
 
 owner_dbs: []Owner_Db
@@ -188,6 +199,7 @@ owner_active: [Owner_Active][dynamic]^Owner_Part
 owner_active_next: [Owner_Active]int
 owner_sampler: [Owner_Weight]Owner_Sampler
 owner_touched: [dynamic]Owner_Touch
+owner_made: Owner_Made
 owner_parts_total: int
 owner_keys_total: int
 owner_expires_total: int
@@ -398,18 +410,18 @@ owner_ever_at :: proc "contextless" (s: ^Owner_Space, i: int) -> lb.Id {
 	return s.ever_more[i - 1]
 }
 
-owner_ever_add :: proc(s: ^Owner_Space, label: lb.Id) {
+owner_ever_add :: proc(s: ^Owner_Space, label: lb.Id) -> bool {
 	n := int(s.ever_n)
 	for i in 0 ..< n {
 		if owner_ever_at(s, i) == label {
-			return
+			return false
 		}
 	}
 	e := s.entry
 	if n == 0 {
 		s.ever_first = label
 		s.ever_n = 1
-		return
+		return true
 	}
 	if s.ever_more == nil {
 		s.ever_more = new([dynamic]lb.Id)
@@ -427,6 +439,36 @@ owner_ever_add :: proc(s: ^Owner_Space, label: lb.Id) {
 		}
 		owner_ever_put(s, i - 1, b)
 		owner_ever_put(s, i, a)
+	}
+	return true
+}
+
+owner_ever_drop :: proc(s: ^Owner_Space, label: lb.Id) {
+	n := int(s.ever_n)
+	at := -1
+	for i in 0 ..< n {
+		if owner_ever_at(s, i) == label {
+			at = i
+			break
+		}
+	}
+	if at < 0 {
+		return
+	}
+	for i in at ..< n - 1 {
+		owner_ever_put(s, i, owner_ever_at(s, i + 1))
+	}
+	if n > 1 {
+		pop(s.ever_more)
+	} else {
+		s.ever_first = lb.ID_NONE
+	}
+	s.ever_n -= 1
+	if s.ever_n <= 1 && s.ever_more != nil {
+		owner_structs(s.entry, -(cap(s.ever_more) * size_of(lb.Id) + size_of([dynamic]lb.Id)))
+		delete(s.ever_more^)
+		free(s.ever_more)
+		s.ever_more = nil
 	}
 }
 
@@ -454,9 +496,11 @@ owner_part_make :: proc(e: ^Owner_Entry, dbi: int, label: lb.Id) -> (^Owner_Part
 	if owner_partitions_max > 0 && i64(owner_parts_total) >= owner_partitions_max {
 		return nil, false
 	}
-	if s == nil {
+	space_new := s == nil
+	if space_new {
 		s = owner_space_make(e, dbi)
 	}
+	more_new := s.first.part != nil && s.more == nil
 	p := (^Owner_Part)(runtime.heap_alloc(size_of(Owner_Part), true))
 	if p == nil {
 		store_fatal("out of memory")
@@ -482,7 +526,7 @@ owner_part_make :: proc(e: ^Owner_Entry, dbi: int, label: lb.Id) -> (^Owner_Part
 		owner_structs(e, (cap(s.more) - before) * size_of(Owner_Slot))
 	}
 	s.nparts += 1
-	owner_ever_add(s, label)
+	owner_made = Owner_Made{p, owner_ever_add(s, label), more_new, space_new}
 	if e.keyspace.parts == 0 {
 		owner_holding += 1
 	}
@@ -557,7 +601,10 @@ owner_touch :: proc(p: ^Db) {
 			return
 		}
 	}
-	append(&owner_touched, Owner_Touch{op, db_size_of(p), owner_part_bytes(p), p.expires, owner_part_tables(p)})
+	made := owner_made
+	owner_made = {}
+	fresh := made.p == op
+	append(&owner_touched, Owner_Touch{p = op, keys = db_size_of(p), bytes = owner_part_bytes(p), exp = p.expires, tabs = owner_part_tables(p), made = fresh, ever_new = fresh && made.ever_new, more_new = fresh && made.more_new, space_new = fresh && made.space_new})
 }
 
 owner_touch_db :: #force_inline proc(p: ^Db) {
@@ -595,10 +642,29 @@ owner_settle_part :: proc(t: Owner_Touch) {
 		p.space.dup.valid = false
 	}
 	if db_size_of(d) == 0 {
+		space, label := p.space, d.label
 		owner_part_release(p)
+		if t.made {
+			owner_unmake(space, label, t.ever_new, t.more_new, t.space_new)
+		}
 		return
 	}
 	owner_enroll(p)
+}
+
+owner_unmake :: proc(s: ^Owner_Space, label: lb.Id, ever_new, more_new, space_new: bool) {
+	if ever_new {
+		owner_ever_drop(s, label)
+	}
+	if more_new && s.more != nil && len(s.more) == 0 {
+		owner_structs(s.entry, -(cap(s.more) * size_of(Owner_Slot) + size_of([dynamic]Owner_Slot)))
+		delete(s.more^)
+		free(s.more)
+		s.more = nil
+	}
+	if space_new && s.nparts == 0 && s.ever_n == 0 && s.copies == nil {
+		owner_space_drop(s)
+	}
 }
 
 owner_enroll :: proc(p: ^Owner_Part) {
@@ -888,8 +954,11 @@ owner_best_own :: proc(s: ^Owner_Space, key: []u8, l: ^Lookup, skip: lb.Id, vis:
 				}
 				if q := owner_space_part(s, cp.copies[best].label); q != nil {
 					tt, ii := db_locate_slot(owner_db(q), l)
-					if ii >= 0 && label_slot_live(owner_db(q), tt, ii) {
-						return owner_db(q), tt, ii
+					if ii >= 0 {
+						if label_slot_live(owner_db(q), tt, ii) {
+							return owner_db(q), tt, ii
+						}
+						aof_note_skipped(owner_db(q), tt, ii)
 					}
 				}
 				floor = cp.copies[best]
@@ -908,6 +977,7 @@ owner_best_own :: proc(s: ^Owner_Space, key: []u8, l: ^Lookup, skip: lb.Id, vis:
 			if label_slot_live(q, tt, ii) {
 				return q, tt, ii
 			}
+			aof_note_skipped(q, tt, ii)
 			return nil, nil, -1
 		}
 	}
@@ -917,8 +987,11 @@ owner_best_own :: proc(s: ^Owner_Space, key: []u8, l: ^Lookup, skip: lb.Id, vis:
 owner_locate_other :: proc(dbi: int, key: []u8, l: ^Lookup, reader: lb.Id, e: ^Owner_Entry, vis: ^lb.Visibility) -> (p: ^Db, t: ^Table, i: int) {
 	if exact := label_part(dbi, reader); exact != nil && db_size_of(exact) > 0 {
 		tt, ii := db_locate_slot(exact, l)
-		if ii >= 0 && label_slot_live(exact, tt, ii) {
-			return exact, tt, ii
+		if ii >= 0 {
+			if label_slot_live(exact, tt, ii) {
+				return exact, tt, ii
+			}
+			aof_note_skipped(exact, tt, ii)
 		}
 	}
 	op, ot, oi := owner_best_own(owner_space_of(e, dbi), key, l, reader, vis)
@@ -1045,7 +1118,7 @@ owner_touch_take :: proc(p: ^Owner_Part) -> Owner_Touch {
 		}
 	}
 	d := owner_db(p)
-	return Owner_Touch{p, db_size_of(d), owner_part_bytes(d), d.expires, owner_part_tables(d)}
+	return Owner_Touch{p = p, keys = db_size_of(d), bytes = owner_part_bytes(d), exp = d.expires, tabs = owner_part_tables(d)}
 }
 
 owner_part_flush :: proc(p: ^Owner_Part, lazy: bool, watch: bool) -> int {

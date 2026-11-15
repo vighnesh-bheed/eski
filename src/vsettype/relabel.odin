@@ -5,6 +5,9 @@ import "../vmath"
 import "../vfilter"
 
 part_insert_raw :: proc(s: Vset, p: ^Part_Head, name: []u8, data: []u8, norm: f32, range: f32, attr: vfilter.Attribute, sc: ^Scratch) -> (slot: u32, f: Failure) {
+	if part_counter_full(p) {
+		return NIL_SLOT, failure(.Out_Of_Memory)
+	}
 	if err := part_ensure_slot(s, p); err != .None {
 		return NIL_SLOT, failure(err)
 	}
@@ -56,6 +59,7 @@ part_insert_raw :: proc(s: Vset, p: ^Part_Head, name: []u8, data: []u8, norm: f3
 }
 
 relabel_at :: proc(s: Vset, a: ^Access, to: ^Access, name: []u8, scratch: ^Scratch = nil) -> (from_gone: bool, to_new: bool, f: Failure) {
+	write_fence(s)
 	if !access_valid(a) || !access_valid(to) || to.owner != a.owner {
 		return false, false, failure(.Invalid_Parameter)
 	}
@@ -120,15 +124,22 @@ relabel_at :: proc(s: Vset, a: ^Access, to: ^Access, name: []u8, scratch: ^Scrat
 		}
 		return false, false, ferr
 	}
+	added := tally_mark(tp, NIL_SLOT)
+	added.slot = slot
+	tally_settle(tp, &added)
 	ni := part_index(s, tp)
 	if !index_add(s, &ni, kept_name, Ref{slot = slot, part = tp.id}) {
 		part_graph_remove(tp, slot, sc)
+		tally_settle(tp, &added)
+		part_pool_trim(tp)
+		tally_drop(tp, slot)
 		part_drop(s, tp, slot)
 		if created {
 			part_retire(s, tp)
 		}
 		return false, false, failure(.Out_Of_Memory)
 	}
+	part_pool_trim(tp)
 	if s.lab != nil {
 		s.lab.total += 1
 		part_maybe_graduate(s, tp, sc)
@@ -137,7 +148,11 @@ relabel_at :: proc(s: Vset, a: ^Access, to: ^Access, name: []u8, scratch: ^Scrat
 	at = exact_copy(a, s, own)
 	src = own[at]
 	sp = ref_part(s, src)
-	if gerr := part_graph_remove(sp, src.slot, sc); gerr != .None {
+	gone := tally_mark(sp, src.slot)
+	gerr := part_graph_remove(sp, src.slot, sc)
+	tally_settle(sp, &gone)
+	part_pool_trim(sp)
+	if gerr != .None {
 		return false, created, failure(gerr)
 	}
 	ch: Change

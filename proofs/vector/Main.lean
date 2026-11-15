@@ -671,6 +671,26 @@ def ystep (st : St) (fields : List String) : Except String (St × Option String)
     return (st, some s!"YI|{op}|{if ok then "ok" else "invalid"}")
   | _ => throw ("invalid owner line: " ++ String.intercalate " " fields)
 
+def checkName : Check → String
+  | .shape => "shape"
+  | .free => "free"
+  | .slot => "slot"
+  | .seq => "seq"
+  | .level => "graph"
+  | .degree => "graph"
+  | .link => "link"
+  | .sym => "sym"
+  | .entry => "entry"
+  | .twin => "twin"
+
+def persistRow (ts : List Nat) : String :=
+  match parseP ts with
+  | none => "KS|0|shape"
+  | some s =>
+    match firstFailure s with
+    | none => "KS|1|" ++ String.intercalate "," ((encodeP s).map toString)
+    | some k => "KS|0|" ++ checkName k
+
 def step (st : St) (fields : List String) : Except String (St × Option String) := do
   match fields with
   | ["P", a, b] =>
@@ -751,6 +771,9 @@ def step (st : St) (fields : List String) : Except String (St × Option String) 
   | "CS" :: rest =>
     let cs ← rest.mapM parseCand
     return (st, some s!"CS|{showHeap (insertionSort closer cs)}")
+  | "KS" :: rest =>
+    let ts ← rest.mapM parseNat
+    return (st, some (persistRow ts))
   | ["LW", c] =>
     let c ← parseNat c
     return (st, some s!"LW|{linkWidth c}|{widthNone (linkWidth c)}")

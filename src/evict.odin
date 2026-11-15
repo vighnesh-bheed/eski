@@ -1,6 +1,7 @@
 package main
 
 import "core:math"
+import lb "label"
 
 Evict_Policy :: enum u8 {
 	Volatile_Lru,
@@ -27,6 +28,8 @@ EVICT_POLICY_NAMES := [Evict_Policy]string {
 ERR_EVICT_POLICY :: "argument(s) must be one of the following: volatile-lru, volatile-lfu, volatile-random, volatile-ttl, allkeys-lru, allkeys-lfu, allkeys-random, noeviction"
 EVPOOL_SIZE :: 16
 EVICT_CHECK_EVERY :: 16
+REQUEST_ARGUMENT_BYTES :: 32
+QUEUED_COMMAND_BYTES :: 20
 
 Evict_Result :: enum u8 {
 	Ok,
@@ -43,6 +46,7 @@ stat_eviction_exceeded_since: i64
 evict_no_shared_ints: bool
 evict_timer: bool
 evict_scope := -1
+memory_arrival_over: bool
 
 @(private = "file")
 Pool_Entry :: struct {
@@ -68,6 +72,8 @@ evict_key: [dynamic]u8
 evict_owner: ^Owner_Entry
 @(private = "file")
 evict_owner_parts: [dynamic]^Owner_Part
+@(private = "file")
+evict_arriving: int
 
 evict_pool_forget :: proc(db: ^Db) {
 	for &pe in evict_pool {
@@ -184,11 +190,18 @@ evict_time_limit_us :: proc() -> i64 {
 	return max(i64)
 }
 
+request_bytes :: #force_inline proc "contextless" (argv: [][]u8) -> (total: int) {
+	for a in argv {
+		total += len(a) + REQUEST_ARGUMENT_BYTES
+	}
+	return
+}
+
 memory_state_over :: #force_inline proc "contextless" () -> (over: bool, tofree: int) {
 	if maxmemory_bytes == 0 {
 		return
 	}
-	reported := mem_used()
+	reported := mem_used() + evict_arriving + tx_queued_extra
 	if u64(reported) <= maxmemory_bytes {
 		return
 	}
@@ -199,16 +212,19 @@ memory_state_over :: #force_inline proc "contextless" () -> (over: bool, tofree:
 	return true, used - int(maxmemory_bytes)
 }
 
-memory_state_over_current :: #force_inline proc "contextless" () -> bool {
-	if maxmemory_bytes == 0 || u64(mem_used_current()) <= maxmemory_bytes {
+memory_state_over_current :: #force_inline proc "contextless" (arriving := 0) -> bool {
+	if maxmemory_bytes == 0 || u64(mem_used_current() + arriving + tx_queued_extra) <= maxmemory_bytes {
 		return false
 	}
-	return memory_state_over_exact()
+	return memory_state_over_exact(arriving)
 }
 
 @(cold)
-memory_state_over_exact :: #force_no_inline proc "contextless" () -> bool {
+memory_state_over_exact :: #force_no_inline proc "contextless" (arriving: int) -> bool {
+	saved := evict_arriving
+	evict_arriving = arriving
 	over, _ := memory_state_over()
+	evict_arriving = saved
 	return over
 }
 
@@ -443,20 +459,22 @@ eviction_exceeded_total_us :: proc() -> i64 {
 	return stat_eviction_exceeded_us + eviction_exceeded_current_us()
 }
 
-perform_evictions :: proc() -> Evict_Result {
-	if aof.loading || srv.pause_end_ms > srv.now_ms {
+perform_evictions :: proc(arriving := 0) -> Evict_Result {
+	if aof.loading || pst.loading || srv.pause_end_ms > srv.now_ms {
 		return .Ok
 	}
-	if !memory_state_over_current() {
+	if !memory_state_over_current(arriving) {
 		return evict_update_metrics(.Ok)
 	}
-	return evict_over_limit()
+	return evict_over_limit(arriving)
 }
 
 @(private = "file")
 @(cold)
-evict_over_limit :: #force_no_inline proc() -> Evict_Result {
+evict_over_limit :: #force_no_inline proc(arriving: int) -> Evict_Result {
 	keyspace_fence()
+	evict_arriving = arriving
+	defer evict_arriving = 0
 	over, tofree := memory_state_over()
 	if !over {
 		return evict_update_metrics(.Ok)
@@ -545,6 +563,9 @@ evict_reset_stats :: proc() {
 }
 
 evict_in_owner :: proc(e: ^Owner_Entry, quota: i64) -> (exhausted: bool) {
+	if aof.loading || pst.loading {
+		return false
+	}
 	if maxmemory_policy == .Noeviction {
 		return true
 	}
@@ -578,15 +599,18 @@ evict_in_owner :: proc(e: ^Owner_Entry, quota: i64) -> (exhausted: bool) {
 	return false
 }
 
-evict_in_label :: proc(label: int, tofree: int) -> (freed: int, exhausted: bool) {
+evict_in_label :: proc(label: lb.Id, quota: int) -> (exhausted: bool) {
+	if aof.loading || pst.loading {
+		return false
+	}
 	if maxmemory_policy == .Noeviction {
-		return 0, true
+		return true
 	}
 	saved := evict_scope
-	evict_scope = label
+	evict_scope = int(label)
 	defer evict_scope = saved
 	random := maxmemory_policy == .Allkeys_Random || maxmemory_policy == .Volatile_Random
-	for freed < tofree {
+	for label_used(label) > quota {
 		db: ^Db
 		found: bool
 		if random {
@@ -595,9 +619,9 @@ evict_in_label :: proc(label: int, tofree: int) -> (freed: int, exhausted: bool)
 			db, found = evict_pick_pool()
 		}
 		if !found {
-			return freed, true
+			return true
 		}
-		freed += evict_delete(db)
+		evict_delete(db)
 	}
-	return freed, false
+	return false
 }

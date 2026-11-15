@@ -1642,6 +1642,36 @@ WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
 NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+## Odin SipHash implementation
+
+src/vset_persist.odin derives the creation seed of a vector set or of one of its partitions from the dataset seed and the set's identity with SipHash-2-4, through the core:crypto/siphash package of the Odin release named in the Odin runtime and standard library section above, so that package is present in every build. Its one file, core:crypto/siphash/siphash.odin, states "Copyright 2022 zhibog" and "Made available under Odin's license", which is the Odin licence reproduced above; it names the SipHash repository of Jean-Philippe Aumasson, https://github.com/veorq/SipHash , and the paper by Jean-Philippe Aumasson and Daniel J. Bernstein, https://www.aumasson.jp/siphash/siphash.pdf , as the description of the algorithm. The package imports core:crypto, core:encoding/endian and core:math/bits, which are under the Odin licence; core:crypto imports core:crypto/_subtle, whose notice is reproduced in the Odin Ed25519 implementation section above.
+
+## Odin AES-GCM, HKDF and HMAC implementation
+
+src/seal/seal.odin seals and opens the data files written under an encryption key with AES-256-GCM, through the core:crypto/aes package, and derives the key id and the key of each file with HKDF-SHA256, through core:crypto/hkdf and core:crypto/hash, of the Odin release named in the Odin runtime and standard library section above, so those packages are present in every build. core:crypto/aes reaches core:crypto/_aes, core:crypto/_aes/ct64 and core:crypto/_aes/hw. The files ct64.odin, ct64_enc.odin, ct64_dec.odin, ct64_keysched.odin and ghash.odin of core:crypto/_aes/ct64, the bitsliced implementation for processors without AES instructions, carry the notice "Copyright (c) 2016 Thomas Pornin" that is reproduced as the second notice of the Odin Ed25519 implementation section above; ct64.odin states that the implementation is derived from the BearSSL ct64 code and distributed under a 1-clause BSD license with permission from the original author. The files ghash_intel.odin and keysched_hw.odin of core:crypto/_aes/hw, the implementation for processors with AES instructions, carry the same terms with the year 2017, reproduced below. core:crypto/hkdf reaches core:crypto/hmac, and both reach core:crypto/hash, whose list of algorithms imports core:crypto/sha2, core:crypto/sha3, core:crypto/sm3, core:crypto/blake2b, core:crypto/blake2s, core:crypto/legacy/keccak, core:crypto/legacy/md5 and core:crypto/legacy/sha1, with core:crypto/_sha3 and core:crypto/_blake2 behind them; Eski calls SHA-256 only. core:crypto/hash/hash.odin and the files of core:crypto/sha3, core:crypto/_sha3, core:crypto/sm3, core:crypto/blake2s, core:crypto/legacy/keccak and core:crypto/legacy/md5 state "Copyright 2021 zhibog" and "Made available under Odin's license", which is the Odin licence reproduced above; the other files of the packages named here are under the Odin licence as well. src/seal/seal_test.odin holds published known-answer values as test data: test cases 13 to 16 of David A. McGrew and John Viega, "The Galois/Counter Mode of Operation (GCM)", and test case 1 of RFC 5869.
+
+Copyright (c) 2017 Thomas Pornin <pornin@bolet.org>
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+  1. Redistributions of source code must retain the above copyright
+     notice, this list of conditions and the following disclaimer.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHORS “AS IS” AND ANY EXPRESS OR
+IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
 ## SplitMix64 and xoshiro256** generators
 
 Several Eski procedures draw pseudorandom numbers or mix hash values with the SplitMix64 generator of Guy L. Steele Jr., Doug Lea and Christine H. Flood, "Fast Splittable Pseudorandom Number Generators", OOPSLA 2014, in the form of Sebastiano Vigna's reference program, https://prng.di.unimi.it/splitmix.c : a state advanced by 0x9E3779B97F4A7C15 and an output function with the multipliers 0xBF58476D1CE4E5B9 and 0x94D049BB133111EB and the shifts 30, 27 and 31. In the vector set, label and owner code these are rng_next in src/hnsw/rng.odin, mix64, rand64 and the per-label streams in src/vsettype/random.odin, splitmix64 in src/vmath/project.odin, label_mix in src/keyspace_labels.odin, owner_rand in src/keyspace_owners.odin, label_hash in src/label/table.odin, which uses the first multiplier only, bench/owners/vset/main.odin, the generators of the package tests and the Python and Lean models in proofs/vector; earlier code uses the same generator in src/settype/table.odin, src/memcached.odin, src/memory.odin, src/hll/selftest.odin, src/hdr/model_test.odin and the generators under test. rng_seed and rng_next in src/vmath/project.odin implement xoshiro256** of David Blackman and Sebastiano Vigna, "Scrambled Linear Pseudorandom Number Generators", ACM Transactions on Mathematical Software 47(4), 2021, following its reference program, https://prng.di.unimi.it/xoshiro256starstar.c , seeded through SplitMix64, and rng_gaussian draws normal variates from it with the polar method of Marsaglia and Bray, 1964. Both reference programs carry the terms below, the first written in 2015 by Sebastiano Vigna and the second in 2018 by David Blackman and Sebastiano Vigna.

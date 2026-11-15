@@ -2,6 +2,7 @@ package main
 
 import "base:runtime"
 import "hnsw"
+import lb "label"
 import ow "owner"
 import "vfilter"
 import va "vsetargs"
@@ -63,6 +64,13 @@ vset_object_release :: proc "contextless" (obj: rawptr) -> int {
 }
 
 vset_object_acct :: proc "contextless" (obj: rawptr) -> int {
+	return vt.memory_usage(cast(vt.Vset)obj)
+}
+
+vset_object_moved :: proc "contextless" (obj: rawptr) -> int {
+	if labels_on {
+		return vt.charges_total(cast(vt.Vset)obj)
+	}
 	return vt.memory_usage(cast(vt.Vset)obj)
 }
 
@@ -200,6 +208,7 @@ cmd_vadd :: proc(c: ^Conn, argv: [][]u8) {
 	sc := vset_scratch_get()
 	added: bool
 	if s == nil {
+		add.seed = vset_plain_seed(key)
 		created, failed := vt.create_for(&add)
 		if failed.err != .None {
 			pst.dirty_explicit = true
@@ -917,6 +926,7 @@ vadd_labelled :: proc(c: ^Conn, argv: [][]u8, req: ^va.Vadd_Request) {
 		set_attr = req.set_attributes,
 	}
 	a := label_vt_access()
+	a.key = key
 	sc := vset_scratch_get()
 	if s == nil {
 		created, failed := vt.create_at(&add, &a)
@@ -1361,4 +1371,316 @@ vset_view_serialized :: proc(obj: rawptr) -> int {
 		return 0
 	}
 	return vt.view_serialized_size(&v)
+}
+
+vset_handlers_install :: proc() {
+	for &cmd in vset_commands {
+		if cmd.handler == cmd_vsim {
+			cmd.handler = cmd_vsim_threaded
+		} else if cmd.handler == cmd_vadd {
+			cmd.handler = cmd_vadd_threaded
+		}
+	}
+}
+
+vset_search_request :: proc "contextless" (req: ^va.Vsim_Request) -> vt.Search_Request {
+	return vt.Search_Request {
+		kind        = .Element if req.query == .Element else .Vector,
+		vector      = req.vector,
+		element     = req.element,
+		count       = int(req.count),
+		ef          = int(req.ef),
+		epsilon     = req.epsilon,
+		use_epsilon = req.epsilon > 0,
+		filter      = string(req.filter_text),
+		use_filter  = req.has_filter,
+		filter_ef   = int(req.filter_ef),
+		truth       = req.truth,
+	}
+}
+
+cmd_vsim_threaded :: proc(c: ^Conn, argv: [][]u8) {
+	if !vset_thread_ready(c) {
+		cmd_vsim(c, argv)
+		return
+	}
+	req, err := va.parse_vsim(argv[1:], vset_heap())
+	defer va.vsim_request_destroy(&req)
+	if req.nothread || (err.kind != .None && err.stage == .Before_Key) {
+		cmd_vsim(c, argv)
+		return
+	}
+	if labels_on {
+		vsim_threaded_labelled(c, argv, &req, err)
+		return
+	}
+	_, s, wrong := vset_lookup(req.key, true)
+	if s == nil && !wrong {
+		reply_array(c, 0)
+		return
+	}
+	if wrong {
+		reply_wrongtype(c)
+		return
+	}
+	if err.kind != .None && err.stage == .After_Key {
+		vset_reply_parse_error(c, err)
+		return
+	}
+	if checked := vset_query_check(s, &req); checked.err != .None {
+		vset_reply_failure(c, checked)
+		return
+	}
+	if err.kind != .None {
+		vset_reply_parse_error(c, err)
+		return
+	}
+	search := vset_search_request(&req)
+	sc := vset_scratch_get()
+	if vset_search_wide(vt.card(s)) {
+		q, prepared := vt.search_prepare(s, &search, sc)
+		if prepared.err != .None {
+			vset_reply_failure(c, prepared)
+			return
+		}
+		if vset_vsim_submit(c, argv, s, nil, q, &search, req.with_scores, req.with_attribs, sc) {
+			return
+		}
+	}
+	clear(&vset_hits)
+	if failed := vt.search(s, &search, sc, &vset_hits); failed.err != .None {
+		clear(&vset_hits)
+		vset_reply_failure(c, failed)
+		return
+	}
+	vset_reply_hits(c, s, vset_hits[:], req.with_scores, req.with_attribs)
+	clear(&vset_hits)
+	vset_trim()
+}
+
+vsim_threaded_labelled :: proc(c: ^Conn, argv: [][]u8, req: ^va.Vsim_Request, err: va.Error) {
+	s, v, wrong, ok := vset_read_view(c, req.key)
+	if !ok && !wrong {
+		reply_array(c, 0)
+		return
+	}
+	if wrong {
+		reply_wrongtype(c)
+		return
+	}
+	if err.kind != .None && err.stage == .After_Key {
+		vset_reply_parse_error(c, err)
+		return
+	}
+	checked := vt.Failure{}
+	if req.query == .Element {
+		if !vt.view_contains(&v, req.element) {
+			checked = vt.failure(.Element_Not_Found)
+		}
+	} else {
+		checked = vset_query_check(s, req)
+	}
+	if checked.err != .None {
+		vset_reply_failure(c, checked)
+		return
+	}
+	if err.kind != .None {
+		vset_reply_parse_error(c, err)
+		return
+	}
+	search := vset_search_request(req)
+	sc := vset_scratch_get()
+	if vset_search_wide(vt.view_size(&v)) {
+		q, prepared := vt.view_search_prepare(&v, &search, sc)
+		if prepared.err != .None {
+			vset_reply_failure(c, prepared)
+			return
+		}
+		if vset_vsim_submit(c, argv, s, &v, q, &search, req.with_scores, req.with_attribs, sc) {
+			return
+		}
+	}
+	clear(&vset_hits)
+	if failed := vt.view_search(&v, &search, sc, &vset_hits); failed.err != .None {
+		clear(&vset_hits)
+		vset_reply_failure(c, failed)
+		return
+	}
+	vset_reply_named_hits(c, s, vset_hits[:], req.with_scores, req.with_attribs)
+	clear(&vset_hits)
+	vset_trim()
+}
+
+vset_names_cas :: proc "contextless" (argv: [][]u8) -> bool {
+	for arg in argv[1:] {
+		if len(arg) == 3 && (arg[0] | 0x20) == 'c' && (arg[1] | 0x20) == 'a' && (arg[2] | 0x20) == 's' {
+			return true
+		}
+	}
+	return false
+}
+
+vset_add_request :: proc "contextless" (req: ^va.Vadd_Request) -> vt.Add_Request {
+	return vt.Add_Request {
+		name     = req.element,
+		vector   = req.vector,
+		quant    = vset_quant(req.quant),
+		reduce   = int(req.reduce),
+		m        = int(req.m),
+		ef       = int(req.ef),
+		attr     = req.attributes,
+		set_attr = req.set_attributes,
+	}
+}
+
+cmd_vadd_threaded :: proc(c: ^Conn, argv: [][]u8) {
+	if t := vset_commit_take(c); t != nil {
+		vadd_commit(c, argv, t)
+		return
+	}
+	if !vset_thread_ready(c) || !vset_names_cas(argv) {
+		cmd_vadd(c, argv)
+		return
+	}
+	req, err := va.parse_vadd(argv[1:], vset_heap())
+	defer va.vadd_request_destroy(&req)
+	if err.kind != .None || !req.cas {
+		cmd_vadd(c, argv)
+		return
+	}
+	original, found := vset_original_argv(argv)
+	s := vset_probe(req.key) if found else nil
+	if s == nil {
+		cmd_vadd(c, argv)
+		return
+	}
+	add := vset_add_request(&req)
+	label: lb.Id
+	owner: vt.Owner
+	if labels_on {
+		a := label_vt_access()
+		label = a.label
+		owner = a.owner
+	}
+	if !vset_search_wide(vset_cas_visible(s, label, owner)) || !vset_cas_submit(c, original, s, &add, label, owner, vset_scratch_get()) {
+		cmd_vadd(c, argv)
+		return
+	}
+	vset_propagate(c, argv, false)
+}
+
+vadd_commit :: proc(c: ^Conn, argv: [][]u8, t: ^Vset_Cas_Task) {
+	if labels_on && access_resume_capture() != t.scope {
+		pst.dirty_explicit = true
+		reply_error(c, ERR_LABEL_INVALID)
+		return
+	}
+	req, err := va.parse_vadd(argv[1:], vset_heap())
+	defer va.vadd_request_destroy(&req)
+	if err.kind != .None {
+		vset_reply_parse_error(c, err)
+		return
+	}
+	if labels_on {
+		vadd_commit_labelled(c, argv, &req, t)
+		return
+	}
+	key := req.key
+	defer signal_key(key)
+	e, s, wrong := vset_lookup(key, false)
+	if wrong {
+		pst.dirty_explicit = true
+		reply_wrongtype(c)
+		return
+	}
+	add := vset_add_request(&req)
+	sc := vset_scratch_get()
+	added: bool
+	if s == nil {
+		add.seed = vset_plain_seed(key)
+		created, failed := vt.create_for(&add)
+		if failed.err != .None {
+			pst.dirty_explicit = true
+			vset_reply_failure(c, failed)
+			return
+		}
+		added, failed = vt.add(created, &add, sc)
+		if failed.err != .None {
+			vt.destroy(created)
+			pst.dirty_explicit = true
+			vset_reply_failure(c, failed)
+			return
+		}
+		fresh, _ := db_upsert(key)
+		vset_attach(fresh, created)
+	} else {
+		before := vt.memory_usage(s)
+		had := vt.contains(s, req.element)
+		failed: vt.Failure
+		added, failed = vt.cas_commit(s, &t.plan, sc)
+		vset_sync(e.db, s, before)
+		if failed.err != .None {
+			lost := had && !vt.contains(s, req.element)
+			if vt.card(s) == 0 {
+				db_remove(key)
+			}
+			pst.dirty_explicit = true
+			if lost {
+				removal := [3][]u8{transmute([]u8)string("VREM"), key, req.element}
+				vset_propagate(c, removal[:], true)
+			}
+			vset_reply_failure(c, failed)
+			return
+		}
+	}
+	vset_propagate(c, argv, true)
+	reply_bool(c, added)
+}
+
+vadd_commit_labelled :: proc(c: ^Conn, argv: [][]u8, req: ^va.Vadd_Request, t: ^Vset_Cas_Task) {
+	key := req.key
+	defer signal_key(key)
+	e, s, wrong := vset_lookup(key, false)
+	if wrong {
+		vset_wrong_label(c, e)
+		return
+	}
+	add := vset_add_request(req)
+	a := label_vt_access()
+	a.key = key
+	sc := vset_scratch_get()
+	if s == nil {
+		created, failed := vt.create_at(&add, &a)
+		if failed.err != .None {
+			pst.dirty_explicit = true
+			vset_reply_failure(c, failed)
+			return
+		}
+		ch, added_failed := vt.add_at(created, &a, &add, sc)
+		if added_failed.err != .None {
+			vt.destroy(created)
+			pst.dirty_explicit = true
+			vset_reply_failure(c, added_failed)
+			return
+		}
+		vset_presence_add(key, created)
+		label_vset_settle(cur_db().id, label_vset_none(), created)
+		vset_propagate(c, argv, true)
+		reply_bool(c, ch.added)
+		return
+	}
+	before := label_vset_take(s)
+	ch, failed := vt.cas_commit_at(s, &a, &t.plan, sc)
+	vset_apply_change(key, s, ch, before)
+	if failed.err != .None {
+		pst.dirty_explicit = true
+		if ch.dropped {
+			removal := [3][]u8{transmute([]u8)string("VREM"), key, req.element}
+			vset_propagate(c, removal[:], true)
+		}
+		vset_reply_failure(c, failed)
+		return
+	}
+	vset_propagate(c, argv, true)
+	reply_bool(c, ch.added)
 }

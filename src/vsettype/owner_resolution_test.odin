@@ -369,6 +369,11 @@ one_owner_alone_reads_like_shared_data :: proc(t: ^testing.T) {
 	sc: Scratch
 	scratch_init(&sc)
 	defer scratch_destroy(&sc)
+	kept := seed_hook
+	seed_hook = proc(a: ^Access) -> u64 {
+		return stream_seed(a.label)
+	}
+	defer seed_hook = kept
 	shared := build(t, &l, SHARED, names[:], &sc)
 	defer destroy(shared)
 	owned := build(t, &l, 4, names[:], &sc)
@@ -395,12 +400,15 @@ one_owner_alone_reads_like_shared_data :: proc(t: ^testing.T) {
 		testing.expectf(t, a == b, "reader %d: one owner alone differs from shared data\n%s", reader, digest_difference(a, b))
 		v, _ := view_open(owned, &oa, &sc)
 		compact := 0
+		fixed := 0
 		for &vp in v.parts {
-			if view_head(&v, &vp).kind == .Compact {
+			h := view_head(&v, &vp)
+			if h.kind == .Compact {
 				compact += 1
 			}
+			fixed += part_fixed_bytes(h) - (set_fixed_bytes(false) + chunk_bytes(PART_FIXED_BYTES) + shared_slot_bytes())
 		}
-		testing.expectf(t, digest_memory(full_b) == digest_memory(full_a) - compact * (PART_FIXED_BYTES - COMPACT_FIXED_BYTES), "reader %d: owner memory %d, shared memory %d, %d compact blocks", reader, digest_memory(full_b), digest_memory(full_a), compact)
+		testing.expectf(t, digest_memory(full_b) == digest_memory(full_a) + fixed, "reader %d: owner memory %d, shared memory %d, %d compact blocks", reader, digest_memory(full_b), digest_memory(full_a), compact)
 	}
 	free_all(context.temp_allocator)
 }

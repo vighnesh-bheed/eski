@@ -123,7 +123,7 @@ theorem embed_step (ops : PartOps N V P) (sees : L → L → Bool) (w : Nat) (ot
       · rfl
       · split
         · rw [pext, ← map_append_one, iext]
-        · rw [hst, sext, pext', ← map_append_one, iext]
+        · rw [pext, ← map_append_one, iext]
   | set n v =>
     simp only [hi, mem_map_atOwner, hp]
     split

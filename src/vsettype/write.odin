@@ -67,6 +67,7 @@ refuse_visible :: proc "contextless" (a: ^Access, s: Vset, own: []Ref, other: []
 }
 
 drop_ref :: proc(s: Vset, p: ^Part_Head, slot: u32, ch: ^Change) {
+	tally_drop(p, slot)
 	ni := part_index(s, p)
 	index_remove(s, &ni, part_element_name(p, slot), Ref{slot = slot, part = p.id})
 	part_drop(s, p, slot)
@@ -85,6 +86,7 @@ drop_ref :: proc(s: Vset, p: ^Part_Head, slot: u32, ch: ^Change) {
 }
 
 add_at :: proc(s: Vset, a: ^Access, req: ^Add_Request, scratch: ^Scratch = nil) -> (ch: Change, f: Failure) {
+	write_fence(s)
 	if !access_valid(a) {
 		return ch, failure(.Invalid_Parameter)
 	}
@@ -102,6 +104,7 @@ add_at :: proc(s: Vset, a: ^Access, req: ^Add_Request, scratch: ^Scratch = nil) 
 }
 
 apply_add_at :: proc(s: Vset, a: ^Access, req: ^Add_Request, vector: []f32, sc: ^Scratch, cache: ^Distance_Cache, cache_part: u32) -> (ch: Change, f: Failure) {
+	write_fence(s)
 	ef := request_ef(req)
 	one_own, one_other: Ref
 	own, other := writer_copies(s, a, req.name, &one_own, &one_other)
@@ -120,7 +123,11 @@ apply_add_at :: proc(s: Vset, a: ^Access, req: ^Add_Request, vector: []f32, sc: 
 			}
 		}
 		dropped: bool
-		if f, dropped = part_update(s, p, r.slot, vector, ef, sc, c); f.err != .None {
+		mark := tally_mark(p, r.slot)
+		f, dropped = part_update(s, p, r.slot, vector, ef, sc, c)
+		tally_settle(p, &mark)
+		part_pool_trim(p)
+		if f.err != .None {
 			part_discard_attribute(s, p, &attr)
 			if dropped {
 				ch.dropped = true
@@ -130,6 +137,7 @@ apply_add_at :: proc(s: Vset, a: ^Access, req: ^Add_Request, vector: []f32, sc: 
 		}
 		if req.set_attr {
 			part_replace_attribute(s, p, &p.elements[r.slot], attr)
+			tally_settle(p, &mark)
 		}
 		return ch, {}
 	}
@@ -159,15 +167,22 @@ apply_add_at :: proc(s: Vset, a: ^Access, req: ^Add_Request, vector: []f32, sc: 
 		}
 		return ch, f
 	}
+	mark := tally_mark(p, NIL_SLOT)
+	mark.slot = slot
+	tally_settle(p, &mark)
 	ni := part_index(s, p)
 	if !index_add(s, &ni, req.name, Ref{slot = slot, part = p.id}) {
 		part_graph_remove(p, slot, sc)
+		tally_settle(p, &mark)
+		part_pool_trim(p)
+		tally_drop(p, slot)
 		part_drop(s, p, slot)
 		if created {
 			part_retire(s, p)
 		}
 		return ch, failure(.Out_Of_Memory)
 	}
+	part_pool_trim(p)
 	if s.lab != nil {
 		s.lab.total += 1
 		part_maybe_graduate(s, p, sc)
@@ -178,6 +193,7 @@ apply_add_at :: proc(s: Vset, a: ^Access, req: ^Add_Request, vector: []f32, sc: 
 }
 
 remove_at :: proc(s: Vset, a: ^Access, name: []u8, scratch: ^Scratch = nil) -> (ch: Change, f: Failure) {
+	write_fence(s)
 	if !access_valid(a) {
 		return ch, failure(.Invalid_Parameter)
 	}
@@ -195,7 +211,11 @@ remove_at :: proc(s: Vset, a: ^Access, name: []u8, scratch: ^Scratch = nil) -> (
 	guard: Scratch_Guard
 	sc := guard_begin(&guard, scratch)
 	defer guard_end(&guard)
-	if err := part_graph_remove(p, r.slot, sc); err != .None {
+	mark := tally_mark(p, r.slot)
+	err := part_graph_remove(p, r.slot, sc)
+	tally_settle(p, &mark)
+	part_pool_trim(p)
+	if err != .None {
 		return ch, failure(err)
 	}
 	ch.found = true
@@ -204,6 +224,7 @@ remove_at :: proc(s: Vset, a: ^Access, name: []u8, scratch: ^Scratch = nil) -> (
 }
 
 set_attribute_at :: proc(s: Vset, a: ^Access, name: []u8, text: []u8) -> (ch: Change, f: Failure) {
+	write_fence(s)
 	if !access_valid(a) {
 		return ch, failure(.Invalid_Parameter)
 	}
@@ -223,6 +244,8 @@ set_attribute_at :: proc(s: Vset, a: ^Access, name: []u8, text: []u8) -> (ch: Ch
 	if !made {
 		return ch, failure(.Out_Of_Memory)
 	}
+	mark := tally_mark(p, r.slot)
 	part_replace_attribute(s, p, &p.elements[r.slot], attr)
+	tally_settle(p, &mark)
 	return ch, {}
 }

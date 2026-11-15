@@ -285,9 +285,10 @@ execute_slot :: proc(c: ^Conn, argv_in: [][]u8, slot_in: ^Cmd_Slot) {
 	}
 	stat_cur = &st.stats
 	t0 := mono_now()
+	settled := compute_settle_ticks
 	cmd.handler(c, argv)
-	ticks := mono_now() - t0
-	deferred := compute_note_deferred(c, cmd, st, t0)
+	ticks := compute_own_ticks(t0, settled)
+	deferred := compute_note_deferred(c, cmd, st, ticks)
 	if deferred {
 		stat_cur = nil
 	} else if ticks < st.limit_ticks {
@@ -328,7 +329,8 @@ execute_hooked :: #force_no_inline proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8)
 	}
 	memory_ok := true
 	if maxmemory_bytes != 0 {
-		memory_ok = perform_evictions() != .Fail
+		memory_ok = perform_evictions(request_bytes(argv)) != .Fail
+		memory_arrival_over = !memory_ok
 	}
 	if c.ps != {} && !pubsub_before(c, cmd, argv) {
 		stat_reject(st, argv)
@@ -398,6 +400,7 @@ execute_hooked :: #force_no_inline proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8)
 	ps_hooked = true
 	stat_cur = &st.stats
 	t0 := mono_now()
+	settled := compute_settle_ticks
 	if len(monitors) > 0 && lua_is_eval(cmd) {
 		monitor_feed_raw(c, argv)
 	}
@@ -406,9 +409,9 @@ execute_hooked :: #force_no_inline proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8)
 		keyspace_label_leave()
 		access_pin_ran(c)
 	}
-	ticks := mono_now() - t0
+	ticks := compute_own_ticks(t0, settled)
 	ps_hooked = false
-	deferred := compute_note_deferred(c, cmd, st, t0)
+	deferred := compute_note_deferred(c, cmd, st, ticks)
 	if deferred {
 		stat_cur = nil
 	} else if ticks < st.limit_ticks {
@@ -421,7 +424,7 @@ execute_hooked :: #force_no_inline proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8)
 	if ps_exec != nil {
 		pubsub_after(c, cmd, argv)
 	}
-	if len(monitors) > 0 && !lua_is_eval(cmd) {
+	if len(monitors) > 0 && !lua_is_eval(cmd) && !compute_feed_deferred(c) {
 		monitor_feed(c, cmd, argv)
 	}
 	if client_buckets_on {

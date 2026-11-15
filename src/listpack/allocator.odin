@@ -47,6 +47,13 @@ lp_malloc_size :: proc "contextless" (p: rawptr) -> int {
 	return int(heap_usable_bytes(p))
 }
 
+content_block :: proc "contextless" (size: int) -> int {
+	if size <= 24 {
+		return 24
+	}
+	return ((size + 23) &~ 15) - 8
+}
+
 raw_allocate :: proc "contextless" (size, alignment: int, zeroed: bool) -> (rawptr, runtime.Allocator_Error) {
 	if size < 0 || alignment <= 0 || alignment & (alignment - 1) != 0 {
 		return nil, .Invalid_Argument

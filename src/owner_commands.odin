@@ -184,7 +184,9 @@ owners_forget :: proc(c: ^Conn, id: []u8) {
 		owner_drop(o)
 	}
 	tokens := label_token_cache_drop_owner(string(id))
-	if label_audit_active() {
+	sequence := access_forget_noted()
+	aof_emit_explicit(c, {aof_bytes("OWNERS"), aof_bytes("FORGET"), id}, true)
+	if label_audit_active() && !aof.loading {
 		b := make([dynamic]u8, context.temp_allocator)
 		mark := [8]int{}
 		values := [7]i64{counts.keys, counts.elements, counts.bytes, i64(connections), i64(contexts), i64(tokens), i64(entries)}
@@ -196,13 +198,15 @@ owners_forget :: proc(c: ^Conn, id: []u8) {
 		text := string(b[:])
 		label_audit(c, "owner-forget", "owner", string(id), "keys", text[mark[0]:mark[1]], "elements", text[mark[1]:mark[2]], "bytes", text[mark[2]:mark[3]], "connections", text[mark[3]:mark[4]], "contexts", text[mark[4]:mark[5]], "tokens", text[mark[5]:mark[6]], "slowlog", text[mark[6]:mark[7]])
 	}
-	reply_map(c, 3)
+	reply_map(c, 4)
 	reply_bulk_str(c, "keys")
 	reply_int(c, counts.keys)
 	reply_bulk_str(c, "elements")
 	reply_int(c, counts.elements)
 	reply_bulk_str(c, "bytes")
 	reply_int(c, counts.bytes)
+	reply_bulk_str(c, "sequence")
+	reply_int(c, i64(sequence))
 }
 
 @(private = "file")
@@ -319,7 +323,10 @@ owners_quota :: proc(c: ^Conn, argv: [][]u8) {
 			return
 		}
 		keyspace_owner_quota(e, true, limit)
-		label_audit(c, "owner-quota", "owner", string(id), "limit", string(argv[4]))
+		if !aof.loading {
+			label_audit(c, "owner-quota", "owner", string(id), "limit", string(argv[4]))
+		}
+		aof_emit_explicit(c, argv, true)
 		reply_ok(c)
 		return
 	}

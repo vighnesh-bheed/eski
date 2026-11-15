@@ -214,7 +214,7 @@ special_mc_port := Config_Special{config_mc_port_set, config_mc_port_get, config
 special_mc_item_size := Config_Special{config_mc_item_size_set, config_mc_item_size_get, config_mc_item_size_rewrite}
 special_databases := Config_Special{config_databases_set, config_databases_get, config_databases_rewrite}
 
-CONFIG_TABLE_LEN :: 212
+CONFIG_TABLE_LEN :: 217
 
 configs: [CONFIG_TABLE_LEN]Config
 
@@ -252,7 +252,7 @@ config_table_init :: proc() {
 		{name = "cluster-require-full-coverage", type = .Bool, def = 1, store = &cfg.cluster_require_full_coverage},
 		{name = "rdb-save-incremental-fsync", type = .Bool, def = 1, store = &cfg.rdb_save_incremental_fsync},
 		{name = "aof-load-truncated", type = .Bool, def = 1, store = &aof.load_truncated},
-		{name = "aof-use-rdb-preamble", type = .Bool, def = 1, store = &aof.preamble},
+		{name = "aof-use-rdb-preamble", type = .Bool, def = 1, store = &aof.preamble, apply = label_preamble_apply},
 		{name = "aof-timestamp-enabled", type = .Bool, def = 0, store = &aof.timestamps},
 		{name = "cluster-replica-no-failover", alias = "cluster-slave-no-failover", type = .Bool, def = 0, store = &cfg.cluster_replica_no_failover},
 		{name = "replica-lazy-flush", alias = "slave-lazy-flush", type = .Bool, def = 0, store = &cfg.replica_lazy_flush},
@@ -418,20 +418,25 @@ config_table_init :: proc() {
 		{name = "latency-tracking-info-percentiles", type = .Special, flags = {.Multi_Arg}, special = &special_percentiles},
 		{name = "memcached-port", type = .Special, flags = {.Immutable, .Hidden}, special = &special_mc_port},
 		{name = "memcached-max-item-size", type = .Special, flags = {.Immutable, .Hidden}, special = &special_mc_item_size},
-		{name = "label-levels", type = .Special, flags = {.Hidden}, special = &special_label_levels, apply = label_scheme_apply},
-		{name = "label-compartments", type = .Special, flags = {.Hidden}, special = &special_label_compartments, apply = label_scheme_apply},
-		{name = "label-trust-levels", type = .Special, flags = {.Hidden}, special = &special_label_trusts, apply = label_scheme_apply},
+		{name = "label-levels", type = .Special, flags = {.Hidden, .Deny_Loading}, special = &special_label_levels, apply = label_scheme_apply},
+		{name = "label-compartments", type = .Special, flags = {.Hidden, .Deny_Loading}, special = &special_label_compartments, apply = label_scheme_apply},
+		{name = "label-trust-levels", type = .Special, flags = {.Hidden, .Deny_Loading}, special = &special_label_trusts, apply = label_scheme_apply},
 		{name = "label-audit-file", type = .Str, flags = {.Immutable, .Hidden}, store = &label_audit_file},
 		{name = "label-token-audience", type = .Str, flags = {.Hidden}, store = &label_token_audience},
 		{name = "label-context-idle-timeout", type = .Num, flags = {.Hidden}, def = 3600, lo = 1, hi = u64(INT_MAX_CFG), store = &label_context_idle},
 		{name = "label-context-max-per-login", type = .Num, flags = {.Hidden}, def = 1000, lo = 1, hi = u64(INT_MAX_CFG), store = &label_context_cap},
 		{name = "label-partitions-max", type = .Num, flags = {.Immutable, .Hidden}, def = LABEL_PARTITIONS_DEFAULT, lo = 1, hi = 1 << 20, store = &label_partitions_max},
 		{name = "label-stream-seed", type = .Num, flags = {.Immutable, .Hidden}, def = 0, lo = 0, hi = LLONG_MAX_CFG, store = &label_stream_seed},
-		{name = "owners", type = .Special, flags = {.Hidden}, special = &special_owners, apply = label_scheme_apply},
+		{name = "owners", type = .Special, flags = {.Hidden, .Deny_Loading}, special = &special_owners, apply = label_scheme_apply},
 		{name = "owner-quota-default", type = .Num, flags = {.Memory, .Hidden}, def = 0, lo = 0, hi = LLONG_MAX_CFG, store = &owner_quota_default},
 		{name = "owner-partitions-max", type = .Num, flags = {.Hidden}, def = 0, lo = 0, hi = LLONG_MAX_CFG, store = &owner_partitions_max},
 		{name = "owner-compact", type = .Bool, flags = {.Immutable, .Hidden}, def = 1, store = &owner_compact},
+		{name = "owners-forget-snapshot-delay", type = .Num, flags = {.Hidden}, def = ACCESS_FORGET_DELAY_DEFAULT, lo = 0, hi = u64(INT_MAX_CFG), store = &owners_forget_snapshot_delay},
+		{name = "owners-forget-aof-delay", type = .Num, flags = {.Hidden}, def = ACCESS_FORGET_DELAY_DEFAULT, lo = 0, hi = u64(INT_MAX_CFG), store = &owners_forget_aof_delay},
 		{name = "debug-hash-seed", type = .Num, flags = {.Immutable, .Hidden}, def = 0, lo = 0, hi = LLONG_MAX_CFG, store = &debug_hash_seed},
+		{name = "encryption-key-file", type = .Str, flags = {.Immutable, .Hidden}, store = &encryption_key_file},
+		{name = "encryption-key-file-previous", type = .Str, flags = {.Immutable, .Hidden}, store = &encryption_key_file_previous},
+		{name = "encryption-adopt-plain", type = .Bool, flags = {.Immutable, .Hidden}, def = 0, store = &encryption_adopt_plain},
 	}
 	#assert(len(t) == CONFIG_TABLE_LEN)
 	configs = t

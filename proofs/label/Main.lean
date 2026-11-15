@@ -195,6 +195,7 @@ def replyText (tc : TConfig) : Reply → String
   | .exec => "exec"
   | .nil => "nil"
   | .none => "-"
+  | .lastsave b => if b then "lastsave:start" else "lastsave:saved"
 
 def wsText (s : WSum) : String := if s.any then s!"{bit s.mixed}/{showLabel s.label}" else "-"
 

@@ -1840,6 +1840,7 @@ db_flush_all :: proc(lazy: bool = false) {
 }
 
 db_flush_in :: proc(db: ^Db, lazy: bool = false) {
+	vset_quiesce_all()
 	if labels_on {
 		label_flush_prepare(db)
 	}

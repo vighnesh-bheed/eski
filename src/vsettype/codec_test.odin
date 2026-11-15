@@ -214,16 +214,16 @@ codec_rejects_malformed_input_without_crashing :: proc(t: ^testing.T) {
 
 @(test)
 codec_bounds_allocation_by_input :: proc(t: ^testing.T) {
-	header := []u8{'E', 'V', 'S', CODEC_VERSION, 0, 0x80, 0x80, 0x20, 0, 16, 0xFF, 0xFF, 0xFF, 0xFF, 0x07, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F}
+	header := []u8{'E', 'V', 'S', CODEC_VERSION_V1, 0, 0x80, 0x80, 0x20, 0, 16, 0xFF, 0xFF, 0xFF, 0xFF, 0x07, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F}
 	_, err := deserialize(header)
 	testing.expect_value(t, err, Decode_Error.Truncated)
-	big_m := []u8{'E', 'V', 'S', CODEC_VERSION, 0, 2, 0, 0xFF, 0xFF, 0x02, 1, 1}
+	big_m := []u8{'E', 'V', 'S', CODEC_VERSION_V1, 0, 2, 0, 0xFF, 0xFF, 0x02, 1, 1}
 	_, err = deserialize(big_m)
 	testing.expect_value(t, err, Decode_Error.Bad_Header)
-	empty := []u8{'E', 'V', 'S', CODEC_VERSION, 0, 2, 0, 16, 0, 0}
+	empty := []u8{'E', 'V', 'S', CODEC_VERSION_V1, 0, 2, 0, 16, 0, 0}
 	_, err = deserialize(empty)
 	testing.expect_value(t, err, Decode_Error.Empty)
-	overlong := []u8{'E', 'V', 'S', CODEC_VERSION, 0, 0x82, 0x00, 0, 16, 1, 1}
+	overlong := []u8{'E', 'V', 'S', CODEC_VERSION_V1, 0, 0x82, 0x00, 0, 16, 1, 1}
 	_, err = deserialize(overlong)
 	testing.expect_value(t, err, Decode_Error.Bad_Header)
 	_, err = deserialize([]u8{'E', 'V', 'X', CODEC_VERSION})
@@ -238,7 +238,7 @@ codec_rejects_dirty_binary_padding_and_duplicates :: proc(t: ^testing.T) {
 	defer destroy(s)
 	add_values(t, s, "a", {1, -1, 1}, quant = .BIN)
 	add_values(t, s, "b", {-1, 1, 1}, quant = .BIN)
-	blob, _ := serialize_bytes(s)
+	blob, _ := serialize_v1_bytes(s)
 	defer delete(blob)
 	dirty := make([]u8, len(blob))
 	defer delete(dirty)
@@ -255,7 +255,7 @@ codec_rejects_dirty_binary_padding_and_duplicates :: proc(t: ^testing.T) {
 	q8 := new_set(t, 2)
 	defer destroy(q8)
 	add_values(t, q8, "a", {1, -1})
-	qblob, _ := serialize_bytes(q8)
+	qblob, _ := serialize_v1_bytes(q8)
 	defer delete(qblob)
 	qblob[header_size(q8) + 3] = 0x80
 	_, err = deserialize(qblob)
