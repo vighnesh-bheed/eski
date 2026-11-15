@@ -63,7 +63,7 @@ set_object_move :: proc "contextless" (obj: rawptr, from: ^Db, to: ^Db) -> int {
 		return 0
 	}
 	st.maintenance_bind(s, to.sctx)
-	return s.acct
+	return s.chg if labels_on else s.acct
 }
 
 set_object_acct :: proc "contextless" (obj: rawptr) -> int {
@@ -74,7 +74,13 @@ set_object_acct :: proc "contextless" (obj: rawptr) -> int {
 set_sync :: proc "contextless" (db: ^Db, s: st.Set) {
 	st.maintenance_bind(s, db.sctx)
 	n := st.memory_usage(s)
-	object_account(db, n - s.acct)
+	if labels_on {
+		c := st.charge(s)
+		object_charged(db, n - s.acct, c - s.chg)
+		s.chg = c
+	} else {
+		object_account(db, n - s.acct)
+	}
 	s.acct = n
 }
 

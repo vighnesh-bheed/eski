@@ -355,6 +355,187 @@ class MemoryTwins(Base):
         self.check_mode('both')
 
 
+QUOTA_VISIBLE = {
+    'labels': [('C', None)],
+    'owners': [('UNCLASSIFIED', 'u1')],
+    'both': [('C', 'u1'), ('C', '')],
+}
+QUOTA_HIDDEN = {
+    'labels': [('S//A', None), ('S//B', None), ('S', None)],
+    'owners': [('UNCLASSIFIED', 'u2'), ('UNCLASSIFIED', 'u3'), ('UNCLASSIFIED', '')],
+    'both': [('C', 'u2'), ('S//A', 'u2'), ('S//B', 'u3'), ('U', 'u4'), ('S//A', '')],
+}
+QUOTA_FIGURES = {
+    'labels': [('label', 'C')],
+    'owners': [('owner', 'u1')],
+    'both': [('owner', 'u1'), ('label', 'C')],
+}
+
+
+def quota_hidden_step(w, hide, i):
+    h = hide[i % len(hide)]
+    k = i % len(hide)
+    w.call(*h, 'SET', 'q-hid%d-%d' % (k, i % 19), 'x' * (1 + i * 37 % 300))
+    w.call(*h, 'HSET', 'q-hid%d-hash' % k, 'f%d' % i, 'y' * (i % 11))
+    w.call(*h, 'SADD', 'q-hid%d-set' % k, 'm%d' % i, i)
+    w.call(*h, 'ZADD', 'q-hid%d-zset' % k, i, 'm%d' % i)
+    w.call(*h, 'RPUSH', 'q-hid%d-list' % k, 'z' * (i % 13))
+    w.call(*h, 'XADD', 'q-hid%d-x' % k, '*', 'f', 'v' * (i % 7))
+    if i % 4 == 0:
+        w.call(*h, 'DEL', 'q-hid%d-%d' % (k, (i + 5) % 19))
+        w.call(*h, 'SPOP', 'q-hid%d-set' % k)
+        w.call(*h, 'LPOP', 'q-hid%d-list' % k)
+
+
+def quota_visible_step(w, r, i):
+    w.call(*r, 'SET', 'q-s%d' % (i % 23), 'v' * (1 + i % 50))
+    w.call(*r, 'APPEND', 'q-grow', 'a' * (i % 9 + 1))
+    w.call(*r, 'HSET', 'q-hash', 'field-%d' % i, 'w' * (i % 70))
+    w.call(*r, 'SADD', 'q-ints', i * 3)
+    w.call(*r, 'SADD', 'q-set', 'member-%d' % i)
+    w.call(*r, 'ZADD', 'q-zset', i * 0.25, 'member-%d' % i)
+    w.call(*r, 'RPUSH', 'q-list', 'u' * (i % 90))
+    w.call(*r, 'XADD', 'q-x', '%d-1' % (i + 2), 'f', 'v' * (i % 30), 'g', i)
+    if i % 11 == 0:
+        w.call(*r, 'XREADGROUP', 'GROUP', 'grp', 'reader-%d' % (i % 3), 'COUNT', 4, 'STREAMS', 'q-x', '>')
+    if i % 17 == 0:
+        w.call(*r, 'HPEXPIREAT', 'q-hash', sl.FAR, 'FIELDS', 1, 'field-%d' % i)
+        w.call(*r, 'PEXPIREAT', 'q-s%d' % (i % 23), sl.FAR)
+
+
+def quota_shrink(w, r):
+    for i in range(0, 600, 2):
+        w.call(*r, 'HDEL', 'q-hash', 'field-%d' % i)
+        w.call(*r, 'SREM', 'q-set', 'member-%d' % i)
+        w.call(*r, 'SREM', 'q-ints', i * 3)
+        w.call(*r, 'ZREM', 'q-zset', 'member-%d' % i)
+    w.call(*r, 'LTRIM', 'q-list', 0, 40)
+    w.call(*r, 'XTRIM', 'q-x', 'MAXLEN', 150)
+    w.call(*r, 'XACK', 'q-x', 'grp', '0-1')
+    w.call(*r, 'XGROUP', 'DELCONSUMER', 'q-x', 'grp', 'reader-1')
+    w.call(*r, 'DEL', 'q-s3', 'q-s4')
+
+
+def quota_expiry(w, r):
+    soon = w.soon()
+    w.call(*r, 'SET', 'q-short', 'gone-soon', 'PXAT', soon)
+    w.call(*r, 'RPUSH', 'q-short-list', *range(30))
+    w.call(*r, 'PEXPIREAT', 'q-short-list', soon)
+    w.call(*r, 'HSET', 'q-hash', 'short-field', 'gone')
+    w.call(*r, 'HPEXPIREAT', 'q-hash', soon, 'FIELDS', 1, 'short-field')
+    w.past(soon)
+    w.pair.gone(r, 'q-short')
+    w.pair.gone(r, 'q-short-list')
+    w.pair.until(lambda c: c.call(*r, 'HEXISTS', 'q-hash', 'short-field') == 0)
+
+
+def quota_workload(rig, hidden):
+    mode = rig.mode
+    w = rig.world()
+    visible = [sl.at(mode, *scope) for scope in QUOTA_VISIBLE[mode]]
+    hide = [sl.at(mode, *scope) for scope in QUOTA_HIDDEN[mode]]
+    for r in visible:
+        w.call(*r, 'XADD', 'q-x', '1-1', 'f', 'v')
+        w.call(*r, 'XGROUP', 'CREATE', 'q-x', 'grp', '0')
+    for i in range(600):
+        if hidden:
+            quota_hidden_step(w, hide, i)
+        for r in visible:
+            quota_visible_step(w, r, i)
+    for r in visible:
+        quota_shrink(w, r)
+        quota_expiry(w, r)
+    if hidden:
+        for k, h in enumerate(hide):
+            w.call(*h, 'DEL', 'q-hid%d-hash' % k)
+
+
+def quota_figures(rig):
+    t = sl.top(rig.mode)
+    out = []
+    for kind, name in QUOTA_FIGURES[rig.mode]:
+        if kind == 'owner':
+            info = rig.c.call(*t, 'OWNERS', 'INFO', name)
+            out.append((kind, name, dict(zip(info[0::2], info[1::2]))[b'bytes']))
+        else:
+            out.append((kind, name, rig.c.call(*t, 'LABEL', 'QUOTA', name)[1]))
+    return out
+
+
+def quota_answers(rig, figures):
+    t = sl.top(rig.mode)
+    out = []
+    for kind, name, used in figures:
+        for limit in (used, used - 1):
+            if kind == 'owner':
+                rig.c.call(*t, 'OWNERS', 'QUOTA', name, 'LIMIT', limit)
+            else:
+                rig.c.call(*t, 'LABEL', 'QUOTA', name, 'LIMIT', limit)
+            p = sl.at(rig.mode, *[s for s in QUOTA_VISIBLE[rig.mode] if (kind == 'owner') == bool(s[1])][0])
+            try:
+                out.append((kind, limit - used, rig.c.call(*p, 'SET', 'q-probe', 'x')))
+            except ServerError as e:
+                out.append((kind, limit - used, str(e)))
+            rig.c.call(*p, 'DEL', 'q-probe')
+            if kind == 'owner':
+                rig.c.call(*t, 'OWNERS', 'QUOTA', name, 'LIMIT', 0)
+            else:
+                rig.c.call(*t, 'LABEL', 'QUOTA', name, 'LIMIT', 0)
+    return out
+
+
+class QuotaTwins(Base):
+    def stage(self, a, b, what):
+        fa, fb = quota_figures(a), quota_figures(b)
+        self.same(fa, fb, 'quota figures %s' % what)
+        for rig in (a, b):
+            checked = rig.c.call(*sl.top(rig.mode), 'DEBUG', 'CHARGE-CHECK')
+            self.assertGreater(checked, 0, 'the running charges equal the content %s' % what)
+        answers = quota_answers(a, fa)
+        self.same(answers, quota_answers(b, fb), 'answers at the quota edge %s' % what)
+        for kind, delta, answer in answers:
+            if delta == 0:
+                self.assertEqual(answer, 'OK', 'a write at the quota edge is accepted %s' % what)
+            else:
+                self.assertIn('OOM', answer, 'a write one byte past the quota edge is refused %s' % what)
+        self.same(fa, quota_figures(a), 'quota figures after the probes %s' % what)
+
+    def check_mode(self, mode):
+        extra = ('--enable-debug-command', 'yes')
+        a = Rig(self, 'qa-' + mode, mode, extra)
+        b = Rig(self, 'qb-' + mode, mode, extra)
+        quota_workload(a, False)
+        quota_workload(b, True)
+        self.stage(a, b, 'on the running twins (%s)' % mode)
+        a.bounce()
+        b.bounce()
+        self.stage(a, b, 'after a restart from the log (%s)' % mode)
+        a.rewrite()
+        b.rewrite()
+        self.stage(a, b, 'after a rewrite (%s)' % mode)
+        a.bounce()
+        b.bounce()
+        self.stage(a, b, 'after a rewrite and a restart (%s)' % mode)
+        snapshot = extra + ('--appendonly', 'no', '--save', '3600 1')
+        c = Rig(self, 'qc-' + mode, mode, snapshot)
+        d = Rig(self, 'qd-' + mode, mode, snapshot)
+        quota_workload(c, False)
+        quota_workload(d, True)
+        for rig in (c, d):
+            self.assertEqual(rig.c.call(*sl.top(mode), 'SAVE'), 'OK')
+            rig.bounce()
+        self.stage(c, d, 'after a restart from a snapshot (%s)' % mode)
+
+    def test_label_only_quota_figures_and_refusals_follow_only_the_readers_data(self):
+        self.check_mode('labels')
+
+    def test_owner_only_quota_figures_and_refusals_follow_only_the_users_data(self):
+        self.check_mode('owners')
+
+    def test_both_quota_figures_and_refusals_follow_only_the_scopes_data(self):
+        self.check_mode('both')
+
+
 def main():
     global BINARY, KEYSPACE_THREADS
     parser = argparse.ArgumentParser()

@@ -26,6 +26,7 @@ List_Object :: struct {
 	ql:       ^Quicklist,
 	acct:     int,
 	encoding: Encoding,
+	chg:      int,
 }
 
 List :: ^List_Object

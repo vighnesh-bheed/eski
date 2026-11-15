@@ -52,12 +52,12 @@ resize_mapped: int
 resize_retired_mapped: int
 
 #assert(size_of(Node) == 32 && size_of(Level) == 16)
-#assert(size_of(Zset_Object) == 32)
+#assert(size_of(Zset_Object) == 40)
 #assert(offset_of(Node, score) == 0 && offset_of(Node, backward) == 8 && offset_of(Node, hash) == 16)
 #assert(offset_of(Node, mlen) == 24 && offset_of(Node, nlevel) == 28)
 #assert(size_of(Skiplist) == 72 && align_of(Skiplist) == 8)
 #assert(offset_of(Skiplist, header) == 0 && offset_of(Skiplist, tail) == 8)
-#assert(offset_of(Skiplist, length) == 16 && offset_of(Skiplist, level) == 24)
+#assert(offset_of(Skiplist, length) == 16 && offset_of(Skiplist, leveled) == 24)
 #assert(offset_of(Skiplist, slots) == 32 && offset_of(Skiplist, cap) == 40)
 #assert(offset_of(Skiplist, count) == 48 && offset_of(Skiplist, bytes) == 56 && offset_of(Skiplist, resize) == 64)
 #assert(size_of(Context) == 40 && offset_of(Context, resize_epoch) == 32)

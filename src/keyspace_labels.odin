@@ -796,7 +796,12 @@ label_flush_prepare :: proc(db: ^Db) {
 				vp := &t.slots[i].val
 				if kp.small.tag.val_form == FORM_OBJECT && vp.slab.info.type == .Vectorset {
 					label_vset_flush_one(db, vp)
-				} else if owned && kp.small.tag.val_form == FORM_OBJECT {
+					continue
+				}
+				if kp.small.tag.val_form == FORM_OBJECT {
+					label_flush_charged(db, vp)
+				}
+				if owned && kp.small.tag.val_form == FORM_OBJECT {
 					owner_object_unbind(vp)
 				}
 			}

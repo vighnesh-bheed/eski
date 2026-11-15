@@ -1,5 +1,6 @@
 package streamtype
 
+import lp "../listpack"
 import rx "../rax"
 import "base:runtime"
 
@@ -123,6 +124,49 @@ group_release :: proc "contextless" (s: Stream, p: rawptr) {
 }
 
 @(private)
+pending_charge :: #force_inline proc "contextless" () -> int {
+	return STREAM_ID_ALLOWANCE + lp.content_block(size_of(Delivery))
+}
+
+@(private)
+member_charge :: #force_inline proc "contextless" (name_len: int) -> int {
+	return STREAM_NAME_ALLOWANCE + name_len + lp.content_block(size_of(Member) + name_len) + lp.content_block(size_of(rx.Rax))
+}
+
+@(private)
+group_charge :: #force_inline proc "contextless" (name_len: int) -> int {
+	return STREAM_NAME_ALLOWANCE + name_len + lp.content_block(size_of(Group)) + 2 * lp.content_block(size_of(rx.Rax))
+}
+
+@(private)
+pending_insert :: proc "contextless" (s: Stream, g: ^Group, key: []u8, d: ^Delivery) {
+	before := g.pending.stored
+	rx.insert(g.pending, key, d)
+	content_moved(s, int(g.pending.stored - before) * pending_charge())
+}
+
+@(private)
+pending_remove :: proc "contextless" (s: Stream, g: ^Group, key: []u8) {
+	if rx.remove(g.pending, key) {
+		content_moved(s, -(pending_charge()))
+	}
+}
+
+@(private)
+owned_insert :: proc "contextless" (s: Stream, m: ^Member, key: []u8, d: ^Delivery) {
+	before := m.owned.stored
+	rx.insert(m.owned, key, d)
+	content_moved(s, int(m.owned.stored - before) * STREAM_ID_ALLOWANCE)
+}
+
+@(private)
+owned_remove :: proc "contextless" (s: Stream, m: ^Member, key: []u8) {
+	if rx.remove(m.owned, key) {
+		content_moved(s, -(STREAM_ID_ALLOWANCE))
+	}
+}
+
+@(private)
 id_key :: #force_inline proc "contextless" (id: ID) -> (key: [16]u8) {
 	encode_id(&key, id)
 	return
@@ -142,6 +186,7 @@ find_group :: proc "contextless" (s: Stream, name: []u8) -> ^Group {
 add_group :: proc "contextless" (s: Stream, name: []u8, id: ID, entries_read: i64) -> ^Group {
 	if s.groups == nil {
 		s.groups = rx.create(&s.group_bytes)
+		content_moved(s, lp.content_block(size_of(rx.Rax)))
 	}
 	if _, found := rx.find(s.groups, name); found {
 		return nil
@@ -152,6 +197,7 @@ add_group :: proc "contextless" (s: Stream, name: []u8, id: ID, entries_read: i6
 	g.pending = rx.create(&s.group_bytes)
 	g.members = rx.create(&s.group_bytes)
 	rx.insert(s.groups, name, g)
+	content_moved(s, group_charge(len(name)))
 	return g
 }
 
@@ -163,6 +209,7 @@ release_member :: proc "contextless" (s: Stream, m: ^Member) {
 
 @(private)
 release_group :: proc "contextless" (s: Stream, g: ^Group) {
+	content_moved(s, -(int(g.pending.stored) * pending_charge()))
 	it: rx.Iterator
 	rx.start(&it, g.pending)
 	rx.seek(&it, "^")
@@ -174,7 +221,9 @@ release_group :: proc "contextless" (s: Stream, g: ^Group) {
 	rx.start(&it, g.members)
 	rx.seek(&it, "^")
 	for rx.next(&it) {
-		release_member(s, (^Member)(it.data))
+		m := (^Member)(it.data)
+		content_moved(s, -(member_charge(len(m.name)) + int(m.owned.stored) * STREAM_ID_ALLOWANCE))
+		release_member(s, m)
 	}
 	rx.stop(&it)
 	rx.destroy(g.members)
@@ -189,6 +238,7 @@ drop_group :: proc "contextless" (s: Stream, name: []u8) -> bool {
 	if !rx.remove(s.groups, name, &old) {
 		return false
 	}
+	content_moved(s, -(group_charge(len(name))))
 	release_group(s, (^Group)(old))
 	return true
 }
@@ -201,11 +251,13 @@ free_groups :: proc "contextless" (s: Stream) {
 	rx.start(&it, s.groups)
 	rx.seek(&it, "^")
 	for rx.next(&it) {
+		content_moved(s, -(group_charge(len(rx.key(&it)))))
 		release_group(s, (^Group)(it.data))
 	}
 	rx.stop(&it)
 	rx.destroy(s.groups)
 	s.groups = nil
+	content_moved(s, -(lp.content_block(size_of(rx.Rax))))
 }
 
 find_member :: proc "contextless" (g: ^Group, name: []u8) -> ^Member {
@@ -234,6 +286,7 @@ add_member :: proc "contextless" (s: Stream, g: ^Group, name: []u8, now: i64) ->
 	m.active_ms = -1
 	m.owned = rx.create(&s.group_bytes)
 	rx.insert(g.members, m.name, m)
+	content_moved(s, member_charge(len(name)))
 	return m
 }
 
@@ -253,11 +306,13 @@ drop_member :: proc "contextless" (s: Stream, g: ^Group, m: ^Member) -> u64 {
 	for rx.next(&it) {
 		old: rawptr
 		if rx.remove(g.pending, rx.key(&it), &old) {
+			content_moved(s, -(pending_charge()))
 			group_release(s, old)
 		}
 	}
 	rx.stop(&it)
 	rx.remove(g.members, m.name)
+	content_moved(s, -(member_charge(len(m.name)) + int(m.owned.stored) * STREAM_ID_ALLOWANCE))
 	release_member(s, m)
 	return dropped
 }
@@ -280,23 +335,23 @@ find_delivery :: proc "contextless" (g: ^Group, id: ID) -> ^Delivery {
 }
 
 @(private)
-hand_over :: proc "contextless" (d: ^Delivery, key: []u8, to: ^Member) {
+hand_over :: proc "contextless" (s: Stream, d: ^Delivery, key: []u8, to: ^Member) {
 	if d.owner == to {
 		return
 	}
 	if d.owner != nil {
-		rx.remove(d.owner.owned, key)
+		owned_remove(s, d.owner, key)
 	}
-	rx.insert(to.owned, key, d)
+	owned_insert(s, to, key, d)
 	d.owner = to
 }
 
 @(private)
 forget_delivery :: proc "contextless" (s: Stream, g: ^Group, d: ^Delivery, key: []u8) {
 	if d.owner != nil {
-		rx.remove(d.owner.owned, key)
+		owned_remove(s, d.owner, key)
 	}
-	rx.remove(g.pending, key)
+	pending_remove(s, g, key)
 	group_release(s, d)
 }
 
@@ -421,9 +476,9 @@ group_deliver :: proc "contextless" (s: Stream, g: ^Group, member: ^Member, id: 
 		d.times = 1
 	} else {
 		d = new_delivery(s, nil, now)
-		rx.insert(g.pending, key[:], d)
+		pending_insert(s, g, key[:], d)
 	}
-	hand_over(d, key[:], member)
+	hand_over(s, d, key[:], member)
 	member.active_ms = now
 }
 
@@ -472,7 +527,7 @@ claim_entry :: proc(s: Stream, g: ^Group, member: ^Member, id: ID, a: ^Claim_Opt
 			return .Skipped
 		}
 		d = new_delivery(s, nil, now)
-		rx.insert(g.pending, key[:], d)
+		pending_insert(s, g, key[:], d)
 		forced = true
 	} else if !entry_exists(s, id) {
 		forget_delivery(s, g, d, key[:])
@@ -494,7 +549,7 @@ claim_entry :: proc(s: Stream, g: ^Group, member: ^Member, id: ID, a: ^Claim_Opt
 	} else if .Ids_Only not_in a.flags {
 		d.times += 1
 	}
-	hand_over(d, key[:], member)
+	hand_over(s, d, key[:], member)
 	member.active_ms = now
 	return .Claimed
 }
@@ -533,7 +588,7 @@ autoclaim_scan :: proc(s: Stream, g: ^Group, member: ^Member, a: ^Autoclaim_Args
 		if !a.justid {
 			d.times += 1
 		}
-		hand_over(d, key[:], member)
+		hand_over(s, d, key[:], member)
 		member.active_ms = now
 		append(out, Autoclaim_Step{id, .Claimed})
 		budget -= 1
@@ -615,9 +670,9 @@ copy_group :: proc "contextless" (into: Stream, name: []u8, src: ^Group) {
 		}
 		twin := new_delivery(into, owner, d.sent_ms)
 		twin.times = d.times
-		rx.insert(dst.pending, rx.key(&pw), twin)
+		pending_insert(into, dst, rx.key(&pw), twin)
 		if owner != nil {
-			rx.insert(owner.owned, rx.key(&pw), twin)
+			owned_insert(into, owner, rx.key(&pw), twin)
 		}
 	}
 	rx.stop(&pw)

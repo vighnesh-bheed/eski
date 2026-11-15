@@ -351,6 +351,7 @@ load_node :: proc(r: ^rdb.Reader, s: Stream, deep: bool) -> (ok: bool, reason: s
 		lp_release(s, node)
 		return false, "Listpack re-added with existing key"
 	}
+	content_moved(s, lp.content_block(lp_total(node)))
 	return true, ""
 }
 
@@ -456,6 +457,7 @@ rdb_load :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> Stream {
 				group_release(s, pe)
 				return rdb_fail(r, s, "Duplicated global PEL entry loading stream consumer group")
 			}
+			content_moved(s, pending_charge())
 		}
 		consumers: u64
 		if !rdb_len(r, &consumers) {
@@ -507,6 +509,7 @@ rdb_load :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> Stream {
 				if !rx.try_insert(member.owned, idkey[:], pe) {
 					return rdb_fail(r, s, "Duplicated consumer PEL entry loading a stream consumer group")
 				}
+				content_moved(s, STREAM_ID_ALLOWANCE)
 			}
 		}
 		{

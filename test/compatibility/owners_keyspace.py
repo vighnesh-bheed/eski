@@ -1694,8 +1694,8 @@ class VectorOwnerCharges(unittest.TestCase):
             use, replies, keys, left = quiet
             seen.add(len(keys))
             if any(reply != 'OK' for reply in replies):
-                self.assertEqual(replies, [LABEL_QUOTA_OOM] * 3, over)
-                self.assertEqual(keys, [], over)
+                self.assertEqual(replies, ['OK'] + [LABEL_QUOTA_OOM] * 2, over)
+                self.assertEqual(keys, [b'probe'], over)
             else:
                 self.assertLessEqual(left, use - over + 600, over)
                 self.assertIn(b'probe', keys, over)

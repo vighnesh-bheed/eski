@@ -2,6 +2,7 @@ package main
 
 import lb "label"
 import ow "owner"
+import sm "streamtype"
 
 ERR_LABEL_INVALID :: "ERR invalid label"
 ERR_LABELS_OFF :: "ERR labels are not configured on this server"
@@ -153,6 +154,7 @@ access_top_label: lb.Label
 
 access_scheme_changed :: proc "contextless" () {
 	access_top_label, _ = lb.config_top(&label_scheme)
+	sm.set_charge_room(labels_on)
 }
 
 access_scheme_top :: #force_inline proc "contextless" () -> lb.Label {

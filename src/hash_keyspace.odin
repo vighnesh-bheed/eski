@@ -124,7 +124,7 @@ object_move :: proc "contextless" (type: Obj_Type, obj: rawptr, from: ^Db, to: ^
 	}
 	h := ht.Hash(obj)
 	hash_move_registry(h, from, to)
-	return h.acct
+	return h.chg if labels_on else h.acct
 }
 
 @(private)
@@ -199,7 +199,12 @@ hash_subexpiry :: proc "contextless" (db: ^Db) -> int {
 hash_sync :: #force_inline proc "contextless" (db: ^Db, h: ht.Hash) {
 	m := ht.memory_usage(h)
 	d := m - h.acct
-	if d != 0 {
+	if labels_on {
+		c := ht.charge(h)
+		object_charged(db, d, c - h.chg)
+		h.chg = c
+		h.acct = m
+	} else if d != 0 {
 		h.acct = m
 		object_account(db, d)
 	}

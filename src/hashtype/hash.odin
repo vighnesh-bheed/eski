@@ -19,6 +19,9 @@ Hash_Object :: struct {
 	hfe: ^Hfe_Meta,
 	acct: int,
 	encoding: Encoding,
+	using charged: bit_field [7]u8 {
+		chg: int | 56,
+	},
 }
 
 Hash :: ^Hash_Object

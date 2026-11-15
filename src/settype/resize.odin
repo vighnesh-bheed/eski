@@ -54,7 +54,7 @@ resize_retired_mapped: int
 
 #assert(size_of(Blob) == 4)
 #assert(size_of(Slot) == 16)
-#assert(size_of(Set_Object) == 32)
+#assert(size_of(Set_Object) == 40)
 #assert(size_of(Table) == 40)
 #assert(offset_of(Table, slots) == 0 && offset_of(Table, cap) == 8)
 #assert(offset_of(Table, count) == 16 && offset_of(Table, blob_bytes) == 24)

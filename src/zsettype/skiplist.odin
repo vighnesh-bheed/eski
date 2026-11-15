@@ -27,7 +27,10 @@ Skiplist :: struct {
 	header: ^Node,
 	tail:   ^Node,
 	length: int,
-	level:  int,
+	using leveled: bit_field u64 {
+		level:   int | 8,
+		content: int | 56,
+	},
 	slots:  [^]^Node,
 	cap:    int,
 	count:  int,
@@ -121,12 +124,14 @@ node_new :: proc "contextless" (sl: ^Skiplist, level: int, score: f64, member: [
 	n.nlevel = u32(level)
 	copy(node_member(n), member)
 	sl.bytes += mem_usable_size(n)
+	sl.content += node_charge(n)
 	return n
 }
 
 node_free :: proc "contextless" (sl: ^Skiplist, n: ^Node) {
 	if n != nil {
 		sl.bytes -= mem_usable_size(n)
+		sl.content -= node_charge(n)
 		mem_free(n)
 	}
 }
@@ -136,6 +141,7 @@ sl_create :: proc "contextless" (expected: int) -> ^Skiplist {
 	sl.level = 1
 	sl.header = node_new(sl, MAX_LEVEL, 0, nil, 0)
 	sl.bytes = 0
+	sl.content = 0
 	sl.cap = dict_cap_for(expected)
 	sl.slots = slots_alloc(sl.cap)
 	return sl

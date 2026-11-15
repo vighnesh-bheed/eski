@@ -46,7 +46,12 @@ stream_memory :: proc "contextless" (obj: rawptr) -> int {
 @(private)
 stream_sync :: #force_inline proc "contextless" (db: ^Db, s: st.Stream) {
 	n := st.memory_usage(s)
-	object_account(db, n - s.acct)
+	if labels_on {
+		before := stream_chg(s)
+		object_charged(db, n - s.acct, stream_chg_store(s, n) - before)
+	} else {
+		object_account(db, n - s.acct)
+	}
 	s.acct = n
 }
 

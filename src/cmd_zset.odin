@@ -36,7 +36,7 @@ zset_object_move :: proc "contextless" (obj: rawptr, from: ^Db, to: ^Db) -> int 
 		return 0
 	}
 	zt.maintenance_bind(z, to.zctx)
-	return z.acct
+	return z.chg if labels_on else z.acct
 }
 
 zset_object_acct :: proc "contextless" (obj: rawptr) -> int {
@@ -57,7 +57,13 @@ zset_obj_encoding :: proc "contextless" (z: zt.Zset) -> Obj_Encoding {
 zset_sync :: proc "contextless" (db: ^Db, z: zt.Zset) {
 	zt.maintenance_bind(z, db.zctx)
 	n := zt.memory_usage(z)
-	object_account(db, n - z.acct)
+	if labels_on {
+		c := zt.charge(z)
+		object_charged(db, n - z.acct, c - z.chg)
+		z.chg = c
+	} else {
+		object_account(db, n - z.acct)
+	}
 	z.acct = n
 }
 

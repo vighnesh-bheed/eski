@@ -157,6 +157,8 @@ debug_more :: proc(c: ^Conn, argv: [][]u8) -> bool {
 		reply_ok(c)
 	case n == 3 && eq_nocase(sub, "error"):
 		debug_error(c, argv[2])
+	case labels_on && n == 2 && eq_nocase(sub, "charge-check"):
+		debug_charge_check(c)
 	case n >= 3 && eq_nocase(sub, "htstats-key"):
 		debug_htstats_key(c, argv[2], n >= 4 && eq_nocase(argv[3], "full"))
 	case n == 2 && eq_nocase(sub, "change-repl-id"):

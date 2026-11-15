@@ -40,9 +40,12 @@ Quicklist :: struct {
 	tail:     ^Node,
 	count:    int,
 	len:      int,
-	fill:     int,
-	compress: int,
+	using shape: bit_field u64 {
+		fill:     int | 32,
+		compress: int | 32,
+	},
 	mem:      int,
+	content:  int,
 }
 
 Iter :: struct {
@@ -102,7 +105,9 @@ ql_new :: proc "contextless" (fill: int, compress: int) -> ^Quicklist {
 	if q == nil {
 		out_of_memory()
 	}
-	q^ = Quicklist{fill = clamp_fill(fill), compress = clamp(compress, 0, COMPRESS_DEPTH_CEILING)}
+	q^ = {}
+	q.fill = clamp_fill(fill)
+	q.compress = clamp(compress, 0, COMPRESS_DEPTH_CEILING)
 	q.mem = usable(q)
 	return q
 }
@@ -128,18 +133,28 @@ node_new :: proc "contextless" (ql: ^Quicklist) -> ^Node {
 	}
 	n^ = {}
 	ql.mem += usable(n)
+	ql.content += node_charge(n)
 	return n
 }
 
-node_update_sz :: proc "contextless" (n: ^Node) {
+node_charge :: #force_inline proc "contextless" (n: ^Node) -> int {
+	return lp.content_block(size_of(Node)) + lp.content_block(max(n.sz, 1))
+}
+
+node_set_sz :: #force_inline proc "contextless" (ql: ^Quicklist, n: ^Node, sz: int) {
+	ql.content += lp.content_block(max(sz, 1)) - lp.content_block(max(n.sz, 1))
+	n.sz = sz
+}
+
+node_update_sz :: proc "contextless" (ql: ^Quicklist, n: ^Node) {
 	if !n.plain {
-		n.sz = lp.lp_bytes(n.entry)
+		node_set_sz(ql, n, lp.lp_bytes(n.entry))
 	}
 }
 
 node_set_entry :: proc "contextless" (ql: ^Quicklist, n: ^Node, old_usable: int, p: [^]u8) {
 	n.entry = p
-	node_update_sz(n)
+	node_update_sz(ql, n)
 	ql.mem += usable(p)-old_usable
 }
 
@@ -221,7 +236,7 @@ node_create_container :: proc(ql: ^Quicklist, plain: bool, value: []u8) -> ^Node
 	n.plain = plain
 	if plain {
 		n.entry = bytes_dup(raw_data(value), len(value))
-		n.sz = len(value)
+		node_set_sz(ql, n, len(value))
 		n.count = 1
 		ql.count += 1
 		ql.mem += usable(n.entry)
@@ -292,7 +307,7 @@ append_listpack :: proc(ql: ^Quicklist, zl: [^]u8) {
 	}
 	n := node_new(ql)
 	n.entry = zl
-	n.sz = lp.lp_bytes(zl)
+	node_set_sz(ql, n, lp.lp_bytes(zl))
 	n.count = count
 	ql.mem += usable(zl)
 	ql.count += count
@@ -313,6 +328,7 @@ del_node :: proc "contextless" (ql: ^Quicklist, n: ^Node) {
 	ql.len -= 1
 	ql.count -= n.count
 	ql.mem -= usable(n.entry)+usable(n)
+	ql.content -= node_charge(n)
 	lp.lp_free(n.entry)
 	lp.lp_mem_free(n)
 }
@@ -402,7 +418,7 @@ listpack_merge :: proc(ql: ^Quicklist, a: ^Node, b: ^Node) -> ^Node {
 	b.entry = nil
 	a.count += b.count
 	b.count = 0
-	node_update_sz(a)
+	node_update_sz(ql, a)
 	del_node(ql, b)
 	return a
 }
@@ -535,7 +551,7 @@ replace_entry :: proc(it: ^Iter, entry: ^Entry, data: []u8) {
 		ql.mem += usable(fresh)-usable(n.entry)
 		lp.lp_free(n.entry)
 		n.entry = fresh
-		n.sz = len(data)
+		node_set_sz(ql, n, len(data))
 	} else {
 		merge_remaining := !n.plain
 		cursor, ok := get_iterator_at_idx(ql, .Start_Head, idx)
@@ -682,7 +698,7 @@ ql_dup :: proc "contextless" (orig: ^Quicklist) -> ^Quicklist {
 	for n := orig.head; n != nil; n = n.next {
 		fresh := node_new(ql)
 		fresh.entry = bytes_dup(n.entry, n.sz)
-		fresh.sz = n.sz
+		node_set_sz(ql, fresh, n.sz)
 		fresh.count = n.count
 		fresh.plain = n.plain
 		ql.mem += usable(fresh.entry)

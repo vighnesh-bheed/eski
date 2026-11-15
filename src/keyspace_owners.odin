@@ -481,7 +481,7 @@ owner_ever_put :: #force_inline proc "contextless" (s: ^Owner_Space, i: int, lab
 }
 
 owner_part_bytes :: #force_inline proc "contextless" (p: ^Db) -> int {
-	return p.t[0].size + p.t[1].size + p.heap_bytes
+	return key_table_charge(p) + p.heap_bytes
 }
 
 owner_part_tables :: #force_inline proc "contextless" (p: ^Db) -> int {

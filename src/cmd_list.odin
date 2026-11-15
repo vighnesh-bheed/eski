@@ -66,7 +66,13 @@ list_memory :: proc "contextless" (obj: rawptr) -> int {
 
 list_sync :: proc "contextless" (db: ^Db, l: lt.List) {
 	n := lt.memory_usage(l)
-	object_account(db, n-l.acct)
+	if labels_on {
+		c := lt.charge(l)
+		object_charged(db, n - l.acct, c - l.chg)
+		l.chg = c
+	} else {
+		object_account(db, n-l.acct)
+	}
 	l.acct = n
 }
 

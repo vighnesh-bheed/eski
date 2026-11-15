@@ -7,7 +7,7 @@ import rdb "../rdb"
 import "core:testing"
 
 #assert(size_of(Hash_Object) == 40)
-#assert(size_of(Table) == 64)
+#assert(size_of(Table) == 72)
 #assert(size_of(Slot) == 16)
 #assert(size_of(Blob) == 12)
 #assert(size_of(Vol_Item) == 16)

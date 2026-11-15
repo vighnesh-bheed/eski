@@ -390,6 +390,7 @@ node_rewrite_int :: proc "contextless" (s: Stream, node: ^[^]u8, at: int, v: i64
 	}
 	total := lp_total(p)
 	delta := nw - old
+	content_moved(s, lp.content_block(total + delta) - lp.content_block(total))
 	if delta > 0 {
 		need := total + delta
 		if need > usable(p) {
@@ -457,7 +458,11 @@ free_lp :: proc "contextless" (p: rawptr) {
 }
 
 create :: proc "contextless" () -> Stream {
-	p := runtime.heap_alloc(size_of(Stream_Log), true)
+	size := size_of(Stream_Log)
+	if intrinsics.atomic_load_explicit(&charge_room, .Relaxed) {
+		size += size_of(Stream_Charge)
+	}
+	p := runtime.heap_alloc(size, true)
 	if p == nil {
 		out_of_memory()
 	}
@@ -590,6 +595,7 @@ dup :: proc(s: Stream) -> Stream {
 		q := lp_alloc(d, size)
 		intrinsics.mem_copy_non_overlapping(q, src, size)
 		rx.insert(d.nodes, rx.key(&it), q)
+		content_moved(d, lp.content_block(size))
 	}
 	rx.stop(&it)
 	d.live = s.live
@@ -925,6 +931,7 @@ open_node :: proc "contextless" (s: Stream, id: ID, fv: [][]u8) -> bool #no_boun
 	end += emit_entry(&node[end], first, fv)
 	node[end] = EOF
 	lp_set_total(node, end + 1)
+	content_moved(s, lp.content_block(end + 1))
 	node[4] = 0
 	node[5] = 0
 	lp_add_count(node, 4 + len(fv) / 2 + first.elements)
@@ -951,6 +958,7 @@ extend_node :: proc "contextless" (s: Stream, t: ^Tail, id: ID, fv: [][]u8) -> b
 	end += emit_entry(&t.node[end], plan, fv)
 	t.node[end] = EOF
 	lp_set_total(t.node, end + 1)
+	content_moved(s, lp.content_block(end + 1) - lp.content_block(used))
 	lp_add_count(t.node, plan.elements)
 	held := t.node
 	node_rewrite_int(s, &t.node, HDR, h.count + 1)
@@ -1018,6 +1026,7 @@ Xadd_Spec :: struct {
 
 @(private)
 node_remove :: proc "contextless" (s: Stream, key: []u8, p: [^]u8) {
+	content_moved(s, -(lp.content_block(lp_total(p))))
 	rx.remove(s.nodes, key)
 	lp_release(s, p)
 }

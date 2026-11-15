@@ -20,6 +20,7 @@ Zset_Object :: struct {
 	sl:       ^Skiplist,
 	acct:     int,
 	encoding: Encoding,
+	chg:      int,
 }
 
 Zset :: ^Zset_Object

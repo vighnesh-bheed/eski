@@ -31,6 +31,7 @@ Table :: struct {
 	vol_len: int,
 	vol_cap: int,
 	resize: ^Resize_State,
+	blob_content: int,
 }
 
 TABLE_MAX_CAPACITY :: (max(int) / size_of(Slot) + 1) / 2
@@ -66,6 +67,7 @@ blob_new :: proc "contextless" (t: ^Table, field, value: []u8) -> ^Blob {
 	copy(blob_field(b), field)
 	copy(blob_value(b), value)
 	t.blob_bytes += mem_usable_size(b)
+	t.blob_content += blob_charge(b)
 	return b
 }
 
@@ -80,6 +82,7 @@ blob_set_value :: proc "contextless" (t: ^Table, b: ^Blob, value: []u8) -> ^Blob
 		t.vol[n.hidx - 1].blob = n
 	}
 	t.blob_bytes -= mem_usable_size(b)
+	t.blob_content -= blob_charge(b)
 	mem_free(b)
 	return n
 }
@@ -89,6 +92,7 @@ blob_free :: proc "contextless" (t: ^Table, b: ^Blob) {
 		vol_remove(t, b)
 	}
 	t.blob_bytes -= mem_usable_size(b)
+	t.blob_content -= blob_charge(b)
 	mem_free(b)
 }
 

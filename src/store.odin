@@ -302,6 +302,10 @@ val_release :: proc "contextless" (db: ^Db, kp: ^Key_Handle, vp: ^Val_Handle) {
 			return
 		}
 		n: int
+		held := 0
+		if labels_on {
+			held = object_chg_of(vp.slab.info.type, rawptr(vp.ref.addr))
+		}
 		queued := false
 		if lazy_mode == .Async || (lazy_mode == .Server && cfg.lazyfree_lazy_server_del) {
 			n, queued = lazyfree_object(vp.slab.info.type, rawptr(vp.ref.addr))
@@ -324,7 +328,7 @@ val_release :: proc "contextless" (db: ^Db, kp: ^Key_Handle, vp: ^Val_Handle) {
 			block_note_removed()
 		}
 		db.heap_objs -= 1
-		db.heap_bytes -= n
+		db.heap_bytes -= held if labels_on else n
 		db_used_memory -= n
 	}
 	kp.small.tag.val_form = FORM_NONE
@@ -957,6 +961,9 @@ entry_object_attach :: proc "contextless" (e: ^Entry, obj: rawptr, type: Obj_Typ
 	db.heap_objs += 1
 	db.heap_bytes += bytes
 	db_used_memory += bytes
+	if labels_on {
+		object_charge_attach(db, type, obj, bytes)
+	}
 	e.val = nil
 	e.cap = 0
 	e.raw_enc = false
@@ -1766,11 +1773,11 @@ db_move :: proc(src: ^Db, dst: ^Db, key: []u8) -> bool #no_bounds_check {
 		case .Set:
 			n = set_object_move(rawptr(vh.ref.addr), src, dst)
 		case .List:
-			n = list_object_acct(rawptr(vh.ref.addr))
+			n = object_held_of(.List, rawptr(vh.ref.addr))
 		case .Zset:
 			n = zset_object_move(rawptr(vh.ref.addr), src, dst)
 		case .Stream:
-			n = stream_object_acct(rawptr(vh.ref.addr))
+			n = object_held_of(.Stream, rawptr(vh.ref.addr))
 		case:
 			n = object_move(vh.slab.info.type, rawptr(vh.ref.addr), src, dst)
 		}

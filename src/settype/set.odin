@@ -24,6 +24,10 @@ Set_Object :: struct {
 	table:    ^Table,
 	acct:     int,
 	encoding: Encoding,
+	using charged: bit_field [7]u8 {
+		chg: int | 56,
+	},
+	blob_content: int,
 }
 
 Set :: ^Set_Object
@@ -121,6 +125,7 @@ release_storage :: proc "contextless" (s: Set) {
 	}
 	s.data = nil
 	s.table = nil
+	s.blob_content = 0
 }
 
 destroy :: proc "contextless" (s: Set) {
@@ -245,12 +250,15 @@ convert_and_expand :: proc(s: Set, enc: Encoding, cap: int) {
 			resize_require(replacement.data != nil)
 		case .Hashtable:
 			buf: [lp.DECIMAL_BUFFER_BYTES]u8
-			table_add_new(replacement.table, value_bytes(v, &buf))
+			member := value_bytes(v, &buf)
+			table_add_new(replacement.table, member)
+			replacement.blob_content += member_charge(len(member))
 		}
 	}
 	release_storage(s)
 	s.data = replacement.data
 	s.table = replacement.table
+	s.blob_content = replacement.blob_content
 	s.encoding = enc
 	lp.lp_mem_free(replacement)
 }
@@ -349,7 +357,11 @@ add_aux :: proc(s: Set, v: Member) -> bool {
 	scratch: [lp.DECIMAL_BUFFER_BYTES]u8
 	member := value_bytes(v, &scratch)
 	if s.encoding == .Hashtable {
-		return table_add(s.table, member)
+		if !table_add(s.table, member) {
+			return false
+		}
+		s.blob_content += member_charge(len(member))
+		return true
 	}
 	if s.encoding == .Intset {
 		return add_to_intset(s, v, member)
@@ -381,7 +393,11 @@ remove_aux :: proc(s: Set, v: Member) -> bool {
 		s.data = lp.lp_delete(s.data, p, nil)
 		return true
 	case .Hashtable:
-		return table_delete(s.table, member)
+		if !table_delete(s.table, member) {
+			return false
+		}
+		s.blob_content -= member_charge(len(member))
+		return true
 	}
 	return false
 }
@@ -426,6 +442,7 @@ dup :: proc(s: Set) -> Set {
 			}
 			table_add_new(copy.table, v.text)
 		}
+		copy.blob_content = s.blob_content
 	}
 	return copy
 }
