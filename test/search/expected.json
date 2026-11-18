@@ -13,6 +13,15 @@
           "redis": "f3b4cb77478ec9e7388d907937dad039f9204482b7038f21ccabce096918ea23"
         }
       }
+    },
+    {
+      "id": "initial-scan-race",
+      "reason": "These cases write documents while the initial scan of a new index runs. On the reference a document indexed twice keeps its first copy in the document statistics until garbage collection, so the scores and FT.INFO counters they return depend on that race and do not repeat from run to run. They are reported as unrepeatable and never count as passed.",
+      "unrepeatable": true,
+      "cases": [
+        "capture/resp2/2153",
+        "capture/resp2/2154"
+      ]
     }
   ]
 }

@@ -99,5 +99,101 @@ class Normalizations(unittest.TestCase):
             self.assertEqual(receipt.read_text(), "original")
 
 
+def bulk(value):
+    return b"$%d\r\n%s\r\n" % (len(value), value)
+
+
+def flat(*items):
+    return b"*%d\r\n" % len(items) + b"".join(items)
+
+
+class ReferenceRepeatability(unittest.TestCase):
+    def same(self, argv, left, right):
+        self.assertEqual(normalized(argv, left), normalized(argv, right))
+
+    def differ(self, argv, left, right):
+        self.assertNotEqual(normalized(argv, left), normalized(argv, right))
+
+    def test_command_inventories_ignore_order_only(self):
+        argv = [b"COMMAND", b"LIST", b"FILTERBY", b"PATTERN", b"FT.*"]
+        left, right = flat(bulk(b"FT.A"), bulk(b"FT.B")), flat(bulk(b"FT.B"), bulk(b"FT.A"))
+        self.same(argv, left, right)
+        self.differ(argv, left, flat(bulk(b"FT.B"), bulk(b"FT.C")))
+        self.same([b"ACL", b"CAT", b"search"], left, right)
+
+    def test_subcommand_entries_ignore_order_only(self):
+        def info(*subcommands):
+            entry = flat(bulk(b"ft.cursor"), b":-2\r\n", flat(), b":0\r\n", b":0\r\n", b":0\r\n", flat(), flat(), flat(),
+                         flat(*subcommands))
+            return flat(entry)
+        one, two = flat(bulk(b"ft.cursor|read")), flat(bulk(b"ft.cursor|del"))
+        self.same([b"COMMAND", b"INFO", b"FT.CURSOR"], info(one, two), info(two, one))
+        self.differ([b"COMMAND", b"INFO", b"FT.CURSOR"], info(one, two), info(one, one))
+
+    def test_index_figures_keep_names_types_and_non_numbers(self):
+        argv = [b"FT.INFO", b"idx"]
+        left = flat(bulk(b"num_docs"), b":3\r\n", bulk(b"inverted_sz_mb"), bulk(b"0.25"), bulk(b"gc_stats"),
+                    flat(bulk(b"bytes_collected"), b":10\r\n"))
+        right = left.replace(b"$4\r\n0.25", b"$4\r\n0.75").replace(b":10\r\n", b":99\r\n")
+        self.same(argv, left, right)
+        self.differ(argv, left, left.replace(b":3\r\n", b":4\r\n"))
+        self.differ(argv, left, left.replace(b"$4\r\n0.25", b"$3\r\nnan"))
+
+    def test_profile_masks_times_and_keeps_counters(self):
+        argv = [b"FT.PROFILE", b"idx", b"SEARCH", b"QUERY", b"x"]
+        left = flat(flat(b":1\r\n"), flat(bulk(b"Total profile time"), bulk(b"0.5"), bulk(b"Results processed"), b":1\r\n"))
+        self.same(argv, left, left.replace(b"0.5", b"0.9"))
+        self.differ(argv, left, left.replace(b"processed\r\n:1", b"processed\r\n:2"))
+
+    def test_tolist_and_unsorted_groups_ignore_member_order(self):
+        argv = [b"FT.AGGREGATE", b"idx", b"*", b"GROUPBY", b"1", b"@c", b"REDUCE", b"TOLIST", b"1", b"@y", b"AS", b"ys"]
+        row = lambda *years: flat(bulk(b"c"), bulk(b"a"), bulk(b"ys"), flat(*map(bulk, years)))
+        self.same(argv, flat(b":1\r\n", row(b"1", b"2")), flat(b":1\r\n", row(b"2", b"1")))
+        self.differ(argv, flat(b":1\r\n", row(b"1", b"2")), flat(b":1\r\n", row(b"1", b"3")))
+        groups = [b"FT.AGGREGATE", b"idx", b"*", b"GROUPBY", b"1", b"@c"]
+        one, two = flat(bulk(b"c"), bulk(b"a")), flat(bulk(b"c"), bulk(b"b"))
+        self.same(groups, flat(b":2\r\n", one, two), flat(b":2\r\n", two, one))
+        self.differ(groups + [b"SORTBY", b"2", b"@c", b"ASC"], flat(b":2\r\n", one, two), flat(b":2\r\n", two, one))
+
+    def test_distance_ties_reorder_only_equal_distances(self):
+        argv = [b"FT.SEARCH", b"idx", b"*=>[KNN 3 @v $q AS d]", b"SORTBY", b"d", b"RETURN", b"1", b"d"]
+        hit = lambda key, d: bulk(key) + flat(bulk(b"d"), bulk(d))
+        reply = lambda *hits: b"*%d\r\n:%d\r\n" % (len(hits) * 2 + 1, len(hits)) + b"".join(hits)
+        self.same(argv, reply(hit(b"a", b"1"), hit(b"b", b"1"), hit(b"c", b"2")),
+                  reply(hit(b"b", b"1"), hit(b"a", b"1"), hit(b"c", b"2")))
+        self.differ(argv, reply(hit(b"a", b"1"), hit(b"b", b"2")), reply(hit(b"b", b"2"), hit(b"a", b"1")))
+
+    def test_hybrid_cursor_ids_are_masked(self):
+        argv = [b"FT.HYBRID", b"idx", b"SEARCH", b"x", b"VSIM", b"@v", b"$q", b"WITHCURSOR"]
+        left = flat(bulk(b"SEARCH"), b":12\r\n", bulk(b"VSIM"), b":34\r\n")
+        self.same(argv, left, left.replace(b":12", b":56"))
+        self.differ(argv, left, left.replace(b":34", b":0"))
+
+    def test_unrepeatable_cases_never_pass_and_lost_replies_never_excuse(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "expected.json"
+            path.write_text('{"categories": [{"id": "race", "reason": "a race on the reference", "unrepeatable": true,'
+                            ' "cases": ["capture/resp2/7"]}]}')
+            expected = compare.load_expected(path)
+            path.write_text('{"categories": [{"id": "race", "reason": "r", "unrepeatable": false, "cases": ["capture/resp2/7"]}]}')
+            with self.assertRaises(ValueError):
+                compare.load_expected(path)
+        for left, right, status in ((b"+A\r\n", b"+B\r\n", "unrepeatable"), (b"+A\r\n", b"+A\r\n", "passed")):
+            report = {"exact": 0, "cases": []}
+            checked = compare.Comparison(report, expected, True)
+            checked.result("race", "capture/resp2/7", [b"FT.SEARCH"], node(left), node(right))
+            self.assertEqual(report["cases"][0]["status"], status)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertFalse(checked.finish())
+        a, b = b"+OK\r\n", b"-ERR x\r\n"
+        entry = ("listed", "reviewed", {"eski": compare.digest(b""), "redis": compare.digest(a)})
+        report = {"exact": 0, "cases": []}
+        checked = compare.Comparison(report, {"capture/resp2/8": entry}, True)
+        checked.lost = "no reply within the timeout"
+        checked.result("s", "capture/resp2/8", [b"FT.PROFILE"], compare.wire.Node(b"-", b"", None, b""), node(a))
+        self.assertEqual(report["cases"][0]["status"], "unexpected")
+        self.assertEqual(report["lost_replies"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

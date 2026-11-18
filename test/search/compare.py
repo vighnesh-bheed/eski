@@ -45,6 +45,8 @@ RESTRICTED = {
     b"CLIENT": {b"SETINFO", b"MAINT_NOTIFICATIONS"},
     b"FT.CONFIG": {b"GET", b"HELP"}, b"_FT.DEBUG": {b"DUMP_TERMS"},
 }
+SETUP_PIPELINE = {b"HSET", b"JSON.SET"}
+LOST_REPLY_LIMIT = 20
 QUERY_COMMANDS = {b"FT.SEARCH", b"FT.AGGREGATE", b"FT.HYBRID", b"FT.EXPLAIN", b"FT.EXPLAINCLI", b"FT.PROFILE"}
 BOUNDED_OPTIONS = rb"\b(?:LIMIT|COUNT|KNN|K|WINDOW|MAX)\s+([+-]?[0-9]+(?:\.[0-9]+)?|\$[A-Za-z_][A-Za-z_0-9]*)(?:\s+([+-]?[0-9]+(?:\.[0-9]+)?))?"
 NORMALIZATIONS = {
@@ -54,8 +56,22 @@ NORMALIZATIONS = {
     "hybrid-execution-time": "FT.HYBRID execution_time measures the current execution. All result rows and scores must match.",
     "projection-field-order": "Search projections are field dictionaries. The projected fields, wire types and result order must match.",
     "json-path-order": "JSON.GET with several paths returns an unordered path object. Each path and its exact JSON value must match.",
-    "indexing-time": "FT.INFO total_indexing_time measures current indexing work. Counts, index schema and indexing state must match.",
+    "index-figures": "FT.INFO total_indexing_time measures current indexing work, its memory and encoding figures describe each engine's own layout, its gc_stats count background collector runs and number_of_uses counts the comparison's own polls while it waits for indexing. Their numbers are masked; the field names, their order and wire types, counts, index schema and indexing state must match.",
+    "command-inventory-order": "COMMAND LIST and ACL CAT return unordered inventories whose order changes between runs of the reference. The element types and every name must match.",
+    "subcommand-order": "COMMAND INFO and COMMAND DOCS list a container command's subcommands in an order that changes between runs of the reference. Every subcommand entry must match.",
+    "profile-timings": "FT.PROFILE reports the time each stage of the current execution took. Those numbers are masked; the results, iterator tree, result processors, counters and field names must match.",
+    "tolist-order": "REDUCE TOLIST returns a set of distinct values whose order changes between runs of the reference. Every member must match.",
+    "group-order": "A GROUPBY that no later SORTBY orders returns its groups in an order that changes between runs of the reference. Every group row and the counts must match; FT.HYBRID execution_time is masked as in hybrid-execution-time and REDUCE TOLIST members as in tolist-order.",
+    "distance-tie-order": "KNN results sorted by distance return rows of exactly equal distance in an order that changes between runs of the reference. Rows are reordered only within a run of equal distance values; every row, every distance and the order between different distances must match.",
 }
+INDEX_FIGURES = {b"total_indexing_time", b"inverted_sz_mb", b"vector_index_sz_mb", b"offset_vectors_sz_mb",
+                 b"doc_table_size_mb", b"sortable_values_size_mb", b"key_table_size_mb", b"tag_overhead_sz_mb",
+                 b"text_overhead_sz_mb", b"total_index_memory_sz_mb", b"geoshapes_sz_mb", b"bytes_per_record_avg",
+                 b"offset_bits_per_record_avg", b"total_inverted_index_blocks", b"memory", b"bytes_collected",
+                 b"total_ms_run", b"total_cycles", b"average_cycle_time_ms", b"last_run_time_ms",
+                 b"gc_numeric_trees_missed", b"gc_blocks_denied", b"number_of_uses"}
+PROFILE_TIMINGS = {b"Total profile time", b"Parsing time", b"Pipeline creation time", b"Workers queue time",
+                   b"Total GIL time", b"Time", b"GIL-Time", b"Total Coordinator time", b"Post Processing time"}
 KINDS = {
     b"+": "status", b"-": "error", b":": "integer", b"$": "bulk", b"*": "array", b"_": "null",
     b"#": "boolean", b",": "double", b"(": "bignum", b"!": "blob_error", b"=": "verbatim",
@@ -235,6 +251,165 @@ def timing_field(node, label):
     return rewrite(node, {id(item): mask_numeric(item)})
 
 
+def rebuild(node, visit):
+    replaced = visit(node)
+    if replaced is not None:
+        return replaced
+    if node.kind in (b"*", b"%", b"~", b">") and node.value is not None and node.raw.startswith(node.kind):
+        return node.head + b"\r\n" + b"".join(rebuild(child, visit) for child in node.value)
+    return node.raw
+
+
+def mask_named(node, labels):
+    def visit(item):
+        data = fields(item)
+        if data is None or not labels & data.keys():
+            return None
+        parts = []
+        for key, value in zip(item.value[::2], item.value[1::2]):
+            parts.append(key.raw)
+            parts.append(mask_numeric(value) if wire.text(key) in labels else rebuild(value, visit))
+        return item.head + b"\r\n" + b"".join(parts)
+    return rebuild(node, visit)
+
+
+def sorted_members(node):
+    return node.head + b"\r\n" + b"".join(sorted(child.raw for child in node.value))
+
+
+def members(node):
+    items = children(node, b"*", b"~")
+    if items is None or not node.raw.startswith(node.kind):
+        return None
+    return items
+
+
+def sort_named(node, labels):
+    def visit(item):
+        data = fields(item)
+        if data is None or not labels & data.keys():
+            return None
+        parts = []
+        for key, value in zip(item.value[::2], item.value[1::2]):
+            parts.append(key.raw)
+            if wire.text(key) in labels and members(value) is not None:
+                parts.append(sorted_members(value))
+            else:
+                parts.append(rebuild(value, visit))
+        return item.head + b"\r\n" + b"".join(parts)
+    return rebuild(node, visit)
+
+
+def tolist_aliases(upper, argv):
+    aliases = set()
+    for i in range(len(upper) - 2):
+        if upper[i] == b"REDUCE" and upper[i + 1] == b"TOLIST" and upper[i + 2].isdigit():
+            end = i + 3 + int(upper[i + 2][:4])
+            if end + 1 < len(upper) and upper[end] == b"AS":
+                aliases.add(argv[end + 1])
+    return aliases
+
+
+def unsorted_groups(upper):
+    if b"GROUPBY" not in upper:
+        return False
+    last = len(upper) - 1 - upper[::-1].index(b"GROUPBY")
+    return b"SORTBY" not in upper[last:]
+
+
+def group_rows(node, command):
+    data = fields(node)
+    if data is not None and b"results" in data and members(data[b"results"]) is not None:
+        rows = data[b"results"]
+        return rewrite(node, {id(rows): sorted_members(rows)})
+    items = members(node)
+    if command == b"FT.AGGREGATE" and items and items[0].kind == b":":
+        return node.head + b"\r\n" + items[0].raw + b"".join(sorted(item.raw for item in items[1:]))
+    return node.raw
+
+
+def knn_alias(upper, argv):
+    if len(argv) < 3:
+        return None
+    match = re.search(rb"=>\s*\[\s*KNN\b[^\]]*\bAS\s+([A-Za-z_][A-Za-z_0-9]*)", argv[2], re.I)
+    if match is None:
+        return None
+    alias = match[1]
+    if b"SORTBY" in upper:
+        position = upper.index(b"SORTBY")
+        if position + 1 >= len(argv) or argv[position + 1].lstrip(b"@") != alias:
+            return None
+    return alias
+
+
+def tie_runs(rows, distance):
+    output, run, previous = [], [], object()
+    for value, raw in rows:
+        if value is None:
+            return None
+        if run and value != previous:
+            output.extend(sorted(run))
+            run = []
+        run.append(raw)
+        previous = value
+    output.extend(sorted(run))
+    return output
+
+
+def distance_ties(node, alias):
+    data = fields(node)
+    if data is not None and b"results" in data and members(data[b"results"]) is not None:
+        rows = []
+        for hit in data[b"results"].value:
+            values = fields(hit)
+            extra = fields(values[b"extra_attributes"]) if values and b"extra_attributes" in values else None
+            rows.append((extra[alias].raw if extra and alias in extra else None, hit.raw))
+        ordered = tie_runs(rows, alias)
+        if ordered is None:
+            return node.raw
+        results = data[b"results"]
+        return rewrite(node, {id(results): results.head + b"\r\n" + b"".join(ordered)})
+    items = members(node)
+    if not items or items[0].kind != b":" or len(items) % 2 != 1:
+        return node.raw
+    rows = []
+    for key, values in zip(items[1::2], items[2::2]):
+        projected = fields(values)
+        rows.append((projected[alias].raw if projected and alias in projected else None, key.raw + values.raw))
+    ordered = tie_runs(rows, alias)
+    if ordered is None:
+        return node.raw
+    return node.head + b"\r\n" + items[0].raw + b"".join(ordered)
+
+
+def command_subcommands(node):
+    entries = members(node)
+    if entries is None:
+        return node.raw
+    rows = []
+    for entry in entries:
+        info = members(entry)
+        if info is not None and len(info) >= 10 and members(info[9]) is not None:
+            rows.append(entry.head + b"\r\n" + b"".join(child.raw for child in info[:9]) + sorted_members(info[9])
+                        + b"".join(child.raw for child in info[10:]))
+        else:
+            rows.append(entry.raw)
+    return node.head + b"\r\n" + b"".join(rows)
+
+
+def docs_subcommands(node):
+    def visit(item):
+        data = fields(item)
+        if data is None or b"subcommands" not in data or fields(data[b"subcommands"]) is None:
+            return None
+        parts = []
+        for key, value in zip(item.value[::2], item.value[1::2]):
+            parts.append(key.raw)
+            parts.append(sort_pairs(value) if wire.text(key) == b"subcommands" else rebuild(value, visit))
+        return item.head + b"\r\n" + b"".join(parts)
+    return rebuild(node, visit)
+
+
 
 def normalize(argv, node):
     upper = [value.upper() for value in argv]
@@ -260,6 +435,17 @@ def normalize(argv, node):
     if cursor_command and (cursor := cursor_field(node)) is not None:
         if int(cursor.value):
             return array(node.kind, [node.value[0].raw, b":1\r\n"]), "cursor-id"
+    if command in (b"FT.AGGREGATE", b"FT.HYBRID") and unsorted_groups(upper) and b"WITHCURSOR" not in upper:
+        aliases = tolist_aliases(upper, argv)
+        grouped = group_rows(parse_reply(sort_named(node, aliases)) if aliases else node, command)
+        if command == b"FT.HYBRID":
+            grouped = timing_field(parse_reply(grouped), b"execution_time")
+        return grouped, "group-order"
+    if command == b"FT.HYBRID" and b"WITHCURSOR" in upper and (data := fields(node)) is not None:
+        ids = {id(data[name]): b":1\r\n" for name in (b"SEARCH", b"VSIM")
+               if name in data and data[name].kind == b":" and int(data[name].value)}
+        if ids:
+            return rewrite(node, ids), "cursor-id"
     if command == b"FT.HYBRID":
         return timing_field(node, b"execution_time"), "hybrid-execution-time"
     if command == b"EXEC" and children(node, b"*") is not None:
@@ -268,7 +454,22 @@ def normalize(argv, node):
         if timings:
             return rewrite(node, timings), "hybrid-execution-time"
     if command == b"FT.INFO" or command == b"EVAL" and len(argv) > 1 and digest(argv[1]) in INFO_SCRIPT_DIGESTS:
-        return timing_field(node, b"total_indexing_time"), "indexing-time"
+        return mask_named(node, INDEX_FIGURES), "index-figures"
+    if command == b"FT.PROFILE":
+        return mask_named(node, PROFILE_TIMINGS), "profile-timings"
+    if upper[:2] == [b"COMMAND", b"LIST"] or upper[:2] == [b"ACL", b"CAT"] and len(upper) == 3:
+        if members(node) is not None and all(wire.text(item) is not None for item in node.value):
+            return sorted_members(node), "command-inventory-order"
+    if upper[:2] == [b"COMMAND", b"INFO"]:
+        return command_subcommands(node), "subcommand-order"
+    if upper[:2] == [b"COMMAND", b"DOCS"]:
+        return docs_subcommands(node), "subcommand-order"
+    if command == b"FT.SEARCH" and (alias := knn_alias(upper, argv)) is not None:
+        ordered = distance_ties(node, alias)
+        if ordered != node.raw:
+            return ordered, "distance-tie-order"
+    if command == b"FT.AGGREGATE" and (aliases := tolist_aliases(upper, argv)):
+        return sort_named(node, aliases), "tolist-order"
     if command == b"FT.SEARCH" and b"RETURN" in upper and not set(upper) & {b"WITHSCORES", b"WITHPAYLOADS", b"WITHSORTKEYS"}:
         return search_projection(node), "projection-field-order"
     if command == b"JSON.GET" and len(argv) > 3 and all(arg.startswith(b"$") for arg in argv[2:]):
@@ -281,8 +482,12 @@ def describe(raw):
 
 
 def recorded_reply(raw):
+    return parse_reply(codecs.escape_decode(raw.encode())[0])
+
+
+def parse_reply(data):
     connection = object.__new__(wire.Conn)
-    connection.buf = bytearray(codecs.escape_decode(raw.encode())[0])
+    connection.buf = bytearray(data)
     connection.pos = 0
 
     def truncated():
@@ -304,6 +509,16 @@ def load_expected(path):
         if not category or not reason or category in categories:
             raise ValueError("expected difference categories need distinct ids and reasons")
         categories.add(category)
+        if group.get("unrepeatable") is True:
+            if not isinstance(group["cases"], list) or not group["cases"]:
+                raise ValueError("an unrepeatable category lists case ids")
+            for case_id in group["cases"]:
+                if case_id in entries or not isinstance(case_id, str) or not re.fullmatch(r"(?:capture|smoke)/resp[23]/[^/]+", case_id):
+                    raise ValueError("duplicate or invalid expected case %s" % case_id)
+                entries[case_id] = (category, reason, None)
+            continue
+        if "unrepeatable" in group:
+            raise ValueError("unrepeatable must be true when present")
         for case_id, pair in group["cases"].items():
             if (case_id in entries or not re.fullmatch(r"(?:capture|smoke)/resp[23]/[^/]+", case_id)
                 or set(pair) != {"eski", "redis"} or pair["eski"] == pair["redis"]):
@@ -322,8 +537,10 @@ class Comparison:
         self.seen = set()
         self.sections = defaultdict(Counter)
         self.normalizations = Counter()
+        self.lost = None
 
     def result(self, section, case_id, argv, eski, redis, observed=None):
+        lost, self.lost = self.lost, None
         if case_id in self.seen:
             raise ValueError("fixture repeated case id %s" % case_id)
         self.seen.add(case_id)
@@ -334,10 +551,14 @@ class Comparison:
         expected = self.expected.get(case_id)
         same = actual == reference
         status = "passed"
-        if expected:
+        if expected and expected[2] is None:
+            status = "passed" if same else "unrepeatable"
+        elif expected:
             hashes = {"eski": digest(actual), "redis": digest(reference)}
             status = "stale" if same else "listed" if hashes == expected[2] else "unexpected"
         elif not same:
+            status = "unexpected"
+        if lost:
             status = "unexpected"
         self.sections[section][status] += 1
         if eski.raw == redis.raw:
@@ -348,6 +569,9 @@ class Comparison:
         row = {"section": section, "id": case_id, "status": status, "command": wire.esc(argv[0])}
         if expected:
             row.update(category=expected[0], reason=expected[1])
+        if lost:
+            row["eski_lost_reply"] = lost
+            self.report["lost_replies"] = self.report.get("lost_replies", 0) + 1
         if status != "passed" or observed is not None and key == "observed_changed":
             row.update(eski=describe(actual), redis=describe(reference),
                        argv=[wire.esc(arg[:160]) for arg in argv])
@@ -366,10 +590,11 @@ class Comparison:
     def finish(self):
         self.report["sections"] = {name: dict(counts) for name, counts in self.sections.items()}
         self.report["normalizations"] = dict(self.normalizations)
-        missing = sorted(self.expected.keys() - self.seen) if self.require_expected else []
+        missing = sorted(key for key in self.expected.keys() - self.seen
+                         if self.expected[key][2] is not None) if self.require_expected else []
         self.report["missing_expected"] = missing
         for name, counts in self.sections.items():
-            print(name, ", ".join("%s %s" % (counts[k], k) for k in ("passed", "listed", "unexpected", "stale")))
+            print(name, ", ".join("%s %s" % (counts[k], k) for k in ("passed", "listed", "unrepeatable", "unexpected", "stale")))
         return bool(missing or not self.seen or any(c["unexpected"] or c["stale"] for c in self.sections.values()))
 
 
@@ -386,6 +611,20 @@ class Connection:
                 raise ValueError("server refused RESP3")
             self.ends.append(conn)
 
+    def lost(self, error):
+        self.replay.lost_replies += 1
+        if self.replay.lost_replies > LOST_REPLY_LIMIT:
+            raise ValueError("Eski lost more than %d replies; last: %s" % (LOST_REPLY_LIMIT, error))
+        self.ends[0].close()
+        replacement = wire.Conn(self.replay.ports[0], 2, 5)
+        self.replay.stack.callback(replacement.close)
+        if self.proto == 3 and replacement.call([b"HELLO", b"3"]).kind != b"%":
+            raise ValueError("server refused RESP3 after a lost reply")
+        self.ends[0] = replacement
+        self.aliases.clear()
+        self.replay.comparison.lost = str(error)
+        return wire.Node(b"-", b"", None, b"")
+
     def validate(self, argv):
         if self.replay.remaining <= 0:
             raise ValueError("fixture exceeded the command budget")
@@ -401,7 +640,10 @@ class Connection:
             if replacement := self.aliases.get((argv[2], argv[3])):
                 candidate = argv[:3] + [replacement] + argv[4:]
         redis = self.ends[1].call(argv)
-        eski = self.ends[0].call(candidate)
+        try:
+            eski = self.ends[0].call(candidate)
+        except wire.ServerGone as error:
+            eski = self.lost(error)
         if (argv[0] == b"FT.AGGREGATE" and b"WITHCURSOR" in argv or argv[:2] == [b"FT.CURSOR", b"READ"]):
             ref_cursor, actual_cursor = cursor_field(redis), cursor_field(eski)
             if ref_cursor is not None and actual_cursor is not None and int(ref_cursor.value) and int(actual_cursor.value):
@@ -422,12 +664,12 @@ class Connection:
 
     def pipeline(self, commands):
         commands = [self.validate(command) for command in commands]
-        if len(commands) > 200 or any(command[0].upper() != b"HSET" for command in commands):
-            raise ValueError("capture setup pipelines must contain at most 200 HSET commands")
+        if len(commands) > 200 or any(command[0].upper() not in SETUP_PIPELINE for command in commands):
+            raise ValueError("capture setup pipelines must contain at most 200 HSET or JSON.SET commands")
         reference = self.ends[1].pipeline(commands)
         candidate = self.ends[0].pipeline(commands)
         if [node.raw for node in candidate] != [node.raw for node in reference]:
-            raise ValueError("a capture setup pipeline produced different HSET replies")
+            raise ValueError("a capture setup pipeline produced different write replies")
         return [capture_value(node) for node in reference]
 
 
@@ -438,6 +680,7 @@ class Replay:
         self.fixture = fixture
         self.stack = stack
         self.remaining = 20000
+        self.lost_replies = 0
         self.connections = {}
 
     def connection(self, protocol):

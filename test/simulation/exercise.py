@@ -88,23 +88,50 @@ def virtual_case(args, case, seed, variant):
     return observations
 
 
+def failure(args, seed, case, variant, error):
+    trace = args.out / f'{seed}-{case}-{variant}.trace'
+    return {'seed': seed, 'case': case, 'variant': variant, 'steps': args.steps, 'trace': trace.name,
+            'stderr': trace.with_suffix('.stderr').name, 'error': str(error),
+            'replay': [str(args.binary), case, str(seed), str(args.steps), variant]}
+
+
 def virtual(args, summary):
     summary.update(first_seed=args.first_seed, seeds=args.seeds, steps=args.steps, worker_timeout=args.timeout,
-                   completed_seeds=0)
+                   completed_seeds=0, failed_seeds=[], failures=[], max_failures=args.max_failures)
     if args.first_seed + args.seeds - 1 > MAX_SEED:
         raise ValueError('seed range exceeds the unsigned 64-bit limit')
     save(args.out, summary)
     if args.measure:
         started = time.monotonic()
     for seed in range(args.first_seed, args.first_seed + args.seeds):
+        failed = []
         for case in CASES:
-            base = virtual_case(args, case, seed, 'base')
+            try:
+                base = virtual_case(args, case, seed, 'base')
+            except RuntimeError as error:
+                failed.append(failure(args, seed, case, 'base', error))
+                continue
             if case in ('labels', 'owners'):
-                hidden = virtual_case(args, case, seed, 'hidden')
+                try:
+                    hidden = virtual_case(args, case, seed, 'hidden')
+                except RuntimeError as error:
+                    failed.append(failure(args, seed, case, 'hidden', error))
+                    continue
                 if len(base) != args.steps or base != hidden:
-                    raise AssertionError(f'{case} seed {seed} visible replies differ across twins or are incomplete')
-        summary['completed_seeds'] += 1
+                    failed.append(failure(args, seed, case, 'hidden',
+                                          f'{case} seed {seed} visible replies differ across twins or are incomplete'))
+        if failed:
+            summary['failed_seeds'].append(seed)
+            summary['failures'].extend(failed)
+        else:
+            summary['completed_seeds'] += 1
         save(args.out, summary)
+        if args.max_failures and len(summary['failures']) >= args.max_failures:
+            summary['stopped_early'] = f'stopped after {len(summary["failures"])} failing workers at seed {seed}'
+            break
+    if summary['failures']:
+        raise AssertionError(f'{len(summary["failures"])} failing workers in {len(summary["failed_seeds"])} seeds; '
+                             f'see failures in {args.out / "summary.json"}')
     if args.measure:
         seconds = time.monotonic() - started
         iterations = args.seeds * args.steps * 5
@@ -186,6 +213,8 @@ def parser():
     virtual_parser.add_argument('--steps', type=bounded(1, 4096), default=4)
     virtual_parser.add_argument('--timeout', type=bounded(1, 3600), default=90, help='seconds per worker')
     virtual_parser.add_argument('--measure', action='store_true', help='record end-to-end model iteration rate')
+    virtual_parser.add_argument('--max-failures', type=bounded(0, 1000000), default=64,
+                                help='stop after this many failing workers (0: run every seed)')
     native_parser = modes.add_parser('native', help='kill and restart a stock Eski build with synthetic data')
     native_parser.add_argument('--cycles', type=bounded(1, 1000), default=1)
     native_parser.add_argument('--transactions', type=bounded(1, 100000), default=3, help='per crash cycle')

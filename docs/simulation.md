@@ -9,7 +9,7 @@ python3 -IB test/simulation/exercise.py virtual --binary "$work/eski-simulation"
   --out "$work/virtual" --first-seed 8 --seeds 1 --steps 2
 ```
 
-Each seed has seven worker traces. `summary.json` records the binary hash, host metadata, effective settings and outcome outside the traces. The runner compares the visible reply lines in each pair of label and owner traces. A failed worker records its seed, chronological events and failed property. Its stderr has a separate file. To replay one case or compare traces byte for byte, use the same worker, case, seed, step count and variant.
+Each seed has seven worker traces. `summary.json` records the binary hash, host metadata, effective settings and outcome outside the traces. The runner compares the visible reply lines in each pair of label and owner traces. A failed worker records its seed, chronological events and failed property. Its stderr has a separate file. A failing worker does not stop the run: every seed runs, `completed_seeds` counts the seeds whose seven workers all passed, `failed_seeds` lists the others and `failures` holds one row per failing worker with its seed, case, variant, step count, trace and stderr file names, the error and the command that replays it. `--max-failures N` (default 64, 0 for no limit) stops after that many failing workers and says so in `stopped_early`, so a worker that fails everywhere cannot hold the host for every seed's timeout. To replay one case or compare traces byte for byte, use the same worker, case, seed, step count and variant.
 
 ```sh
 "$work/eski-simulation" network 8 2 base > "$work/replay.trace"
