@@ -41,6 +41,7 @@ cmd_ft_aggregate :: proc(c: ^Conn, argv: [][]u8) {
 		reply_error(c, fq.error_reply(error, context.temp_allocator))
 		return
 	}
+	search_note_dialect(index, pipeline.search.query_options.dialect)
 	known := make(map[string]bool, context.temp_allocator)
 	knn := search_knn(parsed)
 	for node in parsed.query.nodes {
@@ -55,7 +56,9 @@ cmd_ft_aggregate :: proc(c: ^Conn, argv: [][]u8) {
 	if pipeline.add_scores {
 		known["__score"] = true
 	}
-	docs, _, truncated, good := search_collect(c, &view, parsed, pipeline.search.execute_options, knn)
+	options := pipeline.search.execute_options
+	options.unscored_wildcard = pipeline.search.has_in_keys
+	docs, _, truncated, good := search_collect(c, &view, parsed, options, knn)
 	if !good {
 		return
 	}
@@ -89,5 +92,9 @@ cmd_ft_aggregate :: proc(c: ^Conn, argv: [][]u8) {
 		ft_cursor_reply_start(c, index, &view.state, pipeline.cursor, result, docs)
 		return
 	}
-	ft_reply_aggregate(c, result.rows, result.total, result.warn, result.expand)
+	total := result.total
+	if result.streamed && c.resp >= RESP3 {
+		total = result.skipped + len(result.rows)
+	}
+	ft_reply_aggregate(c, result.rows, total, result.warn, result.expand)
 }

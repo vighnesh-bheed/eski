@@ -18,10 +18,13 @@ FT_Column :: struct {
 	numeric, fold: bool,
 }
 
+FT_SORT_DEFAULT_MAX :: 10
+
 FT_Pipeline_Result :: struct {
 	rows: []FT_Row,
 	total: int,
-	buffered, loaded: bool,
+	skipped: int,
+	buffered, loaded, streamed: bool,
 	warn, expand: bool,
 }
 
@@ -139,6 +142,18 @@ ft_pipeline_load :: proc(rows: []FT_Row, step: ^FT_Pipeline_Step, schema: map[st
 			}
 		}
 	}
+}
+
+ft_load_reads_documents :: proc(step: ^FT_Pipeline_Step, known: map[string]bool) -> bool {
+	if step.all {
+		return true
+	}
+	for field in step.fields {
+		if field.name != field.identifier || !known[field.identifier] {
+			return true
+		}
+	}
+	return false
 }
 
 FT_Columns :: struct {
@@ -409,10 +424,10 @@ ft_pipeline_run :: proc(index: ^Search_Index, pipeline: ^FT_Pipeline, input: []F
 		started := mono_posix_ns() if profile != nil else 0
 		switch step.kind {
 		case .Load:
+			result.loaded = result.loaded || ft_load_reads_documents(&step, cols.known)
 			if !hybrid {
 				ft_pipeline_load(rows, &step, cols.schema, &cols.known, cols.now, cols.on_json, pipeline.search.query_options.dialect, pipeline.expand)
 			}
-			result.loaded = result.loaded || step.all || len(step.fields) != 0
 		case .Apply, .Filter:
 			if err := ft_pipeline_expr(step.expr, &cols, rows); err != "" {
 				return {}, err
@@ -432,7 +447,7 @@ ft_pipeline_run :: proc(index: ^Search_Index, pipeline: ^FT_Pipeline, input: []F
 			if step.kind == .Apply {
 				cols.known[step.name] = true
 			}
-			if hybrid || result.buffered {
+			if hybrid || (result.buffered && step.kind == .Filter) {
 				result.total = len(rows)
 			}
 		case .Group:
@@ -461,8 +476,12 @@ ft_pipeline_run :: proc(index: ^Search_Index, pipeline: ^FT_Pipeline, input: []F
 				result.buffered = true
 				result.total = len(rows)
 			}
-			if step.maximum > 0 {
-				rows = rows[:min(step.maximum, len(rows))]
+			maximum := step.maximum
+			if maximum <= 0 && len(step.order) != 0 && !hybrid && !ft_pipeline_has_limit(pipeline) {
+				maximum = FT_SORT_DEFAULT_MAX
+			}
+			if maximum > 0 {
+				rows = rows[:min(maximum, len(rows))]
 				if !(pipeline.count_all.? or_else true) {
 					result.total = len(rows)
 				}
@@ -470,13 +489,14 @@ ft_pipeline_run :: proc(index: ^Search_Index, pipeline: ^FT_Pipeline, input: []F
 		case .Limit:
 			limit = true
 			start := min(step.offset, len(rows))
+			result.skipped += start
 			rows = rows[start:start+min(step.count, len(rows)-start)]
 		}
 		if profile != nil {
 			search_profile_stage(profile, &step, len(rows), started)
 		}
 	}
-	if hybrid && !limit {
+	if hybrid && !limit && !pipeline.no_sort {
 		rows = rows[:min(len(rows), 10)]
 	}
 	if !hybrid && !result.buffered {
@@ -485,7 +505,8 @@ ft_pipeline_run :: proc(index: ^Search_Index, pipeline: ^FT_Pipeline, input: []F
 		} else if pipeline.count_all.? or_else result.loaded {
 			result.total = backing_count
 		} else {
-			result.total = 1
+			result.total = result.skipped + 1
+			result.streamed = true
 		}
 	}
 	result.rows = rows

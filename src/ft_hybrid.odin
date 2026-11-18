@@ -84,6 +84,7 @@ cmd_ft_hybrid :: proc(c: ^Conn, argv: [][]u8) {
 			return
 		}
 	}
+	search_note_dialect(index, opts.dialect)
 	exec := req.pipeline.search.execute_options
 	exec.view = &view.view
 	exec.builtin_patterns = true
@@ -112,7 +113,8 @@ cmd_ft_hybrid :: proc(c: ^Conn, argv: [][]u8) {
 		return
 	}
 	fused := ft_hybrid_fuse(&req, text_docs, vectors)
-	if !req.pipeline.no_sort {
+	ordered := !req.pipeline.no_sort || ft_pipeline_has_limit(&req.pipeline)
+	if ordered {
 		ft_hybrid_sort(fused)
 	}
 	known := make(map[string]bool, context.temp_allocator)
@@ -167,7 +169,7 @@ cmd_ft_hybrid :: proc(c: ^Conn, argv: [][]u8) {
 		if c.resp >= RESP3 {
 			reply_simple(c, "Profile")
 		}
-		search_profile_hybrid(c, profile, elapsed, !req.pipeline.no_sort)
+		search_profile_hybrid(c, profile, elapsed, ordered)
 	}
 }
 

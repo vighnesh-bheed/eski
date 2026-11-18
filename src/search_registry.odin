@@ -12,6 +12,7 @@ Search_Index :: struct {
 	scope: ow.Scope,
 	age:   u64,
 	uses:  i64,
+	dialects: bit_set[1 ..= 4],
 	spec:  Search_Create,
 	held:  int,
 	real:  vt.Charge,

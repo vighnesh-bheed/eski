@@ -86,6 +86,12 @@ cmd_ft_search :: proc(c: ^Conn, argv: [][]u8) {
 	search_run(c, index, reader, string(argv[2]), &request)
 }
 
+search_note_dialect :: proc "contextless" (index: ^Search_Index, dialect: int) {
+	if dialect >= 1 && dialect <= 4 {
+		index.dialects += {dialect}
+	}
+}
+
 search_query_index :: proc(c: ^Conn, name: string, reader: ow.Scope) -> ^Search_Index {
 	index := search_find(name, reader)
 	if index == nil {
@@ -174,6 +180,7 @@ search_run :: proc(c: ^Conn, index: ^Search_Index, reader: ow.Scope, query: stri
 		reply_error(c, fq.error_reply(parse_error, a))
 		return
 	}
+	search_note_dialect(index, request.query_options.dialect)
 	search_apply_legacy_filters(&parsed.query, indexes[0], request.filters[:])
 	if len(request.in_fields) > 0 {
 		search_limit_text_fields(parsed, indexes[0], request.in_fields)
@@ -197,7 +204,14 @@ search_run :: proc(c: ^Conn, index: ^Search_Index, reader: ow.Scope, query: stri
 		reply_error(c, sort_error)
 		return
 	}
-	rows, total, truncated, good := search_collect(c, &view, parsed, request.execute_options, knn)
+	capped := request.query_options.dialect == 4 && !request.with_count
+	unsorted := capped && knn == nil && !request.has_sort && !search_query_has_text(&parsed.query, parsed.query.root)
+	if unsorted {
+		sort.kind = .Id
+	}
+	options := request.execute_options
+	options.unscored_wildcard = request.has_in_keys
+	rows, total, truncated, good := search_collect(c, &view, parsed, options, knn)
 	if !good {
 		return
 	}
@@ -221,6 +235,12 @@ search_run :: proc(c: ^Conn, index: ^Search_Index, reader: ow.Scope, query: stri
 	}
 	begin := min(request.offset, len(ordered))
 	end := begin + min(request.count, len(ordered) - begin)
+	if capped {
+		total = min(total, request.count)
+		if unsorted && c.resp < RESP3 && search_reads_no_documents(index, request) {
+			total = min(total, 1)
+		}
+	}
 	if index.uses < max(i64) {
 		index.uses += 1
 	}
@@ -374,6 +394,46 @@ search_apply_text_mask :: proc(query: ^fq.Query, id: fq.Node_Id, mask: fq.Field_
 	for child in node.children {
 		search_apply_text_mask(query, child, mask)
 	}
+}
+
+search_reads_no_documents :: proc(index: ^Search_Index, request: ^Search_Request) -> bool {
+	if request.no_content {
+		return true
+	}
+	if !request.has_return || index.spec.on_json || request.snippet.highlight.on || request.snippet.summary.on {
+		return false
+	}
+	found: for field in request.return_fields {
+		for f in index.spec.definition.fields {
+			if f.name == field.identifier {
+				if f.kind == .Numeric && f.sortable {
+					continue found
+				}
+				return false
+			}
+		}
+		return false
+	}
+	return true
+}
+
+search_query_has_text :: proc(q: ^fq.Query, id: fq.Node_Id) -> bool {
+	if id == fq.NO_NODE {
+		return false
+	}
+	node := fq.node_get(q, id)
+	#partial switch node.kind {
+	case .Token, .Phrase, .Prefix, .Suffix, .Infix, .Wildcard_Pattern, .Fuzzy:
+		return true
+	case .Tag, .Numeric, .Geo, .Geoshape, .Missing, .Wildcard, .Null:
+		return false
+	}
+	for child in node.children {
+		if search_query_has_text(q, child) {
+			return true
+		}
+	}
+	return false
 }
 
 search_knn :: proc(parsed: ^fq.Parsed) -> ^fq.Vector_Query {

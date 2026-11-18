@@ -405,6 +405,7 @@ SOURCES = {
     'stream2': [['XADD', 'src', '1-1', 'f', 'v'], ['XADD', 'src2', '2-1', 'g', 'w']],
     'groups': [['XADD', 'src', '1-1', 'f', 'v'], ['XADD', 'src2', '2-1', 'g', 'w'], ['XGROUP', 'CREATE', 'src', 'g', '0'], ['XGROUP', 'CREATE', 'src2', 'g', '0']],
     'sortby': [['RPUSH', 'src', 'b', 'a', 'c'], ['SET', 'w_a', '3'], ['SET', 'w_b', '1'], ['SET', 'o_a', 'x'], ['SET', 'o_c', 'y']],
+    'json': [['JSON.SET', 'src', '$', '{"a":1,"b":[1,2]}'], ['JSON.SET', 'src2', '$', '{"a":"x"}']],
 }
 
 SCRIPT_COPY = "redis.call('SET', KEYS[2], redis.call('GET', KEYS[1]) or 'none') return redis.call('GET', KEYS[2])"
@@ -492,6 +493,10 @@ CASES = [
     ('xautoclaim', 'groups', [['XREADGROUP', 'GROUP', 'g', 'c', 'STREAMS', 'src', '>'], ['XAUTOCLAIM', 'src', 'g', 'c2', '0', '0']]),
     ('vadd', 'none', [['VADD', 'dst', 'VALUES', '2', '1', '2', 'e1'], ['VCARD', 'dst']]),
     ('hset', 'none', [['HSET', 'dst', 'f', 'v'], ['SADD', 'dst2', 'a'], ['ZADD', 'dst3', '1', 'a']]),
+    ('json.mget', 'json', [['JSON.MGET', 'src', 'src2', 'f0', 'nope', '$.a']]),
+    ('json.mget', 'json', [['JSON.MGET', 'src', 'nope', '.a']]),
+    ('json.mset', 'json', [['JSON.MSET', 'dst', '$', '{"c":3}', 'src', '$.a', '5', 'dst2', '$', '[1,2]'], ['JSON.GET', 'dst'], ['JSON.GET', 'src', '$']]),
+    ('json.mset', 'none', [['JSON.MSET', 'dst', '$', '1', 'dst2', '$', '"two"', 'dst3', '$', '{"long":"value-three-is-longer"}'], ['JSON.MGET', 'dst', 'dst2', 'dst3', '$']]),
 ]
 
 NOT_IN_SCRIPTS = {'ssubscribe', 'sunsubscribe', 'watch', 'migrate', 'blmove', 'blmpop', 'blpop', 'brpop', 'brpoplpush', 'bzmpop', 'bzpopmax', 'bzpopmin', 'eval', 'eval_ro', 'evalsha', 'evalsha_ro', 'fcall', 'fcall_ro', 'move', 'copy'}

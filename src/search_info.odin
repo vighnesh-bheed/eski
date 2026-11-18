@@ -279,7 +279,7 @@ search_info_sizes :: proc(c: ^Conn, figures: ^Search_Figures) {
 	search_info_mb(c, "total_index_memory_sz_mb", search_charge_sum(b) if labels_on && !access.top else figures.real)
 	search_info_decimal(c, "geoshapes_sz_mb", "0")
 	if figures.docs > 0 {
-		search_info_double(c, "records_per_doc_avg", f64(figures.records) / f64(figures.docs))
+		search_info_double(c, "records_per_doc_avg", f64(f32(figures.records) / f32(figures.docs)))
 	} else {
 		search_info_decimal(c, "records_per_doc_avg", "nan")
 	}
@@ -288,12 +288,17 @@ search_info_sizes :: proc(c: ^Conn, figures: ^Search_Figures) {
 	} else {
 		search_info_decimal(c, "bytes_per_record_avg", "nan")
 	}
-	if figures.terms > 0 {
-		search_info_double(c, "offsets_per_term_avg", f64(b[.Offsets] / 96) / f64(figures.terms))
+	offsets := b[.Offsets] / SEARCH_OFFSET_CHARGE
+	if figures.records > 0 {
+		search_info_double(c, "offsets_per_term_avg", f64(f32(offsets) / f32(figures.records)))
 	} else {
 		search_info_decimal(c, "offsets_per_term_avg", "nan")
 	}
-	search_info_decimal(c, "offset_bits_per_record_avg", "nan")
+	if offsets > 0 {
+		search_info_double(c, "offset_bits_per_record_avg", f64(f32(8 * b[.Offsets]) / f32(offsets)))
+	} else {
+		search_info_decimal(c, "offset_bits_per_record_avg", "nan")
+	}
 }
 
 @(private = "file")
@@ -359,8 +364,9 @@ search_info_stopwords :: proc(c: ^Conn, input: []string) {
 search_info_dialects :: proc(c: ^Conn, index: ^Search_Index) {
 	reply_simple(c, "dialect_stats")
 	reply_map(c, 4)
-	for name in ([4]string{"dialect_1", "dialect_2", "dialect_3", "dialect_4"}) {
-		search_info_int(c, name, 0)
+	visible_only := labels_on && !access.top
+	for name, i in ([4]string{"dialect_1", "dialect_2", "dialect_3", "dialect_4"}) {
+		search_info_int(c, name, i64(!visible_only && (i + 1) in index.dialects))
 	}
 }
 

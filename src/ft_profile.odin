@@ -190,9 +190,8 @@ search_profile_shard :: proc(c: ^Conn, p: ^Search_Profile, search: bool, elapsed
 	reply_simple(c, "Iterators profile")
 	search_profile_iterator(c, &p.iterator, p.ranged)
 	reply_simple(c, "Result processors profile")
-	loaded := search && p.full
-	reply_array(c, 1 + int(search) * 2 + int(p.distance) + int(loaded) + len(p.stages) +
-		int(p.distance && p.full))
+	loader := (search || p.distance) && p.full
+	reply_array(c, 1 + int(search) * 2 + int(p.distance) + len(p.stages) + int(loader))
 	search_profile_processor(c, "Index", p.total)
 	if p.distance {
 		search_profile_processor(c, "Metrics Applier", p.total)
@@ -204,7 +203,7 @@ search_profile_shard :: proc(c: ^Conn, p: ^Search_Profile, search: bool, elapsed
 	for stage in p.stages {
 		search_profile_processor(c, stage.name, stage.count, stage.elapsed)
 	}
-	if loaded || (p.distance && p.full) {
+	if loader {
 		search_profile_processor(c, "Threadsafe-Loader", p.count)
 	}
 }

@@ -108,6 +108,15 @@ ft_cursor_options :: proc(args: [][]u8, at: ^int, out: ^FT_Cursor_Options) -> st
 	return ""
 }
 
+ft_pipeline_has_limit :: proc(pipeline: ^FT_Pipeline) -> bool {
+	for step in pipeline.steps {
+		if step.kind == .Limit {
+			return true
+		}
+	}
+	return false
+}
+
 ft_pipeline_parse :: proc(args: [][]u8, hybrid: bool, out: ^FT_Pipeline, hybrid_request: ^FT_Hybrid_Request = nil, on_json := false) -> string {
 	a := context.temp_allocator
 	ft_config_search_options(&out.search)

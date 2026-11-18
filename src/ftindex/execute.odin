@@ -48,6 +48,7 @@ Execute_Options :: struct {
 	expansions:    Maybe(int),
 	minimum_pattern: Maybe(int),
 	builtin_patterns: bool,
+	unscored_wildcard: bool,
 	view:          ^Execution_View,
 }
 
@@ -738,7 +739,7 @@ build :: proc(b: ^Builder, id: ftq.Node_Id) -> Built {
 	case .Tag:
 		return tag_node(b, n)
 	case .Wildcard:
-		return all_docs(b, .Wildcard)
+		return all_docs(b, .Filter if b.opts.unscored_wildcard else .Wildcard)
 	case .Missing:
 		return missing_node(b, n)
 	case .Vector:

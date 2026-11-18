@@ -4,7 +4,8 @@ import "core:strings"
 import fi "ftindex"
 import "rrf"
 
-FT_HYBRID_DIALECT_ERROR :: "SEARCH_PARSE_ARGS DIALECT is not supported in FT.HYBRID or any of its subqueries. Please check the documentation on search-default-dialect configuration."
+FT_HYBRID_DIALECT :: 2
+FT_HYBRID_DIALECT_ERROR ::"SEARCH_PARSE_ARGS DIALECT is not supported in FT.HYBRID or any of its subqueries. Please check the documentation on search-default-dialect configuration."
 
 FT_Hybrid_Request :: struct {
 	query, filter, field, parameter: string,
@@ -85,7 +86,9 @@ ft_hybrid_parse :: proc(args: [][]u8, out: ^FT_Hybrid_Request) -> string {
 		}
 		at += 1
 	}
-	return ft_pipeline_parse(args[at:], true, &out.pipeline, out)
+	err := ft_pipeline_parse(args[at:], true, &out.pipeline, out)
+	out.pipeline.search.query_options.dialect = FT_HYBRID_DIALECT
+	return err
 }
 
 ft_hybrid_vector_parse :: proc(args: [][]u8, at: ^int, ranged: bool, out: ^fi.Hybrid_Vector) -> string {

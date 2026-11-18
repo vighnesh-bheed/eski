@@ -9,6 +9,7 @@ import "vmath"
 
 SEARCH_DEFINITION_BASE :: 4096
 SEARCH_PARTITION_BASE :: 16384
+SEARCH_OFFSET_CHARGE :: 96
 
 Search_Memory_Kind :: enum {
 	Keys,
@@ -141,7 +142,7 @@ search_document_bytes :: proc "contextless" (name: string, size: fi.Content_Size
 		.Documents = 256,
 		.Inverted = 1024 * size.text_entries + 256 * (size.numbers + size.missing),
 		.Text = 512 * size.text_entries + 4 * size.term_bytes,
-		.Offsets = 96 * size.positions,
+		.Offsets = SEARCH_OFFSET_CHARGE * size.positions,
 		.Tag = 512 * size.tag_entries + 4 * size.tag_bytes,
 	}
 }

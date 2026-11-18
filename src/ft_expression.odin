@@ -44,6 +44,8 @@ FT_Expr_Parser :: struct {
 	input: string,
 	at: int,
 	error: string,
+	last: int,
+	value: string,
 }
 
 FT_EXPR_DEPTH :: 128
@@ -114,14 +116,52 @@ ft_expr_syntax :: proc(p: ^FT_Expr_Parser) {
 		return
 	}
 	at := p.at
-	end := at
-	for end < len(p.input) && p.input[end] != ' ' && p.input[end] != '\t' && p.input[end] != ')' {
-		end += 1
+	for at < len(p.input) && (p.input[at] == ' ' || (p.input[at] >= '\t' && p.input[at] <= '\r')) {
+		at += 1
 	}
-	if at == end && end < len(p.input) {
-		end += 1
+	offset, near := p.last, p.value
+	if at < len(p.input) {
+		offset = at
+		if text, found := ft_expr_value_token(p.input, at); found {
+			near = text
+		}
 	}
-	p.error = ft_error("SEARCH_EXPR Syntax error at offset ", ft_int_text(i64(at)), " near '", p.input[at:end], "'")
+	p.error = ft_error("SEARCH_EXPR Syntax error at offset ", ft_int_text(i64(offset)), " near '", near, "'")
+}
+
+ft_expr_value_token :: proc(input: string, at: int) -> (string, bool) {
+	ch := input[at]
+	end := at + 1
+	switch {
+	case ch == '@':
+		for end < len(input) && (ft_expr_word(input[end]) || input[end] == '.') {
+			end += 1
+		}
+		return input[at+1:end], end > at + 1
+	case ch == '\'' || ch == '"':
+		for end < len(input) {
+			if input[end] == '\\' {
+				end += 2
+				continue
+			}
+			if input[end] == ch {
+				return input[at:end+1], true
+			}
+			end += 1
+		}
+		return "", false
+	case ft_expr_digit(ch) || ch == '.' || ((ch == '+' || ch == '-') && end < len(input) && (ft_expr_digit(input[end]) || input[end] == '.')):
+		for end < len(input) && (ft_expr_digit(input[end]) || input[end] == '.') {
+			end += 1
+		}
+		return input[at:end], true
+	case ft_expr_word(ch):
+		for end < len(input) && ft_expr_word(input[end]) {
+			end += 1
+		}
+		return input[at:end], true
+	}
+	return "", false
 }
 
 ft_expr_node :: proc(p: ^FT_Expr_Parser, value: FT_Expr) -> ^FT_Expr {
@@ -160,6 +200,7 @@ ft_expr_read :: proc(p: ^FT_Expr_Parser, precedence, level: int) -> ^FT_Expr {
 		if power < precedence {
 			break
 		}
+		p.last = p.at
 		p.at += size
 		right := ft_expr_read(p, power + int(kind != .Power), level + 1)
 		left = ft_expr_node(p, FT_Expr{kind = kind, args = ft_expr_children(left, right)})
@@ -214,6 +255,7 @@ ft_expr_atom :: proc(p: ^FT_Expr_Parser, level: int) -> ^FT_Expr {
 	ch := p.input[p.at]
 	switch ch {
 	case '(':
+		p.last = p.at
 		p.at += 1
 		value := ft_expr_read(p, 1, level + 1)
 		ft_expr_space(p)
@@ -221,9 +263,11 @@ ft_expr_atom :: proc(p: ^FT_Expr_Parser, level: int) -> ^FT_Expr {
 			ft_expr_syntax(p)
 			return nil
 		}
+		p.last = p.at
 		p.at += 1
 		return value
 	case '!', '+', '-':
+		p.last = p.at
 		p.at += 1
 		kind := FT_Expr_Kind.Not
 		if ch == '+' { kind = .Positive }
@@ -239,9 +283,11 @@ ft_expr_atom :: proc(p: ^FT_Expr_Parser, level: int) -> ^FT_Expr {
 			p.at += 1
 		}
 		if p.at == first {
+			p.at = first - 1
 			ft_expr_syntax(p)
 			return nil
 		}
+		p.last, p.value = first - 1, p.input[first:p.at]
 		return ft_expr_node(p, FT_Expr{kind = .Property, name = p.input[first:p.at]})
 	}
 	if ft_expr_digit(ch) || ch == '.' {
@@ -260,6 +306,7 @@ ft_expr_atom :: proc(p: ^FT_Expr_Parser, level: int) -> ^FT_Expr {
 		}
 		value, ok := fi.number_parse(p.input[first:p.at])
 		if ok {
+			p.last, p.value = first, p.input[first:p.at]
 			return ft_expr_node(p, FT_Expr{value = value})
 		}
 		p.at = first
@@ -270,6 +317,7 @@ ft_expr_atom :: proc(p: ^FT_Expr_Parser, level: int) -> ^FT_Expr {
 	}
 	if p.at != first {
 		name := p.input[first:p.at]
+		p.last, p.value = first, name
 		ft_expr_space(p)
 		if p.at < len(p.input) && p.input[p.at] == '(' {
 			return ft_expr_call(p, name, level)
@@ -295,6 +343,7 @@ ft_expr_string :: proc(p: ^FT_Expr_Parser) -> ^FT_Expr {
 		ch := p.input[p.at]
 		p.at += 1
 		if ch == quote {
+			p.last, p.value = first, p.input[first:p.at]
 			return ft_expr_node(p, FT_Expr{value = string(out[:])})
 		}
 		if ch == '\\' && p.at < len(p.input) {
@@ -323,6 +372,7 @@ ft_expr_call :: proc(p: ^FT_Expr_Parser, name: string, level: int) -> ^FT_Expr {
 		p.error = ft_error("SEARCH_EXPR Unknown function name '", name, "'")
 		return nil
 	}
+	p.last = p.at
 	p.at += 1
 	ft_expr_space(p)
 	args := make([dynamic]^FT_Expr, context.temp_allocator)
@@ -337,6 +387,7 @@ ft_expr_call :: proc(p: ^FT_Expr_Parser, name: string, level: int) -> ^FT_Expr {
 			if p.at == len(p.input) || p.input[p.at] != ',' {
 				break
 			}
+			p.last = p.at
 			p.at += 1
 		}
 	}
@@ -344,6 +395,7 @@ ft_expr_call :: proc(p: ^FT_Expr_Parser, name: string, level: int) -> ^FT_Expr {
 		ft_expr_syntax(p)
 		return nil
 	}
+	p.last = p.at
 	p.at += 1
 	function := FT_EXPR_FUNCTIONS[kind]
 	if len(args) < function.min || len(args) > function.max {
@@ -429,14 +481,31 @@ ft_compare :: proc(left, right: FT_Value) -> int {
 
 FT_VALUE_MISSING :: "SEARCH_VALUE_NOT_FOUND Could not find the value for a parameter name, consider using EXISTS if applicable for "
 FT_VALUE_NUMERIC :: "SEARCH_NUMERIC_VALUE_INVALID Invalid numeric value"
+FT_VALUE_CONVERSION :: "Error converting string"
+
+ft_is_number :: proc "contextless" (value: FT_Value) -> bool {
+	#partial switch _ in value {
+	case f64, i64, FT_Json_Double:
+		return true
+	}
+	return false
+}
+
+ft_expr_null_aware :: proc "contextless" (kind: FT_Expr_Function) -> bool {
+	#partial switch kind {
+	case .Upper, .Lower, .Format, .Timefmt:
+		return true
+	}
+	return false
+}
 
 ft_expr_eval :: proc(expr: ^FT_Expr, cells: []FT_Cell, matches: []string) -> (FT_Value, string) {
 	#partial switch expr.kind {
 	case .Literal:
 		return expr.value, ""
 	case .Property:
-		v, _ := ft_cell_get(cells, expr.name)
-		if v == nil {
+		v, present := ft_cell_get(cells, expr.name)
+		if !present {
 			return nil, ft_error(FT_VALUE_MISSING, expr.name)
 		}
 		return v, ""
@@ -469,6 +538,12 @@ ft_expr_eval :: proc(expr: ^FT_Expr, cells: []FT_Cell, matches: []string) -> (FT
 		return nil, problem
 	}
 	#partial switch expr.kind {
+	case .Less, .Greater, .At_Most, .At_Least:
+		if (left == nil && ft_is_number(right)) || (right == nil && ft_is_number(left)) {
+			return nil, FT_VALUE_CONVERSION
+		}
+	}
+	#partial switch expr.kind {
 	case .Equal: return f64(int(ft_compare(left, right) == 0)), ""
 	case .Unequal: return f64(int(ft_compare(left, right) != 0)), ""
 	case .Less: return f64(int(ft_compare(left, right) < 0)), ""
@@ -498,7 +573,7 @@ ft_expr_eval_call :: proc(expr: ^FT_Expr, cells: []FT_Cell, matches: []string) -
 	kind := ft_expr_function(expr.name)
 	if kind == .Exists {
 		value, err := ft_expr_eval(expr.args[0], cells, matches)
-		return f64(int(err == "" && value != nil)), ""
+		return f64(int(err == "" && (value != nil || expr.args[0].kind == .Property))), ""
 	}
 	if kind == .Case {
 		value, err := ft_expr_eval(expr.args[0], cells, matches)
@@ -513,6 +588,9 @@ ft_expr_eval_call :: proc(expr: ^FT_Expr, cells: []FT_Cell, matches: []string) -
 		value, err := ft_expr_eval(arg, cells, matches)
 		if err != "" {
 			return nil, err
+		}
+		if value == nil && arg.kind == .Property && !ft_expr_null_aware(kind) {
+			return nil, ft_error(FT_VALUE_MISSING, arg.name)
 		}
 		args[i] = value
 	}
@@ -558,6 +636,9 @@ ft_expr_eval_call :: proc(expr: ^FT_Expr, cells: []FT_Cell, matches: []string) -
 }
 
 ft_expr_string_call :: proc(kind: FT_Expr_Function, args: []FT_Value) -> (FT_Value, string) {
+	if args[0] == nil && (kind == .Upper || kind == .Lower) {
+		return nil, ""
+	}
 	s := ft_value_string(args[0])
 	#partial switch kind {
 	case .Upper: return strings.to_upper(s, context.temp_allocator), ""
@@ -632,7 +713,7 @@ ft_expr_format :: proc(format: string, args: []FT_Value) -> (FT_Value, string) {
 		if format[i] == '%' {
 			append(&out, '%')
 		} else if format[i] == 's' && arg < len(args) {
-			append(&out, ..transmute([]u8)ft_value_string(args[arg]))
+			append(&out, ..transmute([]u8)(ft_value_string(args[arg]) if args[arg] != nil else "(null)"))
 			arg += 1
 		} else {
 			return nil, "SEARCH_EXPR Invalid format string"

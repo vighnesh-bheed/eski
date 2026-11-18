@@ -753,7 +753,8 @@ reply_docs :: proc(c: ^Conn, i: int) {
 	}
 	reply_bulk_str(c, "group")
 	reply_bulk_str(c, group_names[d.group])
-	if d.module != "" && d.module != JSON_MODULE_NAME {
+	module_late := d.module == JSON_MODULE_NAME || d.module == SEARCH_MODULE_NAME
+	if d.module != "" && !module_late {
 		reply_bulk_str(c, "module")
 		reply_bulk_str(c, d.module)
 	}
@@ -761,7 +762,7 @@ reply_docs :: proc(c: ^Conn, i: int) {
 		reply_bulk_str(c, "complexity")
 		reply_bulk_str(c, d.complexity)
 	}
-	if d.module == JSON_MODULE_NAME {
+	if module_late {
 		reply_bulk_str(c, "module")
 		reply_bulk_str(c, d.module)
 	}
