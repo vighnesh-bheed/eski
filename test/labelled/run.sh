@@ -25,7 +25,7 @@ runner, and every listed difference must still occur; the run fails otherwise.
                               and worker mode (default: run it first)
   --scripting-reference P     the same for the suite's scripting unit
   --vectorset-reference P     the same for the vector set unit
-  --out DIR                   where the logs, the summaries and smoke's full differing strings go
+  --out DIR                   empty directory for logs, summaries and smoke's full differing strings
                               (default: a new directory under TMPDIR)
 
 Modes and their expected files:
@@ -67,9 +67,13 @@ if [ -z "$out" ]; then
 	out="$(mktemp -d "${TMPDIR:-/tmp}/eski-labelled.XXXXXX")" || exit 2
 fi
 mkdir -p "$out" || exit 2
+if [ -n "$(find "$out" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+	echo "labelled: output directory must be empty: $out" >&2
+	exit 2
+fi
+unset ESKI_LABELLED_DIR ESKI_LABELLED_PRINT_LOGIN
 wrapper="$PWD/test/labelled/eski.sh"
 export ESKI_LABELLED_KEYSPACE_THREADS="$threads"
-mkdir -p "$out/server-dir" || exit 2
 status=0
 
 check() {
@@ -79,13 +83,25 @@ check() {
 }
 
 suite() {
-	local name="$1" ref="$2"
+	local name="$1" ref="$2" rc
 	shift 2
 	if [ -z "$ref" ]; then
 		ref="$out/$name-off.json"
-		ESKI_LABELLED_MODE=off ./test/conformance/run.sh "$@" --server "$wrapper" --summary "$ref" >"$out/$name-off.log" 2>&1
+		ESKI_LABELLED_MODE=off ./test/conformance/run.sh "$@" --server "$wrapper" --summary "$ref" --results-dir "$out/$name-off-results" >"$out/$name-off.log" 2>&1
+		rc=$?
+		if [ "$rc" -gt 1 ] || [ ! -s "$ref" ]; then
+			echo "labelled: could not run the labels-off $name suite (exit $rc)" >&2
+			status=1
+			return
+		fi
 	fi
-	ESKI_LABELLED_MODE="$mode" ESKI_LABELLED_DIR="$out/server-dir" ./test/conformance/run.sh "$@" --server "$wrapper" --summary "$out/$name.json" >"$out/$name.log" 2>&1
+	ESKI_LABELLED_MODE="$mode" ./test/conformance/run.sh "$@" --server "$wrapper" --summary "$out/$name.json" --results-dir "$out/$name-results" >"$out/$name.log" 2>&1
+	rc=$?
+	if [ "$rc" -gt 1 ] || [ ! -s "$out/$name.json" ]; then
+		echo "labelled: could not run the $mode $name suite (exit $rc)" >&2
+		status=1
+		return
+	fi
 	check "$name" --result "$out/$name.json" --reference "$ref"
 }
 
@@ -96,12 +112,12 @@ for runner in "${runners[@]}"; do
 		scripting) suite scripting "$scripting_ref" --suite redis --units scripting ;;
 		vectorset) suite vectorset "$vectorset_ref" --suite vectorset ;;
 		compare)
-			ESKI_LABELLED_MODE="$mode" ESKI_LABELLED_DIR="$out/server-dir" ESKI_VSET_SERVER="$wrapper" bash test/vectorset/compare.sh --quiet --summary "$out/compare.json" >"$out/compare.log" 2>&1
+			ESKI_LABELLED_MODE="$mode" ESKI_VSET_SERVER="$wrapper" bash test/vectorset/compare.sh --quiet --summary "$out/compare.json" >"$out/compare.log" 2>&1
 			check compare --result "$out/compare.json"
 			;;
 		smoke)
 			login_rules="$(ESKI_LABELLED_MODE="$mode" ESKI_LABELLED_PRINT_LOGIN=1 bash "$wrapper")"
-			ESKI_LABELLED_MODE="$mode" ESKI_LABELLED_DIR="$out/server-dir" ESKI_SMOKE_BINARY="$wrapper" ESKI_SMOKE_KEYSPACE_THREADS="$threads" ESKI_SMOKE_FULL_DIR="$out/smoke-full" ESKI_SMOKE_LOGIN_RULES="$login_rules" bash test/smoke.sh >"$out/smoke.log" 2>&1
+			ESKI_LABELLED_MODE="$mode" ESKI_SMOKE_BINARY="$wrapper" ESKI_SMOKE_KEYSPACE_THREADS="$threads" ESKI_SMOKE_FULL_DIR="$out/smoke-full" ESKI_SMOKE_LOGIN_RULES="$login_rules" bash test/smoke.sh >"$out/smoke.log" 2>&1
 			check smoke --result "$out/smoke.log"
 			;;
 	esac

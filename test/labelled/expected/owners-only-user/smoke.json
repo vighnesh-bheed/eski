@@ -217,12 +217,10 @@
    ]
   },
   {
-   "id": "memory-figure",
-   "reason": "A caller that acts as a user, as this mode's default login does, reads MEMORY USAGE as a function of the key's own content, with a table counted at the capacity a load gives its count, so the figure moves neither with other scopes' data nor with the timing of a resize (see What stays observable in docs/owners.md). The idle migration checks of hashes, sets and sorted sets read that figure to see a second slot array appear and go, so each of them stops at its first case with fixture did not retain, although the table does grow and does finish migrating while the server is idle, which a caller at the top reads in DEBUG HTSTATS-KEY, OWNERS INFO and used_memory. The sorted set check has a second reason behind that one: type maintenance of a user's partition takes at most 16 steps a tick against up to 64 for shared partitions (see Keys in docs/owners.md), so the two 12,288-member dictionaries of its second case are still migrating when its two-second window ends.",
-   "doc": "docs/owners.md#what-stays-observable",
+   "id": "idle-maintenance",
+   "reason": "The two 12,288-member dictionaries are still migrating when the command-free two-second window ends. Type maintenance of a user's partition takes at most 16 steps per tick, compared with up to 64 for shared partitions.",
+   "doc": "docs/owners.md#keys",
    "entries": [
-    "idle hash member migration",
-    "idle set member migration",
     "idle zset dictionary migration"
    ]
   },

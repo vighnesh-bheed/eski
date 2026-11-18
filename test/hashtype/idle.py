@@ -35,21 +35,19 @@ def main():
                         for i in range(first, min(size, first + 256)):
                             fields.extend((b"field:%06d" % i, b"value\x00suffix"))
                         client.check("HSET", "idle-hash", *fields)
-                    before = client.check("MEMORY", "USAGE", "idle-hash", "SAMPLES", 0)
                     client.check("HSET", "idle-hash", b"field:%06d" % size, b"value\x00suffix")
-                    active = client.check("MEMORY", "USAGE", "idle-hash", "SAMPLES", 0)
-                    settled_ceiling = before + (size // 3 * 4) * 16 + 256
-                    if active <= settled_ceiling:
-                        raise AssertionError(("fixture did not retain a dual-bank growth", protocol, size, before, active, settled_ceiling))
+                    active = storage_server.hash_table_banks(client.check("DEBUG", "HTSTATS-KEY", "idle-hash"))
+                    if active != 2:
+                        raise AssertionError(("fixture did not retain a dual-bank growth", protocol, size, active))
                     started = time.monotonic()
                     time.sleep(args.idle_seconds)
-                    after = client.check("MEMORY", "USAGE", "idle-hash", "SAMPLES", 0)
+                    after = storage_server.hash_table_banks(client.check("DEBUG", "HTSTATS-KEY", "idle-hash"))
                     elapsed = time.monotonic() - started
-                    if after > settled_ceiling:
-                        raise AssertionError(("idle migration did not finish with field expiry disabled", protocol, size, active, after, settled_ceiling, elapsed))
+                    if after != 1:
+                        raise AssertionError(("idle migration did not finish with active expiry disabled", protocol, size, active, after, elapsed))
                     assert client.check("HLEN", "idle-hash") == size + 1
                     assert client.check("HGET", "idle-hash", b"field:%06d" % size) == b"value\x00suffix"
-                    rows.append(dict(protocol=protocol, fields=size, active_bytes=active, settled_bytes=after, idle_observation_seconds=elapsed, command_free_sleep_seconds=args.idle_seconds))
+                    rows.append(dict(protocol=protocol, fields=size, active_banks=active, settled_banks=after, idle_observation_seconds=elapsed, command_free_sleep_seconds=args.idle_seconds))
             finally:
                 client.close()
                 storage_server.stop(process)

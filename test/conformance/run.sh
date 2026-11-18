@@ -65,7 +65,9 @@ a time, and writes a JSON summary to test/conformance/results/latest-SUITE.json,
 with a copy at results/latest.json. The redis suite is the one from Redis
 $REDIS_TAG, the release eski targets; the valkey suite is the one from Valkey
 $VALKEY_TAG. A server started by this script is restarted for every unit, so no
-state leaks between units; an --external server is shared by all units.
+state leaks between units. Each unit gets a fresh working and data directory
+under its log directory, which it can use for restarts within the unit. An
+--external server is shared by all units.
 
 By default every unit runs in the suite's external server mode, which ignores blocks
 tagged external:skip. Redis $REDIS_TAG tags every block of
@@ -105,6 +107,7 @@ a native Tcl interpreter; --tls also generates real CA/server/client certificate
   --client PATH          redis-cli compatible client for managed networking assertions
   --aof-checker PATH     optional test-only checker wrapper for managed AOF utility assertions
   --summary PATH          also write the JSON summary to PATH
+  --results-dir DIR       write logs and summary files to DIR
   --baseline PATH         compare with a recorded summary of the same suite; fail only on regressions
   --known-failures PATH   out of scope units and tests (default: test/conformance/known-failures.txt)
   --tcl auto|docker|PATH  how to run the suite (default: auto, native tclsh first)
@@ -153,6 +156,7 @@ while [ $# -gt 0 ]; do
 		--client) need_value "$@"; client_binary="$(abspath "$2")"; shift 2 ;;
 		--aof-checker) need_value "$@"; aof_checker="$(abspath "$2")"; shift 2 ;;
 		--summary) need_value "$@"; extra_summary="$(abspath "$2")"; shift 2 ;;
+		--results-dir) need_value "$@"; RESULTS_DIR="$(abspath "$2")"; shift 2 ;;
 		--baseline) need_value "$@"; baseline="$(abspath "$2")"; shift 2 ;;
 		--known-failures) need_value "$@"; known_file="$(abspath "$2")"; shift 2 ;;
 		--tcl) need_value "$@"; tcl_choice="$2"; shift 2 ;;
@@ -534,10 +538,16 @@ ping_server() (
 ) 2>/dev/null
 
 start_server() {
+	local unit_dir="$1"
 	if ping_server "$host" "$port"; then
 		die "something already answers PING on port $port"
 	fi
-	"$server" --port "$port" --bind 127.0.0.1 --enable-debug-command yes --enable-protected-configs yes >>"$SERVER_LOG" 2>&1 </dev/null &
+	mkdir -p "$unit_dir" || die "could not create $unit_dir"
+	(
+		cd "$unit_dir" || exit 2
+		exec "$server" --port "$port" --bind 127.0.0.1 --dir "$unit_dir" \
+			--enable-debug-command yes --enable-protected-configs yes
+	) >>"$SERVER_LOG" 2>&1 </dev/null &
 	SERVER_PID=$!
 	for _ in $(seq 1 100); do
 		if ping_server "$host" "$port"; then
@@ -761,7 +771,7 @@ for index in "${!run_canonical[@]}"; do
 	fi
 	if [ -z "$external" ] && [ "$managed" = 0 ]; then
 		printf '=== %s\n' "$display" >>"$SERVER_LOG"
-		start_server
+		start_server "$LOG_DIR/server-$index"
 	fi
 	started="$(date +%s)"
 	if [ "$TCL_MODE" = "docker" ]; then

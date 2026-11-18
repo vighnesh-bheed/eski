@@ -70,6 +70,7 @@ documentation asks, and with its working directory inside the run's log folder.
                          holds the recorded Eski run, test/conformance/reference-vectorset.json
                          the recorded reference run
   --summary PATH         also write the JSON summary to PATH
+  --results-dir DIR      write logs and summary files to DIR
   --exclusions PATH      tests that cannot pass by design, with reasons
                          (default: test/conformance/vectorset-exclusions.json)
   --titles PATH          recorded summary whose test titles anchor the parser
@@ -111,6 +112,7 @@ while [ $# -gt 0 ]; do
 		--reference) reference=1; shift ;;
 		--baseline) need_value "$@"; baseline="$(abspath "$2")"; shift 2 ;;
 		--summary) need_value "$@"; extra_summary="$(abspath "$2")"; shift 2 ;;
+		--results-dir) need_value "$@"; RESULTS_DIR="$(abspath "$2")"; shift 2 ;;
 		--exclusions) need_value "$@"; exclusions="$(abspath "$2")"; shift 2 ;;
 		--titles) need_value "$@"; titles="$(abspath "$2")"; shift 2 ;;
 		--python) need_value "$@"; python_given="$2"; shift 2 ;;
@@ -278,8 +280,11 @@ start_eski() {
 		die "something already answers PING on port $port"
 	fi
 	mkdir -p "$LOG_DIR/server-dir" || die "could not create the server directory"
-	"$server" --port "$port" --bind 127.0.0.1 --enable-debug-command yes --enable-protected-configs yes \
-		--save "" --appendonly no --dir "$LOG_DIR/server-dir" >>"$LOG_DIR/server.log" 2>&1 </dev/null &
+	(
+		cd "$LOG_DIR/server-dir" || exit 2
+		exec "$server" --port "$port" --bind 127.0.0.1 --enable-debug-command yes --enable-protected-configs yes \
+			--save "" --appendonly no --dir "$LOG_DIR/server-dir"
+	) >>"$LOG_DIR/server.log" 2>&1 </dev/null &
 	SERVER_PID=$!
 	if ! wait_ping; then
 		echo "conformance: the server did not answer PING on port $port, log follows" >&2

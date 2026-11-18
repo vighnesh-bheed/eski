@@ -1,0 +1,18 @@
+{
+  "categories": [
+    {
+      "id": "suggestion-dictionaries",
+      "reason": "Redis reports length zero for an absent suggestion dictionary. Eski does not implement FT.SUGLEN and returns an unknown-command error.",
+      "cases": {
+        "smoke/resp2/suggestion-dictionary": {
+          "eski": "950bfe7a3f825318c21884c9df5f4e095ce0f2cbfa45543bf905f352a09da87f",
+          "redis": "f3b4cb77478ec9e7388d907937dad039f9204482b7038f21ccabce096918ea23"
+        },
+        "smoke/resp3/suggestion-dictionary": {
+          "eski": "950bfe7a3f825318c21884c9df5f4e095ce0f2cbfa45543bf905f352a09da87f",
+          "redis": "f3b4cb77478ec9e7388d907937dad039f9204482b7038f21ccabce096918ea23"
+        }
+      }
+    }
+  ]
+}

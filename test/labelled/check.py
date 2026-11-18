@@ -10,13 +10,34 @@ MODES = ('labelled', 'owners-shared', 'owners-user', 'owners-only-user')
 SUITES = ('conformance', 'scripting', 'vectorset')
 
 
-def suite_differences(reference, result):
-    ref_units = reference.get('units', {})
+SNAPSHOT_REFUSAL = ("ERR CONFIG SET failed (possibly related to argument 'aof-use-rdb-preamble') "
+                    "- the append-only base of a server with a label scheme or owner mode is always a snapshot")
+CONFORMANCE_UNIT_ERRORS = {
+    'type/stream': ('exception', "Executing test client: " + SNAPSHOT_REFUSAL + "."),
+    'type/stream-cgroups': ('block', SNAPSHOT_REFUSAL),
+    'acl': ('timeout', 'suite reported no progress'),
+    'pause': ('timeout', 'suite reported no progress'),
+}
+
+
+def suite_differences(reference, result, conformance=False):
+    ref_units = reference['units']
+    units = result['units']
+    if not ref_units or units.keys() != ref_units.keys():
+        raise SystemExit('labelled: suite summary units differ from the reference')
+    for name, unit in units.items():
+        reference_unit = ref_units[name]
+        if reference_unit['errors'] or reference_unit['errored']:
+            raise SystemExit('labelled: reference contains a unit error in %s' % name)
+        errors = [(error['kind'], error['reason']) for error in unit['errors']]
+        allowed = CONFORMANCE_UNIT_ERRORS.get(name) if conformance else None
+        if unit['errored'] != len(errors) or errors and errors != [allowed]:
+            raise SystemExit('labelled: unexpected suite unit error in %s: %s' % (name, errors))
+        if (unit['status'] == 'out-of-scope') != (reference_unit['status'] == 'out-of-scope'):
+            raise SystemExit('labelled: suite unit scope differs from the reference in %s' % name)
     differences = set()
     passing = set()
-    for name, unit in result.get('units', {}).items():
-        if name not in ref_units:
-            continue
+    for name, unit in units.items():
         ref_tests = ref_units[name].get('tests', {})
         for test, counts in ref_tests.items():
             before = counts.get('passed', 0)
@@ -110,7 +131,8 @@ def main():
     if args.runner in SUITES:
         if not args.reference:
             raise SystemExit('--reference is required for ' + args.runner)
-        differences, passing = suite_differences(json.loads(Path(args.reference).read_text()), json.loads(Path(args.result).read_text()))
+        differences, passing = suite_differences(json.loads(Path(args.reference).read_text()), json.loads(Path(args.result).read_text()),
+                                                 conformance=args.runner == 'conformance')
     elif args.runner == 'compare':
         differences, passing = compare_differences(json.loads(Path(args.result).read_text()))
     else:

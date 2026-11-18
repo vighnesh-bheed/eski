@@ -19,6 +19,15 @@ def stats(client):
     return dict(zip(result[::2], result[1::2]))
 
 
+def hash_table_banks(reply):
+    banks = [line for line in reply.splitlines() if line.startswith(b"Hash table ")]
+    main = b"Hash table 0 stats (main hash table):"
+    target = b"Hash table 1 stats (rehashing target):"
+    if banks not in ([main], [main, target]):
+        raise AssertionError(("unexpected DEBUG HTSTATS-KEY reply", reply))
+    return len(banks)
+
+
 def empty_tables(client):
     for _ in range(1000):
         if stats(client)[b"overhead.db.hashtable.lut"] == 0 and int(memory(client)["lazyfree_pending_objects"]) == 0:

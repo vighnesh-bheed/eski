@@ -38,23 +38,22 @@ def main():
                             for i in range(first, min(size, first + 256)):
                                 fields.extend((i, b"member:%06d" % i))
                             client.check("ZADD", key, *fields)
-                    before = [client.check("MEMORY", "USAGE", key, "SAMPLES", 0) for key in keys]
                     member = b"member:%06d\x00tail" % size
                     assert client.pipeline([("ZADD", key, size + 1, member) for key in keys]) == [1, 1]
-                    active = client.pipeline([("MEMORY", "USAGE", key, "SAMPLES", 0) for key in keys])
-                    ceilings = [value + (size // 3 * 4) * 8 + 1024 for value in before]
-                    if any(value <= ceiling for value, ceiling in zip(active, ceilings)):
-                        raise AssertionError(("fixture did not retain two active zset dictionary jobs", protocol, database, size, before, active, ceilings))
+                    stats_queries = [("DEBUG", "HTSTATS-KEY", key) for key in keys]
+                    active = [storage_server.hash_table_banks(reply) for reply in client.pipeline(stats_queries)]
+                    if active != [2, 2]:
+                        raise AssertionError(("fixture did not retain two active zset dictionary jobs", protocol, database, size, active))
                     started = time.monotonic()
                     time.sleep(args.idle_seconds)
-                    after = client.pipeline([("MEMORY", "USAGE", key, "SAMPLES", 0) for key in keys])
+                    after = [storage_server.hash_table_banks(reply) for reply in client.pipeline(stats_queries)]
                     elapsed = time.monotonic() - started
-                    if any(value > ceiling for value, ceiling in zip(after, ceilings)):
-                        raise AssertionError(("idle zset jobs did not finish with active expiry disabled", protocol, database, size, active, after, ceilings, elapsed))
+                    if after != [1, 1]:
+                        raise AssertionError(("idle zset jobs did not finish with active expiry disabled", protocol, database, size, active, after, elapsed))
                     for key in keys:
                         assert client.check("ZCARD", key) == size + 1
                         assert float(client.check("ZSCORE", key, member)) == size + 1
-                    rows.append(dict(protocol=protocol, database=database, members_per_job=size, jobs=2, active_bytes=active, settled_bytes=after, idle_observation_seconds=elapsed, command_free_sleep_seconds=args.idle_seconds))
+                    rows.append(dict(protocol=protocol, database=database, members_per_job=size, jobs=2, active_banks=active, settled_banks=after, idle_observation_seconds=elapsed, command_free_sleep_seconds=args.idle_seconds))
             finally:
                 client.close()
                 storage_server.stop(process)

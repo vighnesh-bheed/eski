@@ -115,6 +115,7 @@ done
 
 run_script "test/conformance/test_managed_fixture.py" "managed-fixture"
 run_script "test/vectorset/test_compare.py" "vector-set-normalisations"
+run_script "test/search/test_compare.py" "search-normalisations"
 run_script "test/threading/keyspace.py" "keyspace" --server "$server_binary"
 run_script "test/threading/full_keyspace.py" "datatype-workers" --server "$server_binary"
 run_script "test/threading/features.py" "worker-features" --server "$server_binary"
