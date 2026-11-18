@@ -121,6 +121,38 @@ def verify_mirror(reader, mirror, folder, key):
         raise ValueError('verified change-log record does not contain the committed SET')
 
 
+def mirror_records(reader, mirror, folder, limit):
+    first = subprocess.run([reader, mirror, 'first'], capture_output=True, timeout=60)
+    first.check_returncode()
+    epoch, position = first.stdout.decode().split()
+    payloads = []
+    while len(payloads) < limit:
+        record = subprocess.run([reader, mirror, 'read', epoch, position], capture_output=True, timeout=60)
+        if record.returncode in (3, 4):
+            break
+        if record.returncode:
+            (folder / 'mirror-walk.err').write_bytes(record.stderr)
+            raise ValueError('change-log read at position %s failed with %d' % (position, record.returncode))
+        payloads.append(record.stdout)
+        position = record.stderr.decode().split('next=')[-1].strip()
+    return payloads
+
+
+def verify_all_writes(reader, mirror, folder, frames):
+    payloads = mirror_records(reader, mirror, folder, len(frames) + 2)
+    combined = b''.join(payloads)
+    found = 0
+    offset = 0
+    for frame in frames:
+        offset = combined.find(frame, offset)
+        if offset < 0:
+            break
+        offset += len(frame)
+        found += 1
+    sets = combined.count(b'*3\r\n$3\r\nSET\r\n')
+    return dict(mirror_records=len(payloads), mirror_bytes_read=len(combined), writes_found_in_order=found, set_commands_in_mirror=sets)
+
+
 def mirror_sample(a, enabled, round_number, work):
     folder = Path(work) / f'round-{round_number}-mirror-{int(enabled)}'
     folder.mkdir()
@@ -129,6 +161,7 @@ def mirror_sample(a, enabled, round_number, work):
         mirror.mkdir(mode=0o700)
     row = {'round': round_number, 'change_log': enabled, 'fsync': a.fsync, 'timed': not a.verify_only}
     writes, _ = (a.writes, a.partitions) if a.size == 'custom' else SIZES[a.size]
+    walk = None
     server = start(a.server, a.port, folder, 'off', True, a.fsync, None, a.cpu, mirror)
     try:
         with closing(server.conn()) as c:
@@ -137,6 +170,11 @@ def mirror_sample(a, enabled, round_number, work):
                 raise ValueError('plain append check did not round-trip')
             if mirror is not None:
                 verify_mirror(a.change_log_reader, mirror, folder, key)
+            if a.verify_only:
+                frames = [encode(['SET', f'key:{i}', VALUE]) for i in range(writes)]
+                replies = c.pipeline(frames, a.pipeline)
+                row.update(writes=writes, failed_writes=sum(reply != 'OK' for reply in replies), dbsize=c.call('DBSIZE'))
+                walk = frames if mirror is not None else None
             if not a.verify_only:
                 frames = [encode(['SET', f'key:{i}', VALUE]) for i in range(writes)]
                 warmup = min(a.warmup, writes)
@@ -162,6 +200,9 @@ def mirror_sample(a, enabled, round_number, work):
         code = server.stop()
     if code != 0:
         raise RuntimeError(f'server exited with {code}')
+    if walk is not None:
+        row.update(verify_all_writes(a.change_log_reader, mirror, folder, walk))
+        row['all_writes_mirrored'] = row['writes_found_in_order'] == writes and row['set_commands_in_mirror'] == writes + 1
     return row
 
 
@@ -185,7 +226,8 @@ def main():
                         help='compare plaintext AOF with the change log off and on using this reader')
     parser.add_argument('--mirror-rounds', type=int, default=2, help='alternate off/on order by round')
     parser.add_argument('--warmup', type=int, default=500, help='warmup writes per mirror measurement')
-    parser.add_argument('--verify-only', action='store_true', help='check mirror capture with no timing')
+    parser.add_argument('--verify-only', action='store_true', help='check mirror capture with no timing: one write read back, then every one of '
+                        'the writes found in the mirror in order, with the dataset size')
     parser.add_argument('--latency-samples', type=int, default=0, help='after the timed run, this many single writes at pipeline 1 with each round trip kept')
     a = parser.parse_args()
     if a.pipeline < 2 or a.writes < 1 or a.partitions < 1 or a.mirror_rounds < 1 or a.warmup < 0:
@@ -203,7 +245,9 @@ def main():
                     for enabled in ((False, True) if r % 2 == 0 else (True, False))]
         print_result(a, rows)
         return int(any(r.get('failed_writes', 0) or (r['timed'] and r['aof_bytes'] <= 0) or
-                       (r['timed'] and r['change_log'] and r['mirror_bytes'] <= 0) for r in rows))
+                       (r['timed'] and r['change_log'] and r['mirror_bytes'] <= 0) or
+                       (not r['timed'] and (r['dbsize'] != r['writes'] + 1 or (r['change_log'] and not r['all_writes_mirrored'])))
+                       for r in rows))
     modes = a.modes.split(',')
     for m in modes:
         if m not in MODES:

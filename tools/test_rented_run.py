@@ -17,18 +17,23 @@ AREAS = ('stock', 'memory', 'search-hash', 'search-json', 'full-text', 'vector-s
          'vector-sets', 'persistence', 'change-log', 'access', 'internal', 'simulation', 'trace')
 
 
-def plan_module(rows, areas=AREAS):
+def plan_module(rows, areas=AREAS, downloads=()):
     module = types.ModuleType('plan')
     module.AREAS = areas
+    module.DOWNLOADS = downloads
     module.steps = lambda context: [dict(row) for row in rows]
     return module
 
 
-def plan_row(name, area='stock', fail=False):
-    script = 'import json,sys,pathlib; p=pathlib.Path(sys.argv[1]); p.parent.mkdir(parents=True, exist_ok=True); ' \
-             'p.write_text(json.dumps({"exit_code": %d})); sys.exit(%d)' % (int(fail), int(fail))
-    return {'name': name, 'area': area, 'artifact': f'plan/{name}.json', 'timeout': 60, 'environment': {},
-            'needs': [], 'estimate_seconds': 1, 'command': [sys.executable, '-c', script, '{out}/plan/%s.json' % name]}
+def plan_row(name, area='stock', fail=False, measured=None, own_directory=False):
+    report = {'exit_code': int(fail)}
+    if measured:
+        report['measured'] = measured
+    artifact = f'{name}/result.json' if own_directory else f'plan/{name}.json'
+    script = 'import json,sys,pathlib; p=pathlib.Path(sys.argv[1]); p.parent.mkdir(parents=True, exist_ok=%s); ' \
+             'p.write_text(json.dumps(%r)); sys.exit(%d)' % (not own_directory, report, int(fail))
+    return {'name': name, 'area': area, 'artifact': artifact, 'timeout': 60, 'environment': {},
+            'needs': [], 'estimate_seconds': 1, 'command': [sys.executable, '-c', script, '{out}/' + artifact]}
 
 
 def ready(rehearsal=False, plan=None):
@@ -45,7 +50,7 @@ def ready(rehearsal=False, plan=None):
 
 
 def arguments(out, **changes):
-    values = dict(out=out, resume=None, revision='a' * 40, server_cpus='0', client_cpus='1', capture=None,
+    values = dict(out=out, resume=None, revision='a' * 40, server_cpus='0', client_cpus='1', control_cpus='2', capture=None,
                   observed=None, expected=None, modern_python=None, llama_python=None, input_sums=None,
                   port_base=17840, min_free_gib=1, first_seed=8, seeds=2, steps=4, cycles=2, transactions=3,
                   plan_profile='rehearsal', only=None, skip=None, allow_unqualified=False, allow_noisy_host=False,
@@ -74,7 +79,8 @@ class StubRun(rented_run.Run):
             result.update(sha256=rented_run.digest(self.server), recovered_cycles=self.sizes['cycles'], appendfsync='always',
                           acknowledged_transactions=self.sizes['cycles'] * self.sizes['transactions'])
         elif name == 'change-log-probe':
-            result['rows'] = [{'change_log': flag, 'timed': False, 'fsync': 'always'} for flag in (False, True)]
+            result['rows'] = [{'change_log': flag, 'timed': False, 'fsync': 'always', 'writes': self.sizes['probe_writes'],
+                               'dbsize': self.sizes['probe_writes'] + 1, 'all_writes_mirrored': True} for flag in (False, True)]
         elif name == 'search-json-probe':
             result.update(timed=False, rows=[{'target': target, 'checked_requests': 8} for target in ('eski', 'redis-search')])
         elif name == 'functional':
@@ -171,6 +177,53 @@ class RunStages(unittest.TestCase):
         self.assertTrue((run.out / 'inputs/expected-2.json').is_file())
         self.assertEqual(code, 0)
 
+    def test_a_step_measured_with_exclusions_is_kept_and_rerun_only_by_name(self):
+        measured = {'excluded': 2, 'valid': 30, 'cases': 32, 'list': 'phases.benchmark.excluded'}
+        plan = plan_module([plan_row('stock-exam', fail=True, measured=measured), plan_row('two')])
+        run, code, called = self.run_once(arguments(self.out), plan)
+        self.assertEqual(code, 0)
+        row = run.report['stages']['stock-exam']
+        self.assertEqual(row['state'], 'measured')
+        self.assertEqual(row['measured']['listed_in'], 'plan/stock-exam.json, field phases.benchmark.excluded')
+        owed = run.report['owed']
+        self.assertEqual([(entry['stage'], entry['state'], entry.get('choice')) for entry in owed], [('stock-exam', 'measured', True)])
+        self.assertIn('operator', owed[0]['note'])
+        self.assertEqual(run.report['measured_with_exclusions']['stock-exam']['excluded'], 2)
+        again, code, called = self.run_once(arguments(self.out, resume=run.out), plan, previous=run.out)
+        self.assertEqual((code, called), (0, []))
+        again, code, called = self.run_once(arguments(self.out, resume=run.out, only=['stock']), plan, previous=run.out)
+        self.assertEqual(called, [])
+        again, code, called = self.run_once(arguments(self.out, resume=run.out, only=['stock-exam']), plan, previous=run.out)
+        self.assertEqual(called, ['stock-exam'])
+        broken = {'excluded': 0, 'valid': 30, 'cases': 30, 'list': 'x'}
+        run, code, called = self.run_once(arguments(self.out), plan_module([plan_row('stock-spec', fail=True, measured=broken)]))
+        self.assertEqual(code, 1)
+        self.assertNotIn('state', run.report['stages']['stock-spec'])
+
+    def test_a_rerun_step_gets_a_fresh_directory_and_keeps_the_old_one(self):
+        plan = plan_module([plan_row('one', fail=True, own_directory=True)])
+        run, code, called = self.run_once(arguments(self.out), plan)
+        self.assertEqual(code, 1)
+        plan = plan_module([plan_row('one', own_directory=True)])
+        again, code, called = self.run_once(arguments(self.out, resume=run.out, only=['one']), plan, previous=run.out)
+        self.assertEqual((code, called), (0, ['one']))
+        history = again.report['stages']['one']['history'][0]
+        self.assertEqual((history['directory'], history['artifact']), ('one.attempt-1', 'one.attempt-1/result.json'))
+        self.assertTrue((run.out / 'one.attempt-1/result.json').is_file() and (run.out / 'one/result.json').is_file())
+
+    def test_the_rehearsal_plan_profile_never_qualifies_a_timed_step(self):
+        plan = plan_module([plan_row('one')])
+        state = ready(rehearsal=False, plan={'steps': []})
+        for profile, because in (('rehearsal', ['rehearsal plan profile']), ('full', None)):
+            args = arguments(self.out, rehearsal=False, plan_profile=profile)
+            with mock.patch.object(rented_run.Run, 'correctness', lambda self: None), \
+                    mock.patch.object(rented_run.Run, 'verify_outcomes', lambda self: None), \
+                    mock.patch.object(rented_run.Run, 'baseline_gate', lambda self: (True, [])):
+                run, code, called = self.run_once(args, plan, state=state)
+            row = run.report['stages']['one']
+            self.assertEqual(row['qualified'], because is None, profile)
+            self.assertEqual(row.get('unqualified_because'), because)
+
     def test_noisy_host_and_tmpfs(self):
         plan = plan_module([plan_row('one')])
         state = ready(rehearsal=False, plan={'steps': []})
@@ -199,6 +252,68 @@ class Pieces(unittest.TestCase):
             rented_run.checked_plan(plan_module([good, good]), {})
         with self.assertRaisesRegex(ValueError, 'AREAS'):
             rented_run.checked_plan(plan_module([good], areas=['stock']), {})
+
+    def test_the_controller_is_chosen_outside_both_roles_or_refused(self):
+        self.assertEqual(rented_run.control_cpus(None, set(range(8)), {2}, {4, 5}), ('7', None))
+        self.assertEqual(rented_run.control_cpus(None, {0, 1, 2}, {1}, {2}), ('0', None))
+        self.assertIn('no CPU', rented_run.control_cpus(None, {1, 2}, {1}, {2})[1])
+        self.assertIsNone(rented_run.control_cpus('6-7', set(range(8)), {2}, {4, 5})[1])
+        for given in ('2', '5', '9', 'x'):
+            self.assertIsNotNone(rented_run.control_cpus(given, set(range(8)), {2}, {4, 5})[1], given)
+
+    def test_plan_downloads_are_checked(self):
+        good = {'name': 'archive', 'url': 'https://example.org/a.tar.gz', 'sha256': 'a' * 64,
+                'path': '.build/downloads/a.tar.gz', 'steps': ('stock-get',)}
+        self.assertEqual(rented_run.plan_downloads(plan_module([], downloads=(good,)), ['stock-get'])[0]['steps'], ['stock-get'])
+        for change in ({'url': 'http://example.org/a'}, {'sha256': 'b'}, {'path': '.build/a.tar.gz'}, {'path': '.build/downloads/../a'},
+                       {'path': '/tmp/a'}, {'steps': ()}, {'steps': ('other',)}):
+            with self.assertRaises(ValueError, msg=str(change)):
+                rented_run.plan_downloads(plan_module([], downloads=(dict(good, **change),)), ['stock-get'])
+        with self.assertRaisesRegex(ValueError, 'DOWNLOADS'):
+            rented_run.plan_downloads(types.ModuleType('plan'))
+        with tempfile.TemporaryDirectory() as folder:
+            with mock.patch.object(rented_run, 'ROOT', Path(folder)):
+                (Path(folder) / '.build/downloads').mkdir(parents=True)
+                (Path(folder) / good['path']).write_text('x')
+                state = rented_run.download_state(dict(good, sha256=rented_run.digest(Path(folder) / good['path'])))
+                self.assertEqual(state, {'cached': True})
+                self.assertFalse(rented_run.download_state(good)['cached'])
+
+    def test_call_graphs_without_perf_are_a_finding(self):
+        with mock.patch.object(rented_run.shutil, 'which', lambda name: None):
+            probe = rented_run.call_graph_probe()
+        self.assertFalse(probe['permitted'])
+        self.assertIn('not installed', probe['reason'])
+
+    def test_the_planning_figure_comes_from_recorded_durations(self):
+        steps = rented_run.required_functional_steps('full')
+        record = {'profile': 'full', 'recorded': '2026-11-18', 'machine': {'cpu': 'a test machine', 'cpus': 'CPUs 0 to 3'},
+                  'stages': {name: 10 for name in rented_run.BUILDS if name != 'debug-build'} | {'virtual': 20, 'native': 30,
+                                                                                                 'change-log-probe': 1, 'search-json-probe': 2},
+                  'functional': {name: 100 for name in steps if not name.startswith('packages-')} | {'packages': 1000},
+                  'partial': {'functional/packages': 'ended early'},
+                  'covers': {'functional/packages': ['functional/' + name for name in steps if name.startswith('packages-')]}}
+        rehearsal = {'profile': 'rehearsal', 'plan_profile': 'full', 'machine': {'cpu': 'another'}, 'plan': {'one': 500}}
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'durations.json'
+            path.write_text(json.dumps({'records': [record, rehearsal]}))
+            args = arguments(Path(folder), rehearsal=False, plan_profile='full')
+            plan = {'steps': [{'name': 'one', 'estimate_seconds': 7}, {'name': 'two', 'estimate_seconds': 9}]}
+            figure = rented_run.planning_figure(args, plan, path)
+        functional = 100 * len([name for name in steps if not name.startswith('packages-')]) + 1000
+        self.assertEqual(figure['correctness_seconds'], 50 + 53 + functional)
+        self.assertEqual(figure['unrecorded'], ['debug-build'])
+        self.assertEqual(figure['lower_bounds'], {'functional/packages': 'ended early'})
+        self.assertEqual((figure['plan_seconds'], figure['plan_steps_from_estimate']), (509, ['two']))
+        line = rented_run.describe_estimate({'estimate': {'correctness_upper_bound_seconds': {'x': 3600}, 'plan_estimate_seconds': 16,
+                                                          'planning': figure, 'disk_bytes_before_baseline': {}}})
+        self.assertIn('planning figure', line)
+        self.assertIn('from another machine, not a bound', line)
+        self.assertIn('a test machine', line)
+        self.assertIn('error', rented_run.planning_figure(args, plan, Path(folder) / 'missing.json'))
+        tracked = rented_run.planning_figure(args, plan)
+        self.assertNotIn('error', tracked)
+        self.assertEqual(tracked['unrecorded'], ['debug-build'])
 
     def test_identity_ignores_what_timing_may_change(self):
         first, second = ready(), ready()

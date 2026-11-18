@@ -22,7 +22,7 @@ MOVED = ('stock-exam', 'aof-append', 'change-log-append', 'graph-load', 'search-
 def context(profile='rehearsal', out=None):
     return dict(profile=profile, out=out or '/srv/run/run-1',
                 binaries={key: '/srv/run/bin/' + key for key in baseline.BINARY_KEYS},
-                server_cpus='2', client_cpus='4-7', ports=[17840, 17879],
+                server_cpus='2', client_cpus='4-7', control_cpus='3', ports=[17840, 17879],
                 images={key: 'sha256:' + '%064x' % index for index, key in enumerate(baseline.IMAGE_KEYS, 1)},
                 limits=dict(server_memory='8g', client_memory='2g', maxmemory=6442450944), python=[sys.executable, '-IB'],
                 seeds=dict(first=8, count=256, steps=128))
@@ -150,6 +150,50 @@ class PlanTests(unittest.TestCase):
         for row in self.plans['full']:
             self.assertNotIn(row['name'], baseline.RESERVED)
             self.assertFalse(row['name'].startswith(baseline.RESERVED_PREFIXES), row['name'])
+
+    def test_controller_cpus_reach_the_steps_that_need_a_controller(self):
+        for profile, rows in self.plans.items():
+            for row in rows:
+                command = row['command']
+                if row['name'] in ('stock-exam', 'stock-spec', 'stock-fill', 'noise-floor'):
+                    self.assertEqual(command[command.index('--control-cpus') + 1], '3', row['name'])
+                    self.assertNotEqual(command[0], 'taskset', row['name'])
+                else:
+                    self.assertNotIn('--control-cpus', command, row['name'])
+        for change in (dict(control_cpus='2'), dict(control_cpus='5'), dict(control_cpus=''), dict(control_cpus='x')):
+            with self.assertRaises(ValueError, msg=str(change)):
+                baseline.steps(dict(context(), **change))
+
+    def test_downloads_name_the_archive_the_step_reads(self):
+        text = (ROOT / 'bench/run.sh').read_text()
+        version = re.search(r'^SPEC_VERSION="([^"]+)"$', text, re.MULTILINE)[1]
+        digest = re.search(r'^SPEC_SHA256="([^"]+)"$', text, re.MULTILINE)[1]
+        exam = (ROOT / 'bench/stock_exam.py').read_text()
+        names = {row['name'] for row in self.plans['full']}
+        self.assertTrue(baseline.DOWNLOADS)
+        for row in baseline.DOWNLOADS:
+            self.assertEqual(set(row), {'name', 'url', 'sha256', 'path', 'steps'})
+            self.assertTrue(row['path'].startswith('.build/downloads/') and '..' not in Path(row['path']).parts)
+            self.assertTrue(set(row['steps']) <= names)
+            self.assertIn(row['sha256'], exam)
+            self.assertIn(row['url'], exam)
+        spec = next(row for row in baseline.DOWNLOADS if 'stock-spec' in row['steps'])
+        self.assertEqual(spec['sha256'], digest)
+        self.assertIn('v%s.tar.gz' % version, spec['url'])
+        self.assertEqual(spec['path'], '.build/downloads/redis-benchmarks-specification-%s.tar.gz' % version)
+        for profile, rows in self.plans.items():
+            command = next(row['command'] for row in rows if row['name'] == 'stock-spec')
+            self.assertEqual(command[command.index('--spec-archive') + 1], spec['path'])
+
+    def test_the_full_profile_cannot_be_softened(self):
+        for row in self.plans['full']:
+            command = row['command']
+            self.assertNotIn('--advisory-gates', command, row['name'])
+            self.assertFalse(any('rehearsal' in part for part in command), row['name'])
+            self.assertEqual(command[command.index('--profile') + 1], 'full', row['name'])
+            self.assertFalse(any(key.startswith(('BENCH_', 'ESKI_')) for key in row['environment']), row['name'])
+        for row in self.plans['rehearsal']:
+            self.assertEqual(row['command'][row['command'].index('--profile') + 1], 'rehearsal', row['name'])
 
     def test_images_named_by_needs_are_the_ones_the_command_uses(self):
         images = context()['images']

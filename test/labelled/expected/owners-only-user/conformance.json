@@ -117,22 +117,6 @@
     "pause::Test the randomkey command will not cause the server to get into an infinite loop during the client pause write",
     "pause::Test write scripts in multi-exec are blocked by pause RO"
    ]
-  },
-  {
-   "id": "narrowed-flush",
-   "reason": "The default login of this mode is the one user suite-user, so a flush acts for that user and removes only its keys, and a flush that does not remove everything neither stops a running snapshot nor saves at once (see FLUSHDB and FLUSHALL in docs/owners.md and the FLUSHALL row of What is enforced in this release in docs/labels.md). Keys of other scopes therefore survive every flush the suite sends. Earlier units, among them acl-v2, write through logins that have no owner rule, which act as SHARED, five such keys remain, and because the runner restarts the server for each unit in one directory, and the server saves at its shutdown and loads at its start, they are present in every later unit. Nine tests differ because of them: six eviction tests of the maxmemory unit count 55 keys where they wrote 50, the two expiry tests of the latency monitor unit, one nested in the other, wait for the keyspace to become empty, and the introspection test that kills a client during a slow snapshot waits for the next flush to stop the snapshot child, which goes on writing its keys at the test's delay for each key, far longer than the test waits.",
-   "doc": "docs/owners.md#flushdb-and-flushall",
-   "entries": [
-    "introspection::CLIENT KILL close the client connection during bgsave",
-    "latency-monitor::LATENCY GRAPH can output the expire event graph",
-    "latency-monitor::LATENCY of expire events are correctly collected",
-    "maxmemory::eviction due to input buffer of a dead client, client eviction: false",
-    "maxmemory::eviction due to input buffer of a dead client, client eviction: true",
-    "maxmemory::eviction due to output buffers of many MGET clients, client eviction: false",
-    "maxmemory::eviction due to output buffers of many MGET clients, client eviction: true",
-    "maxmemory::eviction due to output buffers of pubsub, client eviction: false",
-    "maxmemory::eviction due to output buffers of pubsub, client eviction: true"
-   ]
   }
  ]
 }

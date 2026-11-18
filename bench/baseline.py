@@ -3,10 +3,17 @@ import re
 AREAS = ('stock', 'memory', 'search-hash', 'search-json', 'full-text', 'vector-search', 'hybrid', 'aggregate', 'json',
          'vector-sets', 'persistence', 'change-log', 'access', 'internal', 'simulation', 'trace')
 PROFILES = ('full', 'rehearsal')
-CONTEXT_KEYS = ('profile', 'out', 'binaries', 'server_cpus', 'client_cpus', 'ports', 'images', 'limits', 'python', 'seeds')
+CONTEXT_KEYS = ('profile', 'out', 'binaries', 'server_cpus', 'client_cpus', 'control_cpus', 'ports', 'images', 'limits', 'python', 'seeds')
 BINARY_KEYS = ('eski', 'eski-debug', 'eski-simulation', 'eski-change-log')
 IMAGE_KEYS = ('redis', 'valkey', 'dragonfly', 'memtier', 'redis-search')
 NAME = re.compile(r'[a-z0-9]+(?:-[a-z0-9]+)*$')
+CPU_LIST = re.compile(r'\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$')
+SPEC_ARCHIVE = '.build/downloads/redis-benchmarks-specification-0.3.46.tar.gz'
+DOWNLOADS = (
+    dict(name='Redis benchmarks specification v0.3.46', steps=('stock-spec',), path=SPEC_ARCHIVE,
+         url='https://github.com/redis/redis-benchmarks-specification/archive/refs/tags/v0.3.46.tar.gz',
+         sha256='763f7dd9d453050c0cebe174437e244eeaf9a185e64de18f70bad20ed07e0ca0'),
+)
 RUNNER = 'bench/baseline_run.py'
 RESERVED = ('functional', 'virtual', 'native', 'change-log-probe', 'search-json-probe', 'lua-build', 'diagnostics-build', 'release-build',
             'debug-build', 'simulation-build', 'change-log-build', 'bundle', 'bin', 'inputs', 'summary', 'rented-run', 'SHA256SUMS')
@@ -94,6 +101,13 @@ def validate(context):
     for key in IMAGE_KEYS:
         if not isinstance(context['images'].get(key), str):
             raise ValueError('images.%s must be a string, empty when preflight could not resolve it' % key)
+    roles = {}
+    for key in ('server_cpus', 'client_cpus', 'control_cpus'):
+        if not isinstance(context[key], str) or not CPU_LIST.match(context[key]):
+            raise ValueError('%s must be a Linux CPU list' % key)
+        roles[key] = cpu_set(context[key])
+    if roles['server_cpus'] & roles['client_cpus'] or roles['control_cpus'] & (roles['server_cpus'] | roles['client_cpus']):
+        raise ValueError('server_cpus, client_cpus and control_cpus must be disjoint')
     first, last = context['ports']
     if not (isinstance(first, int) and isinstance(last, int) and 1024 <= first and last - first + 1 >= 40 and last <= 65535):
         raise ValueError('ports must name forty consecutive ports')
@@ -112,12 +126,16 @@ def first_cpu(cpus):
     return re.split(r'[,-]', cpus)[0]
 
 
-def cpu_count(cpus):
-    total = 0
+def cpu_set(cpus):
+    found = set()
     for part in cpus.split(','):
         low, _, high = part.partition('-')
-        total += int(high or low) - int(low) + 1
-    return total
+        found.update(range(int(low), int(high or low) + 1))
+    return found
+
+
+def cpu_count(cpus):
+    return len(cpu_set(cpus))
 
 
 class Plan:
@@ -129,6 +147,7 @@ class Plan:
         self.port = context['ports'][0]
         self.server = context['server_cpus']
         self.client = context['client_cpus']
+        self.control = context['control_cpus']
         self.bin = context['binaries']
         self.images = context['images']
         self.rows = []
@@ -166,7 +185,8 @@ class Plan:
         s = self.s
         ports = '%d-%d' % (self.port, self.port + 9)
         common = ['--profile', self.c['profile'], '--eski', self.bin['eski'], '--server-cpus', self.server, '--client-cpus', self.client,
-                  '--ports', ports, *self.images_args(('redis', 'valkey', 'dragonfly', 'memtier')), *self.limits_args()]
+                  '--control-cpus', self.control, '--ports', ports, *self.images_args(('redis', 'valkey', 'dragonfly', 'memtier')),
+                  *self.limits_args()]
         cases = (s['exam_workloads'] * s['exam_repetitions'] + 1) * 4
         exam = s['exam_idle_watch'] + cases * (s['exam_test_seconds'] + s['exam_warmup_seconds'] + s['exam_case_overhead'])
         self.add('stock-exam', 'stock', [*self.py, 'bench/stock_exam.py', 'exam', '--out', self.out + '/stock-exam', *common],
@@ -175,7 +195,8 @@ class Plan:
         spec = 60 + s['exam_idle_watch'] + spec_cases * (s['spec_test_seconds'] + s['exam_case_overhead'])
         self.add('stock-spec', 'stock', [*self.py, 'bench/stock_exam.py', 'spec', '--out', self.out + '/stock-spec', *common,
                                          '--spec-test-seconds', s['spec_test_seconds'], '--spec-repetitions', s['spec_repetitions'],
-                                         '--spec-cases-per-group', s['spec_case_limit'], '--spec-max-groups', s['spec_max_groups']],
+                                         '--spec-cases-per-group', s['spec_case_limit'], '--spec-max-groups', s['spec_max_groups'],
+                                         '--spec-archive', SPEC_ARCHIVE],
                  max(1800, 3 * spec), spec, ('redis', 'valkey', 'dragonfly', 'memtier'), 'stock-spec/result.json')
         fill = 4 * s['fill_seconds_per_engine']
         self.add('stock-fill', 'memory', [*self.py, 'bench/stock_exam.py', 'fill', '--out', self.out + '/stock-fill', *common,
@@ -302,7 +323,8 @@ class Plan:
         passes = 1 if cpu_count(self.server) >= 2 and cpu_count(self.client) >= 4 else 2
         floor = s['floor_rounds'] * passes * (2 * PLANNING['server_start'] + s['floor_workloads'] * (s['floor_seconds'] + s['floor_warmup'] + 2 * PLANNING['container_start']))
         self.wrapped('noise-floor', 'internal', [*self.py, 'bench/ab_floor_run.py', '--binary', self.bin['eski'], '--server-cpus', self.server,
-                                                 '--client-cpus', self.client, '--port', self.port, '--memtier-image', self.images['memtier'],
+                                                 '--client-cpus', self.client, '--control-cpus', self.control, '--port', self.port,
+                                                 '--memtier-image', self.images['memtier'],
                                                  '--rounds', s['floor_rounds'], '--seconds', s['floor_seconds'], '--warmup', s['floor_warmup'],
                                                  '--workloads', workloads,
                                                  '--out', '{dir}/session', '--result', '{json}'],

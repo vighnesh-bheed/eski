@@ -143,6 +143,8 @@ def main():
     parser.add_argument('--cpu', help='CPU list for the server, as taskset -c takes it')
     parser.add_argument('--out', help='write the JSON here as well')
     parser.add_argument('--work-dir', type=Path, help='new directory to retain logs and data')
+    parser.add_argument('--verify-only', action='store_true', help='record only the checks: the digest after the restart, the background save '
+                        'status and the sizes, with no timing field')
     a = parser.parse_args()
     modes = a.modes.split(',')
     for m in modes:
@@ -159,6 +161,8 @@ def main():
             for flag in a.encryption.split(','):
                 rows.append(measure(a, mode, flag == 'on', port, work))
                 port += 1
+    if a.verify_only:
+        rows = [dict({key: value for key, value in row.items() if not key.endswith('_s')}, timed=False) for row in rows]
     text = json.dumps({'rows': rows}, indent=2)
     if a.out:
         Path(a.out).write_text(text + '\n')

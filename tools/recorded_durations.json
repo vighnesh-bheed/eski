@@ -1,0 +1,133 @@
+{
+ "note": "Seconds each stage, functional step and plan step took on the named machine. Preflight sums them into a planning figure for another host; they are durations of whole steps, not measurements of the server.",
+ "records": [
+  {
+   "covers": {
+    "functional/packages": [
+     "functional/packages-debug",
+     "functional/packages-sanitizer",
+     "functional/packages-release",
+     "functional/packages-drivers"
+    ]
+   },
+   "functional": {
+    "conformance-off": 216.84,
+    "documentation": 0.07,
+    "labelled": 896.61,
+    "owners-only-user": 933.58,
+    "owners-shared": 905.85,
+    "owners-user": 925.88,
+    "packages": 2624.65,
+    "scripting-off": 7.98,
+    "search-advanced-reference": 2.97,
+    "search-capture": 1.77,
+    "search-clients": 20.54,
+    "search-pipeline-reference": 3.17,
+    "search-smoke": 1.92,
+    "smoke-off": 656.27,
+    "strict-check": 16.33,
+    "vector-replies-off": 1.67,
+    "vectorset-off": 51.33
+   },
+   "machine": {
+    "cpu": "Intel Core Ultra 7 265H laptop, 16 CPUs, 62 GiB, Fedora 44, kernel 7.2.10",
+    "cpus": "CPUs 0 to 5, server CPU 0, client CPUs 2 and 3"
+   },
+   "name": "full correctness",
+   "partial": {
+    "diagnostics-build": "the archives were already built in that checkout",
+    "functional/documentation": "failed at once in that revision",
+    "functional/packages": "ended at its first failing driver; the drivers after it did not run",
+    "functional/search-capture": "failed at once in that revision",
+    "lua-build": "the archives were already built in that checkout"
+   },
+   "plan_profile": null,
+   "profile": "full",
+   "recorded": "2026-11-18",
+   "revision": "6a8857903bdc59dc82e468eb752e1e9451750a21",
+   "source": "a full correctness run of tools/rented_run.py on another revision of this tree; the machine also served other work",
+   "stages": {
+    "change-log-build": 0.37,
+    "change-log-probe": 0.32,
+    "diagnostics-build": 0.06,
+    "lua-build": 0.03,
+    "native": 10.39,
+    "release-build": 53.97,
+    "search-json-probe": 0.92,
+    "simulation-build": 3.23,
+    "virtual": 25.59
+   }
+  },
+  {
+   "functional": {
+    "search-runner-tests": 0.11,
+    "search-smoke": 8.38
+   },
+   "machine": {
+    "cpu": "Intel Core Ultra 7 265H laptop, 16 CPUs, 62 GiB, Fedora 44, kernel 7.2.10",
+    "cpus": "CPUs 6 to 13, server CPU 6, client CPUs 8 and 9"
+   },
+   "name": "rehearsal",
+   "partial": {},
+   "plan": {
+    "access-owner-bytes": 1.02,
+    "access-owner-forms": 0.41,
+    "access-owner-scale": 5.08,
+    "access-owner-vset": 7.49,
+    "access-scripts-labelled": 0.31,
+    "access-scripts-off": 0.32,
+    "access-scripts-owners": 0.31,
+    "aggregate": 3.12,
+    "aof-append": 1.07,
+    "change-log-append": 1.17,
+    "full-text": 3.67,
+    "graph-load": 0.41,
+    "hybrid": 3.22,
+    "internal-hash-resize": 3.83,
+    "internal-set-resize": 4.13,
+    "internal-sort": 7.83,
+    "internal-store": 141.7,
+    "internal-zset-resize": 4.04,
+    "json-commands": 5.18,
+    "noise-floor": 61.59,
+    "persistence-engines": 25.71,
+    "save-load": 2.22,
+    "search-hash": 7.68,
+    "search-json": 2.37,
+    "search-json-fields": 3.17,
+    "simulation-rate": 0.42,
+    "stock-exam": 246.66,
+    "stock-fill": 73.18,
+    "stock-spec": 169.69,
+    "trace-access": 6.83,
+    "trace-change-log": 6.78,
+    "trace-json": 6.78,
+    "trace-persistence": 7.03,
+    "trace-search": 6.98,
+    "trace-stock": 9.13,
+    "trace-vector-sets": 6.98,
+    "vector-search": 3.37,
+    "vector-sets": 3.67,
+    "vector-sets-threads": 0.72
+   },
+   "plan_profile": "rehearsal",
+   "profile": "rehearsal",
+   "recorded": "2026-11-18",
+   "revision": "1263129c5d9e89b41d66697dc90fe438e99220fe",
+   "source": "a rehearsal of tools/rented_run.py with the rehearsal plan from a fresh clone; the machine also served other work",
+   "stages": {
+    "change-log-build": 0.47,
+    "change-log-probe": 0.31,
+    "debug-build": 80.56,
+    "diagnostics-build": 0.16,
+    "lua-build": 3.17,
+    "native": 0.32,
+    "release-build": 67.67,
+    "search-json-probe": 2.82,
+    "simulation-build": 4.02,
+    "virtual": 0.16
+   }
+  }
+ ],
+ "schema": "eski-recorded-durations-v1"
+}

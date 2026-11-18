@@ -36,8 +36,10 @@ KNOWN_UNEQUAL = {
                      'corpus; the request is checked on every run and timed only once the replies are equal.',
 }
 KNOWN_DIFFERENCES = {
-    'hnsw': 'HNSW is approximate: the two engines build different graphs, so the neighbours they return for one query may differ; the '
-            'replies are compared and the request is timed with the difference counted',
+    'hnsw': 'HNSW is approximate: the two engines build different graphs, and neither builds the same graph twice, so the neighbours they '
+            'return for one query may differ; a reply is within the difference only when it has the same total and the same number of '
+            'results and every key both replies return carries the same fields, so a wrong distance or a short or failed reply is '
+            'unexpected; the request is timed with the difference counted',
     'score-ties': 'Eski orders documents with equal scores differently from the reference, and a page can end inside a group of equal scores; '
                   'replies are compared exactly and counted, a reply that also differs in its scores or in the keys of a complete group of equal '
                   'scores is an unexpected difference, and the request is timed with the difference counted',
@@ -268,9 +270,35 @@ def parsed_numbers(reply):
         return None
 
 
+def keyed(reply):
+    if not isinstance(reply, list):
+        return None, None
+    total = None
+    pairs = reply
+    if reply and isinstance(reply[0], int) and len(reply) % 2 == 1:
+        total, pairs = reply[0], reply[1:]
+    keys = pairs[0::2]
+    if len(pairs) % 2 or not all(isinstance(key, str) for key in keys) or len(set(keys)) != len(keys):
+        return None, None
+    return total, dict(zip(keys, pairs[1::2]))
+
+
+def approximate_neighbours(eski, reference):
+    if not isinstance(eski, list) or not isinstance(reference, list) or len(eski) != len(reference):
+        return False
+    for mine, theirs in zip(eski, reference):
+        total, found = keyed(mine)
+        other_total, other = keyed(theirs)
+        if found is None or other is None or total != other_total or len(found) != len(other):
+            return False
+        if any(found[key] != other[key] for key in found.keys() & other.keys()):
+            return False
+    return True
+
+
 def within_difference(name, eski, reference):
     if name == 'hnsw':
-        return True
+        return approximate_neighbours(eski, reference)
     if name == 'score-ties':
         return [scored_view(item) for item in eski] == [scored_view(item) for item in reference]
     if name == 'number-array-format':

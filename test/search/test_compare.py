@@ -139,6 +139,33 @@ class ReferenceRepeatability(unittest.TestCase):
         self.differ(argv, left, left.replace(b":3\r\n", b":4\r\n"))
         self.differ(argv, left, left.replace(b"$4\r\n0.25", b"$3\r\nnan"))
 
+    def test_info_server_masks_only_what_each_run_changes(self):
+        argv = [b"INFO", b"server"]
+        fields = [(b"redis_version", b"8.10.3"), (b"redis_mode", b"standalone"), (b"os", b"Linux 7.2.10 x86_64"),
+                  (b"monotonic_clock", b"POSIX clock_gettime"), (b"process_id", b"1"), (b"run_id", b"4872ad"), (b"tcp_port", b"7841"),
+                  (b"server_time_usec", b"1795026720038645"), (b"uptime_in_seconds", b"1"), (b"hz", b"10"), (b"lru_clock", b"16641823"),
+                  (b"executable", b"/data/redis-server"), (b"listener0", b"name=tcp,bind=127.0.0.1,port=7841")]
+
+        def info(kind=b"$", **changes):
+            rename = changes.pop("rename", b"redis_mode")
+            rows = [(name.replace(b"redis_mode", rename), changes.get(name.decode(), value)) for name, value in fields]
+            payload = (b"txt:" if kind == b"=" else b"") + b"# Server\r\n" + b"".join(name + b":" + value + b"\r\n" for name, value in rows)
+            return kind + b"%d\r\n" % len(payload) + payload + b"\r\n"
+        for kind in (b"$", b"="):
+            left = info(kind)
+            self.same(argv, left, info(kind, process_id=b"1482940", run_id=b"f73f17", tcp_port=b"17841", os=b"Linux 6.12.48+deb13 x86_64",
+                                       server_time_usec=b"1795026799999999", uptime_in_seconds=b"2496", lru_clock=b"1",
+                                       executable=b"/srv/run/bin/eski", listener0=b"name=tcp,bind=127.0.0.1,port=17841"))
+            self.same(argv, info(kind, monotonic_clock=b"X86 TSC @ 3686 ticks/us"), info(kind, monotonic_clock=b"X86 TSC @ 2900 ticks/us"))
+            for change in (dict(redis_version=b"7.4.11"), dict(hz=b"100"), dict(monotonic_clock=b"X86 TSC @ 3686 ticks/us"),
+                           dict(redis_mode=b"cluster"), dict(listener0=b"name=tcp,bind=*,port=7841"), dict(rename=b"server_mode")):
+                self.differ(argv, left, info(kind, **change))
+        normalized_reply, rule = compare.normalize(argv, compare.parse_reply(info()))
+        self.assertEqual(rule, "info-server-run-fields")
+        self.assertIn(b"process_id:0\r\nrun_id:masked\r\ntcp_port:0\r\n", normalized_reply)
+        self.assertIn(b"redis_version:8.10.3\r\n", normalized_reply)
+        self.assertEqual(compare.normalize([b"INFO", b"memory"], compare.parse_reply(info()))[1], None)
+
     def test_profile_masks_times_and_keeps_counters(self):
         argv = [b"FT.PROFILE", b"idx", b"SEARCH", b"QUERY", b"x"]
         left = flat(flat(b":1\r\n"), flat(bulk(b"Total profile time"), bulk(b"0.5"), bulk(b"Results processed"), b":1\r\n"))

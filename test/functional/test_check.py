@@ -138,6 +138,25 @@ class Steps(unittest.TestCase):
         second, summary = self.run_full("second", profile="light", resume=first.out)
         self.assertEqual(FakeProcess.launched, ["search-runner-tests", "search-smoke"])
 
+    def test_the_package_groups_cover_every_item_and_a_failed_one_reruns_alone(self):
+        run, summary = self.run_full("groups")
+        rows = {row["step"]: row["command"] for row in summary["steps"] if row["step"].startswith("packages")}
+        self.assertEqual(list(rows), [name for name, group, seconds in check.PACKAGE_GROUPS])
+        groups = {command[command.index("--group") + 1] for command in rows.values()}
+        self.patches[0].stop()
+        try:
+            listing = check.subprocess.run(["bash", str(check.relative("test/run_packages.sh")), "--list"], capture_output=True,
+                                           text=True, check=True).stdout.split("\n")
+        finally:
+            self.patches[0].start()
+        self.assertEqual({line.split()[0] for line in listing if line}, groups)
+        FakeProcess.outcomes, FakeProcess.launched = {"packages-drivers": 1}, []
+        first, summary = self.run_full("first")
+        FakeProcess.outcomes, FakeProcess.launched = {}, []
+        self.run_full("second", resume=first.out)
+        self.assertIn("packages-drivers", FakeProcess.launched)
+        self.assertFalse({"packages-debug", "packages-sanitizer", "packages-release"} & set(FakeProcess.launched))
+
     def test_selected_steps_must_exist(self):
         self.assertIn("search-capture", check.profile_steps("full", True))
         self.assertNotIn("json-commands", check.profile_steps("full", True))

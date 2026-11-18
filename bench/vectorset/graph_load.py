@@ -50,6 +50,8 @@ def main():
     parser.add_argument('--cpu', help='CPU list for the server, as taskset -c takes it')
     parser.add_argument('--out', help='write the JSON here as well')
     parser.add_argument('--work-dir', type=Path, help='new directory to retain logs and data')
+    parser.add_argument('--verify-only', action='store_true', help='record only the checks: the restored and reloaded sets against the built '
+                        'one, the digest and the byte sizes, with no timing field')
     a = parser.parse_args()
     if a.work_dir is not None:
         a.work_dir = a.work_dir.resolve()
@@ -108,6 +110,10 @@ def main():
             c.close()
         finally:
             server.stop()
+    if a.verify_only:
+        timing = lambda key: key.endswith(('_s', '_usec'))
+        result = dict({key: value for key, value in result.items() if not timing(key)}, timed=False,
+                      rounds=[{key: value for key, value in row.items() if not timing(key)} for row in result['rounds']])
     text = json.dumps(result, indent=2)
     if a.out:
         Path(a.out).write_text(text + '\n')

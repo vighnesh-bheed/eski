@@ -22,7 +22,7 @@ VALKEY_LIFTS="tests/unit/acl.tcl:1 tests/unit/acl-v2.tcl:1 tests/unit/auth.tcl:1
 RESULTS_DIR="$CONF_DIR/results"
 PARSER="$CONF_DIR/parse_results.py"
 TCL_IMAGE="eski-conformance-tcl:8.6"
-TCL_BASE_IMAGE="docker.io/library/debian:bookworm-slim"
+TCL_BASE_IMAGE="docker.io/library/debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc"
 DEFAULT_TAGS="-needs:repl"
 
 suite="redis"

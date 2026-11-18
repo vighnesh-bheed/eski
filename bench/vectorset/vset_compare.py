@@ -11,14 +11,15 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from harness import Conn, Container, Server, encode
-from search_bench import execute, key_of, memory, timed
+from search_bench import execute, key_of, memory, timed, within_difference
 
 SCHEMA = 'eski-baseline-vector-sets-v1'
 TARGETS = ('eski', 'redis-search')
 KEY = 'bench:vset'
 DIFFERENCES = {
-    'hnsw': 'VSIM without TRUTH walks each engine\'s own HNSW graph, which the two engines build differently, so the neighbours of one query '
-            'may differ; the replies are compared and the request is timed with the difference counted',
+    'hnsw': 'VSIM without TRUTH walks each engine\'s own HNSW graph, which the two engines build differently and neither builds the same '
+            'way twice, so the neighbours of one query may differ; a reply is within the difference only when it returns as many elements '
+            'and every element both replies return carries the same score; the request is timed with the difference counted',
 }
 
 
@@ -106,7 +107,8 @@ def verify(args, data, shape_list, plans, folder):
     finally:
         for handle, _, _ in engines.values():
             handle.stop()
-    by_shape = {s['name']: dict(checked=0, equal=0, differences=[], difference=s['difference']) for s in shape_list}
+    by_shape = {s['name']: dict(checked=0, equal=0, within_named_difference=0, beyond_named_difference=0, differences=[],
+                                difference=s['difference']) for s in shape_list}
     for key, item in distinct.items():
         row = by_shape[item['shape']]
         row['checked'] += 1
@@ -115,7 +117,12 @@ def verify(args, data, shape_list, plans, folder):
             reference = reference + ['deliberately wrong expectation']
         if replies['eski'][key] == reference:
             row['equal'] += 1
-        elif len(row['differences']) < 5:
+            continue
+        if row['difference'] and within_difference(row['difference'], replies['eski'][key], reference):
+            row['within_named_difference'] += 1
+        else:
+            row['beyond_named_difference'] += 1
+        if len(row['differences']) < 5:
             row['differences'].append(dict(request=[[p if isinstance(p, str) else repr(p) for p in argv] for argv in item['request']],
                                            eski=replies['eski'][key], reference=reference))
     (folder / 'verification.json').write_text(json.dumps(by_shape, indent=1, default=repr) + '\n')
@@ -161,8 +168,8 @@ def main():
     try:
         verification, verified = verify(args, data, shape_list, plans, args.out)
         summary['verification'] = verification
-        unexpected = [n for n, row in verification.items() if row['equal'] != row['checked'] and not row['difference']]
-        timed_shapes = {n for n, row in verification.items() if row['equal'] == row['checked'] or row['difference']}
+        unexpected = [n for n, row in verification.items() if row['beyond_named_difference']]
+        timed_shapes = {n for n, row in verification.items() if not row['beyond_named_difference']}
         summary.update(unexpected_differences=unexpected, timed_shapes=sorted(timed_shapes))
         if not args.verify_only and timed_shapes:
             for rep in range(1, args.repetitions + 1):

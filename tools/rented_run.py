@@ -49,9 +49,12 @@ FULL_SIZES = {'first_seed': 8, 'seeds': 256, 'steps': 128, 'cycles': 64, 'transa
 REHEARSAL_SIZES = {'first_seed': 8, 'seeds': 2, 'steps': 4, 'cycles': 2, 'transactions': 3, 'probe_writes': 200}
 VIRTUAL_TIMEOUT = 90
 FUNCTIONAL_ALLOWANCE = 2 * GIB
-FIELDS = ('revision', 'server_cpus', 'client_cpus', 'capture', 'observed', 'expected', 'modern_python', 'llama_python',
-          'input_sums', 'port_base', 'min_free_gib', 'first_seed', 'seeds', 'steps', 'cycles', 'transactions',
+FIELDS = ('revision', 'server_cpus', 'client_cpus', 'control_cpus', 'capture', 'observed', 'expected', 'modern_python',
+          'llama_python', 'input_sums', 'port_base', 'min_free_gib', 'first_seed', 'seeds', 'steps', 'cycles', 'transactions',
           'plan_profile', 'rehearsal')
+DURATIONS = 'tools/recorded_durations.json'
+DOWNLOAD_ROOT = '.build/downloads/'
+STACK_BYTES = 8192
 
 
 def digest(path):
@@ -112,6 +115,23 @@ def cpu_set(text):
             raise ValueError(f'invalid CPU range {piece}')
         cpus.update(range(lo, hi + 1))
     return cpus
+
+
+def control_cpus(given, available, server, client):
+    if given is None:
+        spare = sorted(available - server - client)
+        spare = [cpu for cpu in spare if cpu != 0] or spare
+        if not spare or not (server or client):
+            return None, ('no CPU outside the server and client roles is available for the controller of the timed steps; '
+                          'narrow a role or give --control-cpus')
+        return str(spare[-1]), None
+    try:
+        control = cpu_set(given)
+    except ValueError as error:
+        return given, str(error)
+    if control & (server | client) or control - available:
+        return given, 'the controller CPUs must be disjoint from both roles and permitted by current affinity'
+    return given, None
 
 
 def read_text(path, default=None):
@@ -201,7 +221,33 @@ def checked_plan(module, context):
         needs = step.get('needs')
         if not isinstance(needs, list) or set(needs) - set(PLAN_IMAGES):
             raise ValueError(f'baseline step {name} needs known image keys')
+    plan_downloads(module, seen)
     return areas, steps
+
+
+def plan_downloads(module, names=None):
+    rows = getattr(module, 'DOWNLOADS', None)
+    if not isinstance(rows, tuple):
+        raise ValueError('the baseline plan must define DOWNLOADS as a tuple, empty when it downloads nothing')
+    checked = []
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {'name', 'url', 'sha256', 'path', 'steps'}:
+            raise ValueError('every download needs exactly name, url, sha256, path and steps')
+        if not isinstance(row['url'], str) or not row['url'].startswith('https://'):
+            raise ValueError(f'download {row.get("name")!r} needs an https URL')
+        if not isinstance(row['sha256'], str) or not re.fullmatch(r'[a-f0-9]{64}', row['sha256']):
+            raise ValueError(f'download {row.get("name")!r} needs a sha256')
+        path = row['path']
+        if (not isinstance(path, str) or not path.startswith(DOWNLOAD_ROOT) or '..' in Path(path).parts
+                or len(Path(path).parts) != 3):
+            raise ValueError(f'download {row.get("name")!r} must be a file directly under {DOWNLOAD_ROOT}')
+        steps = row['steps']
+        if not isinstance(steps, tuple) or not steps or not all(isinstance(step, str) for step in steps):
+            raise ValueError(f'download {row.get("name")!r} needs the tuple of steps that read it')
+        if names is not None and set(steps) - set(names):
+            raise ValueError(f'download {row.get("name")!r} names steps the plan does not have')
+        checked.append(dict(row, steps=list(steps)))
+    return checked
 
 
 def image_names():
@@ -337,7 +383,7 @@ def conformance_downloads():
 def plan_context(args, out, binaries, images, limits, sizes):
     return {'profile': args.plan_profile, 'out': str(out),
             'binaries': {name: str(binaries / name) for name in BINARIES},
-            'server_cpus': args.server_cpus, 'client_cpus': args.client_cpus,
+            'server_cpus': args.server_cpus, 'client_cpus': args.client_cpus, 'control_cpus': args.control_cpus or '',
             'ports': [args.port_base, args.port_base + 39],
             'images': {key: images.get(key) or '' for key in PLAN_IMAGES},
             'limits': dict(limits), 'python': list(PYTHON),
@@ -369,6 +415,10 @@ def preflight(args):
         issues.append(str(error))
     if server & client or (server | client) - available:
         issues.append('CPU roles must be disjoint and permitted by current affinity')
+    ready['control_cpus_default'] = args.control_cpus is None
+    args.control_cpus, problem = control_cpus(args.control_cpus, available, server, client)
+    if problem:
+        issues.append(problem)
     shared = []
     if ready['cpu_topology']:
         siblings = {i for cpu in server for i in cpu_set(ready['cpu_topology'].get(str(cpu), {}).get('thread_siblings_list', str(cpu)))}
@@ -377,8 +427,8 @@ def preflight(args):
     ready['source'] = {'revision': args.revision, 'sha256': inspect('source fingerprint', lambda: source_fingerprint(args.revision))}
     ready['os_release'] = inspect('OS release', lambda: Path('/etc/os-release').read_text())
     ready['boot_id_sha256'] = inspect('boot ID', boot_id)
-    ready['settings'] = {key: getattr(args, key) for key in ('server_cpus', 'client_cpus', 'port_base', 'min_free_gib',
-                                                              'plan_profile')}
+    ready['settings'] = {key: getattr(args, key) for key in ('server_cpus', 'client_cpus', 'control_cpus', 'port_base',
+                                                              'min_free_gib', 'plan_profile')}
     ready['output_root'] = str(args.out)
     ancestor = next(path for path in (args.out, *args.out.parents) if path.exists())
     if not ancestor.is_dir() or not os.access(ancestor, os.W_OK | os.X_OK):
@@ -485,15 +535,80 @@ def preflight(args):
     ready['quiet_findings'], ready['timing_refusals'] = quiet_findings(ready['host'], shared, args.out)
     plan_out = args.out / 'run-preflight'
     images = {key: (ready['images'].get(key) or {}).get('id') for key in PLAN_IMAGES}
+    ready['plan_findings'] = []
     try:
-        areas, steps = checked_plan(load_plan(), plan_context(args, plan_out, plan_out / 'bin', images,
-                                                             ready['settings']['stock_limits'], sizes))
+        module = load_plan()
+        areas, steps = checked_plan(module, plan_context(args, plan_out, plan_out / 'bin', images,
+                                                         ready['settings']['stock_limits'], sizes))
         ready['plan'] = {'areas': list(areas), 'steps': [{key: step[key] for key in ('name', 'area', 'estimate_seconds', 'timeout', 'needs')} for step in steps]}
+        ready['plan_downloads'] = [dict(row, **download_state(row)) for row in plan_downloads(module)]
+        for row in ready['plan_downloads']:
+            if not row['cached'] and not row.get('reachable'):
+                ready['plan_findings'].append({'steps': row['steps'], 'finding': f'{row["name"]} is neither cached at {row["path"]} '
+                                               f'nor reachable at {row["url"]} ({row.get("problem")}); tools/host_setup.sh user fetches it, '
+                                               'and without it these steps fail with that reason'})
+        traces = [step['name'] for step in steps if step['area'] == 'trace']
+        if traces:
+            ready['call_graphs'] = call_graph_probe()
+            if not ready['call_graphs']['permitted']:
+                ready['plan_findings'].append({'steps': traces, 'finding': 'perf cannot record call graphs here: '
+                                               f'{ready["call_graphs"]["reason"]}; the trace steps record a flat profile at most and stay owed; '
+                                               'sudo tools/host_setup.sh quiet sets kernel.perf_event_paranoid to 1'})
     except Exception as error:
         ready['plan'] = None
         ready['timing_refusals'].append(f'baseline plan {PLAN}: {error}')
     ready['estimate'] = estimate(args, sizes, ready['plan'])
     return ready
+
+
+def download_state(row):
+    path = ROOT / row['path']
+    if path.is_file():
+        if digest(path) == row['sha256']:
+            return {'cached': True}
+        return {'cached': False, 'reachable': False, 'problem': f'the file at {row["path"]} does not match sha256 {row["sha256"]}'}
+    try:
+        probe(['curl', '-sSfIL', '--max-time', '20', '-o', '/dev/null', row['url']], timeout=30)
+        return {'cached': False, 'reachable': True}
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        return {'cached': False, 'reachable': False, 'problem': str(error)[-300:]}
+
+
+def one_line(text, limit=300):
+    return ' / '.join(line.strip() for line in (text or '').splitlines() if line.strip())[:limit] or 'no detail'
+
+
+def call_graph_probe():
+    perf = shutil.which('perf')
+    paranoid = read_text('/proc/sys/kernel/perf_event_paranoid')
+    if not perf:
+        return {'permitted': False, 'perf': None, 'perf_event_paranoid': paranoid, 'reason': 'perf is not installed'}
+    try:
+        version = subprocess.run([perf, '--version'], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as error:
+        version = None
+        problem = str(error)
+    else:
+        problem = None if version.returncode == 0 else one_line(version.stderr or version.stdout)
+    if problem is not None:
+        return {'permitted': False, 'perf': perf, 'perf_event_paranoid': paranoid, 'reason': f'perf does not run: {problem}'}
+    refused = []
+    with tempfile.TemporaryDirectory(prefix='eski-perf-') as folder:
+        data = Path(folder) / 'probe.data'
+        for graph in (['--call-graph', f'dwarf,{STACK_BYTES}'], ['--call-graph', 'fp']):
+            for event in ('cycles:u', 'cpu-clock:u'):
+                try:
+                    done = subprocess.run([perf, 'record', '-q', '-e', event, *graph, '-o', str(data), '--', 'true'],
+                                          capture_output=True, text=True, timeout=60, cwd=folder)
+                except (OSError, subprocess.SubprocessError) as error:
+                    refused.append(f'{event} {" ".join(graph)}: {error}')
+                    continue
+                if done.returncode == 0:
+                    return {'permitted': True, 'perf': perf, 'perf_event_paranoid': paranoid, 'event': event,
+                            'call_graph': ' '.join(graph)}
+                refused.append(f'{event} {" ".join(graph)}: {one_line(done.stderr)}')
+    return {'permitted': False, 'perf': perf, 'perf_event_paranoid': paranoid,
+            'reason': f'kernel.perf_event_paranoid={paranoid}; ' + '; '.join(refused)[-600:]}
 
 
 def native_checks(clang):
@@ -529,7 +644,49 @@ def estimate(args, sizes, plan):
             'binaries': 64 << 20}
     disk['bundles'] = sum(disk.values())
     return {'correctness_upper_bound_seconds': upper, 'plan_estimate_seconds': plan_seconds,
+            'planning': planning_figure(args, plan),
             'disk_bytes_before_baseline': disk, 'disk_note': 'the plan states no disk use; keep the free-space margin'}
+
+
+def planning_figure(args, plan, path=None):
+    try:
+        records = json.loads((path or ROOT / DURATIONS).read_text())['records']
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        return {'error': f'{DURATIONS} is unreadable: {error}'}
+    profile = 'rehearsal' if args.rehearsal else 'full'
+    record = next((row for row in records if row.get('profile') == profile), None)
+    if record is None:
+        return {'error': f'{DURATIONS} holds no record for the {profile} profile'}
+    durations = {**record.get('stages', {}), **{'functional/' + name: value for name, value in record.get('functional', {}).items()}}
+    partial = dict(record.get('partial', {}))
+    names = [*BUILDS, *(name for name in CORRECTNESS if name != 'functional'),
+             *('functional/' + name for name in required_functional_steps('light' if args.rehearsal else 'full'))]
+    correctness, unrecorded = 0.0, []
+    for name in names:
+        if isinstance(durations.get(name), (int, float)):
+            correctness += durations[name]
+        else:
+            unrecorded.append(name)
+    for whole, parts in record.get('covers', {}).items():
+        if isinstance(durations.get(whole), (int, float)) and set(parts) <= set(unrecorded):
+            correctness += durations[whole]
+            unrecorded = [name for name in unrecorded if name not in parts]
+            names.append(whole)
+    plan_record = next((row for row in records if row.get('plan_profile') == args.plan_profile and row.get('plan')), None)
+    plan_seconds, from_estimate = 0.0, []
+    for step in (plan or {}).get('steps', []):
+        value = (plan_record or {}).get('plan', {}).get(step['name'])
+        if isinstance(value, (int, float)):
+            plan_seconds += value
+        else:
+            plan_seconds += step['estimate_seconds']
+            from_estimate.append(step['name'])
+    return {'correctness_seconds': round(correctness), 'plan_seconds': round(plan_seconds) if plan else None,
+            'recorded_on': record.get('machine'), 'recorded': record.get('recorded'), 'source': record.get('source'),
+            'plan_recorded_on': (plan_record or {}).get('machine'), 'unrecorded': unrecorded,
+            'lower_bounds': {name: reason for name, reason in partial.items() if name in names},
+            'plan_steps_from_estimate': from_estimate,
+            'note': 'a planning figure from durations recorded on another machine, not a bound'}
 
 
 def stop_step(process):
@@ -596,7 +753,15 @@ def print_owed(report):
     owed = report.get('owed') or []
     print('qualified' if report.get('qualified') else 'not qualified' + (' (rehearsal)' if report.get('rehearsal') else ''), flush=True)
     for row in owed:
+        if row.get('choice'):
+            print(f'measured {row["stage"]}: {row["excluded"]} of {row["cases"]} cases excluded, listed in {row["listed_in"]}; '
+                  f'rerun only by choice: {" ".join(row["command"])}', flush=True)
+            continue
         print(f'owed {row["stage"]}{"/" + row["step"] if row.get("step") else ""}: {row["state"]}; complete with: {" ".join(row["command"])}', flush=True)
+
+
+def span(seconds):
+    return '%d minutes' % -(-seconds // 60) if seconds < 5400 else '%.1f hours' % (seconds / 3600)
 
 
 def describe_estimate(ready):
@@ -604,10 +769,26 @@ def describe_estimate(ready):
     upper = value.get('correctness_upper_bound_seconds') or {}
     plan = value.get('plan_estimate_seconds')
     disk = sum((value.get('disk_bytes_before_baseline') or {}).values())
-    return ('estimate: builds and correctness finish within %.1f hours by their timeouts; the baseline plan states %s; '
+    line = ('estimate: builds and correctness finish within %.1f hours by their timeouts; the baseline plan states %s; '
             'about %.1f GiB of output before the baseline' % (sum(upper.values()) / 3600,
                                                                 'no plan' if plan is None else '%d min' % -(-plan // 60),
                                                                 disk / GIB))
+    planning = value.get('planning') or {}
+    if planning.get('error'):
+        return line + '\nplanning figure: none, ' + planning['error']
+    machine = planning.get('recorded_on') or {}
+    line += ('\nplanning figure: builds and correctness about %s and the baseline plan about %s, from durations recorded '
+             'on %s (%s) on %s; this is a planning figure from another machine, not a bound' % (
+                 span(planning['correctness_seconds']),
+                 'no plan' if planning.get('plan_seconds') is None else span(planning['plan_seconds']),
+                 machine.get('cpu', 'an unnamed machine'), machine.get('cpus', 'unnamed CPUs'), planning.get('recorded')))
+    if planning.get('lower_bounds'):
+        line += '; lower bounds, because the recorded step ended early: ' + ', '.join(sorted(planning['lower_bounds']))
+    if planning.get('unrecorded'):
+        line += '; not counted, no recorded duration: ' + ', '.join(planning['unrecorded'])
+    if planning.get('plan_steps_from_estimate'):
+        line += '; %d plan steps have no recorded duration and count with the plan\'s own estimate' % len(planning['plan_steps_from_estimate'])
+    return line
 
 
 class Run:
@@ -668,8 +849,36 @@ class Run:
             kept = log.with_name(f'{name}.attempt-{attempt}.log')
             log.replace(kept)
             row['log'] = kept.name
+        folder = self.out / name
+        if row.get('kind') == 'baseline' and folder.is_dir() and not folder.is_symlink():
+            kept = self.out / f'{name}.attempt-{attempt}'
+            folder.replace(kept)
+            row['directory'] = kept.name
+            if str(row.get('artifact', '')).startswith(name + '/'):
+                row['artifact'] = kept.name + row['artifact'][len(name):]
         history.append(row)
         return history
+
+    def measured(self, name):
+        row = self.report['stages'].get(name)
+        return bool(row) and row.get('state') == 'measured'
+
+    def measured_record(self, row):
+        if row.get('exit_code') in (0, None, 124, 130) or not row.get('artifact'):
+            return None
+        try:
+            value = json.loads((self.out / row['artifact']).read_text()).get('measured')
+        except (OSError, ValueError, AttributeError):
+            return None
+        if not isinstance(value, dict):
+            return None
+        numbers = [value.get(key) for key in ('excluded', 'valid', 'cases')]
+        if not all(isinstance(number, int) and not isinstance(number, bool) for number in numbers):
+            return None
+        excluded, valid, cases = numbers
+        if excluded < 1 or valid < 1 or excluded + valid != cases or not isinstance(value.get('list'), str) or not value['list']:
+            return None
+        return {'excluded': excluded, 'valid': valid, 'cases': cases, 'listed_in': f'{row["artifact"]}, field {value["list"]}'}
 
     def step(self, name, args, timeout, artifact=None, extra=None, kind='correctness', inputs=None):
         command = list(map(str, args))
@@ -732,7 +941,7 @@ class Run:
 
     def check_receipts(self):
         for name, row in self.report['stages'].items():
-            if row.get('exit_code') != 0:
+            if row.get('exit_code') != 0 and row.get('state') != 'measured':
                 continue
             for key in ('log', 'artifact'):
                 if row.get(key) and digest(self.out / row[key]) != row.get(key + '_sha256'):
@@ -865,7 +1074,10 @@ class Run:
                                  and r['recovered_cycles'] == self.sizes['cycles']
                                  and r['acknowledged_transactions'] == self.sizes['cycles'] * self.sizes['transactions']) or 'native receipt does not cover the requested restarts and binary',
             'change-log-probe': lambda r: (len(r['rows']) == 2 and {row['change_log'] for row in r['rows']} == {True, False}
-                                           and not any(row['timed'] or row['fsync'] != 'always' for row in r['rows'])) or 'change-log receipt omits the untimed off/on probes',
+                                           and not any(row['timed'] or row['fsync'] != 'always' for row in r['rows'])
+                                           and all(row.get('writes') == self.sizes['probe_writes'] and row.get('dbsize') == row['writes'] + 1
+                                                   and (not row['change_log'] or row.get('all_writes_mirrored') is True) for row in r['rows'])
+                                           ) or 'change-log receipt omits the untimed off/on probes or a write the mirror should hold',
             'search-json-probe': lambda r: (not r['timed'] and {row['target'] for row in r['rows']} == {'redis-search', 'eski'}
                                             and all(row['checked_requests'] >= 8 for row in r['rows'])) or 'Search/JSON receipt omits the untimed checks on both engines',
         }
@@ -970,10 +1182,23 @@ class Run:
         for step in steps:
             if not self.selected(step) or self.passed(step['name']):
                 continue
+            if self.measured(step['name']) and step['name'] not in (self.args.only or ()):
+                continue
             self.step(step['name'], step['command'], step['timeout'], step['artifact'], dict(step['environment']),
                       kind='baseline')
             row = self.report['stages'][step['name']]
-            row.update(area=step['area'], needs=step['needs'], timed=True, qualified=complete and not self.args.rehearsal)
+            because = [reason for reason, applies in (('rehearsal run', self.args.rehearsal),
+                                                      ('rehearsal plan profile', self.args.plan_profile != 'full'),
+                                                      ('correctness incomplete', not complete)) if applies]
+            row.update(area=step['area'], needs=step['needs'], timed=True, qualified=not because)
+            if because:
+                row['unqualified_because'] = because
+            measured = self.measured_record(row)
+            if measured:
+                row.update(state='measured', measured=measured)
+                print(f'{step["name"]} measured with {measured["excluded"]} of {measured["cases"]} cases excluded, '
+                      f'listed in {measured["listed_in"]}', flush=True)
+            self.save()
 
     def owed(self, include_bundle=True):
         rows = []
@@ -990,6 +1215,14 @@ class Run:
         planned = self.report.get('plan', {}).get('steps') or [step['name'] for step in (self.ready.get('plan') or {}).get('steps', [])]
         for name in planned:
             row = self.report['stages'].get(name)
+            if row and row.get('state') == 'measured':
+                found = row['measured']
+                rows.append({'stage': name, 'state': 'measured', 'kind': 'baseline', 'choice': True, 'excluded': found['excluded'],
+                             'cases': found['cases'], 'listed_in': found['listed_in'], 'command': resume + ['--only', name],
+                             'note': f'measured: {found["excluded"]} of {found["cases"]} cases were excluded and are listed in '
+                                     f'{found["listed_in"]}; every measurement is kept; a rerun repeats the whole step and is '
+                                     'the operator\'s choice, so a resume leaves it alone unless --only names it'})
+                continue
             if not row or row.get('exit_code') != 0:
                 entry = {'stage': name, 'state': state_of(row), 'error': (row or {}).get('error'),
                          'command': resume + ['--only', name], 'kind': 'baseline'}
@@ -1000,8 +1233,12 @@ class Run:
             rows.append({'stage': FINAL, 'state': 'not run', 'command': ['python3', '-IB', 'tools/rented_run.py', 'bundle', str(self.out)]})
         if settings.get('rehearsal'):
             for row in rows:
-                row['note'] = 'rehearsal: rerun at full size with a fresh run, never by resuming this directory'
+                row['note'] = 'rehearsal: rerun at full size with a fresh run, never by resuming this directory' + (
+                    '; ' + row['note'] if row.get('note') else '')
         return rows
+
+    def exit_code(self):
+        return int(any(not row.get('choice') for row in self.report.get('owed', [])))
 
     def summarise(self, include_bundle=True):
         failures = self.correctness_failures()
@@ -1017,8 +1254,11 @@ class Run:
             self.report['unqualified'] = {'reason': 'timed while correctness had recorded failures (--allow-unqualified)',
                                           'failures': failures}
         elif early and not self.args.rehearsal:
-            self.report['unqualified'] = {'reason': 'these timed steps ran before correctness was complete; rerun them to qualify them',
-                                          'steps': early}
+            self.report['unqualified'] = {'reason': 'these timed steps ran before correctness was complete or with the rehearsal '
+                                                    'plan profile; rerun them with the full plan profile to qualify them',
+                                          'steps': {name: self.report['stages'][name].get('unqualified_because', []) for name in early}}
+        self.report['measured_with_exclusions'] = {name: row['measured'] for name, row in self.report['stages'].items()
+                                                   if row.get('state') == 'measured'}
         self.report['owed'] = self.owed(include_bundle)
 
     def execute(self):
@@ -1032,7 +1272,7 @@ class Run:
                 self.verify_outcomes()
             self.baseline()
             self.summarise(include_bundle=False)
-            self.report['exit_code'] = int(bool(self.report['owed']))
+            self.report['exit_code'] = self.exit_code()
             self.save()
             print_owed(self.report)
             bundle(self.out, self.report)
@@ -1152,7 +1392,7 @@ def names(text):
 def parser():
     result = argparse.ArgumentParser(description='Inspect preparation, run Eski qualification and the baseline on one host, '
                                                  'pack the results or remove private copies')
-    result.add_argument('mode', choices=('preflight', 'run', 'bundle', 'clean', 'images'))
+    result.add_argument('mode', choices=('preflight', 'run', 'bundle', 'clean', 'images', 'downloads'))
     result.add_argument('run_dir', nargs='?', type=lambda path: Path(path).resolve(), help='run directory for bundle and clean')
     result.add_argument('--out', type=lambda path: Path(path).resolve(), help='parent for unique run directories')
     result.add_argument('--resume', type=lambda path: Path(path).resolve(),
@@ -1160,6 +1400,8 @@ def parser():
     result.add_argument('--revision', help='full source revision supplied by the operator')
     for name in ('server-cpus', 'client-cpus'):
         result.add_argument('--' + name, help='Linux CPU list, e.g. 2,4-5')
+    result.add_argument('--control-cpus', help='Linux CPU list outside both roles for the controller of the timed steps '
+                                               '(default: the highest permitted CPU in neither role, CPU 0 only when nothing else is left)')
     for name in ('capture', 'observed', 'modern-python', 'llama-python', 'input-sums'):
         result.add_argument('--' + name, type=lambda path: Path(os.path.abspath(path)))
     result.add_argument('--expected', type=lambda path: Path(path).resolve())
@@ -1231,6 +1473,10 @@ def main():
         if args.mode == 'images':
             print('\n'.join(dict.fromkeys(image_names()[0].values())))
             return 0
+        if args.mode == 'downloads':
+            for row in plan_downloads(load_plan()):
+                print(row['sha256'], row['url'], row['path'])
+            return 0
         if args.mode == 'bundle':
             if not args.run_dir:
                 command_parser.error('bundle needs a run directory')
@@ -1258,6 +1504,8 @@ def main():
     try:
         ready = preflight(args)
         print(describe_estimate(ready), file=sys.stderr)
+        for finding in ready.get('plan_findings') or []:
+            print(f'plan finding for {", ".join(finding["steps"])}: {finding["finding"]}', file=sys.stderr)
         if args.mode == 'preflight':
             print(json.dumps(ready, indent=2, sort_keys=True))
             blocked = ready['errors'] or ready['timing_refusals'] or ready['quiet_findings'] and not (args.allow_noisy_host or args.rehearsal)

@@ -1112,6 +1112,8 @@ def render_outputs(commands, baseline, observed, dataset, readme, ab_floor=None)
                       'and `python3 -I bench/testbed/page.py --dataset ' + run + '/dataset.json --out ' + run + '/report.html`. '
                       'A new physical experiment follows [run the comparison on a new machine](#run-the-comparison-on-a-new-machine) below; '
                       'generating tables does not launch it. '
+                      'The measurements that a one-host run records as the baseline for later speed and memory work are described in the '
+                      '[baseline measurement plan](baseline.md). '
                       'The [recorded report](../' + run + '/report.html), [dataset](../' + run + '/dataset.json) '
                       'and collection receipts are committed together.\n\n'
                       '## Method and machine\n\nMachine: %s; %s RAM; server CPUs `%s`, client CPUs `%s`, controller CPUs `%s`.\n\n%s\n\n'

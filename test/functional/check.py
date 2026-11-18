@@ -18,6 +18,8 @@ PYTHON = (sys.executable, "-IB")
 MODES = ("labelled", "owners-shared", "owners-user", "owners-only-user")
 FALLBACK = ("json-commands", "json-search")
 CLIENT_STEPS = ("search-clients", "search-advanced-reference", "search-pipeline-reference")
+PACKAGE_GROUPS = (("packages-debug", "debug", 7200), ("packages-sanitizer", "sanitizer", 14400),
+                  ("packages-release", "release", 7200), ("packages-drivers", "drivers", 7200))
 SCHEMA = "eski-functional-v2"
 
 
@@ -260,7 +262,9 @@ class Run:
         self.compare("search-smoke")
         self.compare("search-capture", ["--capture", self.args.capture, "--observed", self.args.observed,
                                         "--expected", self.args.expected], self.capture_inputs())
-        if self.step("packages", [relative("test/run_packages.sh")], 28800) is False:
+        packages = [self.step(name, [relative("test/run_packages.sh"), "--group", group], seconds)
+                    for name, group, seconds in PACKAGE_GROUPS]
+        if packages[-1] is False:
             for name in FALLBACK:
                 self.step(name, [*PYTHON, relative("test/compatibility/%s.py" % name.replace("-", "_")),
                                  "--server", self.binary, "--ports", self.ports], 900)

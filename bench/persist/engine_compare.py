@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -151,6 +152,100 @@ def snapshot(args, target, rep, root, frames, count, checks):
     return row
 
 
+def readback(conn, quarter):
+    frames = []
+    for i in range(quarter):
+        frames += [encode(('GET', 'k:s:%d' % i)), encode(('HGETALL', 'k:h:%d' % i)), encode(('SMEMBERS', 'k:t:%d' % i)),
+                   encode(('ZRANGE', 'k:z:%d' % i, '0', '-1', 'WITHSCORES'))]
+    value = hashlib.sha256()
+    errors = 0
+    for reply in conn.pipeline(frames, window=256):
+        errors += isinstance(reply, ServerError)
+        value.update(json.dumps(canonical(reply) if not isinstance(reply, ServerError) else ['error', str(reply)]).encode() + b'\n')
+    return value.hexdigest(), errors
+
+
+def expected_digest(quarter):
+    value = hashlib.sha256()
+    for i in range(quarter):
+        for reply in (VALUE, ['f1', VALUE, 'f2', str(i), 'f3', 'x' * 16], ['a', 'b', 'c', str(i)], ['a', '1', 'b', '2', 'c', str(i)]):
+            value.update(json.dumps(canonical(reply)).encode() + b'\n')
+    return value.hexdigest()
+
+
+def snapshot_check(args, target, root, frames, count, checks, expected):
+    folder = root / ('verify-%s-snapshot' % target)
+    engine = Engine(target, args, args.port, folder / 'data', 'snapshot')
+    row = dict(kind='snapshot', target=target, rep=1, keys=count, timed=False)
+    conn = engine.start([], folder / 'server-1')
+    try:
+        replies = conn.pipeline(frames, window=256)
+        row['load_errors'] = sum(isinstance(r, ServerError) for r in replies)
+        row['dbsize'] = conn.call('DBSIZE')
+        row['before'] = [canonical(conn.call(*argv)) for argv in checks]
+        if args.corrupt_check:
+            row['before'][0] = 'deliberately wrong expectation'
+        row['save_reply'] = conn.call('SAVE')
+        row['bgsave_reply'] = str(conn.call('BGSAVE'))
+        row['bgsave_status'] = wait_bgsave(conn)[1]
+        conn.close()
+    finally:
+        engine.stop()
+    conn = engine.start([], folder / 'server-2')
+    try:
+        row['dbsize_after_restart'] = conn.call('DBSIZE')
+        row['after'] = [canonical(conn.call(*argv)) for argv in checks]
+        row['digest_after_restart'], row['readback_errors'] = readback(conn, count // 4)
+        conn.close()
+    finally:
+        engine.stop()
+    row['expected_digest'] = expected
+    row['restored_equal'] = (row['after'] == row['before'] and row['dbsize_after_restart'] == row['dbsize'] == count
+                             and row['digest_after_restart'] == expected and not row['readback_errors'] and row['bgsave_status'] == 'ok')
+    return row
+
+
+def append_check(args, target, root, fsync):
+    folder = root / ('verify-%s-aof-%s' % (target, fsync))
+    engine = Engine(target, args, args.port, folder / 'data', 'aof')
+    extra = ['--appendonly', 'yes', '--appendfsync', fsync, '--auto-aof-rewrite-percentage', '0']
+    row = dict(kind='append', target=target, rep=1, fsync=fsync, writes=args.writes, timed=False)
+    conn = engine.start(extra, folder / 'server-1')
+    try:
+        replies = conn.pipeline([encode(('SET', 'a:%d' % i, VALUE)) for i in range(args.writes)], window=args.pipeline)
+        row['failed_writes'] = sum(r != 'OK' for r in replies)
+        row['aof_bytes'] = aof_bytes(folder / 'data')
+        conn.close()
+    finally:
+        engine.stop()
+    conn = engine.start(extra, folder / 'server-2')
+    try:
+        row['dbsize_after_restart'] = conn.call('DBSIZE')
+        replies = conn.pipeline([encode(('GET', 'a:%d' % i)) for i in range(args.writes)], window=256)
+        row['replayed_unequal'] = sum(r != VALUE.encode() and r != VALUE for r in replies)
+        conn.close()
+    finally:
+        engine.stop()
+    row['replayed_equal'] = row['dbsize_after_restart'] == args.writes and not row['replayed_unequal'] and not row['failed_writes']
+    return row
+
+
+def verify_only(args, frames, count, checks, summary):
+    expected = expected_digest(count // 4)
+    for target in TARGETS:
+        summary['rows'].append(snapshot_check(args, target, args.out, frames, count, checks, expected))
+        for fsync in args.fsync.split(','):
+            summary['rows'].append(append_check(args, target, args.out, fsync))
+    first = next(row for row in summary['rows'] if row['kind'] == 'snapshot')
+    for row in summary['rows']:
+        if row['kind'] == 'snapshot':
+            row['same_data_as_first_engine'] = row['before'] == first['before'] and row['digest_after_restart'] == first['digest_after_restart']
+    bad = [row for row in summary['rows'] if (row['kind'] == 'snapshot' and (not row['restored_equal'] or not row['same_data_as_first_engine'] or row['load_errors']))
+           or (row['kind'] == 'append' and not row['replayed_equal'])]
+    summary['failed_rows'] = [dict(kind=row['kind'], target=row['target'], fsync=row.get('fsync')) for row in bad]
+    return int(bool(bad))
+
+
 def append(args, target, rep, root, fsync):
     folder = root / ('rep-%d-%s-aof-%s' % (rep, target, fsync))
     engine = Engine(target, args, args.port, folder / 'data', 'aof')
@@ -190,6 +285,8 @@ def main():
     parser.add_argument('--fsync', default='always,everysec')
     parser.add_argument('--server-memory', default='8g')
     parser.add_argument('--corrupt-check', action='store_true', help='deliberately corrupt the saved sample of the first snapshot, to prove the check fails')
+    parser.add_argument('--verify-only', action='store_true', help='one untimed pass per engine that reads the whole dataset back after the '
+                        'snapshot restart and every append-only write back after the log replay, compared with what was written and across engines')
     args = parser.parse_args()
     args.image = dict(item.split('=', 1) for item in args.image)
     if set(args.image) != {'redis', 'valkey'}:
@@ -200,10 +297,14 @@ def main():
     signal.signal(signal.SIGTERM, interrupted)
     frames, count = dataset(args.keys)
     checks = samples(max(1, args.keys // 4))
-    summary = dict(schema=SCHEMA, keys=count, writes=args.writes, pipeline=args.pipeline, repetitions=args.repetitions, fsync=args.fsync.split(','),
-                   images=args.image, server=str(args.server), server_cpus=args.server_cpus, client_cpus=sorted(os.sched_getaffinity(0)), rows=[], exit_code=1)
+    summary = dict(schema=SCHEMA, keys=count, writes=args.writes, pipeline=args.pipeline, repetitions=1 if args.verify_only else args.repetitions,
+                   fsync=args.fsync.split(','), images=args.image, server=str(args.server), server_cpus=args.server_cpus,
+                   client_cpus=sorted(os.sched_getaffinity(0)), timed=not args.verify_only, rows=[], exit_code=1)
     report = args.out / 'summary.json'
     try:
+        if args.verify_only:
+            summary['exit_code'] = verify_only(args, frames, count, checks, summary)
+            return summary['exit_code']
         for rep in range(1, args.repetitions + 1):
             offset = (rep - 1) % len(TARGETS)
             order = TARGETS[offset:] + TARGETS[:offset]

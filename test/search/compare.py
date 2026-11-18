@@ -63,6 +63,7 @@ NORMALIZATIONS = {
     "tolist-order": "REDUCE TOLIST returns a set of distinct values whose order changes between runs of the reference. Every member must match.",
     "group-order": "A GROUPBY that no later SORTBY orders returns its groups in an order that changes between runs of the reference. Every group row and the counts must match; FT.HYBRID execution_time is masked as in hybrid-execution-time and REDUCE TOLIST members as in tolist-order.",
     "distance-tie-order": "KNN results sorted by distance return rows of exactly equal distance in an order that changes between runs of the reference. Rows are reordered only within a run of equal distance values; every row, every distance and the order between different distances must match.",
+    "info-server-run-fields": "INFO server reports the current process (process_id, run_id, executable), its clock and uptime (server_time_usec, uptime_in_seconds, uptime_in_days, lru_clock), the port the run chose (tcp_port and the port of each listener line) and the host's kernel release and clock calibration (os, the number in monotonic_clock), all of which change between runs and hosts of the reference itself. Those values are masked in place; every field name, the order of the fields and every other value, among them the versions, the mode and the build fields, must match.",
 }
 INDEX_FIGURES = {b"total_indexing_time", b"inverted_sz_mb", b"vector_index_sz_mb", b"offset_vectors_sz_mb",
                  b"doc_table_size_mb", b"sortable_values_size_mb", b"key_table_size_mb", b"tag_overhead_sz_mb",
@@ -72,6 +73,8 @@ INDEX_FIGURES = {b"total_indexing_time", b"inverted_sz_mb", b"vector_index_sz_mb
                  b"gc_numeric_trees_missed", b"gc_blocks_denied", b"number_of_uses"}
 PROFILE_TIMINGS = {b"Total profile time", b"Parsing time", b"Pipeline creation time", b"Workers queue time",
                    b"Total GIL time", b"Time", b"GIL-Time", b"Total Coordinator time", b"Post Processing time"}
+INFO_SERVER_RUN_FIELDS = {b"process_id", b"run_id", b"executable", b"server_time_usec", b"uptime_in_seconds",
+                          b"uptime_in_days", b"lru_clock", b"tcp_port", b"os", b"monotonic_clock"}
 KINDS = {
     b"+": "status", b"-": "error", b":": "integer", b"$": "bulk", b"*": "array", b"_": "null",
     b"#": "boolean", b",": "double", b"(": "bignum", b"!": "blob_error", b"=": "verbatim",
@@ -410,6 +413,23 @@ def docs_subcommands(node):
     return rebuild(node, visit)
 
 
+def info_server(node):
+    if node.kind not in (b"$", b"=") or node.value is None or not node.raw.startswith(node.kind):
+        return node.raw
+    prefix, text = (node.value[:4], node.value[4:]) if node.kind == b"=" else (b"", node.value)
+    lines = []
+    for line in text.split(b"\r\n"):
+        name, colon, value = line.partition(b":")
+        if colon and name in (b"run_id", b"executable", b"os"):
+            value = b"masked"
+        elif colon and name in INFO_SERVER_RUN_FIELDS:
+            value = re.sub(rb"[0-9]+", b"0", value)
+        elif colon and re.fullmatch(rb"listener[0-9]+", name):
+            value = re.sub(rb"(^|,)port=[0-9]+", rb"\1port=0", value)
+        lines.append(name + colon + value)
+    payload = prefix + b"\r\n".join(lines)
+    return node.kind + b"%d\r\n" % len(payload) + payload + b"\r\n"
+
 
 def normalize(argv, node):
     upper = [value.upper() for value in argv]
@@ -460,6 +480,8 @@ def normalize(argv, node):
     if upper[:2] == [b"COMMAND", b"LIST"] or upper[:2] == [b"ACL", b"CAT"] and len(upper) == 3:
         if members(node) is not None and all(wire.text(item) is not None for item in node.value):
             return sorted_members(node), "command-inventory-order"
+    if upper == [b"INFO", b"SERVER"]:
+        return info_server(node), "info-server-run-fields"
     if upper[:2] == [b"COMMAND", b"INFO"]:
         return command_subcommands(node), "subcommand-order"
     if upper[:2] == [b"COMMAND", b"DOCS"]:

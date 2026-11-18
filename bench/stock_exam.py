@@ -29,6 +29,7 @@ TARGETS = ('eski', 'redis', 'valkey', 'dragonfly')
 REHEARSAL_WORKLOADS = ('get64-p1', 'zscore16-p1')
 PERCENTILES = '50,90,95,99,99.5,99.9,99.95,99.99,100'
 SENSORS = (('coretemp', 'Package id 0'), ('k10temp', 'Tctl'), ('zenpower', 'Tdie'), ('k10temp', 'Tdie'))
+ADVISORY_PROFILES = ('rehearsal',)
 SPEC_VERSION = 'v0.3.46'
 SPEC_SHA256 = '763f7dd9d453050c0cebe174437e244eeaf9a185e64de18f70bad20ed07e0ca0'
 SPEC_URL = 'https://github.com/redis/redis-benchmarks-specification/archive/refs/tags/v0.3.46.tar.gz'
@@ -86,15 +87,16 @@ def power_source():
 def roles(args, threads):
     server = sorted(metrics.cpu_set(args.server_cpus))
     client = sorted(metrics.cpu_set(args.client_cpus))
+    control = sorted(metrics.cpu_set(args.control_cpus))
     if set(server) & set(client):
         raise Refused('server and client CPUs overlap')
+    if set(control) & (set(server) | set(client)):
+        raise Refused('the controller CPUs %s overlap the server or client role' % args.control_cpus)
+    if not set(control) <= os.sched_getaffinity(0):
+        raise Refused('the controller CPUs %s are not all permitted by this process\'s affinity' % args.control_cpus)
     if len(client) < threads:
         raise Refused('the method needs %d client CPUs and %d are given' % (threads, len(client)))
-    spare = sorted(os.sched_getaffinity(0) - set(server) - set(client))
-    spare = [cpu for cpu in spare if cpu != 0] or spare
-    if not spare:
-        raise Refused('no CPU outside the server and client roles is available for the controller')
-    return dict(server=[server[0]], client=client[:threads], control=[spare[-1]])
+    return dict(server=[server[0]], client=client[:threads], control=control)
 
 
 def base_design(client_cpus):
@@ -266,7 +268,7 @@ def idle(root, design, profile):
 def prepare(args, root):
     chip_label = sensor()
     source = power_source()
-    advisory = args.profile == 'rehearsal'
+    advisory = args.profile in ADVISORY_PROFILES
     if chip_label is None and not advisory:
         raise Refused('no package temperature sensor resolves uniquely (coretemp Package id 0, k10temp Tctl or zenpower Tdie); the gates need one')
     if source is None and not advisory:
@@ -314,7 +316,7 @@ def exam(args, root, result):
             phases[phase]['all_valid'] = valid
             if not valid and not setup['advisory']:
                 raise Refused('calibration did not pass for every engine; the benchmark phase was not started')
-    return verdict(phases, setup['advisory'])
+    return measured_verdict(result, setup['advisory'])
 
 
 def verdict(phases, advisory):
@@ -365,6 +367,38 @@ def spec_select(plan, per_group, rehearsal, max_groups=0, pool=None):
     return dict(plan, items=chosen), sorted(names)
 
 
+def stage_spec_archive(archive, cache):
+    cache.mkdir(parents=True, exist_ok=True)
+    if archive is not None and archive.is_file():
+        if sha(archive) != SPEC_SHA256:
+            raise Refused('the cached specification archive %s does not match sha256 %s; fetch it again with tools/host_setup.sh user' % (archive, SPEC_SHA256))
+        shutil.copyfile(archive, cache / ('redis-benchmarks-specification-%s.tar.gz' % SPEC_VERSION.lstrip('v')))
+        return dict(source='cached', path=str(archive), sha256=SPEC_SHA256)
+    try:
+        done = subprocess.run(['curl', '-sSfIL', '--max-time', '20', '-o', '/dev/null', SPEC_URL], capture_output=True, text=True, timeout=60)
+        problem = (done.stderr or done.stdout).strip()[-300:] if done.returncode else None
+    except (OSError, subprocess.SubprocessError) as error:
+        problem = str(error)
+    if problem is not None:
+        raise Refused('the benchmark specification archive is neither cached at %s (tools/host_setup.sh user fetches it) nor reachable at %s: %s' % (
+            archive if archive is not None else 'a given --spec-archive', SPEC_URL, problem or 'no detail'))
+    return dict(source='downloaded by the step', url=SPEC_URL, sha256=SPEC_SHA256)
+
+
+def exclusions(phases, advisory):
+    benchmark = phases.get('benchmark') or {}
+    if advisory or benchmark.get('state') != 'finished-with-nonsuccess':
+        return None
+    rows = benchmark.get('measurements') or []
+    excluded = [dict(id=row['id'], workload=row['workload'], target=row['target'], repetition=row['repetition'], state=row['state'],
+                     reasons=row['reasons']) for row in rows if row['state'] != 'successful']
+    valid = len(rows) - len(excluded)
+    if not excluded or not valid:
+        return None
+    benchmark['excluded'] = excluded
+    return dict(excluded=len(excluded), valid=valid, cases=len(rows), list='phases.benchmark.excluded')
+
+
 def spec(args, root, result):
     setup = prepare(args, root)
     design, base = setup['design'], setup['base']
@@ -372,6 +406,7 @@ def spec(args, root, result):
                   sensor=setup['sensor'], power_source=setup['power_source'])
     images = dict(args.image)
     cache = root / 'spec-cache'
+    result['spec_archive'] = stage_spec_archive(args.spec_archive, cache)
     environment = {key: value for key, value in os.environ.items() if not key.startswith('BENCH_') and key != 'ESKI_BIN'}
     environment.update(ESKI_BIN=str(base / 'bin/eski'), BENCH_SPEC_CACHE=str(cache), BENCH_REDIS_IMAGE=images['redis'],
                        BENCH_MEMTIER_IMAGE=images['memtier'], BENCH_PORT_ESKI=str(setup['ports']['eski']), BENCH_PORT_REDIS=str(setup['ports']['redis']),
@@ -415,7 +450,15 @@ def spec(args, root, result):
     argv = scheduler_argv(base, root, 'benchmark', spec_design, list(TARGETS), setup['advisory'])
     code, state = run_scheduler(argv, root, 'benchmark', root / 'benchmark.log')
     result['phases'] = dict(benchmark=dict(phase_summary(root, 'benchmark', state), scheduler_exit=code, argv=argv))
-    return verdict(result['phases'], setup['advisory'])
+    return measured_verdict(result, setup['advisory'])
+
+
+def measured_verdict(result, advisory):
+    code = verdict(result['phases'], advisory)
+    measured = exclusions(result['phases'], advisory) if code else None
+    if measured:
+        result['measured'] = measured
+    return code
 
 
 def cooling(chip, label, cool, rest_until, max_wait, advisory):
@@ -508,6 +551,7 @@ def main():
     parser.add_argument('--eski', type=Path, required=True)
     parser.add_argument('--server-cpus', required=True)
     parser.add_argument('--client-cpus', required=True)
+    parser.add_argument('--control-cpus', required=True, help='CPUs outside both roles for the scheduler, the gates and the telemetry')
     parser.add_argument('--ports', required=True, help='FIRST-LAST, at least four free loopback ports')
     parser.add_argument('--image', type=image_pair, action='append', required=True)
     parser.add_argument('--server-memory', default='8g')
@@ -517,6 +561,8 @@ def main():
     parser.add_argument('--spec-repetitions', type=int, default=2)
     parser.add_argument('--spec-cases-per-group', type=int, default=1)
     parser.add_argument('--spec-max-groups', type=int, default=0, help='keep only this many command groups, those with the smallest preloads; 0 keeps every group')
+    parser.add_argument('--spec-archive', type=Path, help='the specification archive fetched ahead of time (tools/host_setup.sh user); '
+                        'without it, or when it is missing, the step downloads the archive into its own directory')
     parser.add_argument('--fill-keys', type=int, default=10000000)
     parser.add_argument('--corrupt-check', action='store_true', help='deliberately expect one key too many in the first workload\'s DBSIZE check, to prove the check fails')
     args = parser.parse_args()
@@ -526,6 +572,8 @@ def main():
     if not (first.isdigit() and last.isdigit() and int(last) - int(first) >= 3):
         parser.error('--ports needs a range of at least four ports')
     root = args.out.resolve()
+    if args.spec_archive is not None:
+        args.spec_archive = args.spec_archive.resolve()
     if root.exists():
         parser.error('%s already exists' % root)
     root.mkdir(parents=True)
