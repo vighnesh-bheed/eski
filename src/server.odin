@@ -379,6 +379,9 @@ server_relisten :: proc() -> bool {
 }
 
 epoll_set :: proc(fd: linux.Fd, op: linux.EPoll_Ctl_Opcode, want_out: bool, id: i64) -> linux.Errno {
+	when sysclock.SIMULATION {
+		return .NONE
+	}
 	ev := linux.EPoll_Event {
 		events = {.IN, .OUT} if want_out else {.IN},
 		data = {u64 = u64(u32(fd)) | u64(u32(id)) << 32},
@@ -443,6 +446,41 @@ protected_peer_denied :: proc(local: bool) -> bool {
 	return cfg.protected_mode && !local && acl_default != nil && .Nopass in acl_default.attributes
 }
 
+conn_allocate :: #force_inline proc(fd: linux.Fd, kind: Conn_Kind) -> ^Conn {
+	c := new(Conn)
+	c.fd = fd
+	srv.next_id += 1
+	c.id = srv.next_id
+	c.rbuf = mem_alloc(RBUF_INIT)
+	c.rcap = RBUF_INIT
+	c.wbuf = mem_alloc(WBUF_INIT)
+	c.wcap = WBUF_INIT
+	c.wpeak = WBUF_INIT
+	c.wpeak_reset_ms = srv.now_ms
+	conn_mem += size_of(Conn) + RBUF_INIT + WBUF_INIT
+	c.ctime_ms = lua_connection_clock()
+	c.atime_ms = c.ctime_ms
+	c.last_cmd = "NULL"
+	c.db = &dbs[0]
+	c.resp = RESP2
+	c.kind = kind
+	if kind == .Memcached {
+		mc_stats.total_conns += 1
+	}
+	return c
+}
+
+conn_register :: #force_inline proc(c: ^Conn) {
+	fd := c.fd
+	acl_conn_init(c)
+	if int(fd) >= len(srv.conns) {
+		resize(&srv.conns, max(int(fd) + 1, len(srv.conns) * 2))
+	}
+	srv.conns[fd] = c
+	srv.nconns += 1
+	if !c.protected_check { srv.stat_conns += 1 }
+}
+
 accept_clients :: proc(lfd: linux.Fd, kind: Conn_Kind) {
 	budget := 1024 if kind == .Memcached else int(cfg.max_new_tls_connections_per_cycle) if transport_tls_listener(lfd) else int(cfg.max_new_connections_per_cycle)
 	for _ in 0 ..< budget {
@@ -475,26 +513,7 @@ accept_clients :: proc(lfd: linux.Fd, kind: Conn_Kind) {
 			linux.close(fd)
 			continue
 		}
-		c := new(Conn)
-		c.fd = fd
-		srv.next_id += 1
-		c.id = srv.next_id
-		c.rbuf = mem_alloc(RBUF_INIT)
-		c.rcap = RBUF_INIT
-		c.wbuf = mem_alloc(WBUF_INIT)
-		c.wcap = WBUF_INIT
-		c.wpeak = WBUF_INIT
-		c.wpeak_reset_ms = srv.now_ms
-		conn_mem += size_of(Conn) + RBUF_INIT + WBUF_INIT
-		c.ctime_ms = lua_connection_clock()
-		c.atime_ms = c.ctime_ms
-		c.last_cmd = "NULL"
-		c.db = &dbs[0]
-		c.resp = RESP2
-		c.kind = kind
-		if kind == .Memcached {
-			mc_stats.total_conns += 1
-		}
+		c := conn_allocate(fd, kind)
 		c.addr_len = transport_format(c.addr[:], &peer)
 		c.transport = transport_listener_kind(lfd)
 		c.local_peer = transport_peer_local(&peer)
@@ -505,13 +524,7 @@ accept_clients :: proc(lfd: linux.Fd, kind: Conn_Kind) {
 			mem_free(c.rbuf); mem_free(c.wbuf); free(c)
 			continue
 		}
-		acl_conn_init(c)
-		if int(fd) >= len(srv.conns) {
-			resize(&srv.conns, max(int(fd) + 1, len(srv.conns) * 2))
-		}
-		srv.conns[fd] = c
-		srv.nconns += 1
-		if !c.protected_check { srv.stat_conns += 1 }
+		conn_register(c)
 	}
 }
 
@@ -555,7 +568,11 @@ conn_close :: proc(c: ^Conn) {
 		access_conn_closed(c)
 	}
 	transport_connection_close(c)
-	linux.close(c.fd)
+	when sysclock.SIMULATION {
+		simulation_transport.close(c.fd)
+	} else {
+		linux.close(c.fd)
+	}
 	if int(c.fd) < len(srv.conns) {
 		srv.conns[c.fd] = nil
 	}

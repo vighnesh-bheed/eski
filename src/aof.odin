@@ -1914,6 +1914,16 @@ aof_write_buffer :: proc() -> bool {
 	if len(aof.buf) == 0 || aof.fd < 0 {
 		return true
 	}
+	when sysclock.SIMULATION {
+		if simulation_aof_sink != nil {
+			simulation_aof_sink(simulation_aof_db, aof.buf[:])
+			simulation_aof_db = i32(aof.selected_db)
+			aof_account_written(len(aof.buf))
+			clear(&aof.buf)
+			aof_shrink_buf()
+			return true
+		}
+	}
 	if seal_on {
 		return aof_write_sealed()
 	}
@@ -7171,5 +7181,24 @@ aof_keyspace_hash :: proc(task: ^Keyspace_Task) {
 		aof_tr_hexpire(&task.client, task.command_name, task.argv, reply, task.hash_expire_at)
 	} else {
 		aof_translate(&task.client, task.command, task.argv, reply)
+	}
+}
+
+when sysclock.SIMULATION {
+	simulation_aof_replay :: proc(db: i32, bytes: []u8) -> Aof_Load_Outcome {
+		reader := Aof_Reader{fd = -1, eof = true}
+		defer aof_reader_free(&reader)
+		if db >= 0 {
+			aof_select_into(&reader.buf, int(db))
+		}
+		append(&reader.buf, ..bytes)
+		aof.loading = true
+		pst.loading = true
+		aof_update_feed()
+		result := aof_load_commands(&reader, "simulation", false, 0)
+		pst.loading = false
+		aof.loading = false
+		aof_update_feed()
+		return result
 	}
 }

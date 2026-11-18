@@ -1,5 +1,6 @@
 package main
 
+import "sysclock"
 import "base:runtime"
 import C "core:c"
 import "core:sys/linux"
@@ -242,6 +243,9 @@ tls_pending_note :: proc(c: ^Conn) {
 }
 
 conn_net_read :: proc(c: ^Conn, bytes: []u8) -> (int, linux.Errno) {
+	when sysclock.SIMULATION {
+		return simulation_transport.read(c.fd, bytes)
+	}
 	if c.tls == nil { return linux.read(c.fd, bytes) }
 	n, err := tls_net_read(c, bytes)
 	tls_pending_note(c)
@@ -280,6 +284,9 @@ tls_net_read :: proc(c: ^Conn, bytes: []u8) -> (int, linux.Errno) {
 
 conn_net_write :: proc(c: ^Conn, bytes: []u8) -> (int, linux.Errno) {
 	if len(bytes) == 0 { return 0, .NONE }
+	when sysclock.SIMULATION {
+		return simulation_transport.write(c.fd, bytes)
+	}
 	if c.tls == nil { return linux.write(c.fd, bytes) }
 	n, err := tls_net_write(c, bytes)
 	tls_pending_note(c)

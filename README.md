@@ -230,7 +230,7 @@ The running executable registers **296 top-level commands** and **420 commands i
 
 ## Direction and licence
 
-Eski provides [vector sets](docs/vector-sets.md), [JSON documents](docs/json.md) and [full-text, vector and hybrid search](docs/search.md) over hashes and JSON. The search guide describes the tested redisvl, LangChain Redis and LlamaIndex Redis flows and how to rerun them. Combined search and JSON qualification and durability simulation remain ahead. Distributed management belongs to a separate layer. [Roadmap](ROADMAP.md)
+Eski provides [vector sets](docs/vector-sets.md), [JSON documents](docs/json.md) and [full-text, vector and hybrid search](docs/search.md) over hashes and JSON. The search guide describes the tested redisvl, LangChain Redis and LlamaIndex Redis flows and how to rerun them. The [simulation runner](docs/simulation.md) exercises deterministic I/O and runs native AOF restart checks. Combined search and JSON qualification and long simulation runs remain ahead. Distributed management belongs to a separate layer. [Roadmap](ROADMAP.md)
 
 Eski is licensed under [Apache-2.0](LICENSE). Third-party components retain their own terms, recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 

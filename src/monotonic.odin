@@ -12,7 +12,7 @@ mono_info: string = "POSIX clock_gettime"
 mono_info_buf: [40]u8
 
 mono_init :: proc() {
-	when ODIN_ARCH == .amd64 {
+	when ODIN_ARCH == .amd64 && !sysclock.SIMULATION {
 		ticks := mono_cpuinfo_ticks()
 		if ticks == 0 {
 			ticks = mono_calibrate()
@@ -163,7 +163,7 @@ mono_posix_ns :: #force_no_inline proc "contextless" () -> u64 {
 }
 
 mono_now :: #force_inline proc "contextless" () -> u64 {
-	when ODIN_ARCH == .amd64 {
+	when ODIN_ARCH == .amd64 && !sysclock.SIMULATION {
 		return u64(intrinsics.read_cycle_counter())
 	} else {
 		return mono_posix_ns()
