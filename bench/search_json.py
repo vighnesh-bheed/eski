@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness import Conn, ROOT, Server, ServerError, encode, parse_info
 
 sys.path.insert(0, str(ROOT / 'test/search'))
+import compare
 from compare import IMAGE, reference_server
 
 TOPICS = ('alpha', 'bravo', 'cedar', 'denim', 'ember', 'frost', 'grove', 'haven')
@@ -144,7 +145,10 @@ def main():
     parser.add_argument('--requests', type=int, default=10000)
     parser.add_argument('--rounds', type=int, default=2, help='alternate engine order by round')
     parser.add_argument('--verify-only', action='store_true', help='verify a corpus without timing')
+    parser.add_argument('--image', help='local image ID of the reference to start instead of the pinned reference by digest')
     args = parser.parse_args()
+    if args.image:
+        compare.IMAGE = args.image
     if not 1024 <= args.port <= 65535 or not len(TOPICS) <= args.documents <= 1000000:
         parser.error('invalid TCP port or corpus size')
     if not 0 <= args.warmup <= 1000000 or not 1 <= args.requests <= 1000000 or not 1 <= args.rounds <= 100:
@@ -155,7 +159,7 @@ def main():
     requests = planned_requests(topics, args.seed ^ 0x1234, args.requests)
     warmup = planned_requests(topics, args.seed ^ 0x3210, args.warmup)
     rows = []
-    summary = {'documents': args.documents, 'seed': args.seed, 'reference': IMAGE,
+    summary = {'documents': args.documents, 'seed': args.seed, 'reference': compare.IMAGE,
                'server_cpus': args.server_cpus, 'client_cpus': sorted(os.sched_getaffinity(0)),
                'timed': not args.verify_only, 'rows': rows, 'exit_code': 1}
     report = args.out / 'summary.json'

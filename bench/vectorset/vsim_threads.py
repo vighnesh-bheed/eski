@@ -1,4 +1,5 @@
 import argparse
+from contextlib import nullcontext
 import hashlib
 import json
 import random
@@ -124,13 +125,18 @@ def main():
     parser.add_argument('--compute-memory', default='128mb', help='the compute-max-memory of the server')
     parser.add_argument('--cpu', help='CPU list for the server, as taskset -c takes it')
     parser.add_argument('--out', help='write the JSON here as well')
+    parser.add_argument('--work-dir', type=Path, help='new directory to retain logs and data')
     a = parser.parse_args()
     shape = (a.elements, a.dim, a.clients, a.queries) if a.size == 'custom' else SIZES[a.size]
     for m in a.modes.split(','):
         if m not in MODES:
             raise SystemExit('unknown mode %s' % m)
     rows = []
-    with tempfile.TemporaryDirectory(prefix='eski-vsim-threads.') as work:
+    if a.work_dir is not None:
+        a.work_dir = a.work_dir.resolve()
+        a.work_dir.mkdir(parents=True, exist_ok=False)
+    working = nullcontext(a.work_dir) if a.work_dir else tempfile.TemporaryDirectory(prefix='eski-vsim-threads.')
+    with working as work:
         port = a.port
         for mode in a.modes.split(','):
             for threads in [int(t) for t in a.threads.split(',')]:

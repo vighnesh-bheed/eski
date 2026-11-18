@@ -53,6 +53,25 @@ def log_bytes(folder):
     return total, files
 
 
+def latency_samples(c, prefix, count, folder, head_args=()):
+    if count <= 0:
+        return None
+    samples = []
+    failed = 0
+    for i in range(count):
+        frame = encode(list(head_args) + ['SET', '%s:%d' % (prefix, i), VALUE])
+        tick = time.perf_counter_ns()
+        c.s.sendall(frame)
+        reply = c.reply()
+        samples.append(time.perf_counter_ns() - tick)
+        failed += reply != 'OK'
+    (Path(folder) / 'latency-samples.json').write_text(json.dumps(dict(unit='ns', samples=samples)) + '\n')
+    ordered = sorted(samples)
+    pick = lambda q: ordered[min(len(ordered) - 1, int(len(ordered) * q))] / 1000
+    return dict(writes=count, failed=failed, pipeline=1, us=dict(p50=pick(.5), p90=pick(.9), p99=pick(.99), p999=pick(.999), max=ordered[-1] / 1000),
+                raw='latency-samples.json')
+
+
 def measure(a, mode, appendonly, encryption, port, work):
     name = '%s-%s-%s' % (mode, 'aof' if appendonly else 'noaof', 'sealed' if encryption else 'plain')
     folder = Path(work) / name
@@ -81,6 +100,7 @@ def measure(a, mode, appendonly, encryption, port, work):
         row['incremental_files'] = files
         row['log_bytes'] = after_bytes - before_bytes
         row['log_bytes_per_write'] = (after_bytes - before_bytes) / writes
+        row['latency'] = latency_samples(c, 'latency', a.latency_samples, folder, head(mode, 0))
         c.close()
     finally:
         server.stop()
@@ -137,6 +157,7 @@ def mirror_sample(a, enabled, round_number, work):
                            successful_writes_per_s=(writes-failed)/elapsed, aof_bytes=after_aof-before_aof,
                            mirror_bytes=after_mirror-before_mirror, used_memory=int(memory['used_memory']),
                            used_memory_rss=int(memory['used_memory_rss']))
+                row['latency'] = latency_samples(c, 'latency', a.latency_samples, folder)
     finally:
         code = server.stop()
     if code != 0:
@@ -165,6 +186,7 @@ def main():
     parser.add_argument('--mirror-rounds', type=int, default=2, help='alternate off/on order by round')
     parser.add_argument('--warmup', type=int, default=500, help='warmup writes per mirror measurement')
     parser.add_argument('--verify-only', action='store_true', help='check mirror capture with no timing')
+    parser.add_argument('--latency-samples', type=int, default=0, help='after the timed run, this many single writes at pipeline 1 with each round trip kept')
     a = parser.parse_args()
     if a.pipeline < 2 or a.writes < 1 or a.partitions < 1 or a.mirror_rounds < 1 or a.warmup < 0:
         parser.error('invalid workload size, pipeline, rounds or warmup')

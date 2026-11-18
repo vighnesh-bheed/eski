@@ -273,6 +273,10 @@ def validate(args, reader):
             raise ValueError('profile requires an immutable local image ID for ' + role)
     if 'redis' in selected and images['redis'] != images['cli']:
         raise ValueError('run.sh shares its Redis server and CLI image; profile IDs must agree')
+    ports = profile.get('ports') or {}
+    if not isinstance(ports, dict) or not set(ports) <= TARGETS or len(set(ports.values())) != len(ports) or \
+            not all(type(port) is int and 1024 <= port <= 65535 for port in ports.values()):
+        raise ValueError('profile ports must map known targets to distinct ports from 1024 to 65535')
     if 'eski' in selected:
         native = profile.get('native') or {}
         if not native.get('path') or native['path'] not in files:
@@ -352,6 +356,8 @@ def validate(args, reader):
     config = {name: getattr(args, name) for name in ('repetitions', 'server_memory', 'client_memory', 'maxmemory', 'cool_temp_c', 'max_temp_c', 'min_idle', 'min_rest', 'stable_seconds', 'max_wait', 'sample_seconds', 'min_free_bytes', 'resource_policy', 'power_source')}
     config.update(cpus={k: sorted(v) for k, v in roles.items()}, sensor=dict(chip=reader.chip, label=reader.label), targets=selected, dragonfly_threads=dragonfly_threads,
                   client_budget_cores=client_budget_cores(topology, roles['client']), max_client_utilization_pct=args.max_client_utilization_pct, max_latency_seconds=args.max_latency_seconds)
+    if getattr(args, 'advisory_gates', False):
+        config['advisory_gates'] = True
     identity = dict(schema=SCHEMA, plan_sha256=sha(args.plan), profile_sha256=sha(args.profile),
                     files=files, scheduler=auto, tools=tools, host=host, config=config)
     identity['sha256'] = hashlib.sha256(canonical(identity)).hexdigest()
@@ -860,6 +866,8 @@ class Scheduler:
             if self.state['last_case_end'] is not None and self.clock.time() - self.state['last_case_end'] < self.args.min_rest:
                 problems.append('minimum_rest')
             metrics.append_json(self.output / 'gates.jsonl', dict(case=row['id'], sample=sample, free_bytes=free, problems=problems))
+            if getattr(self.args, 'advisory_gates', False) and 'disk_pressure' not in problems:
+                return True
             now = self.clock.monotonic()
             stable = (stable if stable is not None else now) if not problems else None
             if stable is not None and now - stable >= self.args.stable_seconds:
@@ -913,6 +921,8 @@ class Scheduler:
         for role, name in (('valkey', 'BENCH_VALKEY_IMAGE'), ('dragonfly', 'BENCH_DRAGONFLY_IMAGE'), ('eski-docker', 'BENCH_ESKI_IMAGE')):
             if role in images:
                 env[name] = images[role]
+        for target, port in (self.model['profile'].get('ports') or {}).items():
+            env['BENCH_PORT_' + target.upper().replace('-', '_')] = str(port)
         if row['target'] == 'eski':
             env['ESKI_BIN'] = str(contained(self.model['root'], self.model['profile']['native']['path']))
         argv = ['bash', str(self.model['harness']), '--targets', row['target'], '--scenarios', 'none', '--plan', str(directory / 'plan.json')]
@@ -1058,6 +1068,7 @@ def parser():
     p.add_argument('--max-latency-seconds', type=float, default=None, help='invalidate a measurement whose raw client JSON reports a maximum latency beyond this run lifetime bound')
     p.add_argument('--host-lock', type=Path, default=Path(tempfile.gettempdir()) / ('eski-exam-%d.lock' % os.getuid()))
     p.add_argument('--retry-interrupted', action='store_true', help='explicitly start a new preserved attempt only for interrupted cases; failed/invalid/skipped are never retried')
+    p.add_argument('--advisory-gates', action='store_true', help='record every gate sample and its problems but admit the case after one sample; for rehearsals on a machine that cannot meet the gates, never for a measurement')
     return p
 
 

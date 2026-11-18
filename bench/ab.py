@@ -230,6 +230,7 @@ def memtier_start(out_dir, name, port, cpus, args, sampler=None):
             'memtier_benchmark', '--server=127.0.0.1', '--port=%d' % port, '--protocol=redis', '--hide-histogram',
             '--json-out-file=/out/%s.json' % name] + args
     ACTIVE_CONTAINERS.add(cname)
+    guard(cname, True)
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if sampler is not None:
         for _ in range(50):
@@ -252,6 +253,7 @@ def memtier_finish(handle, timeout=900):
         remove_container(cname)
         raise
     ACTIVE_CONTAINERS.discard(cname)
+    guard(cname, False)
     (out_dir / (name + '.log')).write_text(stdout + '\n----\n' + stderr)
     if proc.returncode:
         raise RuntimeError('memtier %s rc=%d %s' % (name, proc.returncode, stderr[-500:]))
@@ -264,9 +266,21 @@ def memtier(out_dir, name, port, cpus, args, sampler=None, timeout=900):
     return memtier_finish(memtier_start(out_dir, name, port, cpus, args, sampler), timeout)
 
 
+def guard(cname, add):
+    folder = os.environ.get('ESKI_BENCH_GUARD')
+    if not folder:
+        return
+    path = Path(folder) / ('container-' + cname)
+    if add:
+        path.write_text(cname + '\n')
+    elif path.exists():
+        path.unlink()
+
+
 def remove_container(cname):
     subprocess.run(['docker', 'rm', '-f', cname], capture_output=True)
     ACTIVE_CONTAINERS.discard(cname)
+    guard(cname, False)
 
 
 def wait_ready(port, deadline=30):
@@ -629,11 +643,14 @@ def parser():
     p.add_argument('--freq-pair-tolerance', type=float, default=None)
     p.add_argument('--core-throttle-per-s', type=float, default=None)
     p.add_argument('--min-pairs', type=int, default=None)
+    p.add_argument('--memtier-image', default=MEMTIER, help='local image ID of the pinned memtier_benchmark')
     return p
 
 
 def main(argv=None):
+    global MEMTIER
     args = parser().parse_args(argv)
+    MEMTIER = args.memtier_image
     unknown = [k for k in args.workloads.split(',') if k not in WORKLOADS]
     if unknown:
         raise SystemExit('unknown workloads: %s' % ', '.join(unknown))

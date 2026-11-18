@@ -184,6 +184,15 @@ def process(pid, proc=Path('/proc')):
         return None
 
 
+def process_memory(pid, proc=Path('/proc')):
+    values = {}
+    for line in (read(proc / str(pid) / 'status') or '').splitlines():
+        name, _, rest = line.partition(':')
+        if name in ('VmRSS', 'VmHWM') and rest.split() and rest.split()[0].isdigit():
+            values[name] = int(rest.split()[0]) * 1024
+    return values
+
+
 def cgroup_snapshot(pid, proc=Path('/proc'), sys=Path('/sys')):
     membership = read(proc / str(pid) / 'cgroup')
     relative = next((line[3:] for line in (membership or '').splitlines() if line.startswith('0::')), None)
@@ -212,6 +221,7 @@ def owner_event(events, kind, role, pid=None, container=None, artifact_dir=None)
     item = dict(event=kind, role=role, container=container, pid=pid,
                 artifact_dir=artifact_dir, wall_time=time.time(), monotonic=time.monotonic(), process=process(pid) if pid else None)
     item['cgroup'] = cgroup_snapshot(pid) if pid else dict(available=False, reason='owned PID unavailable')
+    item['status'] = process_memory(pid) if pid else None
     item['cgroup_attribution'] = 'owned-container' if container else 'shared-process-cgroup-not-exclusive'
     item['peak_scope'] = 'kernel cgroup lifetime peak sampled immediately before stop' if container and kind == 'before-stop' else 'observed-so-far; may miss final lifetime peak'
     append_json(events, item)

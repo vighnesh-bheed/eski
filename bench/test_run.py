@@ -147,11 +147,12 @@ class RunnerHarnessTests(unittest.TestCase):
                 self.assertIn(flag, argv)
             self.assertEqual(argv[argv.index('--label') + 1], 'eski-bench=exam-fixture')
             self.assertEqual(argv[argv.index('--name') + 1], 'bench-eski-docker-exam-fixture')
-            image = argv.index('--port') - 1
+            image = argv.index('--bind') - 1
             self.assertTrue(argv[image].startswith('sha256:'))
-            self.assertEqual(argv[image + 1:], ['--port', '6791', '--save', '', '--appendonly', 'no', '--maxmemory', '700000000'])
+            self.assertEqual(argv[image + 1:], ['--bind', '127.0.0.1', '--port', '6791', '--save', '', '--appendonly', 'no', '--maxmemory', '700000000'])
         probes = [call for call in calls if call[0] == 'run' and '-d' in call and '--workdir=/data' not in call]
         self.assertTrue(all('--pull=never' in call and call[-4:] == ['--save', '', '--appendonly', 'no'] for call in probes))
+        self.assertTrue(probes and all(call[call.index('--bind') + 1] == '127.0.0.1' for call in probes))
         clients = [call for call in calls if call[0] == 'run' and any(value.startswith('--json-out-file=') for value in call)]
         self.assertTrue(all('--memory=256m' in call and '--pull=never' in call and call[call.index('-v') + 2].startswith('sha256:') for call in clients))
         self.assertTrue(all(call[0] != 'run' or '--pull=never' in call for call in calls))

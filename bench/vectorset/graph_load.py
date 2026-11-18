@@ -20,7 +20,7 @@ QUERIES = 8
 
 def command_usec(c, name):
     for line in c.call('INFO', 'commandstats').decode().splitlines():
-        if line.startswith('cmdstat_%s:' % name):
+        if line.lower().startswith('cmdstat_%s:' % name.lower()):
             fields = dict(kv.split('=') for kv in line.split(':', 1)[1].split(','))
             return int(fields['calls']), int(fields['usec'])
     return 0, 0

@@ -18,6 +18,7 @@ SERVER_MEMORY="${BENCH_SERVER_MEMORY:-}"
 CLIENT_MEMORY="${BENCH_CLIENT_MEMORY:-}"
 SERVER_MAXMEMORY="${BENCH_SERVER_MAXMEMORY:-}"
 FILL_SETTLE_TIMEOUT="${BENCH_FILL_SETTLE_TIMEOUT:-60}"
+BIND="${BENCH_BIND:-127.0.0.1}"
 FILL_SETTLE_STABLE=3
 READY_TIMEOUT=30
 SPEC_VERSION="0.3.46"
@@ -562,6 +563,8 @@ environment overrides (defaults in brackets):
   BENCH_SERVER_CPUS [0-3]  BENCH_CLIENT_CPUS [4-9]  BENCH_DRAGONFLY_THREADS [4]
   BENCH_SERVER_MEMORY, BENCH_CLIENT_MEMORY [no cap]  memory and swap cap of every server and client container
   BENCH_SERVER_MAXMEMORY [unset]  maxmemory in bytes given to every server
+  BENCH_FILL_KEYS [10000000, 1000000 with --quick]  keys stored by fill10m
+  BENCH_BIND [127.0.0.1]  the address every server listens on
   BENCH_FILL_SETTLE_TIMEOUT [60]  fill10m polls INFO memory once a second after the fill and reads it once used_memory
                                   is unchanged for $FILL_SETTLE_STABLE consecutive samples that report no keyspace rehash
                                   (mem_overhead_db_hashtable_rehashing 0 or absent), waiting at most this many seconds
@@ -664,6 +667,10 @@ if [ "$QUICK" = 1 ]; then
   T=5; FILL_KEYS=1000000; RB_P1_N=100000; RB_P16_N=300000
 else
   T=15; FILL_KEYS=10000000; RB_P1_N=200000; RB_P16_N=1000000
+fi
+if [ -n "${BENCH_FILL_KEYS:-}" ]; then
+  [[ "$BENCH_FILL_KEYS" =~ ^[1-9][0-9]*$ ]] || die "BENCH_FILL_KEYS must be a positive key count"
+  FILL_KEYS=$BENCH_FILL_KEYS
 fi
 
 COMMON_ARGS=(--data-size=64 --key-maximum=1000000 --key-pattern=R:R --distinct-client-seed "--test-time=$T")
@@ -1024,7 +1031,7 @@ start_server() {
   [ -n "$SERVER_MAXMEMORY" ] && limit=(--maxmemory "$SERVER_MAXMEMORY")
   SERVER_ARTIFACT=$tdir
   if [ "$t" = eski ]; then
-    SERVER_ARGV=(taskset -c "$SERVER_CPUS" "$ESKI_BIN" --port "$port" "${persist[@]}" "${limit[@]}" "${SERVER_EXTRA[@]}")
+    SERVER_ARGV=(taskset -c "$SERVER_CPUS" "$ESKI_BIN" --bind "$BIND" --port "$port" "${persist[@]}" "${limit[@]}" "${SERVER_EXTRA[@]}")
     "${SERVER_ARGV[@]}" >"$tdir/server.log" 2>&1 &
     ESKI_PID=$!
     observe hook start server --pid "$ESKI_PID" --artifact-dir "$tdir"
@@ -1037,15 +1044,15 @@ start_server() {
     "${memory[@]}" --workdir=/data --tmpfs /data:rw,mode=1777)
   case "$t" in
     redis)
-      SERVER_ARGV=("${base[@]}" "$(image_id "$REDIS_IMAGE")" redis-server --port "$port" "${persist[@]}" --protected-mode no "${limit[@]}" "${SERVER_EXTRA[@]}") ;;
+      SERVER_ARGV=("${base[@]}" "$(image_id "$REDIS_IMAGE")" redis-server --bind "$BIND" --port "$port" "${persist[@]}" --protected-mode no "${limit[@]}" "${SERVER_EXTRA[@]}") ;;
     valkey)
-      SERVER_ARGV=("${base[@]}" "$(image_id "$VALKEY_IMAGE")" valkey-server --port "$port" "${persist[@]}" --protected-mode no "${limit[@]}" "${SERVER_EXTRA[@]}") ;;
+      SERVER_ARGV=("${base[@]}" "$(image_id "$VALKEY_IMAGE")" valkey-server --bind "$BIND" --port "$port" "${persist[@]}" --protected-mode no "${limit[@]}" "${SERVER_EXTRA[@]}") ;;
     dragonfly)
       [ -n "$SERVER_MAXMEMORY" ] && limit=(--maxmemory="$SERVER_MAXMEMORY")
-      SERVER_ARGV=("${base[@]}" --ulimit memlock=-1 "$(image_id "$DRAGONFLY_IMAGE")" dragonfly --port="$port" \
+      SERVER_ARGV=("${base[@]}" --ulimit memlock=-1 "$(image_id "$DRAGONFLY_IMAGE")" dragonfly --bind="$BIND" --port="$port" \
         "${limit[@]}" --proactor_threads="$DRAGONFLY_THREADS" --dbfilename= --logtostderr --version_check=false) ;;
     eski-docker)
-      SERVER_ARGV=("${base[@]}" "$ESKI_IMAGE_ID" --port "$port" "${persist[@]}" "${limit[@]}" "${SERVER_EXTRA[@]}") ;;
+      SERVER_ARGV=("${base[@]}" "$ESKI_IMAGE_ID" --bind "$BIND" --port "$port" "${persist[@]}" "${limit[@]}" "${SERVER_EXTRA[@]}") ;;
   esac
   "${SERVER_ARGV[@]}" >"$tdir/start.log" 2>&1 || return 1
   docker inspect --format '{{json .HostConfig}}' "$CURRENT_CONTAINER" >"$tdir/container-hostconfig.json" 2>/dev/null
@@ -1344,7 +1351,7 @@ probe_eski() {
   [ -x "$ESKI_BIN" ] || die "specification cases are chosen by the commands eski implements, so an eski binary is needed at $ESKI_BIN (build it, set ESKI_BIN or select the eski-docker target)"
   port_busy "$port" && die "port $port for the eski command probe is in use ($(port_owner "$port")); set BENCH_PORT_ESKI to a free port"
   mkdir -p "$SPEC_CACHE" || die "cannot create $SPEC_CACHE"
-  (cd "$SPEC_CACHE" && exec "$ESKI_BIN" --port "$port") >"$SPEC_CACHE/eski-probe.log" 2>&1 &
+  (cd "$SPEC_CACHE" && exec "$ESKI_BIN" --bind "$BIND" --port "$port") >"$SPEC_CACHE/eski-probe.log" 2>&1 &
   ESKI_PID=$!
   python3 -I "$SPEC_TOOL" probe --port "$port" --out "$out" "$@"
   rc=$?
@@ -1359,7 +1366,7 @@ probe_eski_image() {
   [ -n "$iid" ] || die "docker image $ESKI_IMAGE is not present locally; build it with bench/image.sh or set BENCH_ESKI_IMAGE"
   port_busy "$port" && die "port $port for the eski-docker command probe is in use ($(port_owner "$port")); set BENCH_PORT_ESKI_DOCKER to a free port"
   CURRENT_CONTAINER=$name
-  if ! docker run --pull=never --rm -d --name "$name" --label "$RUN_TAG" --network=host "$iid" --port "$port" --save "" --appendonly no >/dev/null 2>&1; then
+  if ! docker run --pull=never --rm -d --name "$name" --label "$RUN_TAG" --network=host "$iid" --bind "$BIND" --port "$port" --save "" --appendonly no >/dev/null 2>&1; then
     CURRENT_CONTAINER=""
     die "cannot start $ESKI_IMAGE for the eski command probe"
   fi
@@ -1378,7 +1385,7 @@ probe_reference() {
   lock_image "$REDIS_IMAGE"
   CURRENT_CONTAINER=$name
   if ! docker run --pull=never --rm -d --name "$name" --label "$RUN_TAG" --network=host "$(image_id "$REDIS_IMAGE")" \
-      redis-server --port "$port" --save "" --appendonly no >/dev/null 2>&1; then
+      redis-server --bind "$BIND" --port "$port" --save "" --appendonly no >/dev/null 2>&1; then
     CURRENT_CONTAINER=""
     die "cannot start $REDIS_IMAGE for the reference command probe"
   fi
@@ -1537,6 +1544,7 @@ run_item() {
     r=$((r + 1))
   done
   if [ -z "$fail" ]; then
+    rcli "$port" INFO memory >"$tdir/$IT_KEY.info_memory.txt"
     py item "$RUN_DIR" "$t" "$PLAN" "$i"
   else
     [ -f "$tdir/server.log" ] && cp "$tdir/server.log" "$tdir/$IT_KEY.server.log"
