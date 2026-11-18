@@ -828,23 +828,30 @@ cmd_module :: proc(c: ^Conn, argv: [][]u8) {
 			reply_simple(c, line)
 		}
 	case eq_nocase(sub, "list"):
-		reply_array(c, 1)
-		reply_map(c, 4)
-		reply_bulk_str(c, "name")
-		reply_bulk_str(c, VSET_MODULE_NAME)
-		reply_bulk_str(c, "ver")
-		reply_int(c, VSET_MODULE_VERSION)
-		reply_bulk_str(c, "path")
-		reply_bulk_str(c, "")
-		reply_bulk_str(c, "args")
-		reply_array(c, 0)
+		reply_array(c, 3)
+		reply_builtin_module(c, VSET_MODULE_NAME, VSET_MODULE_VERSION)
+		reply_builtin_module(c, SEARCH_MODULE_NAME, SEARCH_MODULE_VERSION)
+		reply_builtin_module(c, JSON_MODULE_NAME, JSON_MODULE_VERSION)
 	case !protected_allowed(cfg.enable_module_command, c):
 		reply_error(c, ERR_MODULE_NOT_ALLOWED)
 	case eq_nocase(sub, "unload"):
-		reply_error(c, ERR_MODULE_UNLOAD_BUILTIN if eq_nocase(argv[2], VSET_MODULE_NAME) else ERR_MODULE_UNLOAD_UNKNOWN)
+		reply_error(c, ERR_MODULE_UNLOAD_BUILTIN if eq_nocase(argv[2], VSET_MODULE_NAME) || eq_nocase(argv[2], SEARCH_MODULE_NAME) || eq_nocase(argv[2], "rejson") else ERR_MODULE_UNLOAD_UNKNOWN)
 	case:
 		reply_error(c, ERR_MODULE_LOAD)
 	}
+}
+
+@(private = "file")
+reply_builtin_module :: proc(c: ^Conn, name: string, version: i64) {
+	reply_map(c, 4)
+	reply_bulk_str(c, "name")
+	reply_bulk_str(c, name)
+	reply_bulk_str(c, "ver")
+	reply_int(c, version)
+	reply_bulk_str(c, "path")
+	reply_bulk_str(c, "")
+	reply_bulk_str(c, "args")
+	reply_array(c, 0)
 }
 
 @(init)

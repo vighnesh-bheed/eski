@@ -15,12 +15,34 @@ lower :: #force_inline proc "contextless" (b: u8) -> u8 {
 	return b + 32 if b >= 'A' && b <= 'Z' else b
 }
 
+command_subcommand_byte :: #force_inline proc "contextless" (parent: string, value: u8) -> u8 {
+	if parent[0] >= 'A' && parent[0] <= 'Z' {
+		return value - 32 if value >= 'a' && value <= 'z' else value
+	}
+	return lower(value)
+}
+
 eq_nocase :: proc "contextless" (a: []u8, b: string) -> bool #no_bounds_check {
 	if len(a) != len(b) {
 		return false
 	}
 	for i in 0 ..< len(a) {
 		if lower(a[i]) != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+command_subcommand_matches :: #force_inline proc "contextless" (input: []u8, canonical: string) -> bool {
+	if canonical[0] < 'A' || canonical[0] > 'Z' {
+		return eq_nocase(input, canonical)
+	}
+	if len(input) != len(canonical) {
+		return false
+	}
+	for value, i in input {
+		if command_subcommand_byte(canonical, value) != canonical[i] {
 			return false
 		}
 	}

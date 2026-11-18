@@ -3,7 +3,10 @@ package main
 import "base:intrinsics"
 import "core:fmt"
 import ht "hashtype"
+import "jsondoc"
+import "base:runtime"
 import lb "label"
+import ow "owner"
 import lt "listtype"
 import st "settype"
 import sm "streamtype"
@@ -64,6 +67,8 @@ object_chg_of :: proc "contextless" (type: Obj_Type, obj: rawptr) -> int {
 		return zt.Zset(obj).chg
 	case .Stream:
 		return stream_chg(sm.Stream(obj))
+	case .Json:
+		return json_object_content_memory(cast(^Json_Object)obj)
 	}
 	return object_acct_of(type, obj)
 }
@@ -96,6 +101,8 @@ object_charge_attach :: proc "contextless" (db: ^Db, type: Obj_Type, obj: rawptr
 		z.chg = c
 	case .Stream:
 		c = stream_chg_store(sm.Stream(obj), bytes)
+	case .Json:
+		c = json_object_content_memory(cast(^Json_Object)obj)
 	case:
 		return
 	}
@@ -125,7 +132,7 @@ label_flush_charged :: proc "contextless" (db: ^Db, vp: ^Val_Handle) {
 }
 
 label_used :: proc(id: lb.Id) -> int {
-	total := 0
+	total := search_scope_charged(ow.Scope{label = id, owner = ow.SHARED})
 	for i in 0 ..< len(label_dbs) {
 		if p := label_part(i, id); p != nil {
 			total += label_partition_bytes(p)
@@ -134,7 +141,7 @@ label_used :: proc(id: lb.Id) -> int {
 	return total
 }
 
-label_quota_check :: proc(cmd: ^Command, spec: ^Cmd_Spec) -> string {
+label_quota_check :: proc(cmd: ^Command, spec: ^Cmd_Spec, argv: [][]u8) -> string {
 	if spec == nil || .Denyoom not_in spec.flags {
 		return ""
 	}
@@ -145,11 +152,33 @@ label_quota_check :: proc(cmd: ^Command, spec: ^Cmd_Spec) -> string {
 	if label_used(access.id) <= quota {
 		return ""
 	}
+	keys := db_size_of(db_cur)
+	label_quota_expire(access.id)
+	if db_size_of(db_cur) != keys {
+		if msg := label_write_check(cmd, spec, argv); msg != "" {
+			return msg
+		}
+	}
+	if label_used(access.id) <= quota {
+		return ""
+	}
 	evict_in_label(access.id, quota)
 	if label_used(access.id) > quota {
 		return ERR_LABEL_QUOTA_OOM
 	}
 	return ""
+}
+
+label_quota_expire :: proc(id: lb.Id) {
+	if aof.loading || pst.loading || expiry_deletion_paused() {
+		return
+	}
+	now := expire_now()
+	for i in 0 ..< len(label_dbs) {
+		if p := label_part(i, id); p != nil {
+			db_quota_expire(p, now)
+		}
+	}
 }
 
 object_content_of :: proc "contextless" (type: Obj_Type, obj: rawptr) -> int {
@@ -164,6 +193,9 @@ object_content_of :: proc "contextless" (type: Obj_Type, obj: rawptr) -> int {
 		return zt.content_memory(zt.Zset(obj))
 	case .Stream:
 		return sm.content_memory(sm.Stream(obj))
+	case .Json:
+		context = runtime.default_context()
+		return jsondoc.content_memory((cast(^Json_Object)obj).doc.root)
 	}
 	return 0
 }

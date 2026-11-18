@@ -389,6 +389,9 @@ copy_object_dup :: proc(src: ^Entry) -> (obj: rawptr, extra: u64, ok: bool) {
 		return zset_copy_dup(src)
 	case .Stream:
 		return stream_copy_dup(src)
+	case .Json:
+		object := json_object_dup(json_object_at(src))
+		return object, 0, object != nil
 	}
 	return nil, 0, false
 }
@@ -405,6 +408,8 @@ copy_object_attach :: proc(dst: ^Entry, key: []u8, kind: Obj_Type, obj: rawptr, 
 		zset_copy_attach(dst, key, obj, extra)
 	case .Stream:
 		stream_copy_attach(dst, obj)
+	case .Json:
+		json_object_attach(dst, cast(^Json_Object)obj)
 	}
 }
 
@@ -575,7 +580,7 @@ scan_parse_cursor :: proc(arg: []u8) -> (cursor: u64, ok: bool) {
 obj_type_by_name :: proc(name: []u8) -> (t: Obj_Type, ok: bool) {
 	s := generic_cstr(name)
 	for candidate in Obj_Type {
-		if eq_nocase(s, type_name(candidate)) {
+		if eq_fold(s, transmute([]u8)type_name(candidate)) {
 			return candidate, true
 		}
 	}

@@ -155,6 +155,8 @@ cmd_debug :: proc(c: ^Conn, argv: [][]u8) {
 			addr = uintptr(sm)
 		} else if vs := entry_object(e, .Vectorset); vs != nil {
 			addr = uintptr(vs)
+		} else if json := json_object_at(e); json != nil {
+			addr = uintptr(json)
 		}
 		size := debug_serialized_length(e, argv[2])
 		debug_lru := entry_debug_lru(e)
@@ -270,6 +272,7 @@ flush_generic :: proc(c: ^Conn, argv: [][]u8, all: bool) {
 		watch_flush(c.db)
 		db_flush_in(c.db, lazy || blocking)
 	}
+	removed += search_flush(c.db.id, all)
 	block_note_removed()
 	if !labels_on {
 		tracking_flush()

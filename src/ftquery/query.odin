@@ -432,7 +432,7 @@ stem_mask :: proc(p: ^Parser) -> Field_Mask {
 }
 
 stemmable :: proc(p: ^Parser, mask: Field_Mask) -> bool {
-	return mask & stem_mask(p) != 0
+	return (p.opts.explain && mask == ALL_FIELDS) || mask & stem_mask(p) != 0
 }
 
 expand_tree :: proc(p: ^Parser, id: Node_Id, inside: bool) -> Node_Id {

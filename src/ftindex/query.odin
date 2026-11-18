@@ -8,6 +8,7 @@ Query_Options :: struct {
 	dialect:       int,
 	params:        []ftq.Param,
 	verbatim:      bool,
+	explain:       bool,
 	no_stop_words: bool,
 	language:      string,
 }
@@ -118,6 +119,7 @@ parse :: proc(ix: ^Index, query: string, opts: Query_Options, allocator := conte
 	o := ftq.Options {
 		dialect       = opts.dialect,
 		verbatim      = opts.verbatim,
+		explain       = opts.explain,
 		language      = language_name(ix, opts.language),
 		params        = opts.params,
 		hooks         = query_hooks(ix),

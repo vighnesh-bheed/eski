@@ -385,7 +385,7 @@ acl_lookup_sub :: proc(base: int, sub: []u8) -> int {
 	buf[n] = '|'
 	n += 1
 	for b in sub {
-		buf[n] = lower(b)
+		buf[n] = command_subcommand_byte(name, b)
 		n += 1
 	}
 	id := acl_doc_index(string(buf[:n]))
@@ -880,6 +880,7 @@ acl_user_clear :: proc(u: ^Acl_User) {
 
 @(private = "file")
 acl_user_free :: proc(u: ^Acl_User) {
+	ft_cursor_remove_user(u)
 	acl_user_clear(u)
 	acl_label_rules_free(&u.labels)
 	delete(u.password_hashes)
@@ -1228,6 +1229,34 @@ acl_check_key :: proc(s: ^Acl_Selector, key: []u8, flags: Key_Flags) -> bool {
 	return false
 }
 
+acl_read_covers_prefix :: proc(user: ^Acl_User, prefix: []u8) -> bool {
+	for i in 0 ..< 1 + len(user.added_selectors) {
+		selector := acl_selector_at(user, i)
+		if .Keys in selector.wildcards {
+			return true
+		}
+		for p in selector.key_patterns {
+			if .Read not_in p.perms || len(p.pattern) == 0 || p.pattern[len(p.pattern)-1] != '*' {
+				continue
+			}
+			if len(p.pattern) == 1 {
+				return true
+			}
+			if len(prefix) == 0 {
+				continue
+			}
+			escaped := false
+			for j := len(p.pattern)-2; j >= 0 && p.pattern[j] == '\\'; j -= 1 {
+				escaped = !escaped
+			}
+			if !escaped && glob_match(p.pattern, prefix, false) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 @(private = "file")
 acl_unrestricted_selector :: proc(s: ^Acl_Selector, flags: Key_Flags) -> bool {
 	if .Keys in s.wildcards {
@@ -1300,7 +1329,11 @@ acl_selector_key_block :: proc(s: ^Acl_Selector, req: ^Acl_Request) -> (blocked:
 		return false, 0
 	}
 	for k in acl_request_keys(req) {
-		if !acl_check_key(s, req.argv[k.pos], k.flags) {
+		flags := k.flags
+		if .Json in cmd_docs[req.id].acl {
+			flags += {.Access} if .Ro in flags else {.Update}
+		}
+		if !acl_check_key(s, req.argv[k.pos], flags) {
 			return true, k.pos
 		}
 	}

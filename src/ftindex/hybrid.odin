@@ -92,7 +92,7 @@ vector_branch :: proc(ix: ^Index, vec: ^Hybrid_Vector, opts: ^Execute_Options, o
 	scratch: Result
 	result_init(&scratch, context.allocator)
 	defer result_destroy(&scratch)
-	set := Filter_Set{ix = ix, v = opts.visibility, all = true}
+	set := Filter_Set{ix = ix, opts = opts, all = true}
 	if vec.filter != nil && vec.filter.query.root != ftq.NO_NODE {
 		session: Session
 		b: Builder
@@ -109,6 +109,9 @@ vector_branch :: proc(ix: ^Index, vec: ^Hybrid_Vector, opts: ^Execute_Options, o
 		}
 		set.all = false
 		materialize(&b, built.cursor, &set)
+		if b.err != .None {
+			return b.err, copy_error(b.query_err)
+		}
 		if len(set.docs) == 0 {
 			return .None, {}
 		}
@@ -124,7 +127,13 @@ vector_branch :: proc(ix: ^Index, vec: ^Hybrid_Vector, opts: ^Execute_Options, o
 		accepted   = -1 if set.all else len(set.docs),
 	}
 	found := make([dynamic]Vector_Hit, context.temp_allocator)
+	if execution_timed_out(opts) {
+		return .Timeout, {}
+	}
 	e := source.within(source.ctx, &q, &found) if vec.range else source.nearest(source.ctx, &q, &found)
+	if set.timed_out || execution_timed_out(opts) {
+		return .Timeout, {}
+	}
 	if e == .Blob_Size {
 		return .Query_Error, blob_size_error(len(vec.blob), want, context.temp_allocator)
 	}
@@ -133,7 +142,12 @@ vector_branch :: proc(ix: ^Index, vec: ^Hybrid_Vector, opts: ^Execute_Options, o
 	}
 	for h in found {
 		if filter_accept(&set, h.doc) {
-			append(out, h)
+			if _, err := append(out, h); err != nil {
+				return .Out_Of_Memory, {}
+			}
+		}
+		if set.timed_out {
+			return .Timeout, {}
 		}
 	}
 	sort_hits(out[:])
@@ -144,6 +158,9 @@ hybrid :: proc(ix: ^Index, text_query: ^ftq.Parsed, vec: Hybrid_Vector, options:
 	opts := options
 	result.rows = make([dynamic]Hybrid_Row, allocator)
 	result.allocator = allocator
+	if !view_includes(view_indexes(&opts.text), ix) {
+		return result, .None, {}
+	}
 	window := opts.window if opts.window > 0 else rrf.WINDOW
 	text_opts := opts.text
 	text_opts.unscored_tags = true

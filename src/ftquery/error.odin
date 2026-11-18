@@ -19,6 +19,7 @@ Error_Code :: enum u8 {
 	Field_Dup,
 	Query_Bad,
 	Parse_Args,
+	Generic,
 	Out_Of_Memory,
 }
 
@@ -38,6 +39,7 @@ ERROR_WORDS := [Error_Code]string {
 	.Field_Dup              = "SEARCH_FIELD_DUP",
 	.Query_Bad              = "SEARCH_QUERY_BAD",
 	.Parse_Args             = "SEARCH_PARSE_ARGS",
+	.Generic                = "SEARCH_GENERIC",
 	.Out_Of_Memory          = "OOM",
 }
 

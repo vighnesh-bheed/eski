@@ -24,6 +24,7 @@ Error :: enum u8 {
 	Too_Many_Terms,
 	Query_Error,
 	Blob_Size,
+	Timeout,
 }
 
 Field_Kind :: enum u8 {
@@ -64,6 +65,7 @@ Field :: struct {
 	case_sensitive: bool,
 	index_empty:    bool,
 	index_missing:  bool,
+	suffix_trie:    bool,
 	vector:         Vector_Options,
 }
 
@@ -73,6 +75,7 @@ Definition :: struct {
 	language_field: string,
 	score:          f32,
 	score_field:    string,
+	payload_field:  string,
 	stop_mode:      text.Stop_Mode,
 	stop_words:     []string,
 }
@@ -97,6 +100,11 @@ Field_Errors :: struct {
 	last_key:   string,
 }
 
+Term_Membership :: struct {
+	stats: ^termstats.Stats,
+	id:    u32,
+}
+
 Tag_Index :: struct {
 	values: tagindex.Field,
 	stats:  termstats.Stats,
@@ -106,6 +114,8 @@ Slot :: struct {
 	ordinal: int,
 	tag:     ^Tag_Index,
 	numbers: ^numindex.Index,
+	locations: map[u32]Geo_Point,
+	extra_locations: map[u32][]Geo_Point,
 	vector:  ^Vector_Source,
 	missing: roaring.Bitmap,
 	errors:  Field_Errors,
@@ -121,6 +131,7 @@ Index :: struct {
 	lists:        [dynamic]^postings.List,
 	term_fields:  [dynamic]postings.Fields,
 	stats:        termstats.Stats,
+	live_terms:   map[u32][dynamic]Term_Membership,
 	stop:         text.Stop_Words,
 	stemmers:     text.Stemmers,
 	analyzer:     text.Analyzer,
@@ -197,6 +208,7 @@ clone_definition :: proc(d: ^Definition, allocator: runtime.Allocator) -> (out: 
 	out.fields = fields
 	out.language_field = strings.clone(d.language_field, allocator)
 	out.score_field = strings.clone(d.score_field, allocator)
+	out.payload_field = strings.clone(d.payload_field, allocator)
 	words, we := make([]string, len(d.stop_words), allocator)
 	if we != nil {
 		return {}, .Out_Of_Memory
@@ -216,6 +228,7 @@ free_definition :: proc(d: ^Definition, allocator: runtime.Allocator) {
 	delete(d.fields, allocator)
 	delete(d.language_field, allocator)
 	delete(d.score_field, allocator)
+	delete(d.payload_field, allocator)
 	for w in d.stop_words {
 		delete(w, allocator)
 	}
@@ -223,7 +236,7 @@ free_definition :: proc(d: ^Definition, allocator: runtime.Allocator) {
 	d^ = {}
 }
 
-init :: proc(ix: ^Index, def: Definition, factory: Vector_Factory = nil, factory_ctx: rawptr = nil, allocator := context.allocator) -> Error {
+init :: proc(ix: ^Index, def: Definition, factory: Vector_Factory = nil, factory_ctx: rawptr = nil, allocator := context.allocator, scoped := false) -> Error {
 	d := def
 	if !valid_definition(&d) {
 		return .Invalid_Definition
@@ -269,7 +282,9 @@ init :: proc(ix: ^Index, def: Definition, factory: Vector_Factory = nil, factory
 			}
 			s.vector = new(Vector_Source, allocator)
 			s.vector^ = source
-		case .Geo, .Geoshape:
+		case .Geo:
+			s.locations = make(map[u32]Geo_Point, allocator)
+		case .Geoshape:
 		}
 	}
 	ix.text_fields = texts[:]
@@ -279,6 +294,14 @@ init :: proc(ix: ^Index, def: Definition, factory: Vector_Factory = nil, factory
 	ix.lists = make([dynamic]^postings.List, 0, 0, allocator)
 	ix.term_fields = make([dynamic]postings.Fields, 0, 0, allocator)
 	termstats.init(&ix.stats, allocator)
+	if scoped {
+		live_terms, le := make(map[u32][dynamic]Term_Membership, 16, allocator)
+		if le != nil || live_terms == nil {
+			destroy(ix)
+			return .Out_Of_Memory
+		}
+		ix.live_terms = live_terms
+	}
 	stop_err: text.Error
 	switch ix.definition.stop_mode {
 	case .Default:
@@ -308,8 +331,17 @@ init :: proc(ix: ^Index, def: Definition, factory: Vector_Factory = nil, factory
 
 destroy :: proc(ix: ^Index) {
 	a := ix.allocator
+	for _, memberships in ix.live_terms {
+		delete(memberships)
+	}
+	delete(ix.live_terms)
 	for &s in ix.slots {
 		roaring.destroy(&s.missing)
+		delete(s.locations)
+		for _, points in s.extra_locations {
+			delete(points, ix.allocator)
+		}
+		delete(s.extra_locations)
 		if s.tag != nil {
 			tagindex.destroy(&s.tag.values)
 			termstats.destroy(&s.tag.stats)

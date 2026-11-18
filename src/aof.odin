@@ -4435,6 +4435,8 @@ aof_rewrite_value :: proc(w: ^rdb.Writer, key: []u8, v: Slot_Value) {
 		aof_rewrite_stream(w, key, cast(sm.Stream)v.obj)
 	case .Vectorset:
 		vset_aof_rewrite(w, key, cast(vt.Vset)v.obj)
+	case .Json:
+		json_aof_rewrite(w, key, cast(^Json_Object)v.obj)
 	}
 }
 
@@ -4469,6 +4471,25 @@ aof_rewrite_commands :: proc(w: ^rdb.Writer) -> bool {
 		tmp[k] = '\r'
 		tmp[k + 1] = '\n'
 		rdb.put_raw(w, tmp[:k + 2])
+	}
+	for index in search_definitions_ordered() {
+		args := search_create_args_saved(index)
+		aof_w_header(w, len(args))
+		for arg in args {
+			aof_w_str(w, arg)
+		}
+		if w.failed {
+			return false
+		}
+	}
+	for alias in search_aliases_ordered() {
+		aof_w_header(w, 3)
+		aof_w_str(w, "FT.ALIASADD")
+		aof_w_str(w, alias.name)
+		aof_w_str(w, alias.target.name)
+		if w.failed {
+			return false
+		}
 	}
 	processed: i64 = 0
 	for &db, id in dbs {
@@ -6080,15 +6101,19 @@ AOF_REJECT_LABELLED_FILE :: "the file was written by a server with a label schem
 aof_run_handler :: proc(c: ^Conn, cmd: ^Command, argv: [][]u8, name: string) -> bool {
 	c.wlen = 0
 	c.wpos = 0
+	aof_json_replayed_partial = false
 	cmd.handler(c, argv)
-	if c.wlen > 0 && c.wbuf[0] == '-' {
+	json_partial := aof_json_replayed_partial
+	aof_json_replayed_partial = false
+	if c.wlen > 0 && c.wbuf[0] == '-' && !json_partial {
 		last := c.wlen
 		if last >= 2 && c.wbuf[last - 2] == '\r' && c.wbuf[last - 1] == '\n' { last -= 2 }
 		plog(LOG_WARNING, "Error executing '", cmd.name, "' while reading AOF ", name, ": ", string(c.wbuf[1:last]))
-		if labels_on {
+		if labels_on || search_metadata_command(cmd) {
 			c.wlen = 0
 			c.wpos = 0
-			return aof_reject(name, "a record failed at replay, so the file and the data disagree about a scope")
+			reason := "a record failed at replay, so the file and the data disagree about a scope" if labels_on else "a search definition record failed at replay"
+			return aof_reject(name, reason)
 		}
 		if cfg.propagation_error_behavior == 1 {
 			plog(LOG_WARNING, "Fatal AOF command execution error: propagation-error-behavior is panic")
@@ -6292,6 +6317,11 @@ aof_replay_scoped :: proc(c: ^Conn, argv: [][]u8, name: string) -> bool {
 	}
 	defer access_resume_leave()
 	defer clear(&label_own_names)
+	if search_metadata_command(cmd) {
+		db_cur = c.db
+		label_cmd_writes = true
+		return aof_run_handler(c, cmd, inner, name)
+	}
 	spec := cmd_spec_lookup(cmd, inner)
 	writes := label_command_writes(cmd, spec)
 	maintenance := aof_maintenance_form(inner)
@@ -6309,7 +6339,7 @@ aof_replay_scoped :: proc(c: ^Conn, argv: [][]u8, name: string) -> bool {
 		}
 	} else if writes && spec != nil {
 		access_resume_partition(c.db, false)
-		aof_spare_names(c.db.id, spec, inner)
+		aof_spare_names(c.db.id, spec, inner, cmd.handler == cmd_json)
 		if label_write_check(cmd, spec, inner) != "" {
 			return aof_reject(name, "a record writes a name that another scope holds, which the running server refuses")
 		}
@@ -6400,13 +6430,13 @@ aof_gone_reset :: proc() {
 }
 
 @(private = "file")
-aof_spare_names :: proc(dbi: int, spec: ^Cmd_Spec, argv: [][]u8) {
-	if len(aof_gone) == 0 || .Module in spec.flags {
+aof_spare_names :: proc(dbi: int, spec: ^Cmd_Spec, argv: [][]u8, json: bool) {
+	if len(aof_gone) == 0 || (.Module in spec.flags && !json) {
 		return
 	}
 	find_keys(spec, argv, &aof_gone_refs)
 	for ref in aof_gone_refs {
-		if ref.pos <= 0 || ref.pos >= len(argv) || (ref.flags != {} && ref.flags & LABEL_WRITE_FLAGS == {}) {
+		if ref.pos <= 0 || ref.pos >= len(argv) || (ref.flags != {} && ref.flags & LABEL_WRITE_FLAGS == {} && !(json && .Rw in ref.flags)) {
 			continue
 		}
 		for g in aof_gone {
@@ -6766,10 +6796,9 @@ aof_load_sealed :: proc(r: ^Aof_Reader, sr: ^seal.File_Reader, f: ^Aof_File, is_
 		persist_refuse_name = string(where_[:])
 		res := persist_load_stream(&rr, false)
 		persist_refuse_name = ""
-		done := res == .Ok && seal_snapshot_done(&rr, sr)
 		rr.seal = nil
 		rdb.reader_destroy(&rr)
-		if !done {
+		if res != .Ok {
 			plog(LOG_WARNING, "Error reading the RDB base file ", name, ", AOF loading aborted")
 			return .Aborted
 		}
@@ -7011,14 +7040,18 @@ aof_debug_loadaof :: proc(c: ^Conn) {
 	} else {
 		db_flush_all()
 	}
+	search_definitions_clear()
 	res := aof_load_all(false)
 	if labels_on {
 		if access_forget_seq < seq {
 			access_forget_seq = seq
 		}
-		if res != .Loaded && res != .Blank && res != .Truncated_Tail {
+		}
+	if res != .Loaded && res != .Blank && res != .Truncated_Tail {
+		if labels_on {
 			access_flush_everything()
 		}
+		search_definitions_clear()
 	}
 	if aof.fd >= 0 {
 		aof_recompute_sizes()

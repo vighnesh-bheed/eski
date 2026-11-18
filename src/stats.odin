@@ -181,7 +181,7 @@ stat_target :: proc(st: ^Cmd_Stats, argv: [][]u8) -> ^Cmd_Stats {
 		return st
 	}
 	for &s in st.subs {
-		if eq_nocase(argv[1], s.short) {
+		if command_subcommand_matches(argv[1], s.short) {
 			return &s.stats
 		}
 	}
@@ -194,7 +194,7 @@ container_precheck :: proc(c: ^Conn, argv: [][]u8, name: string, upper: string) 
 		return false
 	}
 	for &s in slot.stats.subs {
-		if eq_nocase(argv[1], s.short) {
+		if command_subcommand_matches(argv[1], s.short) {
 			if !arity_ok(int(s.stats.arity), len(argv)) {
 				reply_wrong_args(c, s.stats.name)
 				return true
@@ -214,7 +214,7 @@ stat_lookup_name :: proc(name: []u8) -> ^Cmd_Stats {
 				return nil
 			}
 			for &s in parent.stats.subs {
-				if eq_nocase(name[i + 1:], s.short) {
+				if command_subcommand_matches(name[i + 1:], s.short) {
 					return &s.stats
 				}
 			}

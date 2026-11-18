@@ -1,6 +1,6 @@
 # Eski documentation
 
-Eski is a single-node in-memory engine with an Odin host and embedded Lua 5.1.5 C runtime. RESP clients can use its implemented command surface, and an optional second listener speaks the memcached text protocol. Lua scripts, executable Function libraries and interactive debugging are implemented. The [verification record](build-run-test.md#verification) describes executed checks, exclusions and resource limits. Modules, replication, Sentinel and Cluster remain excluded.
+Eski is a single-node in-memory engine with an Odin host and embedded Lua 5.1.5 C runtime. RESP clients can use its implemented command surface, and an optional second listener speaks the memcached text protocol. Lua scripts, executable Function libraries and interactive debugging are implemented. The [verification record](build-run-test.md#verification) describes executed checks, exclusions and resource limits. Dynamic module loading, replication, Sentinel and Cluster remain outside the node scope.
 
 Start with [build, run and test](build-run-test.md) and [architecture](architecture.md). Use the [generated command reference](commands.md) for the current registry and argument metadata, [conformance](conformance.md) for recorded coverage and differences, and [benchmarks](benchmarks.md) for measured workloads and methodology.
 
@@ -17,6 +17,8 @@ Start with [build, run and test](build-run-test.md) and [architecture](architect
 | Bit operations and probabilistic cardinality | [Bitmaps and HyperLogLog](bitmaps-and-hyperloglog.md) |
 | Stream records and consumer groups | [Streams](streams.md) |
 | Vector similarity search, attributes and filters | [Vector sets](vector-sets.md) |
+| JSON documents, paths and updates | [JSON documents](json.md) |
+| Search over hashes and JSON, hybrid retrieval and Python clients | [Search](search.md) |
 | Subscription delivery, notifications and cache invalidation | [Pub/sub, notifications and tracking](pubsub-notifications-tracking.md) |
 | Queued transactions, watches and blocked clients | [Transactions](transactions.md) |
 | Lua scripts, Function libraries, debugging and cancellation | [Scripting](scripting.md) |

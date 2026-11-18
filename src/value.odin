@@ -10,6 +10,7 @@ Obj_Type :: enum u8 {
 	Hash,
 	Stream,
 	Vectorset,
+	Json,
 }
 
 Obj_Encoding :: enum u8 {
@@ -199,6 +200,8 @@ type_name :: proc "contextless" (t: Obj_Type) -> string {
 		return "stream"
 	case .Vectorset:
 		return "vectorset"
+	case .Json:
+		return "ReJSON-RL"
 	}
 	return "none"
 }

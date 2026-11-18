@@ -105,6 +105,9 @@ object_release :: proc "contextless" (type: Obj_Type, obj: rawptr) -> int {
 	if type == .Vectorset {
 		return vset_object_release(obj)
 	}
+	if type == .Json {
+		return json_object_release(obj)
+	}
 	if type != .Hash || obj == nil {
 		return 0
 	}
@@ -118,6 +121,9 @@ object_release :: proc "contextless" (type: Obj_Type, obj: rawptr) -> int {
 object_move :: proc "contextless" (type: Obj_Type, obj: rawptr, from: ^Db, to: ^Db) -> int {
 	if type == .Vectorset {
 		return vset_object_moved(obj)
+	}
+	if type == .Json {
+		return object_held_of(type, obj)
 	}
 	if type != .Hash || obj == nil {
 		return 0
@@ -167,6 +173,7 @@ hash_copy_attach :: proc(dst: ^Entry, key: []u8, obj: rawptr, min_expire: u64) {
 		ht.set_key_ref(h, hash_key_ref_new(key, dst.db.hreg))
 		ht.registry_add(dst.db.hreg, h, min_expire)
 	}
+	search_hash_changed(dst.db, key, h)
 }
 
 c_atoi :: proc "contextless" (s: []u8) -> i64 {
@@ -212,9 +219,12 @@ hash_sync :: #force_inline proc "contextless" (db: ^Db, h: ht.Hash) {
 }
 
 @(private)
-hash_done :: #force_inline proc "contextless" (e: ^Entry, h: ht.Hash) {
+hash_done :: #force_inline proc "contextless" (e: ^Entry, h: ht.Hash, index_change: bool = true) {
 	entry_set_encoding(e, hash_obj_encoding(h))
 	hash_sync(e.db, h)
+	if index_change && search_active_in(e.db) {
+		search_hash_changed(e.db, key_bytes(e.kp, &e.db.slab), h)
+	}
 }
 
 @(private)

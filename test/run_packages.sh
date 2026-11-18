@@ -158,6 +158,21 @@ run_script "test/compatibility/labels_persistence.py" "labels-persistence-coordi
 run_script "test/compatibility/labels_persistence.py" "labels-persistence-workers" --server "$server_binary" --keyspace-threads 2
 run_script "test/compatibility/owners_persistence.py" "owners-persistence-coordinator" --server "$server_binary" --keyspace-threads 0
 run_script "test/compatibility/owners_persistence.py" "owners-persistence-workers" --server "$server_binary" --keyspace-threads 2
+run_script "test/compatibility/search_definitions.py" "search-definitions" --server "$server_binary"
+run_script "test/compatibility/search_maintenance.py" "search-maintenance-coordinator" --server "$server_binary" --keyspace-threads 0
+run_script "test/compatibility/search_maintenance.py" "search-maintenance-workers" --server "$server_binary" --keyspace-threads 2
+run_script "test/compatibility/hash_search.py" "hash-search-coordinator" --server "$server_binary" --keyspace-threads 0
+run_script "test/compatibility/hash_search.py" "hash-search-workers" --server "$server_binary" --keyspace-threads 2
+run_script "test/compatibility/search_pipeline.py" "search-pipeline-coordinator" --server "$server_binary" --keyspace-threads 0
+run_script "test/compatibility/search_pipeline.py" "search-pipeline-workers" --server "$server_binary" --keyspace-threads 2
+run_script "test/compatibility/search_advanced.py" "search-advanced-coordinator" --server "$server_binary" --keyspace-threads 0
+run_script "test/compatibility/search_advanced.py" "search-advanced-workers" --server "$server_binary" --keyspace-threads 2
+run_script "test/compatibility/json_commands.py" "json-coordinator" --server "$server_binary" --keyspace-threads 0
+run_script "test/compatibility/json_commands.py" "json-workers" --server "$server_binary" --keyspace-threads 2
+run_script "test/compatibility/json_search.py" "json-search-coordinator" --server "$server_binary" --keyspace-threads 0
+run_script "test/compatibility/json_search.py" "json-search-workers" --server "$server_binary" --keyspace-threads 2
+run_script "test/compatibility/search_persistence.py" "search-persistence" --server "$server_binary"
+run_script "test/compatibility/search_quota.py" "search-quota" --server "$server_binary"
 
 if [ "$ran" -eq 0 ]; then
 	echo "no test packages found yet"

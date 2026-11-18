@@ -67,7 +67,6 @@ reader_init_file :: proc "contextless" (r: ^Reader, fd: linux.Fd, checksum: bool
 	r.owned = true
 }
 
-@(private)
 reader_remaining :: proc "contextless" (r: ^Reader) -> i64 {
 	if !r.from_file {
 		return i64(r.end - r.pos)
@@ -303,7 +302,6 @@ take :: proc "contextless" (r: ^Reader, n: int) -> ([]u8, bool) {
 	return s, true
 }
 
-@(private)
 take_into :: proc "contextless" (r: ^Reader, dst: [^]u8, n: int) -> bool {
 	done := 0
 	for done < n {

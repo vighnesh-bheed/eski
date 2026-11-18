@@ -58,6 +58,7 @@ Hooks :: struct {
 Options :: struct {
 	dialect:       int,
 	verbatim:      bool,
+	explain:       bool,
 	language:      string,
 	params:        []Param,
 	hooks:         Hooks,

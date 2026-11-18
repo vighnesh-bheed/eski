@@ -310,7 +310,7 @@ vset_replies_both_protocols :: proc(t: ^testing.T) {
 	testing.expect_value(t, vt_run(&v, cmd_vadd, "VADD", "v", "VALUES", "2", "1", "0", "e", "BIN"), "-ERR asked quantization mismatch with existing vector set\r\n")
 	testing.expect_value(t, vt_run(&v, cmd_type, "TYPE", "v"), "+vectorset\r\n")
 	testing.expect_value(t, vt_run(&v, cmd_copy, "COPY", "v", "w"), "-ERR not supported for this module key\r\n")
-	testing.expect_value(t, vt_run(&v, cmd_module, "MODULE", "LIST"), "*1\r\n%4\r\n$4\r\nname\r\n$9\r\nvectorset\r\n$3\r\nver\r\n:1\r\n$4\r\npath\r\n$0\r\n\r\n$4\r\nargs\r\n*0\r\n")
+	testing.expect_value(t, vt_run(&v, cmd_module, "MODULE", "LIST"), "*3\r\n%4\r\n$4\r\nname\r\n$9\r\nvectorset\r\n$3\r\nver\r\n:1\r\n$4\r\npath\r\n$0\r\n\r\n$4\r\nargs\r\n*0\r\n%4\r\n$4\r\nname\r\n$6\r\nsearch\r\n$3\r\nver\r\n:81001\r\n$4\r\npath\r\n$0\r\n\r\n$4\r\nargs\r\n*0\r\n%4\r\n$4\r\nname\r\n$6\r\nReJSON\r\n$3\r\nver\r\n:81000\r\n$4\r\npath\r\n$0\r\n\r\n$4\r\nargs\r\n*0\r\n")
 }
 
 @(test)

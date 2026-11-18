@@ -95,7 +95,6 @@ Hnsw_Source :: struct {
 	epsilon:    f64,
 	encoded:    vmath.Query,
 	user:       ^Vector_Query,
-	candidates: [dynamic]hnsw.Candidate,
 	allocator:  runtime.Allocator,
 }
 
@@ -142,7 +141,6 @@ hnsw_source_make :: proc(field: ^Field, allocator: runtime.Allocator) -> (Vector
 	h.slot_doc = make([dynamic]u32, allocator)
 	h.slot_arena = make([dynamic]u32, allocator)
 	h.doc_slot = make(map[u32]u32, 16, allocator)
-	h.candidates = make([dynamic]hnsw.Candidate, allocator)
 	q, qe := vmath.query_alloc(&h.arena, allocator)
 	if qe != nil {
 		hnsw_source_destroy(h)
@@ -173,7 +171,6 @@ hnsw_source_destroy :: proc(h: ^Hnsw_Source) {
 	delete(h.slot_doc)
 	delete(h.slot_arena)
 	delete(h.doc_slot)
-	delete(h.candidates)
 	if h.query != nil {
 		runtime.mem_free(raw_data(h.query), a)
 	}
@@ -258,6 +255,7 @@ hnsw_source_nearest :: proc(ctx: rawptr, q: ^Vector_Query, out: ^[dynamic]Vector
 	if q.k <= 0 || len(h.doc_slot) == 0 {
 		return .None
 	}
+	defer h.user = nil
 	if !hnsw_encode(h, q) {
 		return .Vector_Source
 	}
@@ -269,24 +267,27 @@ hnsw_source_nearest :: proc(ctx: rawptr, q: ^Vector_Query, out: ^[dynamic]Vector
 	if want <= 0 {
 		return .None
 	}
-	resize(&h.candidates, want)
+	candidates := make([]hnsw.Candidate, want, context.temp_allocator)
+	scratch: hnsw.Scratch
+	hnsw.scratch_init(&scratch, context.temp_allocator)
+	defer hnsw.scratch_destroy(&scratch)
 	ef := max(q.ef_runtime if q.ef_runtime > 0 else h.ef_runtime, want)
 	n: int
 	err: hnsw.Error
 	if q.accept == nil {
-		n, err = hnsw.search(&h.graph, &h.scratch, hnsw_query_distance, h, want, ef, h.candidates[:])
+		n, err = hnsw.search(&h.graph, &scratch, hnsw_query_distance, h, want, ef, candidates)
 	} else if q.policy == .Adhoc_Bf {
-		n, err = hnsw.brute_force(&h.graph, &h.scratch, hnsw_query_distance, h, want, h.candidates[:], hnsw_accept, h)
+		n, err = hnsw.brute_force(&h.graph, &scratch, hnsw_query_distance, h, want, candidates, hnsw_accept, h)
 	} else {
-		n, _, err = hnsw.search_filtered(&h.graph, &h.scratch, hnsw_query_distance, h, want, ef, hnsw_accept, h, 0, h.candidates[:])
+		n, _, err = hnsw.search_filtered(&h.graph, &scratch, hnsw_query_distance, h, want, ef, hnsw_accept, h, 0, candidates)
 		if err == .None && n < want {
-			n, err = hnsw.brute_force(&h.graph, &h.scratch, hnsw_query_distance, h, want, h.candidates[:], hnsw_accept, h)
+			n, err = hnsw.brute_force(&h.graph, &scratch, hnsw_query_distance, h, want, candidates, hnsw_accept, h)
 		}
 	}
 	if err != .None {
 		return .Out_Of_Memory
 	}
-	return hnsw_emit(h, h.candidates[:n], out)
+	return hnsw_emit(h, candidates[:n], out)
 }
 
 hnsw_source_within :: proc(ctx: rawptr, q: ^Vector_Query, out: ^[dynamic]Vector_Hit) -> Error {
@@ -294,6 +295,7 @@ hnsw_source_within :: proc(ctx: rawptr, q: ^Vector_Query, out: ^[dynamic]Vector_
 	if len(h.doc_slot) == 0 {
 		return .None
 	}
+	defer h.user = nil
 	if !hnsw_encode(h, q) {
 		return .Vector_Source
 	}
@@ -304,9 +306,12 @@ hnsw_source_within :: proc(ctx: rawptr, q: ^Vector_Query, out: ^[dynamic]Vector_
 	}
 	r := hnsw.Range{radius = radius, epsilon = f32(epsilon), inclusive = true}
 	found := make([dynamic]hnsw.Candidate, context.temp_allocator)
+	scratch: hnsw.Scratch
+	hnsw.scratch_init(&scratch, context.temp_allocator)
+	defer hnsw.scratch_destroy(&scratch)
 	accept: hnsw.Accept_Proc = hnsw_accept if q.accept != nil else nil
 	ef := q.ef_runtime if q.ef_runtime > 0 else h.ef_runtime
-	_, err := hnsw.search_range(&h.graph, &h.scratch, hnsw_query_distance, h, r, max(ef, 1), &found, accept, h)
+	_, err := hnsw.search_range(&h.graph, &scratch, hnsw_query_distance, h, r, max(ef, 1), &found, accept, h)
 	if err != .None {
 		return .Out_Of_Memory
 	}

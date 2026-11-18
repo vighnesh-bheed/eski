@@ -34,6 +34,8 @@ Lua_Invocation :: struct {
 	argv: [][]u8,
 	function: bool,
 	db: ^Db,
+	outer_db: ^Db,
+	outer_db_expired: bool,
 	allow_oom: bool,
 	loading: bool,
 	propagation: i32,
@@ -445,11 +447,6 @@ lua_inner :: proc(run: ^Lua_Invocation, argv: [][]u8) {
 		stat_reject(hot, argv)
 		return
 	}
-	saved_feed := aof.feed
-	if run.propagation & 1 == 0 {
-		aof.feed = false
-	}
-	defer aof.feed = saved_feed
 	saved_db, saved_touch, saved_stat, saved_deny := db_cur, store_no_touch, stat_cur, deny_blocking
 	defer {
 		db_cur, store_no_touch, stat_cur, deny_blocking = saved_db, saved_touch, saved_stat, saved_deny
@@ -462,6 +459,11 @@ lua_inner :: proc(run: ^Lua_Invocation, argv: [][]u8) {
 			return
 		}
 	}
+	saved_feed := aof.feed
+	if run.propagation & 1 == 0 {
+		aof.feed = false
+	}
+	defer aof.feed = saved_feed
 	client.last_cmd = cmd.name
 	dirty := pst.dirty
 	if aof.feed {
@@ -722,6 +724,7 @@ lua_invoke :: proc(client: ^Conn, argv: [][]u8, numkeys: int, text: []u8, readon
 		run.debug.child = debug_child
 	}
 	saved_stat, saved_db, saved_touch, saved_ps, saved_deny := stat_cur, db_cur, store_no_touch, ps_exec, deny_blocking
+	run.outer_db = saved_db
 	lua_active = &run
 	ps_exec, deny_blocking = client, true
 	owned_effect_group := aof.feed && !aof.in_tx

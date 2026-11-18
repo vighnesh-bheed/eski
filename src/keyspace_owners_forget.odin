@@ -77,6 +77,35 @@ owner_labels_used :: proc(e: ^Owner_Entry) -> int {
 			append(&labels, q.db.label)
 		}
 	}
+	if definitions, has_definitions := search_registry[e.number]; has_definitions {
+		for marking in definitions {
+			known := false
+			for l in labels {
+				if l == marking {
+					known = true
+					break
+				}
+			}
+			if !known {
+				append(&labels, marking)
+			}
+		}
+	}
+	for scope in search_aliases {
+		if scope.owner != e.number {
+			continue
+		}
+		known := false
+		for l in labels {
+			if l == scope.label {
+				known = true
+				break
+			}
+		}
+		if !known {
+			append(&labels, scope.label)
+		}
+	}
 	return len(labels)
 }
 
@@ -114,6 +143,7 @@ keyspace_owner_forget :: proc(e: ^Owner_Entry) -> Owner_Counts {
 	}
 	o := e.number
 	counts.bytes = i64(owner_used_live(e))
+	search_owner_parts_clear(e, true)
 	counts.keys = i64(owner_live_keys(e))
 	parts := make([dynamic]^Owner_Part, context.temp_allocator)
 	owner_parts_of(e, &parts)
@@ -163,7 +193,7 @@ keyspace_owner_forget :: proc(e: ^Owner_Entry) -> Owner_Counts {
 }
 
 keyspace_owner_holds :: proc(e: ^Owner_Entry) -> bool {
-	return owner_live_keys(e) > 0
+	return owner_live_keys(e) > 0 || search_owner_charges[e.number] > 0
 }
 
 keyspace_owner_info :: proc(e: ^Owner_Entry) -> Owner_Info {

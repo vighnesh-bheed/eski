@@ -16,7 +16,7 @@ hash_rename :: proc(key: []u8) {
 	}
 	hash_key_ref_free(h)
 	ht.set_key_ref(h, hash_key_ref_new(key, e.db.hreg))
-	hash_done(e, h)
+	hash_done(e, h, false)
 }
 
 hash_move_registry :: proc "contextless" (h: ht.Hash, from: ^Db, to: ^Db) {
@@ -54,6 +54,7 @@ hash_lazy :: proc(key: []u8, e: ^Entry, h: ht.Hash, read: ht.Field_Read) -> (del
 	if .Reaped in read {
 		stat_expired_subkeys += 1
 		hash_sync(e.db, h)
+		search_hash_changed(e.db, key, h)
 		hash_notify_lazy(key, read)
 	}
 	return false
@@ -145,7 +146,7 @@ hexpire_generic :: proc(c: ^Conn, argv: [][]u8, name: string, unit_seconds: bool
 	}
 	pst.dirty += i64(deleted + updated)
 	stat_expired_subkeys += i64(deleted)
-	hash_done(e, h)
+	hash_done(e, h, deleted > 0)
 	owned: []u8
 	defer delete(owned)
 	if empty {
@@ -240,7 +241,7 @@ cmd_hpersist :: proc(c: ^Conn, argv: [][]u8) {
 	clear(&hash_ints)
 	if ht.persist_fields(h, fields, hash_now(), &hash_ints) {
 		pst.dirty += 1
-		hash_done(e, h)
+		hash_done(e, h, false)
 		signal_key(argv[1])
 		notify(.Hash, "hpersist", argv[1])
 	}
@@ -301,6 +302,7 @@ hash_expire_partition :: proc(db: ^Db, now: u64) -> int {
 		} else {
 			hash_sync(db, item.h)
 			key := hash_key_ref_bytes(item.key)
+			search_hash_changed(db, key, item.h)
 			notify_in(.Hash, "hexpired", key, db)
 			signal_key_expired(key, db)
 		}

@@ -43,6 +43,8 @@ Acl_Cat :: enum u8 {
 	Connection,
 	Transaction,
 	Scripting,
+	Search,
+	Json,
 }
 
 Acl_Cats :: bit_set[Acl_Cat;u32]
@@ -188,6 +190,8 @@ acl_names := [Acl_Cat]string {
 	.Connection  = "@connection",
 	.Transaction = "@transaction",
 	.Scripting   = "@scripting",
+	.Search      = "@search",
+	.Json        = "@json",
 }
 
 @(private = "file")
@@ -350,7 +354,7 @@ doc_sub_find :: proc(parent: int, sub: []u8) -> int {
 	buf[n] = '|'
 	n += 1
 	for b in sub {
-		buf[n] = lower(b)
+		buf[n] = command_subcommand_byte(name, b)
 		n += 1
 	}
 	return doc_find(string(buf[:n]))
@@ -749,13 +753,17 @@ reply_docs :: proc(c: ^Conn, i: int) {
 	}
 	reply_bulk_str(c, "group")
 	reply_bulk_str(c, group_names[d.group])
-	if d.module != "" {
+	if d.module != "" && d.module != JSON_MODULE_NAME {
 		reply_bulk_str(c, "module")
 		reply_bulk_str(c, d.module)
 	}
 	if d.complexity != "" {
 		reply_bulk_str(c, "complexity")
 		reply_bulk_str(c, d.complexity)
+	}
+	if d.module == JSON_MODULE_NAME {
+		reply_bulk_str(c, "module")
+		reply_bulk_str(c, d.module)
 	}
 	if d.doc_flags != {} {
 		reply_bulk_str(c, "doc_flags")
@@ -912,7 +920,7 @@ list_match :: proc(filter: List_Filter, arg: []u8, name: string, acl: Acl_Cats, 
 	case .None:
 		return true
 	case .Module:
-		return module != "" && eq_nocase(arg, module)
+		return module != "" && eq_fold(arg, transmute([]u8)module)
 	case .Aclcat:
 		cat, ok := acl_cat_by_name(arg)
 		return ok && cat in acl

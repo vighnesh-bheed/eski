@@ -166,7 +166,7 @@ mem_keyspace :: #force_inline proc "contextless" () -> int {
 }
 
 mem_counter_total :: #force_inline proc "contextless" () -> int {
-	return diagnostics_memory_used() + intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed) + ht.maintenance_metadata() + st.maintenance_metadata() + zt.maintenance_metadata() + mem_startup + db_used_memory + mem_keyspace() + storage_dead_payload + client_metadata_total + conn_mem + tx_mem_total + mem_aof_buffer() + lazyfree_pending_bytes() + compute_reserved + keyspace_memory_used() + lua_host_memory_used() + owner_struct_bytes + ow.table_bytes(&owner_table)
+	return search_memory.bytes + diagnostics_memory_used() + intrinsics.atomic_load_explicit(&storage_metadata_owned, .Relaxed) + ht.maintenance_metadata() + st.maintenance_metadata() + zt.maintenance_metadata() + mem_startup + db_used_memory + mem_keyspace() + storage_dead_payload + client_metadata_total + conn_mem + tx_mem_total + mem_aof_buffer() + lazyfree_pending_bytes() + compute_reserved + keyspace_memory_used() + lua_host_memory_used() + owner_struct_bytes + ow.table_bytes(&owner_table)
 }
 
 mem_registry_total :: #force_inline proc "contextless" () -> int {
@@ -587,6 +587,9 @@ entry_memory_seen :: proc(e: ^Entry) -> int {
 	if v := entry_object(e, .Vectorset); v != nil {
 		return vset_view_memory(v)
 	}
+	if json := json_object_at(e); json != nil {
+		return json_object_content_memory(json)
+	}
 	return int(e.cap)
 }
 
@@ -611,6 +614,9 @@ entry_memory :: proc(e: ^Entry) -> int {
 			return vset_view_memory(v)
 		}
 		return vset_object_acct(v)
+	}
+	if json := json_object_at(e); json != nil {
+		return json.bytes
 	}
 	return int(e.cap)
 }

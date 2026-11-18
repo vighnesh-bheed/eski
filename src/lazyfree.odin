@@ -118,6 +118,8 @@ object_acct_of :: proc "contextless" (type: Obj_Type, obj: rawptr) -> int {
 		return ht.Hash(obj).acct
 	case .Vectorset:
 		return vset_object_acct(obj)
+	case .Json:
+		return (cast(^Json_Object)obj).bytes
 	}
 	return 0
 }
@@ -176,6 +178,8 @@ lazyfree_effort :: proc(type: Obj_Type, obj: rawptr) -> int {
 		return effort
 	case .Vectorset:
 		return max(vset_object_card(obj), 1)
+	case .Json:
+		return json_object_content_memory(cast(^Json_Object)obj) / 8
 	}
 	return 1
 }

@@ -8,7 +8,6 @@ import "core:slice"
 import "core:strconv"
 import "core:strings"
 import ftq "../ftquery"
-import "../bm25std"
 import "../doctable"
 import "../label"
 import "../numindex"
@@ -35,13 +34,21 @@ Matchers :: [Matcher_Kind]^termdict.Matcher
 
 Execute_Options :: struct {
 	scorer:        ^retrieve.Scorer,
+	scorer_kind:   Scorer_Kind,
+	tanh_factor:   f64,
+	payload:       string,
+	explain_scores: bool,
 	slop:          Maybe(int),
 	in_order:      bool,
 	limit:         Maybe(int),
 	visibility:    ^label.Visibility,
 	unscored_tags: bool,
+	track_matches: bool,
 	matchers:      ^Matchers,
 	expansions:    Maybe(int),
+	minimum_pattern: Maybe(int),
+	builtin_patterns: bool,
+	view:          ^Execution_View,
 }
 
 Hit :: struct {
@@ -64,6 +71,8 @@ Result :: struct {
 	knn_alias: string,
 	yields:    [dynamic]Yield,
 	truncated: bool,
+	matches:   map[u32][]string,
+	explanations: map[u32]retrieve.Explanation,
 	arena:     mem.Dynamic_Arena,
 	allocator: runtime.Allocator,
 }
@@ -112,13 +121,6 @@ mask_fields :: proc "contextless" (mask: ftq.Field_Mask) -> postings.Fields {
 	return postings.Fields(mask)
 }
 
-term_count :: proc(b: ^Builder, id: termdict.Id) -> u64 {
-	if b.opts.visibility != nil {
-		return termstats.term_visible(&b.ix.stats, u32(id), b.opts.visibility)
-	}
-	return termstats.term_total(&b.ix.stats, u32(id))
-}
-
 term_built :: proc(b: ^Builder, id: termdict.Id, mask: ftq.Field_Mask, weight: f64) -> Built {
 	if int(id) >= len(b.ix.lists) || b.ix.lists[id] == nil {
 		return NONE_BUILT
@@ -126,13 +128,16 @@ term_built :: proc(b: ^Builder, id: termdict.Id, mask: ftq.Field_Mask, weight: f
 	if mask != ftq.ALL_FIELDS && b.ix.term_fields[id] & mask_fields(mask) == 0 {
 		return NONE_BUILT
 	}
-	n := term_count(b, id)
-	if b.opts.visibility != nil && n == 0 {
+	n, present := term_frequency_in_view(b, TEXT_DICTIONARY, term_dictionary(b.ix, TEXT_DICTIONARY), id)
+	if !present {
 		return NONE_BUILT
 	}
 	tc := new(retrieve.Term_Cursor, b.a)
 	retrieve.term_cursor_init(tc, b.ix.lists[id], b.deleted, mask_fields(mask), retrieve.leaf(.Term, weight), postings.ALL_FIELDS, b.a)
 	retrieve.prepare(b.scorer, &tc.leaf, n)
+	if b.opts.track_matches || b.opts.explain_scores {
+		tc.match, _ = termdict.text(&b.ix.terms, id)
+	}
 	return Built{cursor = tc, positional = true}
 }
 
@@ -147,30 +152,31 @@ term_lookup :: proc(b: ^Builder, s: string, mask: ftq.Field_Mask, weight: f64) -
 all_docs :: proc(b: ^Builder, kind: retrieve.Leaf_Kind) -> Built {
 	bc := new(retrieve.Bitmap_Cursor, b.a)
 	retrieve.bitmap_cursor_init(bc, &b.ix.docs.live, nil, retrieve.leaf(kind))
+	if b.opts.explain_scores && kind == .Wildcard {
+		bc.match = "*"
+	}
 	retrieve.prepare(b.scorer, &bc.leaf, 0)
 	return Built{cursor = bc}
 }
 
-tag_count :: proc(b: ^Builder, t: ^Tag_Index, id: termdict.Id) -> u64 {
-	if b.opts.visibility != nil {
-		return termstats.term_visible(&t.stats, u32(id), b.opts.visibility)
-	}
-	return termstats.term_total(&t.stats, u32(id))
-}
-
-tag_value_built :: proc(b: ^Builder, t: ^Tag_Index, id: termdict.Id, weight: f64) -> Built {
+tag_value_built :: proc(b: ^Builder, field: int, id: termdict.Id, weight: f64) -> Built {
+	t := b.ix.slots[field].tag
 	bm := tagindex.bitmap(&t.values, id)
 	if bm == nil || roaring.is_empty(bm) {
 		return NONE_BUILT
 	}
-	n := tag_count(b, t, id)
-	if b.opts.visibility != nil && n == 0 {
+	n, present := term_frequency_in_view(b, field, term_dictionary(b.ix, field), id)
+	if !present {
 		return NONE_BUILT
 	}
 	kind := retrieve.Leaf_Kind.Filter if b.opts.unscored_tags else retrieve.Leaf_Kind.Tag
 	bc := new(retrieve.Bitmap_Cursor, b.a)
 	retrieve.bitmap_cursor_init(bc, bm, b.deleted, retrieve.leaf(kind, weight))
 	retrieve.prepare(b.scorer, &bc.leaf, n)
+	if b.opts.track_matches || b.opts.explain_scores {
+		dictionary := term_dictionary(b.ix, field)
+		bc.match, _ = termdict.text(dictionary.dict, id)
+	}
 	return Built{cursor = bc}
 }
 
@@ -204,14 +210,18 @@ matcher_for :: proc(b: ^Builder, kind: ftq.Node_Kind, distance: int, stats: ^ter
 	return nil
 }
 
-expand_pattern :: proc(b: ^Builder, n: ^ftq.Node, dict: ^termdict.Dictionary, stats: ^termstats.Stats) -> []termdict.Id {
-	m := matcher_for(b, n.kind, n.distance, stats)
+expand_pattern :: proc(b: ^Builder, n: ^ftq.Node, field: int) -> []termdict.Id {
+	if b.opts.builtin_patterns || (n.kind == .Prefix && view_indexes(b.opts) != nil && (b.opts.matchers == nil || b.opts.matchers[.Prefix] == nil)) {
+		return merged_pattern(b, n, field)
+	}
+	source := term_dictionary(b.ix, field)
+	m := matcher_for(b, n.kind, n.distance, source.stats)
 	if m == nil {
 		fail(b, .Unsupported)
 		return nil
 	}
 	ids := make([dynamic]termdict.Id, b.a)
-	truncated, e := termdict.expand(m, dict, n.text, b.expand, &ids)
+	truncated, e := termdict.expand(m, source.dict, n.text, b.expand, &ids)
 	if e != .None {
 		fail(b, .Out_Of_Memory)
 		return nil
@@ -244,7 +254,7 @@ union_built :: proc(b: ^Builder, parts: []^retrieve.Cursor, weight: f64, mode: r
 }
 
 text_pattern :: proc(b: ^Builder, n: ^ftq.Node) -> Built {
-	ids := expand_pattern(b, n, &b.ix.terms, &b.ix.stats)
+	ids := expand_pattern(b, n, TEXT_DICTIONARY)
 	parts := make([dynamic]^retrieve.Cursor, b.a)
 	for id in ids {
 		t, _ := termdict.text(&b.ix.terms, id)
@@ -304,18 +314,18 @@ tag_node :: proc(b: ^Builder, n: ^ftq.Node) -> Built {
 			if !found {
 				continue
 			}
-			built := tag_value_built(b, t, vid, n.weight)
+			built := tag_value_built(b, n.field, vid, n.weight)
 			if built.cursor != nil {
 				append(&parts, built.cursor)
 			}
 		case .Prefix, .Suffix, .Infix, .Wildcard_Pattern, .Fuzzy:
-			ids := expand_pattern(b, c, &t.values.values, &t.stats)
+			ids := expand_pattern(b, c, n.field)
 			if b.err != .None {
 				return NONE_BUILT
 			}
 			group := make([dynamic]^retrieve.Cursor, b.a)
 			for vid in ids {
-				built := tag_value_built(b, t, vid, n.weight)
+				built := tag_value_built(b, n.field, vid, n.weight)
 				if built.cursor != nil {
 					append(&group, built.cursor)
 				}
@@ -345,8 +355,15 @@ numeric_node :: proc(b: ^Builder, n: ^ftq.Node) -> Built {
 		return NONE_BUILT
 	}
 	ac := new(retrieve.Array_Cursor, b.a)
-	retrieve.array_cursor_init(ac, docs[:], b.deleted, retrieve.leaf(.Filter))
+	retrieve.array_cursor_init(ac, docs[:], b.deleted, value_filter_leaf(b))
 	return Built{cursor = ac}
+}
+
+value_filter_leaf :: proc(b: ^Builder) -> retrieve.Leaf {
+	if b.opts.scorer != nil {
+		return retrieve.leaf(.Filter)
+	}
+	return {kind = .Value, weight = 1, prepared = 1}
 }
 
 missing_node :: proc(b: ^Builder, n: ^ftq.Node) -> Built {
@@ -585,13 +602,17 @@ intersect_node :: proc(b: ^Builder, id: ftq.Node_Id) -> Built {
 		append(&required, base.cursor)
 	}
 	core: ^retrieve.Cursor
-	if len(required) == 1 && len(optional) == 0 {
+	single := len(required) == 1 && len(optional) == 0
+	if single {
 		core = required[0]
 	} else {
 		ix := new(retrieve.Intersection, b.a)
 		if retrieve.intersection_init(ix, required[:], optional[:], n.weight, .Auto, b.a) != .None {
 			fail(b, .Out_Of_Memory)
 			return NONE_BUILT
+		}
+		if b.opts.explain_scores {
+			ix.trace_optional = optional[:]
 		}
 		core = ix
 	}
@@ -618,6 +639,9 @@ intersect_node :: proc(b: ^Builder, id: ftq.Node_Id) -> Built {
 		}
 		x := new(retrieve.Difference, b.a)
 		retrieve.difference_init(x, core, exclude)
+		if b.opts.explain_scores || legacy_scorer(b.opts.scorer_kind) {
+			x.trace_excluded, x.trace_flatten, x.trace_weight = len(negative), !single, n.weight
+		}
 		return Built{cursor = x, positional = len(positional) > 0}
 	}
 	return Built{cursor = core, positional = len(positional) > 0}
@@ -661,6 +685,9 @@ optional_node :: proc(b: ^Builder, n: ^ftq.Node) -> Built {
 		fail(b, .Out_Of_Memory)
 		return NONE_BUILT
 	}
+	if b.opts.explain_scores {
+		ix.trace_optional = opt
+	}
 	return Built{cursor = ix}
 }
 
@@ -682,6 +709,9 @@ union_node :: proc(b: ^Builder, n: ^ftq.Node) -> Built {
 }
 
 build :: proc(b: ^Builder, id: ftq.Node_Id) -> Built {
+	if !check_deadline(b) {
+		return NONE_BUILT
+	}
 	if id == ftq.NO_NODE || b.err != .None {
 		return NONE_BUILT
 	}
@@ -713,7 +743,9 @@ build :: proc(b: ^Builder, id: ftq.Node_Id) -> Built {
 		return missing_node(b, n)
 	case .Vector:
 		return vector_node(b, id)
-	case .Geo, .Geoshape:
+	case .Geo:
+		return geo_node(b, n)
+	case .Geoshape:
 		fail(b, .Unsupported)
 		return NONE_BUILT
 	}
@@ -725,7 +757,7 @@ document_of :: proc(ix: ^Index, id: u32) -> (retrieve.Document, bool) {
 	if d == nil {
 		return {}, false
 	}
-	return retrieve.Document{id = id, length = d.length, max_frequency = d.max_frequency, score = d.score}, true
+	return scoring_document(d, id), true
 }
 
 visible_doc :: proc(ix: ^Index, v: ^label.Visibility, id: u32) -> bool {
@@ -742,7 +774,7 @@ collection_of :: proc(ix: ^Index, v: ^label.Visibility) -> retrieve.Collection {
 }
 
 Session :: struct {
-	params: bm25std.Params,
+	params: Scorer_State,
 	scorer: retrieve.Scorer,
 }
 
@@ -753,15 +785,14 @@ builder_init :: proc(b: ^Builder, ix: ^Index, parsed: ^ftq.Parsed, opts: ^Execut
 	if opts.scorer != nil {
 		b.scorer = opts.scorer
 	} else {
-		session.params = bm25std.params_default()
-		session.scorer = bm25std.scorer(&session.params)
+		session.scorer = scorer_init(&session.params, opts.scorer_kind, opts.tanh_factor)
 		b.scorer = &session.scorer
 	}
 	b.deleted = &ix.docs.deleted
 	b.slop = opts.slop.? or_else -1
 	b.limit = opts.limit.? or_else -1
 	b.expand = opts.expansions.? or_else prefix.LIMIT
-	retrieve.begin(b.scorer, collection_of(ix, opts.visibility))
+	retrieve.begin(b.scorer, view_collection(ix, opts))
 }
 
 result_init :: proc(r: ^Result, allocator: runtime.Allocator) {
@@ -774,6 +805,16 @@ result_init :: proc(r: ^Result, allocator: runtime.Allocator) {
 execute :: proc(ix: ^Index, parsed: ^ftq.Parsed, options: Execute_Options, allocator := context.allocator) -> (result: Result, err: Error, query_err: ftq.Error) {
 	opts := options
 	result_init(&result, allocator)
+	indexes := view_indexes(&opts)
+	if !view_includes(indexes, ix) {
+		return result, .None, {}
+	}
+	if execution_timed_out(&opts) {
+		return result, .Timeout, {}
+	}
+	if !view_has_live_counts(indexes, opts.visibility) {
+		return result, .Unsupported, {}
+	}
 	if parsed == nil || parsed.query.root == ftq.NO_NODE {
 		return result, .None, {}
 	}
@@ -784,7 +825,7 @@ execute :: proc(ix: ^Index, parsed: ^ftq.Parsed, options: Execute_Options, alloc
 		return result, b.err, b.query_err
 	}
 	root := build(&b, parsed.query.root)
-	if b.err != .None {
+	if !check_deadline(&b) {
 		return result, b.err, b.query_err
 	}
 	if root.cursor == nil {
@@ -805,14 +846,44 @@ run_root :: proc(b: ^Builder, root: ^retrieve.Cursor) -> (err: Error, query_err:
 		}
 	}
 	s := retrieve.Scoring{scorer = b.scorer}
+	trace_arena: mem.Dynamic_Arena
+	trace_allocator: mem.Allocator
+	if b.opts.scorer == nil && (legacy_scorer(b.opts.scorer_kind) || b.opts.explain_scores) {
+		mem.dynamic_arena_init(&trace_arena, b.result.allocator, b.result.allocator)
+		trace_allocator = mem.dynamic_arena_allocator(&trace_arena)
+	}
+	defer if trace_allocator.procedure != nil {
+		mem.dynamic_arena_destroy(&trace_arena)
+	}
+	matches := make([dynamic]string, b.a) if b.opts.track_matches else nil
+	if b.opts.track_matches {
+		s.matches = &matches
+	}
 	total := 0
-	for d := retrieve.next(root); d != retrieve.END; d = retrieve.next(root) {
-		doc, found := document_of(ix, d)
-		if !found || !visible_doc(ix, b.opts.visibility, d) {
+	for check_deadline(b) {
+		d := retrieve.next(root)
+		if d == retrieve.END {
+			break
+		}
+		doc := doctable.get(&ix.docs, d)
+		if !execution_accepts(ix, b.opts, d, doc) {
 			continue
 		}
-		s.doc = doc
-		value := retrieve.finish(&s, retrieve.score(root, &s), root)
+		s.doc = scoring_document(doc, d)
+		value, explanation := score_document(b, &s, root, doc.key, trace_allocator)
+		if trace_allocator.procedure != nil {
+			mem.dynamic_arena_reset(&trace_arena)
+		}
+		if b.opts.explain_scores {
+			if r.explanations == nil {
+				r.explanations = make(map[u32]retrieve.Explanation, b.a)
+			}
+			r.explanations[d] = explanation
+		}
+		if len(matches) != 0 {
+			save_matches(b, d, matches[:])
+			clear(&matches)
+		}
 		total += 1
 		if keep_all {
 			if _, e := append(&r.hits, Hit{doc = d, score = value, distance = math.nan_f64()}); e != nil {
@@ -821,6 +892,9 @@ run_root :: proc(b: ^Builder, root: ^retrieve.Cursor) -> (err: Error, query_err:
 		} else if retrieve.top_k_push(&top, d, value) != .None {
 			return .Out_Of_Memory, {}
 		}
+	}
+	if !check_deadline(b) {
+		return .Timeout, {}
 	}
 	r.total = total
 	if keep_all {
@@ -841,6 +915,9 @@ run_root :: proc(b: ^Builder, root: ^retrieve.Cursor) -> (err: Error, query_err:
 		for &h in r.hits {
 			h.distance = knn_distance(b.knn, h.doc)
 		}
+	}
+	if !check_deadline(b) {
+		return .Timeout, {}
 	}
 	return .None, {}
 }
@@ -923,31 +1000,35 @@ knn_distance :: proc(k: ^Knn_Cursor, doc: u32) -> f64 {
 }
 
 Filter_Set :: struct {
-	docs:   [dynamic]u32,
-	scores: [dynamic]f64,
-	ix:     ^Index,
-	v:      ^label.Visibility,
-	all:    bool,
+	docs:      [dynamic]u32,
+	scores:    [dynamic]f64,
+	ix:        ^Index,
+	opts:      ^Execute_Options,
+	all:       bool,
+	timed_out: bool,
 }
 
 filter_accept :: proc(ctx: rawptr, id: u32) -> bool {
 	f := (^Filter_Set)(ctx)
-	if f.all {
-		if doctable.get(&f.ix.docs, id) == nil {
+	if f.timed_out || execution_timed_out(f.opts) {
+		f.timed_out = true
+		return false
+	}
+	if !f.all {
+		lo, hi := 0, len(f.docs)
+		for lo < hi {
+			mid := (lo + hi) / 2
+			if f.docs[mid] < id {
+				lo = mid + 1
+			} else {
+				hi = mid
+			}
+		}
+		if lo == len(f.docs) || f.docs[lo] != id {
 			return false
 		}
-		return visible_doc(f.ix, f.v, id)
 	}
-	lo, hi := 0, len(f.docs)
-	for lo < hi {
-		mid := (lo + hi) / 2
-		if f.docs[mid] < id {
-			lo = mid + 1
-		} else {
-			hi = mid
-		}
-	}
-	return lo < len(f.docs) && f.docs[lo] == id
+	return execution_accepts(f.ix, f.opts, id, doctable.get(&f.ix.docs, id))
 }
 
 filter_score :: proc(f: ^Filter_Set, id: u32) -> f64 {
@@ -969,20 +1050,58 @@ filter_score :: proc(f: ^Filter_Set, id: u32) -> f64 {
 	return 0
 }
 
+save_matches :: proc(b: ^Builder, id: u32, words: []string) {
+	if b.result.matches == nil {
+		b.result.matches = make(map[u32][]string, b.a)
+	}
+	copy := make([]string, len(words), b.a)
+	for word, i in words {
+		copy[i] = strings.clone(word, b.a)
+	}
+	b.result.matches[id] = copy
+}
+
 materialize :: proc(b: ^Builder, c: ^retrieve.Cursor, f: ^Filter_Set) {
 	f.ix = b.ix
-	f.v = b.opts.visibility
+	f.opts = b.opts
 	f.docs = make([dynamic]u32, b.a)
 	f.scores = make([dynamic]f64, b.a)
 	s := retrieve.Scoring{scorer = b.scorer}
-	for d := retrieve.next(c); d != retrieve.END; d = retrieve.next(c) {
-		doc, found := document_of(b.ix, d)
-		if !found || !visible_doc(b.ix, f.v, d) {
+	trace_arena: mem.Dynamic_Arena
+	trace_allocator: mem.Allocator
+	if b.opts.scorer == nil && (legacy_scorer(b.opts.scorer_kind) || b.opts.explain_scores) {
+		mem.dynamic_arena_init(&trace_arena, b.result.allocator, b.result.allocator)
+		trace_allocator = mem.dynamic_arena_allocator(&trace_arena)
+	}
+	defer if trace_allocator.procedure != nil {
+		mem.dynamic_arena_destroy(&trace_arena)
+	}
+	matches := make([dynamic]string, b.a) if b.opts.track_matches else nil
+	if b.opts.track_matches {
+		s.matches = &matches
+	}
+	for check_deadline(b) {
+		d := retrieve.next(c)
+		if d == retrieve.END {
+			break
+		}
+		doc := doctable.get(&b.ix.docs, d)
+		if !execution_accepts(b.ix, b.opts, d, doc) {
 			continue
 		}
-		s.doc = doc
-		append(&f.docs, d)
-		append(&f.scores, retrieve.score(c, &s))
+		s.doc = scoring_document(doc, d)
+		if _, err := append(&f.docs, d); err != nil {
+			fail(b, .Out_Of_Memory)
+			return
+		}
+		if _, err := append(&f.scores, retrieve.score(c, &s)); err != nil {
+			fail(b, .Out_Of_Memory)
+			return
+		}
+		if len(matches) != 0 {
+			save_matches(b, d, matches[:])
+			clear(&matches)
+		}
 	}
 }
 
@@ -997,6 +1116,9 @@ blob_size_error :: proc(got, want: int, allocator: mem.Allocator) -> ftq.Error {
 }
 
 validate_tree :: proc(b: ^Builder, id: ftq.Node_Id) -> bool {
+	if !check_deadline(b) {
+		return false
+	}
 	if id == ftq.NO_NODE {
 		return true
 	}
@@ -1104,21 +1226,24 @@ vector_node :: proc(b: ^Builder, id: ftq.Node_Id) -> Built {
 		return NONE_BUILT
 	}
 	q := vector_query_from(v)
-	set := new(Filter_Set, b.a)
+	set: Filter_Set
 	if v.kind == .Knn && has_filter {
-		materialize(b, filter.cursor, set)
-		if len(set.docs) == 0 {
+		materialize(b, filter.cursor, &set)
+		if b.err != .None || len(set.docs) == 0 {
 			return NONE_BUILT
 		}
 		q.accepted = len(set.docs)
 	} else {
 		set.all = true
 		set.ix = b.ix
-		set.v = b.opts.visibility
+		set.opts = b.opts
 		q.accepted = -1
 	}
 	q.accept = filter_accept
-	q.accept_ctx = set
+	q.accept_ctx = &set
+	if !check_deadline(b) {
+		return NONE_BUILT
+	}
 	hits := make([dynamic]Vector_Hit, b.a)
 	e: Error
 	if v.kind == .Knn {
@@ -1128,6 +1253,10 @@ vector_node :: proc(b: ^Builder, id: ftq.Node_Id) -> Built {
 		e = source.nearest(source.ctx, &q, &hits)
 	} else {
 		e = source.within(source.ctx, &q, &hits)
+	}
+	if set.timed_out || !check_deadline(b) {
+		fail(b, .Timeout)
+		return NONE_BUILT
 	}
 	if e == .Blob_Size {
 		b.query_err = blob_size_error(len(q.blob), field_vector_bytes(b.ix, v.field), b.a)
@@ -1140,8 +1269,15 @@ vector_node :: proc(b: ^Builder, id: ftq.Node_Id) -> Built {
 	}
 	live := make([dynamic]Vector_Hit, 0, len(hits), b.a)
 	for h in hits {
-		if doctable.get(&b.ix.docs, h.doc) != nil && filter_accept(set, h.doc) {
-			append(&live, h)
+		if filter_accept(&set, h.doc) {
+			if _, err := append(&live, h); err != nil {
+				fail(b, .Out_Of_Memory)
+				return NONE_BUILT
+			}
+		}
+		if set.timed_out {
+			fail(b, .Timeout)
+			return NONE_BUILT
 		}
 	}
 	if len(live) == 0 {
@@ -1169,7 +1305,7 @@ vector_node :: proc(b: ^Builder, id: ftq.Node_Id) -> Built {
 	for h, i in by_doc {
 		k.docs[i] = h.doc
 		k.distances[i] = h.distance
-		k.scores[i] = filter_score(set, h.doc)
+		k.scores[i] = filter_score(&set, h.doc)
 	}
 	k.field = v.field
 	k.alias = v.score_alias

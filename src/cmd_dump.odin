@@ -134,6 +134,7 @@ Migrate_Outcome :: struct {
 	acked:      int,
 }
 
+
 restore_keyspace_event :: proc(db: ^Db, key: []u8) {
 	signal_key_in(key, db)
 	notify_in(.Generic, "restore", key, db)
@@ -141,7 +142,9 @@ restore_keyspace_event :: proc(db: ^Db, key: []u8) {
 
 dump_payload :: proc(w: ^rdb.Writer, key: []u8, v: Slot_Value) {
 	start := w.len
-	persist_write_value(w, key, v, false)
+	if !persist_write_value(w, key, v, false) {
+		return
+	}
 	rdb.put_u8(w, u8(rdb.RDB_VERSION & 0xff))
 	rdb.put_u8(w, u8((rdb.RDB_VERSION >> 8) & 0xff))
 	sum := rdb.crc64(0, w.buf[start:w.len])
@@ -261,8 +264,16 @@ restore_decode :: proc(r: ^rdb.Reader, payload: []u8, deep: bool) -> (v: Loaded_
 	if kind < 0 || !rdb.is_object_type(kind) {
 		return
 	}
-	v = persist_load_object(r, kind, deep)
-	if r.status != .Ok {
+	if kind == rdb.TYPE_MODULE_2 {
+		id := persist_module_id(r)
+		if id == JSON_RDB_MODULE {
+			r.end -= DUMP_TRAILER_LEN
+		}
+		v = persist_load_module(r, id)
+	} else {
+		v = persist_load_object(r, kind, deep)
+	}
+	if r.status != .Ok || (v.type == .Json && rdb.reader_remaining(r) != 0) {
 		if v.obj != nil {
 			persist_free_loaded(v)
 		}
@@ -830,6 +841,9 @@ migrate_collect :: proc(req: ^Migrate_Request) -> int {
 		}
 		w.len = 0
 		dump_payload(&w, key, dump_value_of(e))
+		if w.failed {
+			return -1
+		}
 		digits: [24]u8
 		k := format_i64(raw_data(digits[:]), ttl)
 		if req.replace {
@@ -993,7 +1007,12 @@ migrate_answer :: proc(c: ^Conn, o: ^Migrate_Outcome) {
 
 @(private = "file")
 migrate_run :: proc(c: ^Conn, req: ^Migrate_Request) {
-	if present := migrate_collect(req); present == 0 {
+	present := migrate_collect(req)
+	if present < 0 {
+		reply_error(c, ERR_MIGRATE_WRITE)
+		return
+	}
+	if present == 0 {
 		reply_simple(c, "NOKEY")
 		pst.dirty_explicit = true
 		return

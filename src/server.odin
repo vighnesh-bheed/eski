@@ -86,6 +86,7 @@ Conn :: struct {
 	keyspace_ready: bool,
 	keyspace_waiting: bool,
 	label:       ^Access_Conn,
+	search_profile: ^Search_Profile,
 }
 
 Server :: struct {
@@ -1020,6 +1021,7 @@ server_cron :: proc() {
 	clients_querybuf_cron()
 	clients_replybuf_cron()
 	lua_cache_reap(16)
+	ft_cursor_reap()
 	mem_cron()
 	persist_cron()
 	db_active_expire()
@@ -1106,6 +1108,7 @@ server_run :: proc() -> bool {
 	compute_start()
 	defer compute_shutdown()
 	defer keyspace_shutdown()
+	defer ft_cursor_shutdown()
 	log_startup()
 	maxmemory_startup_warning()
 	diagnostics_work_end()

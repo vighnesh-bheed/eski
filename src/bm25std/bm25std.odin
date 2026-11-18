@@ -44,7 +44,7 @@ prepare :: proc(ctx: rawptr, term: retrieve.Term_Statistics) -> f64 {
 	switch term.kind {
 	case .Wildcard:
 		return 1
-	case .Filter:
+	case .Filter, .Value:
 		return 0
 	case .Term, .Tag:
 		return idf(p.documents, term.containing)

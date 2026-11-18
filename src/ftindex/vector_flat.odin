@@ -5,7 +5,6 @@ import "../flatindex"
 
 Flat_Source :: struct {
 	index:     flatindex.Index,
-	hits:      [dynamic]flatindex.Hit,
 	allocator: runtime.Allocator,
 }
 
@@ -32,7 +31,6 @@ flat_source_make :: proc(field: ^Field, allocator: runtime.Allocator) -> (Vector
 		free(f, allocator)
 		return {}, .Invalid_Definition
 	}
-	f.hits = make([dynamic]flatindex.Hit, allocator)
 	return Vector_Source {
 			ctx = f,
 			add = flat_source_add,
@@ -44,7 +42,6 @@ flat_source_make :: proc(field: ^Field, allocator: runtime.Allocator) -> (Vector
 				f := (^Flat_Source)(ctx)
 				a := f.allocator
 				flatindex.destroy(&f.index)
-				delete(f.hits)
 				free(f, a)
 			},
 		},
@@ -73,8 +70,8 @@ flat_filter :: proc "contextless" (q: ^Vector_Query) -> flatindex.Filter {
 	return flatindex.filter_accept(q.accept, q.accept_ctx)
 }
 
-flat_emit :: proc(f: ^Flat_Source, out: ^[dynamic]Vector_Hit) -> Error {
-	for h in f.hits {
+flat_emit :: proc(hits: []flatindex.Hit, out: ^[dynamic]Vector_Hit) -> Error {
+	for h in hits {
 		if _, e := append(out, Vector_Hit{doc = h.id, distance = h.dist}); e != nil {
 			return .Out_Of_Memory
 		}
@@ -92,11 +89,11 @@ flat_source_nearest :: proc(ctx: rawptr, q: ^Vector_Query, out: ^[dynamic]Vector
 		return flat_error(e)
 	}
 	defer flatindex.query_destroy(&qy)
-	clear(&f.hits)
-	if e := flatindex.knn(&f.index, &qy, q.k, &f.hits, flat_filter(q)); e != .None {
+	hits := make([dynamic]flatindex.Hit, context.temp_allocator)
+	if e := flatindex.knn(&f.index, &qy, q.k, &hits, flat_filter(q)); e != .None {
 		return flat_error(e)
 	}
-	return flat_emit(f, out)
+	return flat_emit(hits[:], out)
 }
 
 flat_source_within :: proc(ctx: rawptr, q: ^Vector_Query, out: ^[dynamic]Vector_Hit) -> Error {
@@ -109,9 +106,9 @@ flat_source_within :: proc(ctx: rawptr, q: ^Vector_Query, out: ^[dynamic]Vector_
 		return flat_error(e)
 	}
 	defer flatindex.query_destroy(&qy)
-	clear(&f.hits)
-	if e := flatindex.range_search(&f.index, &qy, q.radius, &f.hits, flat_filter(q)); e != .None {
+	hits := make([dynamic]flatindex.Hit, context.temp_allocator)
+	if e := flatindex.range_search(&f.index, &qy, q.radius, &hits, flat_filter(q)); e != .None {
 		return flat_error(e)
 	}
-	return flat_emit(f, out)
+	return flat_emit(hits[:], out)
 }

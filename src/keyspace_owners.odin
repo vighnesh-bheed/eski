@@ -925,10 +925,18 @@ owner_streams_drop :: proc(e: ^Owner_Entry) {
 }
 
 keyspace_owners_totals :: proc() -> Owner_Totals {
-	return Owner_Totals{holding = i64(owner_holding), partitions = i64(owner_parts_total), bytes = i64(owner_bytes_total + owner_struct_bytes - owner_global_bytes + ow.table_entries_bytes(&owner_table))}
+	holding := owner_holding
+	bytes := owner_bytes_total + owner_struct_bytes - owner_global_bytes + ow.table_entries_bytes(&owner_table)
+	for owner, charged in search_owner_charges {
+		bytes += charged
+		if e := owner_entry(owner); e != nil && e.keyspace.parts == 0 {
+			holding += 1
+		}
+	}
+	return Owner_Totals{holding = i64(holding), partitions = i64(owner_parts_total), bytes = i64(bytes)}
 }
 
-owner_best_own :: proc(s: ^Owner_Space, key: []u8, l: ^Lookup, skip: lb.Id, vis: ^lb.Visibility) -> (p: ^Db, t: ^Table, i: int) {
+owner_best_own :: proc(s: ^Owner_Space, key: []u8, l: ^Lookup, skip: lb.Id, vis: ^lb.Visibility, note_skipped := true) -> (p: ^Db, t: ^Table, i: int) {
 	if s == nil {
 		return nil, nil, -1
 	}
@@ -958,7 +966,9 @@ owner_best_own :: proc(s: ^Owner_Space, key: []u8, l: ^Lookup, skip: lb.Id, vis:
 						if label_slot_live(owner_db(q), tt, ii) {
 							return owner_db(q), tt, ii
 						}
-						aof_note_skipped(owner_db(q), tt, ii)
+						if note_skipped {
+							aof_note_skipped(owner_db(q), tt, ii)
+						}
 					}
 				}
 				floor = cp.copies[best]
@@ -977,25 +987,29 @@ owner_best_own :: proc(s: ^Owner_Space, key: []u8, l: ^Lookup, skip: lb.Id, vis:
 			if label_slot_live(q, tt, ii) {
 				return q, tt, ii
 			}
-			aof_note_skipped(q, tt, ii)
+			if note_skipped {
+				aof_note_skipped(q, tt, ii)
+			}
 			return nil, nil, -1
 		}
 	}
 	return nil, nil, -1
 }
 
-owner_locate_other :: proc(dbi: int, key: []u8, l: ^Lookup, reader: lb.Id, e: ^Owner_Entry, vis: ^lb.Visibility) -> (p: ^Db, t: ^Table, i: int) {
+owner_locate_other :: proc(dbi: int, key: []u8, l: ^Lookup, reader: lb.Id, e: ^Owner_Entry, vis: ^lb.Visibility, note_skipped := true) -> (p: ^Db, t: ^Table, i: int) {
 	if exact := label_part(dbi, reader); exact != nil && db_size_of(exact) > 0 {
 		tt, ii := db_locate_slot(exact, l)
 		if ii >= 0 {
 			if label_slot_live(exact, tt, ii) {
 				return exact, tt, ii
 			}
-			aof_note_skipped(exact, tt, ii)
+			if note_skipped {
+				aof_note_skipped(exact, tt, ii)
+			}
 		}
 	}
-	op, ot, oi := owner_best_own(owner_space_of(e, dbi), key, l, reader, vis)
-	sp, sst, si := label_locate_other(dbi, key, l, reader, vis)
+	op, ot, oi := owner_best_own(owner_space_of(e, dbi), key, l, reader, vis, note_skipped)
+	sp, sst, si := label_locate_other(dbi, key, l, reader, vis, note_skipped)
 	if oi < 0 {
 		return sp, sst, si
 	}

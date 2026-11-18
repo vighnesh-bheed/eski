@@ -1051,7 +1051,8 @@ def render_outputs(commands, baseline, observed, dataset, readme, ab_floor=None)
     commands_page = ('# Command inventory\n\nGenerated from a temporary instance of the built executable using `COMMAND DOCS`, `COMMAND LIST` and `COMMAND COUNT`. '
                      'The inventory contains %d top-level commands and %d names including subcommands. Metadata describes the protocol surface; '
                      'the [command-group pages](README.md) and [conformance record](conformance.md) define implemented behavior and remaining gaps. '
-                     'Lua scripts, Function libraries and debugging have the scope documented in [scripting](scripting.md). Replication and clustering remain outside the node scope.\n\n'
+                     'Lua scripts, Function libraries and debugging have the scope documented in [scripting](scripting.md). Replication and clustering remain outside the node scope. '
+                     'Usage, compatible clients and execution limits are documented in the [search guide](search.md) and the [JSON guide](json.md).\n\n'
                      'Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test/readme_tables.py --check`. '
                      'Use `--server HOST:PORT` to inspect an existing instance without starting one. The canonical command-metadata SHA256 is `%s`.\n\n%s\n') % (
                          top_count, command_count, digest, command_table(commands))

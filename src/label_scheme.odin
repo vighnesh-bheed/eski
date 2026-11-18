@@ -390,6 +390,9 @@ label_scheme_apply :: proc() -> string {
 @(private = "file")
 label_keys_held :: proc() -> bool {
 	keyspace_fence()
+	if len(search_registry) > 0 {
+		return true
+	}
 	if owners_on && keyspace_owners_totals().holding > 0 {
 		return true
 	}

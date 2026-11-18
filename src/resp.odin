@@ -54,7 +54,6 @@ wb_reserve :: #force_inline proc(c: ^Conn, n: int) -> [^]u8 #no_bounds_check {
 RESP2 :: 2
 RESP3 :: 3
 
-@(private = "file")
 reply_raw :: proc(c: ^Conn, s: []u8) #no_bounds_check {
 	n := len(s)
 	if n == 0 {

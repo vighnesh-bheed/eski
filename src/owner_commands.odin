@@ -181,6 +181,7 @@ owners_forget :: proc(c: ^Conn, id: []u8) {
 		contexts = label_contexts_drop_owner(o)
 		entries = slowlog_drop_owner(o)
 		lua_scopes_forget_owner(o)
+		search_forget_owner(o)
 		owner_drop(o)
 	}
 	tokens := label_token_cache_drop_owner(string(id))
@@ -269,7 +270,7 @@ owners_list :: proc(c: ^Conn, argv: [][]u8) {
 		examined := 0
 		e := ow.table_from(&owner_table, from)
 		for e != nil && examined < count {
-			if keyspace_owner_holds(e) {
+			if keyspace_owner_holds(e) || search_owner_has_definitions(e.number) {
 				append(&found, e)
 			}
 			examined += 1

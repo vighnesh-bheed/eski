@@ -18,15 +18,31 @@ Value :: struct {
 	value: string,
 }
 
+Field_Input :: struct {
+	values: []Value,
+	invalid: string,
+}
+
 Outcome :: enum u8 {
 	Indexed,
 	Rejected,
+}
+
+Content_Size :: struct {
+	text_entries: int,
+	term_bytes:   int,
+	positions:    int,
+	tag_entries:  int,
+	tag_bytes:    int,
+	numbers:      int,
+	missing:      int,
 }
 
 Added :: struct {
 	outcome:  Outcome,
 	id:       u32,
 	replaced: u32,
+	size:     Content_Size,
 }
 
 Occurrence :: struct {
@@ -48,8 +64,9 @@ Work :: struct {
 	positions:   [dynamic]u32,
 	trie:        [dynamic]u8,
 	tags:        Tag_Pieces,
-	found:       [dynamic]int,
-	numbers:     [dynamic]f64,
+	fields:      [dynamic][]Value,
+	points:      [dynamic]Geo_Point,
+	point_start: [dynamic]int,
 	tag_ids:     [dynamic]termdict.Id,
 }
 
@@ -65,8 +82,9 @@ work_init :: proc(w: ^Work, allocator: runtime.Allocator) {
 	w.positions = make([dynamic]u32, allocator)
 	w.trie = make([dynamic]u8, allocator)
 	tag_pieces_init(&w.tags, allocator)
-	w.found = make([dynamic]int, allocator)
-	w.numbers = make([dynamic]f64, allocator)
+	w.fields = make([dynamic][]Value, allocator)
+	w.points = make([dynamic]Geo_Point, allocator)
+	w.point_start = make([dynamic]int, allocator)
 	w.tag_ids = make([dynamic]termdict.Id, allocator)
 }
 
@@ -82,9 +100,17 @@ work_destroy :: proc(w: ^Work) {
 	delete(w.positions)
 	delete(w.trie)
 	tag_pieces_destroy(&w.tags)
-	delete(w.found)
-	delete(w.numbers)
+	delete(w.fields)
+	delete(w.points)
+	delete(w.point_start)
 	delete(w.tag_ids)
+}
+
+release_work :: proc(ix: ^Index) {
+	work_destroy(&ix.work)
+	work_init(&ix.work, ix.allocator)
+	text.analyzer_destroy(&ix.analyzer)
+	text.analyzer_init(&ix.analyzer, &ix.stop, &ix.stemmers, ix.allocator)
 }
 
 work_reset :: proc(w: ^Work) {
@@ -120,30 +146,53 @@ reject_field :: proc(ix: ^Index, field: int, key: string, message: string) {
 	set_error(&ix.errors, message, key, ix.allocator)
 }
 
-validate :: proc(ix: ^Index, key: string, values: []Value) -> bool {
+validate :: proc(ix: ^Index, key: string, values: []Value, inputs: []Field_Input, field_limit: int) -> bool {
 	w := &ix.work
-	clear(&w.found)
-	clear(&w.numbers)
+	clear(&w.fields)
+	clear(&w.points)
+	clear(&w.point_start)
 	for f, i in ix.definition.fields {
-		at := find_value(values, f.source)
-		append(&w.found, at)
-		append(&w.numbers, 0)
-		if at < 0 || f.no_index {
+		input: Field_Input
+		if i < field_limit {
+			if inputs != nil {
+				input = inputs[i]
+			} else if at := find_value(values, f.source); at >= 0 {
+				input.values = values[at:at+1]
+			}
+		}
+		append(&w.fields, input.values)
+		append(&w.point_start, len(w.points))
+		if f.no_index {
 			continue
 		}
-		#partial switch f.kind {
-		case .Numeric:
-			v, ok := number_parse(values[at].value)
-			if !ok {
-				reject_field(ix, i, key, fmt.tprintf("SEARCH_NUMERIC_VALUE_INVALID Invalid numeric value: '%s'", values[at].value))
+		if input.invalid != "" {
+			reject_field(ix, i, key, input.invalid)
+			return false
+		}
+		for value in input.values {
+			point: Geo_Point
+			error: string
+			#partial switch f.kind {
+			case .Numeric:
+				ok: bool
+				point.lon, ok = number_parse(value.value)
+				if !ok {
+					error = fmt.tprintf("SEARCH_NUMERIC_VALUE_INVALID Invalid numeric value: '%s'", value.value)
+				}
+			case .Geo:
+				point, error = geo_parse_point(value.value)
+			case .Vector:
+				want := f.vector.dim * vector_elem_size(f.vector.elem)
+				if len(value.value) != want {
+					error = fmt.tprintf("SEARCH_VECTOR_BLOB_SIZE_MISMATCH Could not add vector with blob size %d (expected size %d)", len(value.value), want)
+				}
+			}
+			if error != "" {
+				reject_field(ix, i, key, error)
 				return false
 			}
-			w.numbers[i] = v
-		case .Vector:
-			want := f.vector.dim * vector_elem_size(f.vector.elem)
-			if len(values[at].value) != want {
-				reject_field(ix, i, key, fmt.tprintf("SEARCH_VECTOR_BLOB_SIZE_MISMATCH Could not add vector with blob size %d (expected size %d)", len(values[at].value), want))
-				return false
+			if f.kind == .Numeric || f.kind == .Geo {
+				append(&w.points, point)
 			}
 		}
 	}
@@ -178,30 +227,35 @@ analyze_document :: proc(ix: ^Index, values: []Value) -> (a: Analysis) {
 	}
 	position := u32(0)
 	length := u64(0)
+	fields: [TEXT_FIELDS_MAX]struct{first, last: int}
 	for field, ordinal in ix.text_fields {
 		f := &def.fields[field]
-		at := w.found[field]
-		if at < 0 || f.no_index {
+		if f.no_index {
 			continue
 		}
-		weight := frequency_weight(f.weight)
-		raw := transmute([]u8)values[at].value
-		if len(raw) == 0 {
-			if f.index_empty {
-				position += 1
-				length += u64(weight)
-				slot := term_slot(w, raw)
-				append(&w.occurrences, Occurrence{term = slot, field = u32(ordinal), position = position})
+		fields[ordinal].first = len(w.terms.list)
+		for value, i in w.fields[field] {
+			if i != 0 {
+				position += 100
 			}
-			continue
+			raw := transmute([]u8)value.value
+			if len(raw) == 0 && f.index_empty {
+				position += 1
+				append(&w.terms.list, text.Term{position = position})
+			} else {
+				position = text.analyze(&ix.analyzer, raw, text.Field{language = a.language, stem = !f.no_stem, base = position}, &w.terms)
+			}
 		}
-		first := len(w.terms.list)
-		position = text.analyze(&ix.analyzer, raw, text.Field{language = a.language, stem = !f.no_stem, base = position}, &w.terms)
-		for term in w.terms.list[first:] {
+		fields[ordinal].last = len(w.terms.list)
+	}
+	for field, ordinal in ix.text_fields {
+		range := fields[ordinal]
+		weight := frequency_weight(def.fields[field].weight)
+		for term in w.terms.list[range.first:range.last] {
 			bytes := text.term_bytes(&w.terms, term)
 			if term.kind == .Original {
 				length += u64(weight)
-				if len(bytes) == 0 {
+				if len(bytes) == 0 && !def.fields[field].index_empty {
 					continue
 				}
 			}
@@ -305,8 +359,31 @@ ensure_list :: proc(ix: ^Index, id: termdict.Id) -> (^postings.List, Error) {
 	return ix.lists[id], .None
 }
 
-add :: proc(ix: ^Index, key: string, values: []Value, doc_label := label.BOTTOM_ID) -> (result: Added, err: Error) {
-	if !validate(ix, key, values) {
+term_membership_reserve :: proc(terms: ^[dynamic]Term_Membership) -> bool {
+	if terms == nil || len(terms^) < cap(terms^) {
+		return true
+	}
+	capacity := cap(terms^)
+	return capacity <= max(int) / 2 && reserve(terms, max(4, capacity * 2)) == nil
+}
+
+term_membership_add :: proc(terms: ^[dynamic]Term_Membership, stats: ^termstats.Stats, id: termdict.Id, doc_label: label.Id) -> Error {
+	if terms != nil {
+		if _, err := append(terms, Term_Membership{stats, u32(id)}); err != nil {
+			return .Out_Of_Memory
+		}
+	}
+	if termstats.term_add(stats, u32(id), doc_label) != .None {
+		if terms != nil {
+			pop(terms)
+		}
+		return .Out_Of_Memory
+	}
+	return .None
+}
+
+add :: proc(ix: ^Index, key: string, values: []Value, doc_label := label.BOTTOM_ID, measure := false, field_limit := max(int), inputs: []Field_Input = nil) -> (result: Added, err: Error) {
+	if !validate(ix, key, values, inputs, field_limit) {
 		result.outcome = .Rejected
 		result.replaced = drop_key(ix, key)
 		return result, .None
@@ -317,6 +394,29 @@ add :: proc(ix: ^Index, key: string, values: []Value, doc_label := label.BOTTOM_
 	if len(def.score_field) > 0 {
 		at := find_value(values, def.score_field)
 		score = document_score(values[at].value if at >= 0 else "", at >= 0, def.score)
+	}
+	tracked_id: u32
+	memberships: [dynamic]Term_Membership
+	terms: ^[dynamic]Term_Membership
+	if ix.live_terms != nil && doctable.max_id(&ix.docs) < doctable.ID_LIMIT {
+		tracked_id = doctable.max_id(&ix.docs) + 1
+		memberships.allocator = ix.allocator
+		if reserve(&memberships, len(ix.work.texts)) != nil {
+			return result, .Out_Of_Memory
+		}
+		if map_insert(&ix.live_terms, tracked_id, memberships) == nil {
+			delete(memberships)
+			return result, .Out_Of_Memory
+		}
+		terms = &memberships
+	}
+	defer if tracked_id != 0 {
+		if len(memberships) == 0 {
+			delete(memberships)
+			delete_key(&ix.live_terms, tracked_id)
+		} else {
+			ix.live_terms[tracked_id] = memberships
+		}
 	}
 	id, replaced, de := doctable.add(&ix.docs, key, doctable.Fields{length = a.length, max_frequency = a.max_frequency, score = score, label = doc_label})
 	switch de {
@@ -337,7 +437,14 @@ add :: proc(ix: ^Index, key: string, values: []Value, doc_label := label.BOTTOM_
 		return result, .Out_Of_Memory
 	}
 	w := &ix.work
+	if measure {
+		result.size.text_entries = len(w.texts)
+		result.size.positions = len(w.occurrences)
+	}
 	for t, i in w.texts {
+		if measure {
+			result.size.term_bytes += len(t)
+		}
 		tid, _, te := termdict.insert(&ix.terms, t, listed_term(w, t))
 		switch te {
 		case .None:
@@ -352,17 +459,23 @@ add :: proc(ix: ^Index, key: string, values: []Value, doc_label := label.BOTTOM_
 			return result, .Out_Of_Memory
 		}
 		ix.term_fields[tid] |= posting.fields
-		if termstats.term_add(&ix.stats, u32(tid), doc_label) != .None {
-			return result, .Out_Of_Memory
+		if e := term_membership_add(terms, &ix.stats, tid, doc_label); e != .None {
+			return result, e
 		}
 		ix.records += 1
 	}
 	for &f, i in def.fields {
 		s := &ix.slots[i]
-		at := w.found[i]
-		if at < 0 {
+		input := w.fields[i]
+		if i >= field_limit {
+			break
+		}
+		if len(input) == 0 {
 			if f.index_missing {
 				roaring.add(&s.missing, id)
+				if measure {
+					result.size.missing += 1
+				}
 			}
 			continue
 		}
@@ -372,25 +485,58 @@ add :: proc(ix: ^Index, key: string, values: []Value, doc_label := label.BOTTOM_
 		#partial switch f.kind {
 		case .Tag:
 			tag_pieces_clear(&w.tags)
-			tag_split(&w.tags, transmute([]u8)values[at].value, f.separator, f.case_sensitive, f.index_empty)
+			for value in input {
+				tag_split(&w.tags, transmute([]u8)value.value, f.separator, f.case_sensitive, f.index_empty)
+			}
 			for k in 0 ..< tag_piece_count(&w.tags) {
-				vid, te := tagindex.add(&s.tag.values, tag_piece(&w.tags, k), id)
+				if !term_membership_reserve(terms) {
+					return result, .Out_Of_Memory
+				}
+				value := tag_piece(&w.tags, k)
+				if measure {
+					result.size.tag_entries += 1
+					result.size.tag_bytes += len(value)
+				}
+				vid, te := tagindex.add(&s.tag.values, value, id)
 				if te != .None {
 					return result, .Out_Of_Memory
 				}
-				if termstats.term_add(&s.tag.stats, u32(vid), doc_label) != .None {
-					return result, .Out_Of_Memory
+				if e := term_membership_add(terms, &s.tag.stats, vid, doc_label); e != .None {
+					return result, e
 				}
 				ix.records += 1
 			}
 		case .Numeric:
-			if _, ne := numindex.add(s.numbers, id, w.numbers[i]); ne != .None {
-				return result, .Out_Of_Memory
+			for j in 0 ..< len(input) {
+				added, error := numindex.add(s.numbers, id, w.points[w.point_start[i] + j].lon)
+				if error != .None {
+					return result, .Out_Of_Memory
+				}
+				ix.records += int(added)
+				if measure {
+					result.size.numbers += int(added)
+				}
 			}
-			ix.records += 1
+		case .Geo:
+			start := w.point_start[i]
+			s.locations[id] = w.points[start]
+			if len(input) > 1 {
+				if s.extra_locations == nil {
+					s.extra_locations = make(map[u32][]Geo_Point, ix.allocator)
+				}
+				points := make([]Geo_Point, len(input) - 1, ix.allocator)
+				copy(points, w.points[start+1:start+len(input)])
+				s.extra_locations[id] = points
+			}
+			ix.records += len(input)
+			if measure {
+				result.size.numbers += len(input)
+			}
 		case .Vector:
-			if s.vector.add(s.vector.ctx, id, transmute([]u8)values[at].value) != .None {
-				return result, .Vector_Source
+			for value in input {
+				if s.vector.add(s.vector.ctx, id, transmute([]u8)value.value) != .None {
+					return result, .Vector_Source
+				}
 			}
 		}
 	}
@@ -403,7 +549,32 @@ forget_document :: proc(ix: ^Index, id: u32) {
 		return
 	}
 	termstats.document_remove(&ix.stats, d.label, d.length)
+	if memberships, found := ix.live_terms[id]; found {
+		for membership in memberships {
+			termstats.term_remove(membership.stats, membership.id, d.label)
+		}
+		delete(memberships)
+		delete_key(&ix.live_terms, id)
+	}
 	for &s in ix.slots {
+		if _, exists := s.locations[id]; exists {
+			delete_key(&s.locations, id)
+			ix.records -= 1
+			if points, multi := s.extra_locations[id]; multi {
+				ix.records -= len(points)
+				delete(points, ix.allocator)
+				delete_key(&s.extra_locations, id)
+				if len(s.extra_locations) == 0 {
+					delete(s.extra_locations)
+					s.extra_locations = nil
+				} else if len(s.extra_locations) * 4 < cap(s.extra_locations) {
+					shrink(&s.extra_locations)
+				}
+			}
+			if len(s.locations) * 4 < cap(s.locations) {
+				shrink(&s.locations)
+			}
+		}
 		if s.vector != nil {
 			s.vector.remove(s.vector.ctx, id)
 		}
@@ -430,12 +601,10 @@ reject :: proc(ix: ^Index, key: string) -> (id: u32, found: bool) {
 }
 
 rename :: proc(ix: ^Index, from, to: string) -> (id: u32, found: bool) {
-	if other, had := doctable.lookup(&ix.docs, to); had && from != to {
-		if _, live := doctable.lookup(&ix.docs, from); live {
-			forget_document(ix, other)
-		}
+	rid, replaced, err := doctable.rename(&ix.docs, from, to)
+	if err == .None && replaced != 0 {
+		forget_document(ix, replaced)
 	}
-	rid, _, err := doctable.rename(&ix.docs, from, to)
 	return rid, err == .None
 }
 
@@ -473,7 +642,7 @@ collect :: proc(ix: ^Index) -> (removed: int, err: Error) {
 		dropped, ce := postings.collect(l, deleted, proc(ctx: rawptr, doc: u32) {
 			x := (^Collect_Context)(ctx)
 			d := doctable.slot(&x.ix.docs, doc)
-			if d != nil {
+			if d != nil && x.ix.live_terms == nil {
 				termstats.term_remove(x.stats, x.term, d.label)
 			}
 		}, &ctx)
@@ -498,7 +667,7 @@ collect :: proc(ix: ^Index) -> (removed: int, err: Error) {
 			dropped, te := tagindex.collect(&s.tag.values, deleted, proc(ctx: rawptr, value: termdict.Id, doc: u32) {
 				x := (^Collect_Context)(ctx)
 				d := doctable.slot(&x.ix.docs, doc)
-				if d != nil {
+				if d != nil && x.ix.live_terms == nil {
 					termstats.term_remove(x.stats, u32(value), d.label)
 				}
 			}, &ctx)

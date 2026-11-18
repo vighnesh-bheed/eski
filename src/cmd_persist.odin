@@ -142,6 +142,9 @@ persist_write_names := [?]string {
 	"xack", "xadd", "xautoclaim", "xclaim", "xdel", "xgroup", "xreadgroup", "xsetid", "xtrim", "zadd", "zdiffstore",
 	"zincrby", "zinterstore", "zmpop", "zpopmax", "zpopmin", "zrangestore", "zrem", "zremrangebylex",
 	"zremrangebyrank", "zremrangebyscore", "zunionstore", "VADD", "VREM", "VSETATTR",
+	"FT.CREATE", "FT.DROPINDEX", "FT.ALTER", "FT.ALIASADD", "FT.ALIASUPDATE", "FT.ALIASDEL",
+	"json.arrappend", "json.arrinsert", "json.arrpop", "json.arrtrim", "json.clear", "json.del", "json.forget",
+	"json.merge", "json.mset", "json.numincrby", "json.nummultby", "json.numpowby", "json.set", "json.strappend", "json.toggle",
 }
 
 @(private = "file")
@@ -310,7 +313,7 @@ persist_type_byte :: proc "contextless" (v: Slot_Value) -> u8 {
 		return ht.rdb_type(cast(ht.Hash)v.obj)
 	case .Stream:
 		return sm.rdb_type(cast(sm.Stream)v.obj)
-	case .Vectorset:
+	case .Vectorset, .Json:
 		return rdb.TYPE_MODULE_2
 	}
 	return rdb.TYPE_STRING
@@ -339,6 +342,8 @@ persist_write_value :: proc(w: ^rdb.Writer, key: []u8, v: Slot_Value, with_key: 
 		sm.rdb_save(w, cast(sm.Stream)v.obj)
 	case .Vectorset:
 		vset_rdb_save(w, cast(vt.Vset)v.obj)
+	case .Json:
+		json_rdb_save(w, cast(^Json_Object)v.obj)
 	}
 	return !w.failed
 }
@@ -427,6 +432,9 @@ persist_write_rdb :: proc(w: ^rdb.Writer, aof_base: bool = false) -> bool {
 	rdb.put_header(w, persist_unix_now(), i64(mem_used()), aof_base)
 	mode, labelled := access_save_mode()
 	if labelled && !access_write_header(w, mode) {
+		return false
+	}
+	if !search_write_rdb(w, mode, labelled) {
 		return false
 	}
 	lua_libraries_save(w)
@@ -797,21 +805,7 @@ persist_load_object :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> (v: Loa
 	case rdb.TYPE_MODULE_PRE_GA:
 		rdb.corrupt(r, "holds module data in a pre-release format")
 	case rdb.TYPE_MODULE_2:
-		id := rdb.get_len(r)
-		if !rdb.ok(r) {
-			rdb.corrupt(r, "holds module data with an unreadable module id")
-			return
-		}
-		if vset_rdb_module(id) {
-			if vs := vset_rdb_load(r, id); vs != nil {
-				v.type = .Vectorset
-				v.obj = vs
-			}
-			return
-		}
-		name: [9]u8
-		rdb.corrupt(r, "holds data of unknown module type '", 0, false, rdb.module_name_by_id(id, &name))
-		rdb.corrupt_append(r, "'")
+		v = persist_load_module(r, persist_module_id(r))
 	case:
 		rdb.corrupt(r, "has unknown encoding type ", u64(max(rdbtype, 0)), true)
 	}
@@ -820,6 +814,35 @@ persist_load_object :: proc(r: ^rdb.Reader, rdbtype: int, deep: bool) -> (v: Loa
 		v = {}
 	}
 	return
+}
+
+persist_module_id :: proc(r: ^rdb.Reader) -> u64 {
+	id, encoded, ok := rdb.get_len_enc(r)
+	if !ok || encoded {
+		rdb.corrupt(r, "holds module data with an unreadable module id")
+	}
+	return id
+}
+
+persist_load_module :: proc(r: ^rdb.Reader, id: u64) -> Loaded_Value {
+	if !rdb.ok(r) {
+		return {}
+	}
+	switch {
+	case id == JSON_RDB_MODULE:
+		if object := json_rdb_load(r); object != nil {
+			return {type = .Json, obj = object}
+		}
+	case vset_rdb_module(id):
+		if vs := vset_rdb_load(r, id); vs != nil {
+			return {type = .Vectorset, obj = vs}
+		}
+	case:
+		name: [9]u8
+		rdb.corrupt(r, "holds data of unknown module type '", 0, false, rdb.module_name_by_id(id, &name))
+		rdb.corrupt_append(r, "'")
+	}
+	return {}
 }
 
 persist_free_loaded :: proc(v: Loaded_Value) {
@@ -849,6 +872,8 @@ persist_attach :: proc(e: ^Entry, key: []u8, v: Loaded_Value) {
 		stream_copy_attach(e, v.obj)
 	case .Vectorset:
 		vset_attach(e, cast(vt.Vset)v.obj)
+	case .Json:
+		json_object_attach(e, cast(^Json_Object)v.obj)
 	}
 }
 
@@ -1208,6 +1233,9 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 		return .Failed
 	}
 	access_load_begin()
+	search_load: Search_Load
+	defer runtime.arena_destroy(&search_load.arena)
+	search_past_definitions := false
 	persist_past_aux = false
 	persist_seed_found = false
 	persist_seed_value = 0
@@ -1233,6 +1261,7 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 		}
 		if t != rdb.OPCODE_AUX && t != rdb.OPCODE_MODULE_AUX {
 			persist_past_aux = true
+			search_past_definitions = true
 		}
 		switch t {
 		case rdb.OPCODE_EXPIRETIME:
@@ -1325,6 +1354,7 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 				persist_load_failed(r)
 			}
 			if id == ACCESS_MODULE_ID {
+				search_past_definitions ||= access_ld.active
 				msg, refusal := access_load_module(r)
 				if refusal {
 					return persist_refuse(msg)
@@ -1336,6 +1366,22 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 					persist_fail_with(r, msg)
 				}
 				persist_past_aux = true
+				continue
+			}
+			if id == SEARCH_RDB_MODULE {
+				if labels_on && !access_ld.active {
+					return persist_refuse(LABEL_STARTUP_FILE)
+				}
+				if search_past_definitions {
+					persist_fail_with(r, "the file has a search definition after the data records begin")
+				}
+				if msg := search_read_rdb(r, &search_load); msg != "" {
+					persist_fail_with(r, msg)
+				}
+				if preserve_libraries && !merge && search_rdb_conflicts(&search_load) {
+					plog(LOG_WARNING, "A loaded search index definition already exists")
+					return .Failed
+				}
 				continue
 			}
 			name: [9]u8
@@ -1383,11 +1429,16 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 					persist_fail_key(r, "the file holds key ", key, " outside any partition")
 				}
 			}
-			if access_ld.active && t == rdb.TYPE_MODULE_2 {
+			scoped_module := access_ld.active && t == rdb.TYPE_MODULE_2
+			module_id := persist_module_id(r) if scoped_module else 0
+			if scoped_module && !rdb.ok(r) {
+				persist_value_failed(r, key, t)
+			}
+			if scoped_module && vset_rdb_module(module_id) {
 				keys_seen += 1
 				if persist_skip_expired && expire != -1 && expire < now_ms {
 					aof_load_expired(db.id, key)
-					if _, read := access_load_vset(r, key, false); !read {
+					if _, read := access_load_vset(r, key, module_id, false); !read {
 						persist_value_failed(r, key, t)
 					}
 					if access_load_dead(key) {
@@ -1397,7 +1448,7 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 					expire, hint = -1, {}
 					continue
 				}
-				s, read := access_load_vset(r, key, true)
+				s, read := access_load_vset(r, key, module_id, true)
 				if !read {
 					persist_value_failed(r, key, t)
 				}
@@ -1414,7 +1465,7 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 				}
 				persist_load_settled(e, expire, hint)
 			} else {
-				v := persist_load_object(r, t, deep)
+				v := persist_load_module(r, module_id) if scoped_module else persist_load_object(r, t, deep)
 				if r.status == .Empty_Key {
 					r.status = .Ok
 					persist_log_empty_key(key)
@@ -1498,6 +1549,9 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 			}
 		}
 	}
+	if !seal_snapshot_done(r, r.seal) {
+		return .Failed
+	}
 	if access_ld.active {
 		if persist_seed_found {
 			persist_fail_with(r, "the file has a vector set seed field outside its labelled header")
@@ -1516,6 +1570,13 @@ persist_load_stream :: proc(r: ^rdb.Reader, merge: bool, preserve_libraries: boo
 		} else {
 			vset_seed_clear()
 		}
+	}
+	if msg := search_restore_rdb(&search_load, !preserve_libraries); msg != "" {
+		if preserve_libraries {
+			plog(LOG_WARNING, msg)
+			return .Failed
+		}
+		persist_fail_with(r, msg)
 	}
 	return .Ok
 }
@@ -1618,9 +1679,6 @@ persist_rdb_load :: proc(merge: bool, at_startup: bool, preserve_libraries: bool
 	persist_skip_expired = true
 	access_load_startup = at_startup
 	result := persist_load_stream(&r, merge, preserve_libraries)
-	if result == .Ok && !seal_snapshot_done(&r, &sr) {
-		result = .Failed
-	}
 	access_load_startup = false
 	persist_skip_expired = false
 	pst.loading_loaded = rdb.reader_offset(&r)
@@ -2068,6 +2126,8 @@ Digest_Tag :: enum u8 {
 	Vectorset,
 	Scope,
 	Quota,
+	Search_Definition,
+	Json,
 }
 
 @(private = "file")
@@ -2272,6 +2332,9 @@ digest_of_value :: proc(v: Slot_Value) -> Digest {
 	case .Vectorset:
 		digest_begin(&h, .Vectorset)
 		digest_vset(&h, cast(vt.Vset)v.obj)
+	case .Json:
+		digest_begin(&h, .Json)
+		json_digest(&h, cast(^Json_Object)v.obj)
 	case:
 		blake2b.init(&h, DIGEST_BYTES)
 	}
@@ -2538,6 +2601,36 @@ persist_scoped_digest :: proc(final: ^[20]u8) {
 		h: blake2b.Context
 		digest_begin(&h, .Quota)
 		digest_word(&h, access_forget_seq)
+		digest_accumulate(&total, digest_close(&h))
+	}
+	for index, i in search_definitions_ordered() {
+		marking, owner, known := search_persist_scope(index.scope, true)
+		if !known {
+			store_fatal("a search definition has an invalid scope")
+		}
+		h: blake2b.Context
+		digest_begin(&h, .Search_Definition)
+		digest_word(&h, u64(i))
+		digest_text(&h, transmute([]u8)marking)
+		digest_text(&h, transmute([]u8)owner)
+		for arg in search_create_args_saved(index) {
+			digest_text(&h, transmute([]u8)arg)
+		}
+		digest_accumulate(&total, digest_close(&h))
+	}
+	for alias, i in search_aliases_ordered() {
+		marking, owner, known := search_persist_scope(alias.scope, true)
+		target_marking, target_owner, target_known := search_persist_scope(alias.target.scope, true)
+		if !known || !target_known {
+			store_fatal("a search alias has an invalid scope")
+		}
+		h: blake2b.Context
+		digest_begin(&h, .Search_Definition)
+		digest_word(&h, u64(i))
+		values := [7]string{"FT.ALIASADD", marking, owner, alias.name, target_marking, target_owner, alias.target.name}
+		for value in values {
+			digest_text(&h, transmute([]u8)value)
+		}
 		digest_accumulate(&total, digest_close(&h))
 	}
 	final^ = total

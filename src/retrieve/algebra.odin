@@ -16,6 +16,7 @@ Intersection :: struct {
 	using base: Cursor,
 	required:   []^Cursor,
 	children:   []^Cursor,
+	trace_optional: []^Cursor,
 	weight:     f64,
 	strategy:   Strategy,
 	pending:    int,
@@ -54,15 +55,25 @@ INTERSECTION_OPS := Ops {
 	},
 	score = proc(c: ^Cursor, s: ^Scoring) -> f64 {
 		ix := (^Intersection)(c)
+		first := trace_start(s)
 		total := 0.0
 		have := false
 		for ch in ix.children {
 			if ch.doc == ix.doc {
 				total = fold(s, .Intersection, have, total, score(ch, s))
 				have = true
+			} else if s != nil && s.trace != nil && s.trace.explain {
+				for optional in ix.trace_optional {
+					if optional == ch {
+						trace_zero(s, 0, 1)
+						break
+					}
+				}
 			}
 		}
-		return ix.weight * total
+		value := ix.weight * total
+		trace_group(s, first, ix.weight, value)
+		return value
 	},
 }
 
@@ -324,14 +335,19 @@ UNION_OPS := Ops {
 		if u.matched_len == 0 {
 			return 0
 		}
+		first := trace_start(s)
 		if u.mode == .First {
-			return u.weight * score(u.children[u.matched[0]], s)
+			value := u.weight * score(u.children[u.matched[0]], s)
+			trace_group(s, first, u.weight, value)
+			return value
 		}
 		total := 0.0
 		for k in 0 ..< u.matched_len {
 			total = fold(s, .Union, k > 0, total, score(u.children[u.matched[k]], s))
 		}
-		return u.weight * total
+		value := u.weight * total
+		trace_group(s, first, u.weight, value)
+		return value
 	},
 	positions = proc(c: ^Cursor, out: ^[dynamic]u32) -> bool {
 		u := (^Union)(c)
@@ -418,6 +434,9 @@ Difference :: struct {
 	using base: Cursor,
 	include:    ^Cursor,
 	exclude:    ^Cursor,
+	trace_excluded: int,
+	trace_flatten: bool,
+	trace_weight: f64,
 }
 
 difference_settle :: proc(x: ^Difference, d: u32) -> u32 {
@@ -450,7 +469,22 @@ DIFFERENCE_OPS := Ops {
 	},
 	score = proc(c: ^Cursor, s: ^Scoring) -> f64 {
 		x := (^Difference)(c)
-		return score(x.include, s)
+		first := trace_start(s)
+		value := score(x.include, s)
+		if x.trace_excluded > 0 && s != nil && s.trace != nil {
+			if x.trace_flatten && len(s.trace.nodes) == first + 1 {
+				group := s.trace.nodes[first]
+				resize(&s.trace.nodes, first)
+				append(&s.trace.nodes, ..group.children)
+			}
+			if s.trace.explain {
+				for _ in 0 ..< x.trace_excluded {
+					trace_zero(s, 1, 0)
+				}
+			}
+			trace_group(s, first, x.trace_weight, value)
+		}
+		return value
 	},
 	positions = proc(c: ^Cursor, out: ^[dynamic]u32) -> bool {
 		x := (^Difference)(c)

@@ -35,10 +35,14 @@ hash_init :: proc "contextless" (seed: u64) {
 	hash_seed = seed ~ wy_mix(seed ~ WY_P0, WY_P1)
 }
 
-hash_bytes :: proc "contextless" (key: []u8) -> u64 #no_bounds_check {
+hash_bytes :: #force_inline proc "contextless" (key: []u8) -> u64 {
+	return hash_bytes_seeded(key, hash_seed)
+}
+
+hash_bytes_seeded :: proc "contextless" (key: []u8, initial_seed: u64) -> u64 #no_bounds_check {
 	p := raw_data(key)
 	n := len(key)
-	seed := hash_seed
+	seed := initial_seed
 	a, b: u64
 	if n <= 16 {
 		if n >= 4 {

@@ -23,7 +23,7 @@ keyspace_object_memory :: proc "contextless" (kind: Obj_Type, object: rawptr) ->
 	case .Set: return st.memory_usage(cast(st.Set)object)
 	case .Zset: return zt.memory_usage(cast(zt.Zset)object)
 	case .Stream: return sm.memory_usage(cast(sm.Stream)object)
-	case .Vectorset: return vset_object_acct(object)
+	case .Vectorset, .Json: return object_acct_of(kind, object)
 	}
 	return 0
 }
@@ -38,6 +38,7 @@ keyspace_object_length :: proc(kind: Obj_Type, object: rawptr) -> int {
 	case .Zset: return zt.length(cast(zt.Zset)object)
 	case .Stream: return int(sm.length(cast(sm.Stream)object))
 	case .Vectorset: return vt.card(cast(vt.Vset)object)
+	case .Json: return json_object_content_memory(cast(^Json_Object)object)
 	}
 	return 0
 }
@@ -60,7 +61,7 @@ keyspace_object_duplicate :: proc(kind: Obj_Type, object: rawptr) -> rawptr {
 	case .Set: return st.dup(cast(st.Set)object)
 	case .Zset: return zt.dup(cast(zt.Zset)object)
 	case .Stream: return sm.dup(cast(sm.Stream)object)
-	case .Vectorset: return nil
+	case .Vectorset, .Json: return nil
 	}
 	return nil
 }
@@ -74,6 +75,7 @@ keyspace_object_destructor :: proc "contextless" (kind: Obj_Type) -> proc "conte
 	case .Zset: return keyspace_zset_destroy
 	case .Stream: return keyspace_stream_destroy
 	case .Vectorset: return keyspace_vset_destroy
+	case .Json: return nil
 	}
 	return nil
 }
@@ -88,14 +90,14 @@ keyspace_object_encoding :: proc "contextless" (kind: Obj_Type, object: rawptr) 
 	case .Set: return u8(set_obj_encoding(cast(st.Set)object))
 	case .Zset: return u8(zset_obj_encoding(cast(zt.Zset)object))
 	case .Stream: return u8(Obj_Encoding.Stream)
-	case .Vectorset: return u8(Obj_Encoding.Raw)
+	case .Vectorset, .Json: return u8(Obj_Encoding.Raw)
 	}
 	return 0
 }
 
 keyspace_object_seed :: proc(db: ^Db, key: []u8, owner: int) -> ^ks.Record {
 	pointer, kind, clock, expires, eligible := keyspace_store_seed_object(db, key)
-	if !eligible || kind == .Vectorset { return nil }
+	if !eligible || kind == .Vectorset || kind == .Json { return nil }
 	if kind == .Hash { keyspace_timed = true }
 	charge := keyspace_object_memory(kind, pointer)
 	if !ks.reserve_external(&keyspace_pool, charge) { return nil }
@@ -133,6 +135,7 @@ keyspace_object_import :: proc(db: ^Db, r: ^ks.Record) {
 	case .Zset: zset_copy_attach(e, key, r.object, 0)
 	case .Stream: stream_copy_attach(e, r.object)
 	case .Vectorset: vset_attach(e, cast(vt.Vset)r.object)
+	case .Json: json_object_attach(e, cast(^Json_Object)r.object)
 	}
 	entry_set_expire(e, r.expire_at)
 	entry_set_access_word(e, r.clock)
@@ -164,7 +167,7 @@ keyspace_object_work :: proc(task: ^Keyspace_Task, r: ^ks.Record, kind: Obj_Type
 		case .Set: work.object = st.create(nil, len(task.argv))
 		case .Zset: work.object = zt.type_create(len(task.argv), 0)
 		case .Stream: work.object = sm.create()
-		case .Vectorset:
+		case .Vectorset, .Json:
 		}
 	}
 	ok = work.object != nil

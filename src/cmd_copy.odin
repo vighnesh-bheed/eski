@@ -46,10 +46,6 @@ cmd_copy :: proc(c: ^Conn, argv: [][]u8) {
 		reply_error(c, ERR_VSET_COPY)
 		return
 	}
-	if exists {
-		db_remove_in(target, destination)
-		block_note_removed()
-	}
 	src := db_find_notouch(source)
 	if src == nil {
 		reply_int(c, 0)
@@ -71,6 +67,10 @@ cmd_copy :: proc(c: ^Conn, argv: [][]u8) {
 			reply_int(c, 0)
 			return
 		}
+	}
+	if exists {
+		db_remove_in(target, destination)
+		block_note_removed()
 	}
 	e, _ := db_upsert_timed_in(target, destination, expire)
 	if kind == .String {

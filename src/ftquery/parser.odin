@@ -1144,7 +1144,7 @@ check_geo :: proc(p: ^Parser, id: Node_Id) -> bool {
 		fail(p, .Syntax, "Invalid GeoFilter lat/lon")
 		return false
 	}
-	if n.radius < 0 {
+	if n.radius <= 0 {
 		fail(p, .Syntax, "Invalid GeoFilter radius")
 		return false
 	}

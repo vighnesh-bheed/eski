@@ -401,7 +401,6 @@ access_info_forget :: proc(b: ^[dynamic]u8) {
 	info_line_int(b, "owners_forget_in_aof", i64(access_forget_in_aof_value()))
 }
 
-@(private = "file")
 access_put_uint :: proc(w: ^rdb.Writer, v: u64) {
 	rdb.put_len(w, rdb.MODULE_OPCODE_UINT)
 	rdb.put_len(w, v)
@@ -593,7 +592,6 @@ access_write_dbs :: proc(w: ^rdb.Writer, lru: bool, lfu: bool) -> bool {
 	return !w.failed
 }
 
-@(private = "file")
 access_len :: proc(r: ^rdb.Reader) -> (u64, bool) {
 	v, encoded, got := rdb.get_len_enc(r)
 	if !got || encoded {
@@ -602,7 +600,6 @@ access_len :: proc(r: ^rdb.Reader) -> (u64, bool) {
 	return v, true
 }
 
-@(private = "file")
 access_get_uint :: proc(r: ^rdb.Reader) -> (u64, bool) {
 	op, got := access_len(r)
 	if !got || op != rdb.MODULE_OPCODE_UINT {
@@ -620,7 +617,6 @@ access_get_text :: proc(r: ^rdb.Reader, slot: int) -> ([]u8, bool) {
 	return rdb.get_string(r, slot)
 }
 
-@(private = "file")
 access_get_end :: proc(r: ^rdb.Reader) -> bool {
 	op, got := access_len(r)
 	return got && op == rdb.MODULE_OPCODE_EOF
@@ -1145,18 +1141,8 @@ access_load_target :: proc(key: []u8) -> (target: ^Db, msg: string, duplicate: b
 	return ld.part, "", false
 }
 
-access_load_vset :: proc(r: ^rdb.Reader, key: []u8, keep: bool) -> (s: vt.Vset, good: bool) {
+access_load_vset :: proc(r: ^rdb.Reader, key: []u8, id: u64, keep: bool) -> (s: vt.Vset, good: bool) {
 	ld := &access_ld
-	id := rdb.get_len(r)
-	if !rdb.ok(r) {
-		return nil, false
-	}
-	if !vset_rdb_module(id) {
-		name: [9]u8
-		rdb.corrupt(r, "holds data of unknown module type '", 0, false, rdb.module_name_by_id(id, &name))
-		rdb.corrupt_append(r, "'")
-		return nil, false
-	}
 	owner := vt.SHARED
 	if ld.part_owner != 0 {
 		owner = vt.Owner(ld.owners[ld.part_owner].number)
@@ -1500,6 +1486,9 @@ access_file_probe :: proc(name: string) -> string {
 			continue
 		case rdb.OPCODE_MODULE_AUX:
 			id, got_id := access_len(&r)
+			if got_id && id == SEARCH_RDB_MODULE && labels_on {
+				return LABEL_STARTUP_FILE
+			}
 			if !got_id || id != ACCESS_MODULE_ID {
 				return ""
 			}

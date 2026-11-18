@@ -788,7 +788,7 @@ keyspace_try :: proc(c: ^Conn, slot: ^Cmd_Slot, argv: [][]u8) -> bool {
 	for index, i in indices {
 		db := c.db.id
 		if relocate && i == 1 { db = target_db }
-		if keyspace_features_blocked(db, argv[index]) || !mc_worker_key_admissible(&dbs[db], argv[index]) || expiry_deletion_paused() && !keyspace_store_pause_admissible(&dbs[db], argv[index]) { keyspace_fence(); return false }
+		if search_worker_blocked(db, argv[index]) || keyspace_features_blocked(db, argv[index]) || !mc_worker_key_admissible(&dbs[db], argv[index]) || expiry_deletion_paused() && !keyspace_store_pause_admissible(&dbs[db], argv[index]) { keyspace_fence(); return false }
 	}
 
 	event_capacity := 0

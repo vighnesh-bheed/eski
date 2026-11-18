@@ -1,8 +1,8 @@
 # Command inventory
 
-Generated from a temporary instance of the built executable using `COMMAND DOCS`, `COMMAND LIST` and `COMMAND COUNT`. The inventory contains 254 top-level commands and 372 names including subcommands. Metadata describes the protocol surface; the [command-group pages](README.md) and [conformance record](conformance.md) define implemented behavior and remaining gaps. Lua scripts, Function libraries and debugging have the scope documented in [scripting](scripting.md). Replication and clustering remain outside the node scope.
+Generated from a temporary instance of the built executable using `COMMAND DOCS`, `COMMAND LIST` and `COMMAND COUNT`. The inventory contains 296 top-level commands and 420 names including subcommands. Metadata describes the protocol surface; the [command-group pages](README.md) and [conformance record](conformance.md) define implemented behavior and remaining gaps. Lua scripts, Function libraries and debugging have the scope documented in [scripting](scripting.md). Replication and clustering remain outside the node scope. Usage, compatible clients and execution limits are documented in the [search guide](search.md) and the [JSON guide](json.md).
 
-Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test/readme_tables.py --check`. Use `--server HOST:PORT` to inspect an existing instance without starting one. The canonical command-metadata SHA256 is `33519364f197c5891f2988ca3d0e57d79be5a79e0eda95d5ac56b4809f587090`.
+Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test/readme_tables.py --check`. Use `--server HOST:PORT` to inspect an existing instance without starting one. The canonical command-metadata SHA256 is `4419d61b588eee22dd9df16db705857ceaa3eefcbb33a9e2a9c7f0bd947156ed`.
 
 ## Bitmap
 
@@ -186,6 +186,54 @@ Regenerate with `python3 -I test/readme_tables.py`; verify with `python3 -I test
 
 | Command | Arguments | Metadata summary |
 | --- | --- | --- |
+| `FT._LIST` | `[WITHCLUSTERSTATE]` | Returns a list of all existing indexes |
+| `FT.AGGREGATE` | `<index> <query> [ADDSCORES] [LOAD <fields>] [<pipeline-step> ...]` | Runs a query and transforms its results through an aggregation pipeline |
+| `FT.ALIASADD` | `<alias> <index>` | Adds an alias to an index |
+| `FT.ALIASDEL` | `<alias>` | Removes an alias |
+| `FT.ALIASUPDATE` | `<alias> <index>` | Changes the index an alias resolves to |
+| `FT.ALTER` | `<index> [SKIPINITIALSCAN] SCHEMA ADD <field> ...` | Adds fields to an index schema |
+| `FT.CONFIG` | — | Gets and sets search configuration options |
+| `FT.CONFIG GET` | `<option>` | Reads search configuration values |
+| `FT.CONFIG HELP` | `<option>` | Describes search configuration options |
+| `FT.CONFIG SET` | `<option> <value>` | Changes a search configuration option |
+| `FT.CREATE` | `<index> [ON (HASH \| JSON)] [INDEXALL (ENABLE \| DISABLE)] [PREFIX <count> <prefix> ...] [FILTER <filter>] [LANGUAGE <default_lang>] [LANGUAGE_FIELD <lang_attribute>] [SCORE <default_score>] [SCORE_FIELD <score_attribute>] [PAYLOAD_FIELD <payload_attribute>] [MAXTEXTFIELDS] [TEMPORARY <seconds>] [NOOFFSETS] [NOHL] [NOFIELDS] [NOFREQS] [STOPWORDS <count> [<stopword> ...]] [SKIPINITIALSCAN] SCHEMA <field_name> [AS <alias>] (TEXT \| TAG \| NUMERIC \| GEO \| GEOSHAPE \| VECTOR) [WITHSUFFIXTRIE] [INDEXEMPTY] [INDEXMISSING] [SORTABLE [UNF]] [NOINDEX] ...` | Creates an index with the given spec |
+| `FT.CURSOR` | — | Reads or releases search result cursors |
+| `FT.CURSOR DEL` | `<index> <cursor>` | Releases a search result cursor |
+| `FT.CURSOR GC` | `<index> <cursor>` | Releases expired search result cursors |
+| `FT.CURSOR READ` | `<index> <cursor> [COUNT <read-size>]` | Reads the next page from a search result cursor |
+| `FT.DROPINDEX` | `<index> [(DD)]` | Deletes the index |
+| `FT.EXPLAIN` | `<index> <query> [DIALECT <dialect>]` | Returns the execution plan for a search query |
+| `FT.EXPLAINCLI` | `<index> <query> [DIALECT <dialect>]` | Returns the lines of a search query plan |
+| `FT.HYBRID` | `<index> SEARCH <query> [<text-option> ...] VSIM <vector-field> <vector-parameter> [<option> ...]` | Combines text and vector matches using reciprocal rank fusion or a linear combination |
+| `FT.INFO` | `<index>` | Returns information and statistics on the index |
+| `FT.PROFILE` | `<index> <operation> [LIMITED] QUERY <argument> ...` | Runs a search query and reports iterator and result processor statistics |
+| `FT.SEARCH` | `<index> <query> [NOCONTENT] [VERBATIM] [NOSTOPWORDS] [WITHSCORES] [WITHPAYLOADS] [WITHSORTKEYS] [FILTER <numeric_field> <min> <max> ...] [GEOFILTER <geo_field> <lon> <lat> <radius> (M \| KM \| MI \| FT) ...] [INKEYS <count> <key> ...] [INFIELDS <count> <field> ...] [RETURN <count> <identifier> [AS <property>] ...] [SUMMARIZE [FIELDS <count> <field> ...] [FRAGS <num>] [LEN <fragsize>] [SEPARATOR <separator>]] [HIGHLIGHT [FIELDS <count> <field> ...] [TAGS <open> <close>]] [SLOP <slop>] [TIMEOUT <timeout>] [INORDER] [LANGUAGE <language>] [EXPANDER <expander>] [SCORER <scorer>] [EXPLAINSCORE] [PAYLOAD <payload>] [SORTBY <sortby> [(ASC \| DESC)]] [LIMIT <offset> <num>] [PARAMS <nargs> <name> <value> ...] [DIALECT <dialect>]` | Searches the index with a textual query, returning either documents or just ids |
+| `FT.TAGVALS` | `<index> <field>` | Returns the distinct indexed values of a tag field |
+| `JSON.ARRAPPEND` | `<key> <path> <json> ...` | Append the JSON values into the array at path after the last element in it |
+| `JSON.ARRINDEX` | `<key> <path> <json-value> [<start> [<stop>]]` | Search for the first occurrence of a JSON value in an array |
+| `JSON.ARRINSERT` | `<key> <path> <index> <json> ...` | Insert the json values into the array at path before the index (shifts to the right) |
+| `JSON.ARRLEN` | `<key> [<path>]` | Report the length of the JSON array at path in key |
+| `JSON.ARRPOP` | `<key> [FORMAT (STRINGS \| EXPAND1 \| EXPAND)] [<path> [<index>]]` | Remove and return the element at the specified index in the array at path |
+| `JSON.ARRTRIM` | `<key> <path> <start> <stop>` | Trim an array so that it contains only the specified inclusive range of elements |
+| `JSON.CLEAR` | `<key> [<path>]` | Clear container values (arrays/objects) and set numeric values to 0 |
+| `JSON.DEBUG` | `(MEMORY \| HELP) [<key>] [<path>]` | This is a container command for debugging related tasks |
+| `JSON.DEL` | `<key> [<path>]` | Delete a value |
+| `JSON.FORGET` | `<key> [<path>]` | Delete a value |
+| `JSON.GET` | `<key> [INDENT <indent>] [NEWLINE <newline>] [SPACE <space>] [FORMAT (STRING \| EXPAND1 \| EXPAND)] [<path> ...]` | Get JSON value at path |
+| `JSON.MERGE` | `<key> <path> <json> [FORMAT (STRING \| JSON \| BSON)]` | Merge a given JSON value into matching paths. Consequently, JSON values at matching paths are updated, deleted, or expanded with new children |
+| `JSON.MGET` | `<key> ... <path>` | Return the values at path from multiple key arguments |
+| `JSON.MSET` | `<key> <path> <json> ...` | Set or update one or more JSON values according to the specified key-path-value triplets |
+| `JSON.NUMINCRBY` | `<key> <path> <number>` | Increment the number value stored at path by number |
+| `JSON.NUMMULTBY` | `<key> <path> <number>` | Multiply the number value stored at path by number |
+| `JSON.NUMPOWBY` | `<key> <path> <number>` | Raise the number value stored at path to the power of number |
+| `JSON.OBJKEYS` | `<key> [<path>]` | Return the keys in the object that's referenced by path |
+| `JSON.OBJLEN` | `<key> [<path>]` | Report the number of keys in the JSON object at path in key |
+| `JSON.RESP` | `<key> [<path>]` | Return the JSON in key in Redis serialization protocol specification form |
+| `JSON.SET` | `<key> <path> <json> [(NX \| XX)] [FPHA (BF16 \| FP16 \| FP32 \| FP64)] [FORMAT (STRING \| JSON \| BSON)]` | Set the JSON value at path in key |
+| `JSON.STRAPPEND` | `<key> [<path>] <json-string>` | Append the json-string values to the string at path |
+| `JSON.STRLEN` | `<key> [<path>]` | Report the length of the JSON String at path in key |
+| `JSON.TOGGLE` | `<key> <path>` | Toggle the boolean value stored at path |
+| `JSON.TYPE` | `<key> [<path>]` | Report the type of JSON value at path |
 | `VADD` | `<key> [REDUCE <dim>] (FP32 \| VALUES) <vector> <element> [CAS] [(NOQUANT \| BIN \| Q8)] [EF <build-exploration-factor>] [SETATTR <attributes>] [M <numlinks>]` | Stores a vector under an element name, creating the vector set on first use and replacing the vector of an element that is already present. |
 | `VCARD` | `<key>` | Counts the elements stored in a vector set, answering 0 for a missing key. |
 | `VDIM` | `<key>` | Reports how many components each stored vector has, which after a REDUCE projection is the reduced size. |

@@ -317,6 +317,11 @@ label_command_writes :: #force_inline proc(cmd: ^Command, spec: ^Cmd_Spec) -> bo
 }
 
 label_step :: proc(home: ^Db, cmd: ^Command, argv: [][]u8) -> string {
+	if search_metadata_command(cmd) {
+		db_cur = home
+		label_cmd_writes = true
+		return ERR_OWNER_INVALID if owners_on && access.owner == ow.EVERY else ""
+	}
 	dbi := home.id
 	ld := &label_dbs[dbi]
 	user := owner_user()
@@ -369,11 +374,11 @@ label_step :: proc(home: ^Db, cmd: ^Command, argv: [][]u8) -> string {
 		}
 	}
 	if user {
-		if msg := owner_quota_check(cmd, spec, access.owner_entry); msg != "" {
+		if msg := owner_quota_check(cmd, spec, argv, access.owner_entry); msg != "" {
 			return msg
 		}
 	} else if label_quota_active() {
-		if msg := label_quota_check(cmd, spec); msg != "" {
+		if msg := label_quota_check(cmd, spec, argv); msg != "" {
 			return msg
 		}
 	}
@@ -381,7 +386,7 @@ label_step :: proc(home: ^Db, cmd: ^Command, argv: [][]u8) -> string {
 }
 
 label_write_check :: proc(cmd: ^Command, spec: ^Cmd_Spec, argv: [][]u8) -> string {
-	if .Module in spec.flags {
+	if .Module in spec.flags && cmd.handler != cmd_json {
 		return ""
 	}
 	clear(&label_refs)
@@ -395,7 +400,7 @@ label_write_check :: proc(cmd: ^Command, spec: ^Cmd_Spec, argv: [][]u8) -> strin
 		if copying && ref.pos == 2 {
 			continue
 		}
-		if !all_write && ref.flags != {} && ref.flags & LABEL_WRITE_FLAGS == {} {
+		if !all_write && ref.flags != {} && ref.flags & LABEL_WRITE_FLAGS == {} && !(cmd.handler == cmd_json && .Rw in ref.flags) {
 			continue
 		}
 		if l, o, found := label_write_conflict(db_cur, argv[ref.pos]); found {
@@ -417,6 +422,8 @@ label_creates_only :: proc(cmd: ^Command, argv: [][]u8, pos: int) -> bool {
 		return pos == 2
 	case h == cmd_set:
 		return set_creates_only(argv)
+	case h == cmd_json:
+		return json_set_creates_only(argv)
 	}
 	return false
 }
@@ -492,7 +499,7 @@ label_copy_better :: proc "contextless" (a, b: Label_Copy) -> bool {
 	return a.seq < b.seq
 }
 
-label_locate_other :: proc(dbi: int, key: []u8, l: ^Lookup, reader: lb.Id, vis: ^lb.Visibility) -> (p: ^Db, t: ^Table, i: int) {
+label_locate_other :: proc(dbi: int, key: []u8, l: ^Lookup, reader: lb.Id, vis: ^lb.Visibility, note_skipped := true) -> (p: ^Db, t: ^Table, i: int) {
 	ld := &label_dbs[dbi]
 	if len(ld.copies) > 0 {
 		if cp, ok := ld.copies[string(key)]; ok {
@@ -521,7 +528,9 @@ label_locate_other :: proc(dbi: int, key: []u8, l: ^Lookup, reader: lb.Id, vis: 
 						if label_slot_live(q, tt, ii) {
 							return q, tt, ii
 						}
-						aof_note_skipped(q, tt, ii)
+						if note_skipped {
+							aof_note_skipped(q, tt, ii)
+						}
 					}
 				}
 				floor = cp.copies[best]
@@ -539,7 +548,9 @@ label_locate_other :: proc(dbi: int, key: []u8, l: ^Lookup, reader: lb.Id, vis: 
 			if label_slot_live(q, tt, ii) {
 				return q, tt, ii
 			}
-			aof_note_skipped(q, tt, ii)
+			if note_skipped {
+				aof_note_skipped(q, tt, ii)
+			}
 			return nil, nil, -1
 		}
 	}
@@ -590,7 +601,7 @@ label_scope_find :: proc(dbi: int) -> ^Db {
 	return own
 }
 
-label_resolve :: proc(dbi: int, key: []u8, reader: lb.Id, vis: ^lb.Visibility, o := ow.SHARED) -> (p: ^Db, t: ^Table, i: int) {
+label_resolve :: proc(dbi: int, key: []u8, reader: lb.Id, vis: ^lb.Visibility, o := ow.SHARED, note_skipped := true) -> (p: ^Db, t: ^Table, i: int) {
 	l := lookup_make(key)
 	own, e := label_scope_part(dbi, reader, o)
 	if own != nil && db_size_of(own) > 0 {
@@ -599,13 +610,15 @@ label_resolve :: proc(dbi: int, key: []u8, reader: lb.Id, vis: ^lb.Visibility, o
 			if label_slot_live(own, tt, ii) {
 				return own, tt, ii
 			}
-			aof_note_skipped(own, tt, ii)
+			if note_skipped {
+				aof_note_skipped(own, tt, ii)
+			}
 		}
 	}
 	if owners_on && ow.is_user(o) {
-		return owner_locate_other(dbi, key, &l, reader, e, vis)
+		return owner_locate_other(dbi, key, &l, reader, e, vis, note_skipped)
 	}
-	return label_locate_other(dbi, key, &l, reader, vis)
+	return label_locate_other(dbi, key, &l, reader, vis, note_skipped)
 }
 
 label_key_state :: proc(dbi: int, key: []u8, reader: lb.Id, o := ow.SHARED) -> (exists: bool, expired: bool) {

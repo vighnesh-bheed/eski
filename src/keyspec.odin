@@ -132,7 +132,7 @@ cmd_spec_lookup :: proc(cmd: ^Command, argv: [][]u8) -> ^Cmd_Spec {
 		spec_name_buf[n] = '|'
 		n += 1
 		for b in sub {
-			spec_name_buf[n] = lower(b)
+			spec_name_buf[n] = command_subcommand_byte(name, b)
 			n += 1
 		}
 		if i, ok := spec_index[string(spec_name_buf[:n])]; ok {
@@ -292,6 +292,29 @@ command_keys :: proc(spec: ^Cmd_Spec, argv: [][]u8, out: ^[dynamic]int) {
 }
 
 cmd_specs := [?]Cmd_Spec {
+	{"FT.AGGREGATE", -3, {.Readonly, .Module}, .None, 0, 0, 0, nil},
+	{"FT.ALIASADD", 3, {.Write, .Denyoom, .Module}, .None, 0, 0, 0, nil},
+	{"FT.ALIASDEL", 2, {.Write, .Module}, .None, 0, 0, 0, nil},
+	{"FT.ALIASUPDATE", 3, {.Write, .Denyoom, .Module}, .None, 0, 0, 0, nil},
+	{"FT.ALTER", -6, {.Write, .Denyoom, .Module}, .None, 0, 0, 0, nil},
+	{"FT.CONFIG", -2, {.Readonly, .Module}, .None, 0, 0, 0, nil},
+	{"FT.CONFIG|GET", -3, {.Readonly, .Module}, .None, 0, 0, 0, nil},
+	{"FT.CONFIG|HELP", -3, {.Readonly, .Module}, .None, 0, 0, 0, nil},
+	{"FT.CONFIG|SET", -3, {.Write, .Module}, .None, 0, 0, 0, nil},
+	{"FT.CREATE", -5, {.Write, .Denyoom, .Module}, .None, 0, 0, 0, nil},
+	{"FT.CURSOR", -2, {.Readonly, .Module}, .None, 0, 0, 0, nil},
+	{"FT.CURSOR|DEL", -4, {.Readonly, .Module}, .None, 0, 0, 0, nil},
+	{"FT.CURSOR|GC", -2, {.Readonly, .Module}, .None, 0, 0, 0, nil},
+	{"FT.CURSOR|READ", -4, {.Readonly, .Module}, .None, 0, 0, 0, nil},
+	{"FT.DROPINDEX", -2, {.Write, .Module}, .None, 0, 0, 0, nil},
+	{"FT.EXPLAIN", -3, {.Readonly, .Module}, .None, 0, 0, 0, nil},
+	{"FT.EXPLAINCLI", -3, {.Readonly, .Module}, .None, 0, 0, 0, nil},
+	{"FT.HYBRID", -7, {.Readonly, .Module}, .None, 0, 0, 0, nil},
+	{"FT.INFO", 2, {.Readonly, .Module}, .None, 0, 0, 0, nil},
+	{"FT.PROFILE", -5, {.Readonly, .Module}, .None, 0, 0, 0, nil},
+	{"FT.SEARCH", -3, {.Readonly, .Module}, .None, 0, 0, 0, nil},
+	{"FT.TAGVALS", 3, {.Readonly, .Module}, .None, 0, 0, 0, nil},
+	{"FT._LIST", -1, {.Readonly, .Module}, .None, 0, 0, 0, nil},
 	{"VADD", -5, {.Write, .Denyoom, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw, .Access, .Update}}}},
 	{"VCARD", 2, {.Readonly, .Module, .Fast}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Ro, .Access}}}},
 	{"VDIM", 2, {.Readonly, .Module, .Fast}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Ro, .Access}}}},
@@ -483,6 +506,31 @@ cmd_specs := [?]Cmd_Spec {
 	{"incrby", 3, {.Write, .Denyoom, .Fast}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw, .Access, .Update}}}},
 	{"incrbyfloat", 3, {.Write, .Denyoom, .Fast}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw, .Access, .Update}}}},
 	{"info", -1, {.Loading, .Stale, .Sentinel}, .None, 0, 0, 0, nil},
+	{"json.arrappend", -3, {.Write, .Denyoom, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw}}}},
+	{"json.arrindex", -4, {.Readonly, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Ro}}}},
+	{"json.arrinsert", -5, {.Write, .Denyoom, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw}}}},
+	{"json.arrlen", -2, {.Readonly, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Ro}}}},
+	{"json.arrpop", -2, {.Write, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw}}}},
+	{"json.arrtrim", 5, {.Write, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw}}}},
+	{"json.clear", -2, {.Write, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw}}}},
+	{"json.debug", -2, {.Readonly, .Module}, .None, 0, 0, 0, {{.Keyword, 0, "MEMORY", 1, .Range, 0, 1, 0, {.Ro}}}},
+	{"json.del", -2, {.Write, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw}}}},
+	{"json.forget", -2, {.Write, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw}}}},
+	{"json.get", -2, {.Readonly, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Ro}}}},
+	{"json.merge", -4, {.Write, .Denyoom, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw}}}},
+	{"json.mget", -3, {.Readonly, .Module}, .None, 1, -2, 1, {{.Index, 1, "", 0, .Range, -2, 1, 0, {.Ro}}}},
+	{"json.mset", -4, {.Write, .Denyoom, .Module}, .None, 1, -1, 3, {{.Index, 1, "", 0, .Range, -1, 3, 0, {.Rw}}}},
+	{"json.numincrby", 4, {.Write, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw}}}},
+	{"json.nummultby", 4, {.Write, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw}}}},
+	{"json.numpowby", 4, {.Write, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw}}}},
+	{"json.objkeys", -2, {.Readonly, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Ro}}}},
+	{"json.objlen", -2, {.Readonly, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Ro}}}},
+	{"json.resp", -2, {.Readonly, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Ro}}}},
+	{"json.set", -4, {.Write, .Denyoom, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw}}}},
+	{"json.strappend", -3, {.Write, .Denyoom, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw}}}},
+	{"json.strlen", -2, {.Readonly, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Ro}}}},
+	{"json.toggle", 3, {.Write, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Rw}}}},
+	{"json.type", -2, {.Readonly, .Module}, .None, 1, 0, 1, {{.Index, 1, "", 0, .Range, 0, 1, 0, {.Ro}}}},
 	{"keys", 2, {.Readonly}, .None, 0, 0, 0, nil},
 	{"label", -2, {}, .None, 0, 0, 0, nil},
 	{"label|as", -4, {.Noscript, .Loading, .Stale, .Fast}, .None, 0, 0, 0, nil},

@@ -3679,8 +3679,12 @@ def run(port, steps):
             ok = all(ch in "0123456789abcdef" for ch in items) and not items.startswith("-")
             notes.append("genpass %s len=%d hex=%s" % (step[2], len(items), ok) if not items.startswith("-") else "genpass %s %s" % (step[2], items))
         elif op == "cat":
-            items = [x for x in conns[step[1]].array("ACL CAT " + step[2] + "\r\n") if x.split("|")[0] not in ("label", "context", "owners")]
-            notes.append("cat %s %s" % (step[2], ",".join(sorted(items))))
+            if step[2]:
+                items = sorted(x for x in conns[step[1]].array("ACL CAT " + step[2] + "\r\n")
+                               if x.split("|")[0] not in ("label", "context", "owners") and not x.lower().startswith(("ft.", "json.")))
+            else:
+                items = [x for x in conns[step[1]].array("ACL CAT\r\n") if x not in ("search", "json")]
+            notes.append("cat %s %s" % (step[2], ",".join(items)))
         time.sleep(SETTLE)
         for c in conns.values():
             c.drain()
@@ -3979,7 +3983,7 @@ def pubsub_default(proto):
             "ACL GETUSER pd5", "ACL GETUSER pd1", "ACL LIST",
         )),
         ("send", "a", cmds(
-            "ACL HELP", "ACL HELP x", "ACL FOO", "ACL", "ACL CAT", "ACL CAT nosuch", "ACL CAT a b", "ACL WHOAMI",
+            "ACL HELP", "ACL HELP x", "ACL FOO", "ACL", "ACL CAT nosuch", "ACL CAT a b", "ACL WHOAMI",
             "ACL WHOAMI x", "ACL USERS", "ACL USERS x", "ACL LIST x", "ACL GETUSER", "ACL GETUSER a b", "ACL GENPASS x",
             "ACL GENPASS 0", "ACL GENPASS -1", "ACL GENPASS 4097", "ACL GENPASS 1 2", "ACL LOAD", "ACL SAVE", "ACL LOAD x",
             "ACL LOG 1 2", "ACL DELUSER", "ACL SETUSER", "acl whoami",
@@ -3989,6 +3993,7 @@ def pubsub_default(proto):
         ("genpass", "a", "ACL GENPASS 5"),
         ("genpass", "a", "ACL GENPASS 128"),
         ("genpass", "a", "ACL GENPASS 4096"),
+        ("cat", "a", ""),
         ("cat", "a", "keyspace"),
         ("cat", "a", "HASH"),
         ("cat", "a", "dangerous"),
@@ -4587,9 +4592,23 @@ def run(proto):
     j, r = Conn(ESKI, proto), Conn(REF, proto)
     module = set(names_of(j.cmd("COMMAND", "LIST", "FILTERBY", "MODULE", "vectorset")))
     check(len(module) == 13, "resp%d COMMAND LIST FILTERBY MODULE vectorset lists %d commands" % (proto, len(module)))
+    search = set(names_of(j.cmd("COMMAND", "LIST", "FILTERBY", "MODULE", "search")))
+    check(search == {"FT.AGGREGATE", "FT.ALIASADD", "FT.ALIASDEL", "FT.ALIASUPDATE", "FT.ALTER",
+                     "FT.CONFIG", "FT.CONFIG|GET", "FT.CONFIG|HELP", "FT.CONFIG|SET",
+                     "FT.CREATE", "FT.CURSOR", "FT.CURSOR|DEL", "FT.CURSOR|GC", "FT.CURSOR|READ", "FT.DROPINDEX",
+                     "FT.EXPLAIN", "FT.EXPLAINCLI", "FT.HYBRID", "FT.INFO", "FT.PROFILE", "FT.SEARCH",
+                     "FT.TAGVALS", "FT._LIST"},
+          "resp%d COMMAND LIST FILTERBY MODULE search returned %s" % (proto, sorted(search)))
+    json_commands = set(names_of(j.cmd("COMMAND", "LIST", "FILTERBY", "MODULE", "ReJSON")))
+    check(json_commands == {"json." + n for n in ("arrappend", "arrindex", "arrinsert", "arrlen", "arrpop", "arrtrim",
+                             "clear", "debug", "del", "forget", "get", "merge", "mget", "mset",
+                             "numincrby", "nummultby", "numpowby", "objkeys", "objlen", "resp",
+                             "set", "strappend", "strlen", "toggle", "type")},
+          "resp%d COMMAND LIST FILTERBY MODULE ReJSON returned %s" % (proto, sorted(json_commands)))
+    module |= search | json_commands
     own = set(n for n in names_of(j.cmd("COMMAND", "LIST")) if n.split("|")[0] in ("label", "context", "owners"))
     check(len(own) == 20, "resp%d COMMAND LIST lists %d label, context and owners commands" % (proto, len(own)))
-    extra = len(module) + len([n for n in own if "|" not in n])
+    extra = len([n for n in module | own if "|" not in n])
     module = module | own
     jl = [n for n in names_of(j.cmd("COMMAND", "LIST")) if n not in module]
     rl = names_of(r.cmd("COMMAND", "LIST"))

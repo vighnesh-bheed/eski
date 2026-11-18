@@ -127,7 +127,8 @@ cmd_hmget :: proc(c: ^Conn, argv: [][]u8) {
 		if empty {
 			db_remove(key)
 		} else {
-			hash_sync(cur_db(), h)
+			hash_sync(e.db, h)
+			search_hash_changed(e.db, key, h)
 		}
 		if notify_expired {
 			notify(.Hash, "hexpired", key)
@@ -236,8 +237,9 @@ cmd_hdel :: proc(c: ^Conn, argv: [][]u8) {
 	n, empty := ht.hdel(h, argv[2:])
 	pst.dirty += i64(n)
 	if n > 0 {
-		hash_done(e, h)
+		hash_done(e, h, !empty)
 		if empty {
+			search_hash_changed(e.db, key, nil, true)
 			db_remove(key)
 		}
 		signal_key(key)

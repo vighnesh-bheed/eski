@@ -36,11 +36,14 @@ PHRASE_OPS := Ops {
 	},
 	score = proc(c: ^Cursor, s: ^Scoring) -> f64 {
 		p := (^Phrase)(c)
+		first := trace_start(s)
 		total := 0.0
 		for i, k in p.order {
 			total = fold(s, .Phrase, k > 0, total, score(p.terms[i], s))
 		}
-		return p.weight * total
+		value := p.weight * total
+		trace_group(s, first, p.weight, value)
+		return value
 	},
 }
 

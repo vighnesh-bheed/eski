@@ -7,6 +7,7 @@ Leaf_Kind :: enum u8 {
 	Tag,
 	Wildcard,
 	Filter,
+	Value,
 }
 
 Collection :: struct {
@@ -68,6 +69,8 @@ Scorer :: struct {
 Scoring :: struct {
 	scorer: ^Scorer,
 	doc:    Document,
+	matches: ^[dynamic]string,
+	trace: ^Score_Trace_Context,
 }
 
 leaf :: proc "contextless" (kind: Leaf_Kind, weight := 1.0) -> Leaf {

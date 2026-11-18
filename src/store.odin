@@ -294,6 +294,10 @@ val_release :: proc "contextless" (db: ^Db, kp: ^Key_Handle, vp: ^Val_Handle) {
 		mem_free(bs.data)
 		mem_free(bs)
 	case FORM_OBJECT:
+		kind := vp.slab.info.type
+		if (kind == .Hash || kind == .Json) && search_active_in(db) {
+			search_document_changed(db, key_bytes(kp, &db.slab), nil, kind == .Json)
+		}
 		if labels_on && vp.slab.info.type == .Vectorset {
 			label_vset_release(db, rawptr(vp.ref.addr))
 			db.heap_objs -= 1
@@ -1722,6 +1726,9 @@ db_rename :: proc(src: []u8, dst: []u8) -> bool #no_bounds_check {
 	e.kp.small.tag.val_form = vform
 	e.mp.stamp = stamp
 	entry_set_expire(e, due)
+	if vform == FORM_OBJECT && (vh.slab.info.type == .Hash || vh.slab.info.type == .Json) {
+		search_document_renamed(db, src, dst, rawptr(vh.ref.addr), vh.slab.info.type == .Json)
+	}
 	return true
 }
 
@@ -1791,6 +1798,11 @@ db_move :: proc(src: ^Db, dst: ^Db, key: []u8) -> bool #no_bounds_check {
 	e.kp.small.tag.val_form = form
 	e.mp.stamp = stamp
 	entry_set_expire(e, due)
+	if form == FORM_OBJECT && (vh.slab.info.type == .Hash || vh.slab.info.type == .Json) {
+		on_json := vh.slab.info.type == .Json
+		search_document_changed(src, key, nil, on_json)
+		search_document_changed(dst, key, rawptr(vh.ref.addr), on_json)
+	}
 	if labels_on {
 		label_note_erased(src, key)
 	}
@@ -1834,6 +1846,9 @@ db_swap :: proc(a: int, b: int) {
 	if labels_on {
 		label_swap(a, b)
 	}
+	if a == 0 || b == 0 {
+		search_rebuild_db0()
+	}
 }
 
 db_flush :: proc() {
@@ -1847,6 +1862,7 @@ db_flush_all :: proc(lazy: bool = false) {
 }
 
 db_flush_in :: proc(db: ^Db, lazy: bool = false) {
+	search_part_flush(db)
 	vset_quiesce_all()
 	if labels_on {
 		label_flush_prepare(db)
@@ -2076,6 +2092,47 @@ db_expire_slot :: proc(db: ^Db, t: ^Table, slot: int) {
 	expired_key_copy(&t.slots[slot].key, &db.slab)
 	db_erase_expired(db, t, slot)
 	key_expired_event(expired_key_buf[:], db)
+}
+
+db_quota_expire :: proc(db: ^Db, now: i64) -> bool #no_bounds_check {
+	expired := false
+	for k in 0 ..< 2 {
+		if db.expires == 0 || (k == 1 && db.rehash_idx < 0) {
+			break
+		}
+		t := &db.t[k]
+		for group in 0 ..< t.groups {
+			occupied := group_full(group_load(t.ctrl, group))
+			for occupied != 0 {
+				slot := int(group << GROUP_SHIFT) + int(intrinsics.count_trailing_zeros(occupied))
+				occupied &= occupied - 1
+				due := slot_deadline(db, t, slot)
+				if due != 0 && due <= now {
+					if !expired {
+						owner_touch_db(db)
+						expired = true
+					}
+					db_expire_slot(db, t, slot)
+				}
+			}
+			if db.expires == 0 {
+				break
+			}
+		}
+	}
+	if expired {
+		db_maybe_shrink(db)
+	}
+	if ht.registry_next_expire(db.hreg) <= u64(now) {
+		if !expired {
+			owner_touch_db(db)
+			expired = true
+		}
+		for ht.registry_next_expire(db.hreg) <= u64(now) {
+			hash_expire_partition(db, u64(now))
+		}
+	}
+	return expired
 }
 
 db_expire_scan :: proc(db: ^Db, deadline: i64) #no_bounds_check {
@@ -2654,7 +2711,6 @@ db_evict_sample :: proc(db: ^Db, out: []Evict_Sample, volatile: bool, score: Evi
 	return n
 }
 
-@(private = "file")
 slot_evict_rank :: #force_inline proc "contextless" (meta: Slot_Meta, val: Val_Handle, due: i64, score: Evict_Score) -> u64 {
 	note := Access_Note{stamp = meta.stamp, tally = val.small.tally}
 	switch score {

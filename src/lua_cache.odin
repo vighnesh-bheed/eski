@@ -504,18 +504,23 @@ lua_scope_room :: proc(digest: [40]u8, body: []u8) -> bool {
 		return true
 	}
 	charge := size_of(Lua_Source) + len(body)
-	need := i64(owner_used_live(e) + charge) - quota
-	if need <= 0 {
+	room := quota - i64(charge)
+	if i64(owner_used_live(e)) <= room {
+		return true
+	}
+	retained := owner_quota_expire(e, nil)
+	used := i64(owner_used_live(e)) - retained
+	if used <= room {
 		return true
 	}
 	spare := 0
 	for h := home.lru_head; h != nil; h = h.lru_next {
 		spare += lua_holder_charge(h.entry)
 	}
-	if i64(spare) < need {
+	if i128(used) - i128(spare) > i128(room) {
 		return false
 	}
-	for home.lru_tail != nil && i64(owner_used_live(e) + charge) > quota {
+	for home.lru_tail != nil && i64(owner_used_live(e)) - retained > room {
 		lua_holder_drop(home.lru_tail)
 		lua_cache_evictions += 1
 	}

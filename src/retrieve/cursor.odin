@@ -79,6 +79,7 @@ Term_Cursor :: struct {
 	reader:          postings.Cursor,
 	leaf:            Leaf,
 	position_fields: postings.Fields,
+	match:           string,
 }
 
 TERM_OPS := Ops {
@@ -94,8 +95,11 @@ TERM_OPS := Ops {
 	},
 	score = proc(c: ^Cursor, s: ^Scoring) -> f64 {
 		t := (^Term_Cursor)(c)
+		record_match(s, t.match)
 		hit := Hit{frequency = postings.frequency(&t.reader), fields = postings.fields_of(&t.reader)}
-		return leaf_score(s, &t.leaf, hit)
+		value := leaf_score(s, &t.leaf, hit)
+		trace_leaf(s, c, t.leaf, hit.frequency, t.match, value)
+		return value
 	},
 	positions = proc(c: ^Cursor, out: ^[dynamic]u32) -> bool {
 		t := (^Term_Cursor)(c)
@@ -105,6 +109,12 @@ TERM_OPS := Ops {
 		t := (^Term_Cursor)(c)
 		return postings.block_docs(&t.reader)
 	},
+}
+
+record_match :: #force_inline proc(s: ^Scoring, term: string) {
+	if len(term) != 0 && s != nil && s.matches != nil && len(s.matches^) < 100 {
+		append(s.matches, term)
+	}
 }
 
 term_cursor_init :: proc(t: ^Term_Cursor, list: ^postings.List, deleted: ^roaring.Bitmap, required_fields: postings.Fields, leaf: Leaf, position_fields := postings.ALL_FIELDS, allocator := context.allocator) {
@@ -123,6 +133,7 @@ Bitmap_Cursor :: struct {
 	iterator:   roaring.Iterator,
 	deleted:    ^roaring.Bitmap,
 	leaf:       Leaf,
+	match:      string,
 }
 
 bitmap_next :: proc(c: ^Cursor) -> u32 {
@@ -163,7 +174,10 @@ BITMAP_OPS := Ops {
 	},
 	score = proc(c: ^Cursor, s: ^Scoring) -> f64 {
 		b := (^Bitmap_Cursor)(c)
-		return leaf_score(s, &b.leaf, Hit{frequency = 1})
+		record_match(s, b.match)
+		value := leaf_score(s, &b.leaf, Hit{frequency = 1})
+		trace_leaf(s, c, b.leaf, 1, b.match, value)
+		return value
 	},
 }
 
@@ -219,7 +233,9 @@ ARRAY_OPS := Ops {
 	},
 	score = proc(c: ^Cursor, s: ^Scoring) -> f64 {
 		a := (^Array_Cursor)(c)
-		return leaf_score(s, &a.leaf, Hit{frequency = 1})
+		value := leaf_score(s, &a.leaf, Hit{frequency = 1})
+		trace_leaf(s, c, a.leaf, 1, "", value)
+		return value
 	},
 	block = proc(c: ^Cursor) -> []u32 {
 		a := (^Array_Cursor)(c)

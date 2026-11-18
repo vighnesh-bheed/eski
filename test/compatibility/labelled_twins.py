@@ -535,6 +535,261 @@ class QuotaTwins(Base):
     def test_both_quota_figures_and_refusals_follow_only_the_scopes_data(self):
         self.check_mode('both')
 
+    def expiry_server(self, name, mode, policy='noeviction', extra=()):
+        server = self.server(name, mode, ('--enable-debug-command', 'yes', '--maxmemory-policy', policy) + extra)
+        client = server.up()
+        self.addCleanup(client.close)
+        self.assertEqual(client.call(*sl.top(mode), 'DEBUG', 'SET-ACTIVE-EXPIRE', 0), 'OK')
+        return server, client
+
+    def expiry_case(self, mode, policy, script=None):
+        _, a = self.expiry_server('expiry-a-' + policy, mode, policy)
+        b_server, b = self.expiry_server('expiry-b-' + policy, mode, policy)
+        reader = sl.at(mode, *QUOTA_VISIBLE[mode][0])
+        top = sl.top(mode)
+        kind, name = QUOTA_FIGURES[mode][0]
+        quota = top + ('OWNERS' if kind == 'owner' else 'LABEL', 'QUOTA', name)
+        fields = ['f%d' % i for i in range(1050)]
+        payload = [arg for field in fields for arg in (field, 'x' * 80)]
+        hidden = [sl.at(mode, *scope) for scope in HIDDEN[mode]]
+        for c in (a, b):
+            self.assertEqual(c.call(*reader, 'SET', 'q-exp-victim', 'v', 'PXAT', sl.FAR - 1000), 'OK')
+            self.assertEqual(c.call(*reader, 'SET', 'q-exp-keeper', 'v', 'PXAT', sl.FAR), 'OK')
+            self.assertEqual(c.call(*reader, 'HSET', 'q-exp-hash', 'survivor', 'v', *payload), len(fields) + 1)
+            self.assertEqual(c.call(*reader, 'HSET', 'q-exp-empty-hash', 'gone', 'v'), 1)
+            self.assertEqual(c.call(*reader, 'VADD', 'q-exp-dead-vector', 'VALUES', 2, 1, 0, 'mine'), 1)
+            self.assertEqual(c.call('SELECT', 2), 'OK')
+            self.assertEqual(c.call(*reader, 'SET', 'q-exp-other-db', 'x' * 1024), 'OK')
+            self.assertEqual(c.call('SELECT', 0), 'OK')
+        for prefix in hidden:
+            self.assertEqual(b.call(*prefix, 'HSET', 'q-exp-hidden-hash', *payload), len(fields))
+        self.assertEqual(b.call(*hidden[0], 'VADD', 'q-exp-dead-vector', 'VALUES', 2, 0, 1, 'sibling'), 1)
+
+        at = max(ll.server_ms(c, mode) for c in (a, b)) + 750
+        for c in (a, b):
+            self.assertEqual(c.call(*reader, 'PEXPIREAT', 'q-exp-dead-vector', at), 1)
+            self.assertEqual(c.call(*reader, 'HPEXPIREAT', 'q-exp-hash', at, 'FIELDS', len(fields), *fields), [1] * len(fields))
+            self.assertEqual(c.call(*reader, 'HPEXPIREAT', 'q-exp-empty-hash', at, 'FIELDS', 1, 'gone'), [1])
+            self.assertEqual(c.call('SELECT', 2), 'OK')
+            self.assertEqual(c.call(*reader, 'PEXPIREAT', 'q-exp-other-db', at), 1)
+            self.assertEqual(c.call('SELECT', 0), 'OK')
+            self.assertEqual(c.call(*reader, 'PEXPIRETIME', 'q-exp-dead-vector'), at)
+        hidden_commands = []
+        for prefix in hidden:
+            hidden_commands += [prefix + ('SET', 'q-exp-hide-%d' % i, 'v', 'PXAT', at) for i in range(160)]
+            hidden_commands.append(prefix + ('HPEXPIREAT', 'q-exp-hidden-hash', at, 'FIELDS', len(fields), *fields))
+        self.assertEqual(b.pipeline(hidden_commands), (['OK'] * 160 + [[1] * len(fields)]) * len(hidden))
+
+        self.assertEqual(a.call(*top, 'DEBUG', 'SET-ACTIVE-EXPIRE', 1), 'OK')
+        sl.wait_for(lambda: ll.server_ms(b, mode) > at, what='the server clock to pass the expiry deadline')
+
+        def reaped():
+            stats = lf.info(a, *top, section='stats')
+            return int(stats['expired_keys']) == 2 and int(stats['expired_subkeys']) == len(fields) + 1
+
+        sl.wait_for(reaped, what='the first twin to reap both keys and all expired fields')
+        held = b.call(*quota)[1]
+        self.assertEqual(b.call(*quota, 'LIMIT', held), 'OK')
+        self.assertEqual(b.call(*reader, 'SET', 'q-exp-keeper', 'v', 'KEEPTTL'), 'OK')
+        self.assertEqual(b.call(*quota)[1], held)
+        clean = a.call(*quota)[1]
+        if script:
+            expected = a.call(*reader, 'SCRIPT', 'LOAD', script)
+            script_charge = a.call(*quota)[1] - clean
+            self.assertGreater(script_charge, 0)
+            probe = reader + ('SCRIPT', 'LOAD', script)
+            limit = clean + script_charge
+        else:
+            probe = reader + ('SET', 'q-exp-probe', 'ok')
+            expected = 'OK'
+            limit = clean - (policy == 'volatile-ttl')
+
+        replies = []
+        for c in (a, b):
+            self.assertEqual(c.call(*quota, 'LIMIT', limit), 'OK')
+            if c is b and script:
+                self.assertEqual(c.call(*top, 'CLIENT', 'PAUSE', 60000, 'WRITE'), 'OK')
+                with self.assertRaisesRegex(ServerError, 'OOM.*owner-quota'):
+                    c.call(*probe)
+                self.assertEqual(c.call(*quota)[1], held)
+                self.assertEqual(c.call(*top, 'CLIENT', 'UNPAUSE'), 'OK')
+            activated, usage, answer = c.pipeline([
+                top + ('DEBUG', 'SET-ACTIVE-EXPIRE', 1), quota, probe,
+            ])
+            self.assertEqual(activated, 'OK')
+            if c is b:
+                self.assertGreater(usage[1], limit, 'the second twin still holds expired data at the quota check')
+            keys = sorted(c.call(*reader, 'KEYS', 'q-exp-*'))
+            replies.append((sl.error_text(answer), keys))
+
+        self.assertEqual(replies[0], replies[1])
+        expected_keys = [b'q-exp-hash', b'q-exp-keeper']
+        if not script:
+            expected_keys.append(b'q-exp-probe')
+        if policy != 'volatile-ttl':
+            expected_keys.append(b'q-exp-victim')
+        self.assertEqual(replies[0], (expected, expected_keys))
+        self.assertEqual(b.call(*reader, 'HGETALL', 'q-exp-hash'), [b'survivor', b'v'])
+        self.assertEqual(b.call(*hidden[0], 'VCARD', 'q-exp-dead-vector'), 1)
+        self.assertEqual(a.call(*quota), b.call(*quota))
+        b_server.kill()
+        b = b_server.up()
+        self.addCleanup(b.close)
+        self.assertEqual(sorted(b.call(*reader, 'KEYS', 'q-exp-*')), expected_keys)
+        self.assertEqual(b.call(*reader, 'HGETALL', 'q-exp-hash'), [b'survivor', b'v'])
+        self.assertEqual(b.call(*hidden[0], 'VCARD', 'q-exp-dead-vector'), 1)
+
+    def test_label_quota_reaps_expired_keys_and_fields_before_admission_and_eviction(self):
+        for policy in ('noeviction', 'volatile-ttl'):
+            with self.subTest(policy=policy):
+                self.expiry_case('labels', policy)
+
+    def test_owner_quota_reaps_expired_keys_and_fields_before_admission_and_eviction(self):
+        for policy in ('noeviction', 'volatile-ttl'):
+            with self.subTest(policy=policy):
+                self.expiry_case('owners', policy)
+
+    def test_scoped_eviction_samples_match_before_and_after_a_shrink(self):
+        seed = 3
+        print('scoped quota eviction seed', seed, file=sys.stderr)
+        expired = ['gone%04d' % i for i in range(6000)]
+        keepers = ['keep%02d' % i for i in range(24)]
+        for mode, policy in (('owners', 'allkeys-random'), ('owners', 'volatile-random'),
+                             ('owners', 'volatile-ttl'), ('labels', 'allkeys-random')):
+            with self.subTest(mode=mode, policy=policy, seed=seed):
+                self.quota_samples_after_expiry(mode, policy, seed, keepers, expired)
+
+    def quota_samples_after_expiry(self, mode, policy, seed, keepers, expired):
+        extra = ('--appendonly', 'no', '--debug-hash-seed', str(seed), '--maxmemory-samples', '1')
+        name = mode + '-' + policy
+        a_server, a = self.expiry_server('sample-a-' + name, mode, policy, extra)
+        b_server, b = self.expiry_server('sample-b-' + name, mode, policy, extra)
+        top = sl.top(mode)
+        reader = sl.at(mode, *QUOTA_VISIBLE[mode][0])
+        hidden = sl.at(mode, *HIDDEN[mode][0])
+        kind, name = QUOTA_FIGURES[mode][0]
+        quota = top + ('OWNERS' if kind == 'owner' else 'LABEL', 'QUOTA', name)
+        for c in (a, b):
+            self.assertEqual(c.pipeline([reader + ('SET', key, 'v', 'PXAT', sl.FAR + i)
+                                         for i, key in enumerate(keepers)]), ['OK'] * len(keepers))
+            self.assertEqual(c.call(*reader, 'MSET', *[v for key in expired for v in (key, 'v')]), 'OK')
+        at = max(ll.server_ms(c, mode) for c in (a, b)) + 1500
+        for c in (a, b):
+            self.assertEqual(c.pipeline([reader + ('PEXPIREAT', key, at) for key in expired]), [1] * len(expired))
+        self.assertEqual(b.pipeline([hidden + ('SET', 'hidden%d' % i, 'v', 'PXAT', at)
+                                     for i in range(400)]), ['OK'] * 400)
+        self.assertEqual(a.call(*top, 'DEBUG', 'SET-ACTIVE-EXPIRE', 1), 'OK')
+        sl.wait_for(lambda: ll.server_ms(b, mode) > at, what='the server clock to pass the sample deadline')
+        sl.wait_for(lambda: lf.info(a, *top, section='stats')['expired_keys'] == str(len(expired)),
+                    what='the first twin to finish expiry')
+        sl.wait_for(lambda: lf.info(a, *top, section='memory')['mem_overhead_db_hashtable_rehashing'] == '0',
+                    what='the first twin to finish shrinking its table')
+        used = a.call(*quota)[1]
+        self.assertGreater(b.call(*quota)[1], used)
+        remaining = []
+        for c in (a, b):
+            self.assertEqual(c.call(*quota, 'LIMIT', used - 1), 'OK')
+            self.assertEqual(c.pipeline([top + ('DEBUG', 'SET-ACTIVE-EXPIRE', 1),
+                                         reader + ('SET', 'probe', 'v')]), ['OK', 'OK'])
+            remaining.append(sorted(c.call(*reader, 'KEYS', 'keep*')))
+        self.assertEqual(len(remaining[0]), len(keepers) - 1)
+        self.assertEqual(remaining[0], remaining[1])
+        a_server.kill()
+        b_server.kill()
+
+    def test_owner_quota_reaps_expired_keys_and_fields_before_caching_a_script(self):
+        self.expiry_case('owners', 'noeviction', script='return 123')
+
+    def test_owner_quota_releases_the_context_of_an_emptied_destination(self):
+        mode = 'owners'
+        _, a = self.expiry_server('destination-a', mode)
+        _, b = self.expiry_server('destination-b', mode)
+        top = sl.top(mode)
+        reader = sl.at(mode, 'UNCLASSIFIED', 'u1')
+        quota = top + ('OWNERS', 'QUOTA', 'u1')
+        at = max(ll.server_ms(c, mode) for c in (a, b)) + 250
+        for c in (a, b):
+            self.assertEqual(c.call(*reader, 'HSET', 'destination', 'gone', 'x' * 1024), 1)
+            self.assertEqual(c.call(*reader, 'HPEXPIREAT', 'destination', at, 'FIELDS', 1, 'gone'), [1])
+        self.assertEqual(a.call(*top, 'DEBUG', 'SET-ACTIVE-EXPIRE', 1), 'OK')
+        sl.wait_for(lambda: ll.server_ms(b, mode) > at, what='the server clock to pass the destination deadline')
+        sl.wait_for(lambda: lf.info(a, *top, section='stats')['expired_subkeys'] == '1',
+                    what='the first twin to empty its destination partition')
+        empty_partition_bytes = 376
+        limit = a.call(*quota)[1] + empty_partition_bytes
+        self.assertGreater(b.call(*quota)[1], limit)
+        for c in (a, b):
+            self.assertEqual(c.call(*quota, 'LIMIT', limit), 'OK')
+            self.assertEqual(c.call(*reader, 'SET', 'destination', 'live'), 'OK')
+        self.assertEqual(a.call(*quota), b.call(*quota))
+
+    def test_owner_quota_expiry_is_logged_during_a_script_with_propagation_disabled(self):
+        mode = 'owners'
+        _, a = self.expiry_server('lua-a', mode)
+        b_server, b = self.expiry_server('lua-b', mode)
+        top = sl.top(mode)
+        reader = sl.at(mode, 'UNCLASSIFIED', 'u1')
+        quota = top + ('OWNERS', 'QUOTA', 'u1')
+        body = ("redis.call('SELECT', 2); redis.set_repl(redis.REPL_NONE); "
+                "return redis.call('INCR', 'lua-counter')")
+        digests = []
+        for c in (a, b):
+            digests.append(c.call(*reader, 'SCRIPT', 'LOAD', body))
+            self.assertEqual(c.call('SELECT', 2), 'OK')
+            self.assertEqual(c.call(*reader, 'SET', 'lua-counter', 1), 'OK')
+            self.assertEqual(c.call('SELECT', 0), 'OK')
+            self.assertEqual(c.call(*reader, 'HSET', 'lua-due-hash', 'gone', 'x' * 1024), 1)
+        at = max(ll.server_ms(c, mode) for c in (a, b)) + 250
+        for c in (a, b):
+            self.assertEqual(c.call(*reader, 'SET', 'lua-due-key', 'x' * 1024, 'PXAT', at), 'OK')
+            self.assertEqual(c.call(*reader, 'HPEXPIREAT', 'lua-due-hash', at, 'FIELDS', 1, 'gone'), [1])
+        self.assertEqual(a.call(*top, 'DEBUG', 'SET-ACTIVE-EXPIRE', 1), 'OK')
+        sl.wait_for(lambda: ll.server_ms(b, mode) > at, what='the server clock to pass the Lua test deadline')
+        sl.wait_for(lambda: lf.info(a, *top, section='stats')['expired_subkeys'] == '1',
+                    what='the first twin to expire the hash field')
+        sl.wait_for(lambda: lf.info(a, *top, section='stats')['expired_keys'] == '1',
+                    what='the first twin to expire the key')
+        clean = a.call(*quota)[1]
+        self.assertGreater(b.call(*quota)[1], clean)
+        for c, digest in zip((a, b), digests):
+            self.assertEqual(c.call(*quota, 'LIMIT', clean), 'OK')
+            self.assertEqual(c.call(*reader, 'EVALSHA', digest, 0), 2)
+        self.assertEqual(a.call(*quota), b.call(*quota))
+        scope = (b'UNCLASSIFIED', b'u1')
+        path = sl.last_incr(b_server.run.directory)
+
+        def has_expiry_records():
+            rows = [argv for mark, argv in map(sl.scoped, sl.records(path.read_bytes())) if mark == scope]
+            if [b'DEL', b'lua-due-key'] in rows and [b'HDEL', b'lua-due-hash', b'gone'] in rows:
+                self.assertNotIn([b'INCR', b'lua-counter'], rows)
+                return True
+            return False
+
+        sl.wait_for(has_expiry_records, what='the quota expiry effects to reach the append-only file')
+        b_server.kill()
+        b = b_server.up()
+        self.addCleanup(b.close)
+        self.assertEqual(b.call(*reader, 'DBSIZE'), 0)
+        self.assertEqual(b.call('SELECT', 2), 'OK')
+        self.assertEqual(b.call(*reader, 'GET', 'lua-counter'), b'1')
+
+    def test_quota_expiry_rechecks_a_visible_copy_when_the_destination_hash_empties(self):
+        mode = 'labels'
+        _, c = self.expiry_server('preflight', mode)
+        top = sl.top(mode)
+        reader = sl.at(mode, 'C')
+        lower = sl.at(mode, 'U')
+        self.assertEqual(c.call(*reader, 'HSET', 'quota-copy', 'gone', 'x' * 1024), 1)
+        self.assertEqual(c.call(*lower, 'SET', 'quota-copy', 'below'), 'OK')
+        at = ll.server_ms(c, mode) + 200
+        self.assertEqual(c.call(*reader, 'HPEXPIREAT', 'quota-copy', at, 'FIELDS', 1, 'gone'), [1])
+        sl.wait_for(lambda: ll.server_ms(c, mode) > at, what='the server clock to pass the hash field deadline')
+        used = c.call(*top, 'LABEL', 'QUOTA', 'C')[1]
+        self.assertEqual(c.call(*top, 'LABEL', 'QUOTA', 'C', 'LIMIT', used - 1), 'OK')
+        with self.assertRaisesRegex(ServerError, 'INUSE'):
+            c.call(*reader, 'SET', 'quota-copy', 'overwrite')
+        self.assertEqual(c.call(*reader, 'GET', 'quota-copy'), b'below')
+
 
 def main():
     global BINARY, KEYSPACE_THREADS
