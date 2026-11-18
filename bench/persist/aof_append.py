@@ -1,6 +1,8 @@
 import argparse
+from contextlib import closing, nullcontext
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -8,7 +10,7 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from harness import Server, ServerError, cpu_seconds, encode
+from harness import Server, ServerError, cpu_seconds, encode, parse_info
 
 SCHEME = ['--label-levels', 'UNCLASSIFIED,CONFIDENTIAL,SECRET', '--label-compartments', 'A,B', '--label-trust-levels', 'WEB,VETTED']
 MARKINGS = ['UNCLASSIFIED', 'CONFIDENTIAL', 'SECRET', 'UNCLASSIFIED//A', 'CONFIDENTIAL//A', 'SECRET//A', 'SECRET//A/B', 'CONFIDENTIAL//B']
@@ -30,9 +32,11 @@ def head(mode, partition):
     return ['LABEL', 'AS', 'OWNER', 'u%d' % partition]
 
 
-def start(binary, port, folder, mode, appendonly, fsync, key, cpu):
+def start(binary, port, folder, mode, appendonly, fsync, key, cpu, mirror=None):
     spec = MODES[mode]
     args = list(spec['args']) + ['--appendonly', 'yes' if appendonly else 'no', '--appendfsync', fsync, '--auto-aof-rewrite-percentage', '0']
+    if mirror is not None:
+        args += ['--change-log-dir', str(mirror)]
     if key is not None:
         args += ['--encryption-key-file', str(key)]
     if spec['login'] is not None:
@@ -83,6 +87,63 @@ def measure(a, mode, appendonly, encryption, port, work):
     return row
 
 
+def verify_mirror(reader, mirror, folder, key):
+    first = subprocess.run([reader, mirror, 'first'], capture_output=True, timeout=10)
+    (folder / 'mirror-first.out').write_bytes(first.stdout)
+    (folder / 'mirror-first.err').write_bytes(first.stderr)
+    first.check_returncode()
+    epoch, position = first.stdout.decode().split()
+    record = subprocess.run([reader, mirror, 'read', epoch, position], capture_output=True, timeout=10)
+    (folder / 'mirror-first.aof').write_bytes(record.stdout)
+    (folder / 'mirror-read.err').write_bytes(record.stderr)
+    record.check_returncode()
+    if encode(['SET', key, VALUE]) not in record.stdout:
+        raise ValueError('verified change-log record does not contain the committed SET')
+
+
+def mirror_sample(a, enabled, round_number, work):
+    folder = Path(work) / f'round-{round_number}-mirror-{int(enabled)}'
+    folder.mkdir()
+    mirror = folder / 'mirror' if enabled else None
+    if mirror is not None:
+        mirror.mkdir(mode=0o700)
+    row = {'round': round_number, 'change_log': enabled, 'fsync': a.fsync, 'timed': not a.verify_only}
+    writes, _ = (a.writes, a.partitions) if a.size == 'custom' else SIZES[a.size]
+    server = start(a.server, a.port, folder, 'off', True, a.fsync, None, a.cpu, mirror)
+    try:
+        with closing(server.conn()) as c:
+            key = 'mirror-check'
+            if c.call('SET', key, VALUE) != 'OK' or c.call('GET', key) != VALUE.encode():
+                raise ValueError('plain append check did not round-trip')
+            if mirror is not None:
+                verify_mirror(a.change_log_reader, mirror, folder, key)
+            if not a.verify_only:
+                frames = [encode(['SET', f'key:{i}', VALUE]) for i in range(writes)]
+                warmup = min(a.warmup, writes)
+                if any(reply != 'OK' for reply in c.pipeline(frames[:warmup], a.pipeline)):
+                    raise ValueError('append warmup failed')
+                before_aof, _ = log_bytes(folder)
+                before_mirror = sum(path.stat().st_size for path in mirror.iterdir()) if mirror else 0
+                cpu = cpu_seconds(server.pid)
+                started = time.perf_counter()
+                replies = c.pipeline(frames, a.pipeline)
+                elapsed = time.perf_counter() - started
+                after_aof, _ = log_bytes(folder)
+                after_mirror = sum(path.stat().st_size for path in mirror.iterdir()) if mirror else 0
+                memory = parse_info(c.call('INFO', 'memory'))
+                failed = sum(reply != 'OK' for reply in replies)
+                row.update(warmup=warmup, writes=writes, pipeline=a.pipeline, wall_s=elapsed,
+                           server_cpu_s=cpu_seconds(server.pid)-cpu, failed_writes=failed,
+                           successful_writes_per_s=(writes-failed)/elapsed, aof_bytes=after_aof-before_aof,
+                           mirror_bytes=after_mirror-before_mirror, used_memory=int(memory['used_memory']),
+                           used_memory_rss=int(memory['used_memory_rss']))
+    finally:
+        code = server.stop()
+    if code != 0:
+        raise RuntimeError(f'server exited with {code}')
+    return row
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Measures what a write costs the server with the append-only file on against off, with labels off against a label scheme against owner mode, and with the log plain or encrypted: the server's CPU time per write over a pipelined run of SET commands whose keys are spread over the partitions (labels in label mode, users in owner mode), and the bytes the incremental log file holds per write, which are exact and reportable. Informs: the size of the scope prefix on a record, aliasing of owners in the log, the cost of sealing the log. Prints JSON with one row per configuration; the timing fields are for a quiet machine and are read in a speed pass.")
@@ -98,7 +159,29 @@ def main():
     parser.add_argument('--encryption', default='off,on', help='comma separated: off, on; only runs with the log on are encrypted')
     parser.add_argument('--cpu', help='CPU list for the server, as taskset -c takes it')
     parser.add_argument('--out', help='write the JSON here as well')
+    parser.add_argument('--work-dir', type=Path, help='new directory to retain logs and data')
+    parser.add_argument('--change-log-reader', type=lambda name: Path(name).resolve(),
+                        help='compare plaintext AOF with the change log off and on using this reader')
+    parser.add_argument('--mirror-rounds', type=int, default=2, help='alternate off/on order by round')
+    parser.add_argument('--warmup', type=int, default=500, help='warmup writes per mirror measurement')
+    parser.add_argument('--verify-only', action='store_true', help='check mirror capture with no timing')
     a = parser.parse_args()
+    if a.pipeline < 2 or a.writes < 1 or a.partitions < 1 or a.mirror_rounds < 1 or a.warmup < 0:
+        parser.error('invalid workload size, pipeline, rounds or warmup')
+    if a.verify_only and a.change_log_reader is None:
+        parser.error('--verify-only needs --change-log-reader')
+    if a.work_dir is not None:
+        a.work_dir = a.work_dir.resolve()
+        a.work_dir.mkdir(parents=True, exist_ok=False)
+    working = nullcontext(a.work_dir) if a.work_dir else tempfile.TemporaryDirectory(prefix='eski-aof-append.')
+    if a.change_log_reader is not None:
+        count = 1 if a.verify_only else a.mirror_rounds
+        with working as work:
+            rows = [mirror_sample(a, enabled, r, work) for r in range(count)
+                    for enabled in ((False, True) if r % 2 == 0 else (True, False))]
+        print_result(a, rows)
+        return int(any(r.get('failed_writes', 0) or (r['timed'] and r['aof_bytes'] <= 0) or
+                       (r['timed'] and r['change_log'] and r['mirror_bytes'] <= 0) for r in rows))
     modes = a.modes.split(',')
     for m in modes:
         if m not in MODES:
@@ -111,14 +194,18 @@ def main():
                     continue
                 configs.append((mode, aof == 'yes', enc == 'on'))
     rows = []
-    with tempfile.TemporaryDirectory(prefix='eski-aof-append.') as work:
+    with working as work:
         for i, (mode, aof, enc) in enumerate(configs):
             rows.append(measure(a, mode, aof, enc, a.port + i, work))
+    print_result(a, rows)
+    return 0 if all(r['failed_writes'] == 0 and (not r['appendonly'] or r['log_bytes'] > 0) for r in rows) else 1
+
+
+def print_result(a, rows):
     text = json.dumps({'rows': rows}, indent=2)
     if a.out:
         Path(a.out).write_text(text + '\n')
     print(text)
-    return 0 if all(r['failed_writes'] == 0 and (not r['appendonly'] or r['log_bytes'] > 0) for r in rows) else 1
 
 
 if __name__ == '__main__':

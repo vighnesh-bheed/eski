@@ -182,6 +182,8 @@ The light profile runs the search runner's offline tests and the tracked replay 
 
 Each invocation requires an empty output directory and writes independent logs, reports and a combined `summary.json`. The full profile uses the existing suite dependencies, including native Tcl or Docker and the smoke images. Search containers use the local pinned image and keep their logs. The first two ports in the `--port-base` range are enough for the light profile. The full profile requires a free range of 40 consecutive loopback ports. The labelled conformance wrapper chooses free server ports, the Tcl and vector set units allocate upstream fixture and replica ports, and the package runners manage their own ports.
 
+Use the [one-host coordinator](rented-run.md) for a preflight, the combined functional run, deterministic and native stress, and a gated benchmark baseline.
+
 ### Labelled-mode gate
 
 ```sh

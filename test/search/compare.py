@@ -592,7 +592,7 @@ def verify_reference(port):
         conn.close()
 
 
-def remove_reference(id_file, log):
+def remove_reference(id_file, log, timeout=10):
     if id_file.is_file():
         container = id_file.read_text().strip()
         if re.fullmatch(r"[a-f0-9]{64}", container):
@@ -600,18 +600,19 @@ def remove_reference(id_file, log):
                 with log.open("wb") as output:
                     subprocess.run(["docker", "logs", container], stdout=output, stderr=subprocess.STDOUT, timeout=5)
             finally:
-                subprocess.run(["docker", "rm", "-f", container], stdout=subprocess.DEVNULL, check=True, timeout=10)
+                subprocess.run(["docker", "rm", "-f", container], stdout=subprocess.DEVNULL, check=True, timeout=timeout)
 
 
 @contextmanager
-def reference_server(port, folder):
+def reference_server(port, folder, cpus=None, cleanup_timeout=10):
     folder.mkdir()
     id_file = folder / "container.id"
+    affinity = ["--cpuset-cpus", cpus] if cpus else []
     try:
         free_port(port)
         with (folder / "startup.log").open("wb") as log:
             subprocess.run(["docker", "run", "--pull=never", "-d", "--name", "eski-search-%s-%s" % (port, os.getpid()),
-                            "--cidfile", id_file, "--network", "host", "--memory", "2g", "--memory-swap", "2g",
+                            "--cidfile", id_file, "--network", "host", "--memory", "2g", "--memory-swap", "2g", *affinity,
                             "--tmpfs", "/data:rw,size=128m", IMAGE, "redis-server", "--port", str(port),
                             "--bind", "127.0.0.1", "--protected-mode", "yes", "--dir", "/data", "--save", "",
                             "--appendonly", "no", "--maxmemory", "1gb",
@@ -621,7 +622,7 @@ def reference_server(port, folder):
         verify_reference(port)
         yield
     finally:
-        remove_reference(id_file, folder / "server.log")
+        remove_reference(id_file, folder / "server.log", timeout=cleanup_timeout)
 
 
 @contextmanager

@@ -1,4 +1,5 @@
 import argparse
+from contextlib import nullcontext
 import json
 import random
 import re
@@ -48,13 +49,18 @@ def main():
     parser.add_argument('--rounds', type=int, default=2, help='restores of the payload')
     parser.add_argument('--cpu', help='CPU list for the server, as taskset -c takes it')
     parser.add_argument('--out', help='write the JSON here as well')
+    parser.add_argument('--work-dir', type=Path, help='new directory to retain logs and data')
     a = parser.parse_args()
+    if a.work_dir is not None:
+        a.work_dir = a.work_dir.resolve()
+        a.work_dir.mkdir(parents=True, exist_ok=False)
+    working = nullcontext(a.work_dir) if a.work_dir else tempfile.TemporaryDirectory(prefix='eski-graph-load.')
     n = a.elements if a.size == 'custom' else SIZES[a.size]
     rng = random.Random(n * 7 + a.dim)
     vectors = [[rng.uniform(-1, 1) for _ in range(a.dim)] for _ in range(n)]
     probes = [[rng.uniform(-1, 1) for _ in range(a.dim)] for _ in range(QUERIES)]
     result = {'elements': n, 'dim': a.dim, 'quant': a.quant, 'm': a.m, 'rounds': []}
-    with tempfile.TemporaryDirectory(prefix='eski-graph-load.') as work:
+    with working as work:
         server = Server(a.server, a.port, work, ['--enable-debug-command', 'yes'], cpus=a.cpu)
         try:
             c = server.conn()
