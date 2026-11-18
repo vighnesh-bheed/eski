@@ -339,6 +339,9 @@ label_trusts_rewrite :: proc(rs: ^Rewrite_State, cf: ^Config) {
 label_scheme_apply :: proc() -> string {
 	labelled := lb.config_labelled(&label_scheme)
 	guarded := labelled || owners_wanted
+	if guarded && change_log_dir != "" {
+		return CHANGE_LOG_PROTECTION
+	}
 	if label_scheme_runtime && guarded && mc_port != 0 {
 		return LABEL_SCHEME_MEMCACHED if labelled else OWNERS_MEMCACHED
 	}

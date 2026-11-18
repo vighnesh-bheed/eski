@@ -214,7 +214,7 @@ special_mc_port := Config_Special{config_mc_port_set, config_mc_port_get, config
 special_mc_item_size := Config_Special{config_mc_item_size_set, config_mc_item_size_get, config_mc_item_size_rewrite}
 special_databases := Config_Special{config_databases_set, config_databases_get, config_databases_rewrite}
 
-CONFIG_TABLE_LEN :: 217
+CONFIG_TABLE_LEN :: 220
 
 configs: [CONFIG_TABLE_LEN]Config
 
@@ -290,6 +290,9 @@ config_table_init :: proc() {
 		{name = "dbfilename", type = .Str, flags = {.Protected}, sdef = "dump.rdb", store = &cfg.dbfilename, check = config_check_dbfilename},
 		{name = "appendfilename", type = .Str, flags = {.Immutable}, sdef = "appendonly.aof", store = &aof.filename, check = config_check_appendfilename},
 		{name = "appenddirname", type = .Str, flags = {.Immutable}, sdef = "appendonlydir", store = &aof.dirname, check = config_check_appenddirname},
+		{name = "change-log-dir", type = .Str, flags = {.Immutable, .Hidden, .Null_Empty}, store = &change_log_dir},
+		{name = "change-log-segment-bytes", type = .Num, flags = {.Immutable, .Hidden, .Memory}, def = 64 * 1024 * 1024, lo = 65, hi = LLONG_MAX_CFG, store = &change_log_limits.segment_bytes},
+		{name = "change-log-retain-bytes", type = .Num, flags = {.Immutable, .Hidden, .Memory}, def = 1024 * 1024 * 1024, lo = 65, hi = LLONG_MAX_CFG, store = &change_log_limits.retain_bytes},
 		{name = "server-cpulist", alias = "server_cpulist", type = .Str, flags = {.Immutable, .Null_Empty}, store = &cfg.server_cpulist},
 		{name = "bio-cpulist", alias = "bio_cpulist", type = .Str, flags = {.Immutable, .Null_Empty}, store = &cfg.bio_cpulist},
 		{name = "aof-rewrite-cpulist", alias = "aof_rewrite_cpulist", type = .Str, flags = {.Immutable, .Null_Empty}, store = &cfg.aof_rewrite_cpulist},

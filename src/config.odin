@@ -1654,6 +1654,9 @@ config_rewrite_string_line :: proc(rs: ^Rewrite_State, name: string, value: stri
 }
 
 config_dir_set :: proc(args: [][]u8) -> (bool, string) {
+	if aof.started && change_log_dir != "" {
+		return false, CHANGE_LOG_DIRECTORY
+	}
 	if len(args) != 1 {
 		return false, "wrong number of arguments"
 	}
@@ -2109,6 +2112,9 @@ config_appendonly_set :: proc(args: [][]u8) -> (bool, string) {
 	}
 	if v == config_appendonly_value() {
 		return false, ""
+	}
+	if aof.started && !v && change_log_dir != "" {
+		return false, CHANGE_LOG_APPENDONLY
 	}
 	if e := label_persistence_refusal(v); e != "" {
 		return false, e
@@ -2715,6 +2721,7 @@ config_startup :: proc() {
 		config_fatal(0, "", "debug-hash-seed is a test setting and needs enable-debug-command set to yes or local")
 	}
 	label_scheme_startup()
+	change_log_config_startup()
 	process_title_init()
 	if cfg.logfile != "" {
 		buf: [4096]u8

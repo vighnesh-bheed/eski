@@ -1921,10 +1921,16 @@ aof_write_buffer :: proc() -> bool {
 	written, err := aof_write_all(aof.fd, aof.buf[:])
 	latency_end("aof-write", started)
 	if err != .NONE {
+		if change_log_active {
+			change_log_stop("AOF write failed")
+		}
 		aof_note_write_failure(written, err)
 		return false
 	}
 	aof_account_written(written)
+	if change_log_active {
+		change_log_aof_written()
+	}
 	clear(&aof.buf)
 	aof_shrink_buf()
 	aof_clear_write_error()
@@ -4593,6 +4599,9 @@ aof_switch_fd :: proc(fd: linux.Fd) {
 	old := aof.fd
 	aof.fd = fd
 	aof.selected_db = -1
+	if change_log_active {
+		change_log_aof_switched()
+	}
 	aof.last_ts = 0
 	aof_incr_bytes = 0
 	fresh := false
@@ -7001,6 +7010,10 @@ aof_load_manifest :: proc(m: ^Aof_Manifest, at_startup: bool) -> Aof_Load_Outcom
 }
 
 aof_debug_loadaof :: proc(c: ^Conn) {
+	if change_log_dir != "" {
+		reply_error(c, ERR_CHANGE_LOG_RELOAD)
+		return
+	}
 	if aof.state == .Enabled {
 		aof_flush(true)
 	}

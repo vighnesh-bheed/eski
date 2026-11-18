@@ -1880,6 +1880,7 @@ persist_startup :: proc() {
 	}
 	if aof.wanted || aof.state != .Disabled {
 		seal_startup_done()
+		change_log_startup()
 		return
 	}
 	switch persist_rdb_load(false, true) {
@@ -2638,6 +2639,10 @@ persist_scoped_digest :: proc(final: ^[20]u8) {
 
 @(private = "file")
 persist_debug_reload :: proc(c: ^Conn, argv: [][]u8) {
+	if change_log_dir != "" {
+		reply_error(c, ERR_CHANGE_LOG_RELOAD)
+		return
+	}
 	merge, noflush, nosave := false, false, false
 	for arg in argv[2:] {
 		switch {

@@ -30,6 +30,9 @@ runtime_fork :: proc() -> (linux.Pid, linux.Errno) {
 		return pid, problem
 	}
 	if pid == 0 {
+		if change_log_active {
+			change_log_detach()
+		}
 		lazyfree_after_fork()
 		aof_bio_after_fork()
 		diagnostics_after_fork()

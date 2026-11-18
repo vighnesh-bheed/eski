@@ -104,6 +104,8 @@ The example binds to loopback on purpose. Configure network access and [ACLs](do
 
 **Lua behind a wall.** [Scripts and Functions](docs/scripting.md) run on the coordinator in persistent Lua 5.1.5 engines behind a protected C ABI. EVAL and Function libraries use separate engines, builtin tables are read-only, and every invocation uses the caller's ACL and command-effect hooks. Successful writes survive a later script error and reach the AOF; the engine boundary keeps a Lua error from unwinding into Odin frames.
 
+**Local change log.** The opt-in [change log](docs/change-log.md) mirrors canonical AOF writes into checksummed segments with resumable local cursors.
+
 The source is organized by command group. Files such as `src/cmd_string.odin`, `src/cmd_hash.odin` and `src/cmd_stream.odin` register handlers, with storage packages underneath and shared dispatch, reply, ACL and persistence services around them. The [architecture page](docs/architecture.md) and the [documentation index](docs/README.md) go deeper.
 
 ## Why Odin
